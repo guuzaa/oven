@@ -1,0 +1,16 @@
+[package]
+name = "oven-agent"
+description = "Agent layer: agent loop and tools"
+version = "0.0.1"
+edition = { workspace = true }
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+oven-llm = {workspace = true}
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "process", "time", "io-util", "sync"] }
+
+[dev-dependencies]
+mockall = { workspace = true }
+tempdir = { workspace = true }

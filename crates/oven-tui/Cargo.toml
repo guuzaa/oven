@@ -1,0 +1,26 @@
+[package]
+name = "oven-tui"
+description = "TUI layer: entry point"
+version = "0.0.1"
+edition = { workspace = true }
+
+[[bin]]
+name = "oven"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+crossterm = { workspace = true }
+oven-agent = { workspace = true }
+oven-app = { workspace = true }
+ratatui = { workspace = true }
+oven-llm = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+
+[dev-dependencies]
+mockall = { workspace = true }

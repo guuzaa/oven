@@ -1,0 +1,38 @@
+# Oven project-level configuration. Place at the workspace root as `.oven.yaml`.
+# All fields are optional; environment variables take precedence where noted.
+
+# LLM provider settings.
+provider:
+  # Model name (genai infers provider from prefix, e.g. "claude*" -> Anthropic).
+  # model: gpt-4o-mini
+  # Override the API endpoint. Useful for OpenAI/Anthropic-compatible proxies.
+  # base_url: "https://api.moonshot.cn/anthropic/v1/"
+  # Explicit API key. If unset, the adapter's default env var is used
+  # (ANTHROPIC_API_KEY / OPENAI_API_KEY / ...).
+  # api_key: sk-...
+
+# Per-request timeout in seconds.
+request_timeout_secs: 60
+
+# Number of retries after a transient failure before giving up.
+max_retries: 2
+
+# Initial backoff between retries, in ms. Doubles per attempt (exponential).
+base_backoff_ms: 500
+
+# Built-in skills to enable. Unknown ids are silently ignored.
+#   files: file_read + file_write tools
+#   bash:  bash tool
+# If empty, both are enabled by default.
+skills:
+  - files
+  - bash
+
+# MCP servers to declare. The transport itself is not yet implemented; this
+# only registers them so future features can spin them up.
+# mcps:
+#   filesystem:
+#     command: "npx"
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "/abs/path"]
+#     env:
+#       FOO: bar

@@ -1,0 +1,29 @@
+[package]
+name = "oven-app"
+description = "Application layer: service composition"
+version = "0.0.1"
+edition = { workspace = true }
+
+[dependencies]
+dirs = { workspace = true }
+oven-llm = { workspace = true }
+oven-agent = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "rt",
+    "sync",
+    "time",
+] }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+futures = { workspace = true }
+mockall = { workspace = true }
+tempdir = { workspace = true }
