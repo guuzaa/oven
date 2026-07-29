@@ -39,8 +39,8 @@ impl Agent {
             history: History::new(),
             model: ModelId::new("default"),
             system: None,
-            max_iters: 16,
-            budget: 100_000,
+            max_iters: 100,
+            budget: 200_000,
         }
     }
 
@@ -117,7 +117,7 @@ impl Agent {
         for m in self.history.messages() {
             if m.role == Role::System {
                 if system.is_none() {
-                    system = Some(system_text(m));
+                    system = m.system_prompt();
                 }
             } else {
                 messages.push(m.clone());
@@ -362,16 +362,6 @@ impl Agent {
     pub fn total_usage(&self) -> &Usage {
         self.history.total_usage()
     }
-}
-
-fn system_text(m: &Message) -> String {
-    m.content
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {

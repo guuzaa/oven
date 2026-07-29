@@ -10,7 +10,7 @@ edition = "2024"
 oven-app = { path = "./crates/oven-app" }
 oven-agent = { path = "./crates/oven-agent" }
 oven-tui = { path = "./crates/oven-tui" }
-oven-llm = "0.1.1"
+oven-llm = "0.1.2"
 
 # External dependencies
 async-trait = "0.1"

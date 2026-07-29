@@ -188,13 +188,17 @@ impl App {
     }
 
     fn build_provider(&self, model: &str) -> Box<dyn Provider> {
-        let base_url = self
-            .effective_base_url(model)
-            .unwrap_or_else(|| "https://open.bigmodel.cn/api/paas/v4".to_string());
         let api_key = self.effective_api_key(model);
         let provider_name = Self::determine_provider_name(model);
-        let provider =
-            OpenAICompatProvider::new(base_url, provider_name, SecretString::new(api_key.into()));
+        let provider = if let Some(base_url) = self.effective_base_url(model) {
+            OpenAICompatProvider::with_base_url(
+                base_url,
+                provider_name,
+                SecretString::new(api_key.into()),
+            )
+        } else {
+            OpenAICompatProvider::new(provider_name, SecretString::new(api_key.into()))
+        };
         let retrying = RetryingProvider::new(Box::new(provider))
             .with_timeout(self.config.request_timeout())
             .with_retries(self.config.max_retries)
