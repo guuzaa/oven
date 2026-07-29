@@ -1,11 +1,11 @@
 use std::io::{self, Stdout};
-use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use futures::StreamExt;
 use oven_agent::AgentEvent;
 use oven_app::{AppCmd, AppEvent, AppHandle};
 use oven_llm::Usage;
@@ -14,13 +14,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::broadcast;
-
-struct TranscriptLine {
-    kind: LineKind,
-    text: String,
-}
+use tui_textarea::TextArea;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LineKind {
@@ -35,10 +32,10 @@ enum LineKind {
 pub struct Ui {
     handle: AppHandle,
     events: broadcast::Receiver<AppEvent>,
-    transcript: Vec<TranscriptLine>,
+    line_cache: Vec<Line<'static>>,
     streaming: String,
     stream_kind: LineKind,
-    input: String,
+    input: TextArea<'static>,
     status: String,
     total_usage: Usage,
     busy: bool,
@@ -51,13 +48,13 @@ impl Ui {
         Self {
             handle,
             events,
-            transcript: vec![TranscriptLine {
-                kind: LineKind::System,
-                text: "oven — Enter send · Esc cancel · Ctrl-C quit".into(),
-            }],
+            line_cache: format_lines(
+                LineKind::System,
+                "oven — Enter send · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-C quit",
+            ),
             streaming: String::new(),
             stream_kind: LineKind::Text,
-            input: String::new(),
+            input: new_textarea(),
             status: "ready".into(),
             total_usage: Usage::default(),
             busy: false,
@@ -77,22 +74,34 @@ impl Ui {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> io::Result<()> {
+        let mut term_events = EventStream::new();
+        terminal.draw(|f| self.draw(f))?;
         loop {
-            self.drain_events();
+            tokio::select! {
+                Some(ev) = term_events.next() => {
+                    match ev? {
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            if self.handle_key(key)? {
+                                break;
+                            }
+                        }
+                        Event::Resize(_, _) => {}
+                        _ => continue,
+                    }
+                }
+                result = self.events.recv() => {
+                    match result {
+                        Ok(ev) => self.apply_event(ev),
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {
+                            self.status = "app closed".into();
+                            self.busy = false;
+                        }
+                    }
+                    self.drain_events();
+                }
+            }
             terminal.draw(|f| self.draw(f))?;
-
-            if !event::poll(Duration::from_millis(50))? {
-                continue;
-            }
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
-            if self.handle_key(key)? {
-                break;
-            }
         }
         Ok(())
     }
@@ -112,14 +121,16 @@ impl Ui {
         }
     }
 
+    fn push_row(&mut self, kind: LineKind, text: &str) {
+        self.line_cache.extend(format_lines(kind, text));
+        self.scroll = 0;
+    }
+
     fn flush_streaming(&mut self) {
         let body = std::mem::take(&mut self.streaming);
         let body = trim_message(&body);
         if !body.is_empty() {
-            self.transcript.push(TranscriptLine {
-                kind: self.stream_kind,
-                text: body,
-            });
+            self.push_row(self.stream_kind, &body);
         }
     }
 
@@ -132,6 +143,7 @@ impl Ui {
         }
         self.stream_kind = kind;
         self.streaming.push_str(text);
+        self.scroll = 0;
     }
 
     fn apply_event(&mut self, ev: AppEvent) {
@@ -148,10 +160,7 @@ impl Ui {
                 AgentEvent::ToolStart { name, .. } => {
                     self.flush_streaming();
                     self.status = format!("tool: {name}…");
-                    self.transcript.push(TranscriptLine {
-                        kind: LineKind::Tool,
-                        text: name,
-                    });
+                    self.push_row(LineKind::Tool, &name);
                 }
                 AgentEvent::ToolEnd { ok, .. } => {
                     self.status = if ok {
@@ -161,17 +170,15 @@ impl Ui {
                     };
                 }
                 AgentEvent::Done { text, usage, .. } => {
-                    self.total_usage += usage;
-                    if self.streaming.is_empty() {
-                        let body = trim_message(&text);
-                        if !body.is_empty() {
-                            self.transcript.push(TranscriptLine {
-                                kind: LineKind::Text,
-                                text: body,
-                            });
-                        }
+                    self.total_usage = usage;
+                    if self.stream_kind == LineKind::Text {
+                        self.streaming.clear();
                     } else {
                         self.flush_streaming();
+                    }
+                    let body = trim_message(&text);
+                    if !body.is_empty() {
+                        self.push_row(LineKind::Text, &body);
                     }
                 }
                 AgentEvent::Cancelled { .. } => {
@@ -179,20 +186,15 @@ impl Ui {
                         let kind = self.stream_kind;
                         let partial = trim_message(&std::mem::take(&mut self.streaming));
                         if !partial.is_empty() {
-                            self.transcript.push(TranscriptLine {
-                                kind,
-                                text: format!("{partial}…"),
-                            });
+                            self.push_row(kind, &format!("{partial}…"));
                         }
                     }
-                    self.transcript.push(TranscriptLine {
-                        kind: LineKind::System,
-                        text: "cancelled".into(),
-                    });
+                    self.push_row(LineKind::System, "cancelled");
                     self.status = "cancelled".into();
                 }
             },
             AppEvent::Idle { .. } => {
+                self.flush_streaming();
                 self.busy = false;
                 if self.status == "streaming…"
                     || self.status == "thinking…"
@@ -205,11 +207,8 @@ impl Ui {
                 }
             }
             AppEvent::Error { message, .. } => {
-                self.transcript.push(TranscriptLine {
-                    kind: LineKind::Error,
-                    text: message,
-                });
-                self.streaming.clear();
+                self.flush_streaming();
+                self.push_row(LineKind::Error, &message);
                 self.status = "error".into();
             }
         }
@@ -230,50 +229,47 @@ impl Ui {
                     self.status = "cancelling…".into();
                 }
             }
-            KeyCode::Enter => {
-                if !self.busy {
-                    let text = self.input.trim().to_string();
-                    if !text.is_empty() {
-                        self.transcript.push(TranscriptLine {
-                            kind: LineKind::User,
-                            text: text.clone(),
-                        });
-                        self.input.clear();
-                        self.streaming.clear();
-                        self.busy = true;
-                        self.status = "thinking…".into();
-                        if self.handle.send(AppCmd::UserInput(text)).is_err() {
-                            self.busy = false;
-                            self.status = "app channel closed".into();
-                        }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_add(1);
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_sub(1);
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) && !self.busy => {
+                self.input.insert_newline();
+            }
+            KeyCode::Enter if !self.busy => {
+                let text = self.input.lines().join("\n");
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    self.flush_streaming();
+                    self.push_row(LineKind::User, &text);
+                    self.input = new_textarea();
+                    self.busy = true;
+                    self.status = "thinking…".into();
+                    if self.handle.send(AppCmd::UserInput(text)).is_err() {
+                        self.busy = false;
+                        self.status = "app channel closed".into();
                     }
                 }
             }
-            KeyCode::Backspace => {
-                self.input.pop();
-            }
-            KeyCode::Up => {
-                self.scroll = self.scroll.saturating_add(1);
-            }
-            KeyCode::Down => {
-                self.scroll = self.scroll.saturating_sub(1);
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.push(c);
+            _ if !self.busy => {
+                self.input.input(key);
             }
             _ => {}
         }
         Ok(false)
     }
 
-    fn draw(&self, f: &mut ratatui::Frame<'_>) {
+    fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
+        let input_h = (self.input.lines().len() as u16).clamp(1, 8).saturating_add(2);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
                 Constraint::Length(1),
                 Constraint::Length(1),
-                Constraint::Length(3),
+                Constraint::Length(input_h),
             ])
             .split(f.area());
 
@@ -284,12 +280,15 @@ impl Ui {
     }
 
     fn draw_transcript(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
-        let mut lines: Vec<Line> = Vec::new();
-        for row in &self.transcript {
-            lines.extend(format_lines(row.kind, &row.text));
+        let width = area.width.saturating_sub(2) as usize;
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.line_cache.len() + 8);
+        for line in &self.line_cache {
+            wrap_line_into(&mut lines, line, width);
         }
         if !self.streaming.is_empty() {
-            lines.extend(format_lines(self.stream_kind, &self.streaming));
+            for line in format_lines(self.stream_kind, &self.streaming) {
+                wrap_line_into(&mut lines, &line, width);
+            }
         }
 
         let height = area.height.saturating_sub(2) as usize;
@@ -303,9 +302,7 @@ impl Ui {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" conversation ");
-        let para = Paragraph::new(visible)
-            .block(block)
-            .wrap(Wrap { trim: false });
+        let para = Paragraph::new(visible).block(block);
         f.render_widget(para, area);
     }
 
@@ -325,28 +322,34 @@ impl Ui {
         f.render_widget(para, area);
     }
 
-    fn draw_input(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
+    fn draw_input(&mut self, f: &mut ratatui::Frame<'_>, area: Rect) {
         let title = if self.busy {
             " input (busy) "
         } else {
             " input "
         };
-        let block = Block::default().borders(Borders::ALL).title(title);
-        let style = if self.busy {
-            Style::default().fg(Color::DarkGray)
+        self.input
+            .set_block(Block::default().borders(Borders::ALL).title(title));
+        if self.busy {
+            self.input
+                .set_style(Style::default().fg(Color::DarkGray));
+            self.input.set_cursor_style(Style::default());
+            self.input.set_cursor_line_style(Style::default());
         } else {
-            Style::default()
-        };
-        let para = Paragraph::new(self.input.as_str())
-            .style(style)
-            .block(block);
-        f.render_widget(para, area);
-        if !self.busy {
-            let cursor_x = area.x + 1 + self.input.chars().count() as u16;
-            let cursor_y = area.y + 1;
-            f.set_cursor_position((cursor_x.min(area.right().saturating_sub(1)), cursor_y));
+            self.input.set_style(Style::default());
+            self.input
+                .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+            self.input.set_cursor_line_style(Style::default());
         }
+        f.render_widget(&self.input, area);
     }
+}
+
+fn new_textarea() -> TextArea<'static> {
+    let mut ta = TextArea::default();
+    ta.set_cursor_line_style(Style::default());
+    ta.set_placeholder_text("message…");
+    ta
 }
 
 fn format_usage(u: &Usage) -> String {
@@ -377,6 +380,9 @@ fn trim_message(text: &str) -> String {
         .to_string()
 }
 
+const LINE_PREFIX_WIDTH: usize = 11;
+const LINE_INDENT: &str = "           ";
+
 fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
     let (prefix, style) = match kind {
         LineKind::User => (
@@ -391,7 +397,6 @@ fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         LineKind::Error => ("err      | ", Style::default().fg(Color::Red)),
         LineKind::System => ("sys      | ", Style::default().fg(Color::DarkGray)),
     };
-    let indent = "           ";
     let mut lines = Vec::new();
     let mut prev_blank = false;
     for part in text.lines() {
@@ -400,7 +405,7 @@ fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
             continue;
         }
         prev_blank = blank;
-        let head = if lines.is_empty() { prefix } else { indent };
+        let head = if lines.is_empty() { prefix } else { LINE_INDENT };
         lines.push(Line::from(vec![
             Span::styled(head.to_string(), style),
             Span::raw(if blank {
@@ -417,6 +422,69 @@ fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         ]));
     }
     lines
+}
+
+fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: usize) {
+    if width == 0 {
+        out.push(line.clone());
+        return;
+    }
+    let (prefix, style, body) = match line.spans.as_slice() {
+        [head, rest @ ..] => {
+            let body: String = rest.iter().map(|s| s.content.as_ref()).collect();
+            (head.content.as_ref().to_string(), head.style, body)
+        }
+        [] => {
+            out.push(line.clone());
+            return;
+        }
+    };
+    let body_width = width.saturating_sub(LINE_PREFIX_WIDTH).max(1);
+    if body.is_empty() {
+        out.push(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::raw(String::new()),
+        ]));
+        return;
+    }
+    let mut first = true;
+    let mut rest = body.as_str();
+    while !rest.is_empty() {
+        let (chunk, next) = split_at_width(rest, body_width);
+        let head = if first {
+            first = false;
+            prefix.as_str()
+        } else {
+            LINE_INDENT
+        };
+        out.push(Line::from(vec![
+            Span::styled(head.to_string(), style),
+            Span::raw(chunk.to_string()),
+        ]));
+        rest = next;
+    }
+}
+
+fn split_at_width(s: &str, max_width: usize) -> (&str, &str) {
+    if max_width == 0 {
+        return ("", s);
+    }
+    if s.width() <= max_width {
+        return (s, "");
+    }
+    let mut width = 0;
+    for (i, ch) in s.char_indices() {
+        let cw = ch.width().unwrap_or(0);
+        if width + cw > max_width {
+            if i == 0 {
+                let next = ch.len_utf8();
+                return (&s[..next], &s[next..]);
+            }
+            return (&s[..i], &s[i..]);
+        }
+        width += cw;
+    }
+    (s, "")
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {

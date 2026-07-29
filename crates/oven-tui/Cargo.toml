@@ -15,6 +15,9 @@ oven-agent = { workspace = true }
 oven-app = { workspace = true }
 ratatui = { workspace = true }
 oven-llm = { workspace = true }
+futures = { workspace = true }
+tui-textarea-2 = { workspace = true }
+unicode-width = { workspace = true }
 tokio = { workspace = true, features = [
     "macros",
     "rt-multi-thread",

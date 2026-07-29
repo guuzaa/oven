@@ -146,7 +146,7 @@ impl AppId {
 
 fn spawn_runtime(app_id: AppId, agent: Agent, session: Option<Session>) -> AppHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, _) = broadcast::channel(256);
+    let (event_tx, _) = broadcast::channel(8192);
     let event_tx_task = event_tx.clone();
     let join = tokio::spawn(async move {
         runtime_loop(app_id, agent, session, cmd_rx, event_tx_task).await;
