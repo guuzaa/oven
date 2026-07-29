@@ -22,10 +22,11 @@ struct TranscriptLine {
     text: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum LineKind {
     User,
-    Assistant,
+    Thinking,
+    Text,
     Tool,
     Error,
     System,
@@ -36,6 +37,7 @@ pub struct Ui {
     events: broadcast::Receiver<AppEvent>,
     transcript: Vec<TranscriptLine>,
     streaming: String,
+    stream_kind: LineKind,
     input: String,
     status: String,
     total_usage: Usage,
@@ -54,6 +56,7 @@ impl Ui {
                 text: "oven — Enter send · Esc cancel · Ctrl-C quit".into(),
             }],
             streaming: String::new(),
+            stream_kind: LineKind::Text,
             input: String::new(),
             status: "ready".into(),
             total_usage: Usage::default(),
@@ -109,18 +112,45 @@ impl Ui {
         }
     }
 
+    fn flush_streaming(&mut self) {
+        let body = std::mem::take(&mut self.streaming);
+        let body = trim_message(&body);
+        if !body.is_empty() {
+            self.transcript.push(TranscriptLine {
+                kind: self.stream_kind,
+                text: body,
+            });
+        }
+    }
+
+    fn push_stream(&mut self, kind: LineKind, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.streaming.is_empty() && self.stream_kind != kind {
+            self.flush_streaming();
+        }
+        self.stream_kind = kind;
+        self.streaming.push_str(text);
+    }
+
     fn apply_event(&mut self, ev: AppEvent) {
         match ev {
             AppEvent::Agent { event, .. } => match event {
-                AgentEvent::TokenDelta { text, .. } => {
-                    self.streaming.push_str(&text);
+                AgentEvent::ThinkingDelta { text, .. } => {
+                    self.push_stream(LineKind::Thinking, &text);
+                    self.status = "thinking…".into();
+                }
+                AgentEvent::TextDelta { text, .. } => {
+                    self.push_stream(LineKind::Text, &text);
                     self.status = "streaming…".into();
                 }
                 AgentEvent::ToolStart { name, .. } => {
+                    self.flush_streaming();
                     self.status = format!("tool: {name}…");
                     self.transcript.push(TranscriptLine {
                         kind: LineKind::Tool,
-                        text: format!("→ {name}"),
+                        text: name,
                     });
                 }
                 AgentEvent::ToolEnd { ok, .. } => {
@@ -132,26 +162,28 @@ impl Ui {
                 }
                 AgentEvent::Done { text, usage, .. } => {
                     self.total_usage += usage;
-                    let body = if self.streaming.is_empty() {
-                        text
+                    if self.streaming.is_empty() {
+                        let body = trim_message(&text);
+                        if !body.is_empty() {
+                            self.transcript.push(TranscriptLine {
+                                kind: LineKind::Text,
+                                text: body,
+                            });
+                        }
                     } else {
-                        std::mem::take(&mut self.streaming)
-                    };
-                    if !body.is_empty() {
-                        self.transcript.push(TranscriptLine {
-                            kind: LineKind::Assistant,
-                            text: body,
-                        });
+                        self.flush_streaming();
                     }
-                    self.streaming.clear();
                 }
                 AgentEvent::Cancelled { .. } => {
                     if !self.streaming.is_empty() {
-                        let partial = std::mem::take(&mut self.streaming);
-                        self.transcript.push(TranscriptLine {
-                            kind: LineKind::Assistant,
-                            text: format!("{partial}…"),
-                        });
+                        let kind = self.stream_kind;
+                        let partial = trim_message(&std::mem::take(&mut self.streaming));
+                        if !partial.is_empty() {
+                            self.transcript.push(TranscriptLine {
+                                kind,
+                                text: format!("{partial}…"),
+                            });
+                        }
                     }
                     self.transcript.push(TranscriptLine {
                         kind: LineKind::System,
@@ -162,7 +194,10 @@ impl Ui {
             },
             AppEvent::Idle { .. } => {
                 self.busy = false;
-                if self.status == "streaming…" || self.status.starts_with("tool:") {
+                if self.status == "streaming…"
+                    || self.status == "thinking…"
+                    || self.status.starts_with("tool:")
+                {
                     self.status = "ready".into();
                 }
                 if self.status == "cancelled" {
@@ -251,10 +286,10 @@ impl Ui {
     fn draw_transcript(&self, f: &mut ratatui::Frame<'_>, area: Rect) {
         let mut lines: Vec<Line> = Vec::new();
         for row in &self.transcript {
-            lines.push(format_line(row.kind, &row.text));
+            lines.extend(format_lines(row.kind, &row.text));
         }
         if !self.streaming.is_empty() {
-            lines.push(format_line(LineKind::Assistant, &self.streaming));
+            lines.extend(format_lines(self.stream_kind, &self.streaming));
         }
 
         let height = area.height.saturating_sub(2) as usize;
@@ -337,40 +372,51 @@ fn human(n: u32) -> String {
     }
 }
 
-fn format_line(kind: LineKind, text: &str) -> Line<'static> {
+fn trim_message(text: &str) -> String {
+    text.trim_matches(|c: char| c == '\n' || c == '\r')
+        .to_string()
+}
+
+fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
     let (prefix, style) = match kind {
         LineKind::User => (
-            "you | ",
+            "you      | ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        LineKind::Assistant => ("oven| ", Style::default().fg(Color::Green)),
-        LineKind::Tool => ("tool| ", Style::default().fg(Color::Magenta)),
-        LineKind::Error => ("err | ", Style::default().fg(Color::Red)),
-        LineKind::System => (" ·  | ", Style::default().fg(Color::DarkGray)),
+        LineKind::Thinking => ("thinking | ", Style::default().fg(Color::DarkGray)),
+        LineKind::Text => ("text     | ", Style::default().fg(Color::Green)),
+        LineKind::Tool => ("tool     | ", Style::default().fg(Color::Magenta)),
+        LineKind::Error => ("err      | ", Style::default().fg(Color::Red)),
+        LineKind::System => ("sys      | ", Style::default().fg(Color::DarkGray)),
     };
-    // Multi-line: first line gets prefix, rest indented.
-    let mut out_lines = text.lines();
-    let first = out_lines.next().unwrap_or("");
-    let mut spans = vec![
-        Span::styled(prefix.to_string(), style),
-        Span::raw(first.to_string()),
-    ];
-    // Paragraph takes one Line; join remaining with explicit newlines via single Line is weak.
-    // Collapse to one visual line set by building full string for simplicity on wrapped para.
-    let rest: Vec<&str> = out_lines.collect();
-    if rest.is_empty() {
-        return Line::from(spans);
+    let indent = "           ";
+    let mut lines = Vec::new();
+    let mut prev_blank = false;
+    for part in text.lines() {
+        let blank = part.trim().is_empty();
+        if blank && (prev_blank || lines.is_empty()) {
+            continue;
+        }
+        prev_blank = blank;
+        let head = if lines.is_empty() { prefix } else { indent };
+        lines.push(Line::from(vec![
+            Span::styled(head.to_string(), style),
+            Span::raw(if blank {
+                String::new()
+            } else {
+                part.to_string()
+            }),
+        ]));
     }
-    let mut body = first.to_string();
-    for r in rest {
-        body.push('\n');
-        body.push_str("      ");
-        body.push_str(r);
+    if lines.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), style),
+            Span::raw(String::new()),
+        ]));
     }
-    spans = vec![Span::styled(prefix.to_string(), style), Span::raw(body)];
-    Line::from(spans)
+    lines
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {

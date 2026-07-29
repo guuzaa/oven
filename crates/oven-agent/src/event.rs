@@ -8,7 +8,11 @@ pub struct AgentId(pub u64);
 /// envelopes these when forwarding to the TUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
-    TokenDelta {
+    ThinkingDelta {
+        agent_id: AgentId,
+        text: String,
+    },
+    TextDelta {
         agent_id: AgentId,
         text: String,
     },

@@ -187,19 +187,28 @@ impl Agent {
                         None => break,
                         Some(Err(e)) => return Err(e.into()),
                         Some(Ok(event)) => {
-                            if let StreamEvent::ContentBlockDelta {
-                                delta: Delta::TextDelta { text },
-                                ..
-                            } = &event
-                                && !text.is_empty()
-                            {
-                                Self::emit(
-                                    tx,
-                                    AgentEvent::TokenDelta {
-                                        agent_id: self.id,
-                                        text: text.clone(),
-                                    },
-                                );
+                            if let StreamEvent::ContentBlockDelta { delta, .. } = &event {
+                                match delta {
+                                    Delta::ThinkingDelta { thinking } if !thinking.is_empty() => {
+                                        Self::emit(
+                                            tx,
+                                            AgentEvent::ThinkingDelta {
+                                                agent_id: self.id,
+                                                text: thinking.clone(),
+                                            },
+                                        );
+                                    }
+                                    Delta::TextDelta { text } if !text.is_empty() => {
+                                        Self::emit(
+                                            tx,
+                                            AgentEvent::TextDelta {
+                                                agent_id: self.id,
+                                                text: text.clone(),
+                                            },
+                                        );
+                                    }
+                                    _ => {}
+                                }
                             }
                             collector.push(&event);
                         }
@@ -219,11 +228,21 @@ impl Agent {
                     self.provider.complete(&req).await?
                 };
                 if !response.has_tool_use() {
+                    let thinking = response.thinking();
+                    if !thinking.is_empty() {
+                        Self::emit(
+                            tx,
+                            AgentEvent::ThinkingDelta {
+                                agent_id: self.id,
+                                text: thinking,
+                            },
+                        );
+                    }
                     let text = response.text();
                     if !text.is_empty() {
                         Self::emit(
                             tx,
-                            AgentEvent::TokenDelta {
+                            AgentEvent::TextDelta {
                                 agent_id: self.id,
                                 text,
                             },
@@ -547,7 +566,7 @@ mod tests {
         )));
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::TokenDelta {
+            AgentEvent::TextDelta {
                 agent_id: AgentId(7),
                 text
             } if text == "all good"
