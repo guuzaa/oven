@@ -57,11 +57,7 @@ fn is_retryable(err: &ProviderError) -> bool {
     match err {
         ProviderError::Transport(_) | ProviderError::RateLimit { .. } => true,
         ProviderError::Api { status, .. } => *status >= 500 || *status == 408 || *status == 429,
-        ProviderError::Auth(_)
-        | ProviderError::Decode(_)
-        | ProviderError::Stream(_)
-        | ProviderError::InvalidRequest(_)
-        | ProviderError::Encode(_) => false,
+        _ => false,
     }
 }
 

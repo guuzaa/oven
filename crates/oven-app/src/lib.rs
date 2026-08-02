@@ -2,8 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use oven_agent::{Agent, AgentError, RetryingProvider, Tool};
-use oven_llm::{OpenAICompatProvider, Provider, ProviderName};
-use secrecy::SecretString;
+use oven_llm::{CompletionsProvider, Provider, ProviderName, SecretString};
 use thiserror::Error;
 
 use crate::config::{AppConfig, ConfigError};
@@ -191,13 +190,13 @@ impl App {
         let api_key = self.effective_api_key(model);
         let provider_name = Self::determine_provider_name(model);
         let provider = if let Some(base_url) = self.effective_base_url(model) {
-            OpenAICompatProvider::with_base_url(
+            CompletionsProvider::with_base_url(
                 base_url,
                 provider_name,
                 SecretString::new(api_key.into()),
             )
         } else {
-            OpenAICompatProvider::new(provider_name, SecretString::new(api_key.into()))
+            CompletionsProvider::new(provider_name, SecretString::new(api_key.into()))
         };
         let retrying = RetryingProvider::new(Box::new(provider))
             .with_timeout(self.config.request_timeout())

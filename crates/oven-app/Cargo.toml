@@ -8,7 +8,6 @@ edition = { workspace = true }
 dirs = { workspace = true }
 oven-llm = { workspace = true }
 oven-agent = { workspace = true }
-secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

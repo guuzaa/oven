@@ -5,12 +5,14 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.92"
+description = "A toy coding agent for joy only."
 
 [workspace.dependencies]
 oven-app = { path = "./crates/oven-app" }
 oven-agent = { path = "./crates/oven-agent" }
 oven-tui = { path = "./crates/oven-tui" }
-oven-llm = "0.1.2"
+oven-llm = "0.2.0"
 
 # External dependencies
 async-trait = "0.1"
@@ -38,4 +40,3 @@ tokio = { version = "1", features = [
 tokio-stream = "0.1"
 mockall = "0.15.0"
 wiremock = "0.6.5"
-secrecy = "0.10"
