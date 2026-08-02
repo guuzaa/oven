@@ -84,9 +84,9 @@ impl AppHandle {
 
 impl App {
     /// Spawn a long-lived app task with no session persistence.
-    pub fn spawn(&self) -> AppHandle {
-        let agent = self.build_agent();
-        spawn_runtime(AppId::next(), agent, None)
+    pub fn spawn(&self) -> Result<AppHandle, AppError> {
+        let agent = self.build_agent()?;
+        Ok(spawn_runtime(AppId::next(), agent, None))
     }
 
     /// Spawn with JSONL session under the platform data dir.
@@ -108,7 +108,7 @@ impl App {
     ) -> Result<AppHandle, AppError> {
         let session = Session::open(sessions_dir, session_id)?;
         let prior = session.load()?;
-        let mut agent = self.build_agent();
+        let mut agent = self.build_agent()?;
         for m in prior.into_iter().filter(|m| m.role != Role::System) {
             agent.push_history(m);
         }
@@ -171,6 +171,7 @@ async fn runtime_loop(
     event_tx: broadcast::Sender<AppEvent>,
 ) {
     let mut persisted_len = agent.history().len();
+    let mut persisted_rev = agent.history_revision();
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -221,8 +222,25 @@ async fn runtime_loop(
                 match result {
                     Ok(_) => {
                         if let Some(store) = &session {
+                            let rev = agent.history_revision();
                             let after = agent.history();
-                            if after.len() > persisted_len {
+                            if rev != persisted_rev {
+                                // History was replaced in memory (e.g. by
+                                // `/clear`): rewrite the store instead of
+                                // appending, so the clear survives a resume.
+                                if let Err(e) = store.overwrite(after) {
+                                    emit(
+                                        &event_tx,
+                                        AppEvent::Error {
+                                            app_id,
+                                            message: e.to_string(),
+                                        },
+                                    );
+                                } else {
+                                    persisted_len = after.len();
+                                    persisted_rev = rev;
+                                }
+                            } else if after.len() > persisted_len {
                                 if let Err(e) = store.append_all(&after[persisted_len..]) {
                                     emit(
                                         &event_tx,
@@ -395,6 +413,39 @@ mod tests {
 
         let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
         assert_eq!(loaded.iter().filter(|m| m.role == Role::User).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn slash_clear_rewrites_persisted_session() {
+        let tmp = tempdir::TempDir::new("app-runtime-clear").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Turn 1 persists a message so the file is non-empty.
+        let mock1 = MockProvider::new(vec![text_response("one")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock1), session)
+            .unwrap();
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+        handle.shutdown().await;
+
+        // Turn 2 is `/clear`; the session file must be truncated, not keep
+        // the old messages for the next resume.
+        let mock2 = MockProvider::new(vec![]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock2), session)
+            .unwrap();
+        assert_eq!(handle.prompt("/clear").await.unwrap(), "history cleared");
+        handle.shutdown().await;
+
+        let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+        assert!(
+            loaded.is_empty(),
+            "expected cleared session, got {loaded:?}"
+        );
     }
 
     #[tokio::test]

@@ -7,11 +7,17 @@ use oven_llm::{ContentBlock, Message, Role, Usage};
 /// measure appended user/tool messages; we assume a single user message
 /// adds a negligible number of tokens relative to the budget, and refresh
 /// the count from the next API response.
+///
+/// The `revision` bumped whenever the message list is structurally replaced (`clear` /
+/// `set_messages`).
+/// The App layer uses this to detect that a rewrite of
+/// the persisted session store is required instead of an append.
 #[derive(Debug)]
 pub struct History {
     messages: Vec<Message>,
     last_prompt_tokens: usize,
     total: Usage,
+    revision: u64,
 }
 
 impl History {
@@ -20,6 +26,7 @@ impl History {
             messages: Vec::new(),
             last_prompt_tokens: 0,
             total: Usage::default(),
+            revision: 0,
         }
     }
 
@@ -32,13 +39,19 @@ impl History {
     }
 
     pub fn clear(&mut self) {
+        self.revision += 1;
         self.messages.clear();
         self.last_prompt_tokens = 0;
     }
 
     pub fn set_messages(&mut self, msgs: Vec<Message>) {
+        self.revision += 1;
         self.messages = msgs;
         self.last_prompt_tokens = 0;
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn messages(&self) -> &[Message] {

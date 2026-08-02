@@ -67,7 +67,11 @@ max_retries: 2
 base_backoff_ms: 500
 
 skills:
-  - files
+  # reserved: skill module ids (currently none bundled)
+
+tools:
+  - file_read
+  - file_write
   - bash
 
 mcps:
@@ -75,6 +79,12 @@ mcps:
 ```
 
 If no `.oven.yaml` exists, Oven uses sensible defaults.
+
+`skills` opts into guidance modules that inject instructions into the system
+prompt; no skills are bundled yet, so entries are accepted and currently
+skipped. `tools` selects which capabilities the agent can actually invoke; an
+empty `tools:` list mounts the built-in default set (`file_read`,
+`file_write`, `bash`). The two are independent.
 
 ## Modes
 

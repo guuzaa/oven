@@ -77,7 +77,13 @@ async fn headless(app: &App, session: Option<&str>, prompt: &str) -> ExitCode {
             out
         }
         None => {
-            let handle = app.spawn();
+            let handle = match app.spawn() {
+                Ok(h) => h,
+                Err(err) => {
+                    eprintln!("error: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
             let out = handle.prompt(prompt).await;
             handle.shutdown().await;
             out
@@ -105,7 +111,13 @@ async fn interactive(app: &App, session: Option<&str>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
-        None => app.spawn(),
+        None => match app.spawn() {
+            Ok(h) => h,
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
     };
 
     match ui::Ui::new(handle).run().await {

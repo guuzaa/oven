@@ -84,6 +84,10 @@ impl Agent {
         self.history.messages()
     }
 
+    pub fn history_revision(&self) -> u64 {
+        self.history.revision()
+    }
+
     pub fn clear_history(&mut self) {
         self.history.clear();
     }
@@ -150,13 +154,18 @@ impl Agent {
         }
     }
 
-    async fn dispatch(&self, name: &str, args: &serde_json::Value) -> Result<String, AgentError> {
+    async fn dispatch(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+        cancel: Option<&Cancel>,
+    ) -> Result<String, AgentError> {
         let tool = self
             .tools
             .iter()
             .find(|t| t.name() == name)
             .ok_or_else(|| AgentError::from(format!("unknown tool: {name}")))?;
-        tool.run(args).await
+        tool.run(args, cancel).await
     }
 
     async fn complete_response(
@@ -287,7 +296,7 @@ impl Agent {
                     name: name.clone(),
                 },
             );
-            let (ok, result) = match self.dispatch(name, input).await {
+            let (ok, result) = match self.dispatch(name, input, cancel).await {
                 Ok(r) => (true, r),
                 Err(e) => (false, format!("error: {e}")),
             };
@@ -299,6 +308,9 @@ impl Agent {
                     ok,
                 },
             );
+            // A cancel landing during tool work aborts the turn; the result
+            // must not be recorded into the history of an aborted turn.
+            self.check_cancel(cancel)?;
             let summary = truncate(&result, 2000);
             self.history
                 .push(Message::tool_result(id.clone(), summary, !ok));

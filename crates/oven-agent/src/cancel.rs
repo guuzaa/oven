@@ -16,12 +16,12 @@ impl Cancel {
     }
 
     pub fn cancel(&self) {
-        self.flag.store(true, Ordering::SeqCst);
+        self.flag.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.flag.load(Ordering::Acquire)
     }
 
     /// Resolves when [`cancel`](Self::cancel) is called.

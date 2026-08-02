@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{Tool, require_str, resolve_within};
+use crate::cancel::Cancel;
 use crate::error::AgentError;
 
 pub struct FileReadTool {
@@ -34,7 +35,7 @@ impl Tool for FileReadTool {
             "required": ["path"]
         })
     }
-    async fn run(&self, args: &Value) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cancel: Option<&Cancel>) -> Result<String, AgentError> {
         let path_str = require_str(args, "path", "file_read")?;
         let path = resolve_within(&self.root, path_str)?;
         if !path.is_file() {
@@ -59,7 +60,7 @@ mod tests {
         let tmp = tmp_dir();
         let read = FileReadTool::new(tmp.path());
         let err = read
-            .run(&json!({"path": "../etc/passwd"}))
+            .run(&json!({"path": "../etc/passwd"}), None)
             .await
             .unwrap_err();
         assert!(err.message.contains("escapes root"));

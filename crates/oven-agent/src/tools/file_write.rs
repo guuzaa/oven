@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{Tool, require_str, resolve_within};
+use crate::cancel::Cancel;
 use crate::error::AgentError;
 
 pub struct FileWriteTool {
@@ -35,7 +36,7 @@ impl Tool for FileWriteTool {
             "required": ["path", "content"]
         })
     }
-    async fn run(&self, args: &Value) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cancel: Option<&Cancel>) -> Result<String, AgentError> {
         let path_str = require_str(args, "path", "file_write")?;
         let content = require_str(args, "content", "file_write")?;
         let path = resolve_within(&self.root, path_str)?;
@@ -70,12 +71,15 @@ mod tests {
         let root = tmp.path();
         let write = FileWriteTool::new(root);
         let out = write
-            .run(&json!({"path": "hello.txt", "content": "line one\nline two"}))
+            .run(
+                &json!({"path": "hello.txt", "content": "line one\nline two"}),
+                None,
+            )
             .await
             .unwrap();
         assert!(out.contains("wrote"));
         let read = FileReadTool::new(root);
-        let content = read.run(&json!({"path": "hello.txt"})).await.unwrap();
+        let content = read.run(&json!({"path": "hello.txt"}), None).await.unwrap();
         assert_eq!(content, "line one\nline two");
     }
 }

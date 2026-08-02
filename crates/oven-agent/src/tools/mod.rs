@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::cancel::Cancel;
 use crate::error::AgentError;
 
 pub use bash::BashTool;
@@ -18,7 +19,7 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn schema(&self) -> Value;
-    async fn run(&self, args: &Value) -> Result<String, AgentError>;
+    async fn run(&self, args: &Value, cancel: Option<&Cancel>) -> Result<String, AgentError>;
 }
 
 pub(crate) fn resolve_within(root: &Path, rel: &str) -> Result<PathBuf, AgentError> {

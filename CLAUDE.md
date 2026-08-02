@@ -1,5 +1,5 @@
 # Code Style
-- Don't write too much code in lib.rs. Keep it as small as possible.
+- Don't write too much code in `lib.rs`/`mod.rs`. Keep it as small as possible.
 - Don't add comments when modification. Keep comments as little as possble.
 
 # Commands
