@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use oven_agent::{Agent, AgentEvent, Cancel};
+use oven_agent::{Agent, AgentEvent, CancellationToken};
 use oven_llm::{Provider, Role};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -180,7 +180,7 @@ async fn runtime_loop(
                 // no in-flight turn
             }
             AppCmd::UserInput(input) => {
-                let cancel = Cancel::new();
+                let cancel = CancellationToken::new();
                 let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
 
                 let result = {

@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
 use super::{Tool, require_str, resolve_within};
-use crate::cancel::Cancel;
 use crate::error::AgentError;
 
 pub struct FileReadTool {
@@ -35,7 +35,11 @@ impl Tool for FileReadTool {
             "required": ["path"]
         })
     }
-    async fn run(&self, args: &Value, _cancel: Option<&Cancel>) -> Result<String, AgentError> {
+    async fn run(
+        &self,
+        args: &Value,
+        _cancel: Option<&CancellationToken>,
+    ) -> Result<String, AgentError> {
         let path_str = require_str(args, "path", "file_read")?;
         let path = resolve_within(&self.root, path_str)?;
         if !path.is_file() {

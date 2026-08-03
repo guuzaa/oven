@@ -4,9 +4,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 use super::{Tool, require_str};
-use crate::cancel::Cancel;
 use crate::error::AgentError;
 
 pub struct BashTool {
@@ -47,7 +47,11 @@ impl Tool for BashTool {
             "required": ["command"]
         })
     }
-    async fn run(&self, args: &Value, cancel: Option<&Cancel>) -> Result<String, AgentError> {
+    async fn run(
+        &self,
+        args: &Value,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<String, AgentError> {
         let command = require_str(args, "command", "bash")?;
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command).current_dir(&self.root);
@@ -175,7 +179,7 @@ mod tests {
     async fn bash_cancel_aborts_and_returns_cancelled() {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path());
-        let cancel = Cancel::new();
+        let cancel = CancellationToken::new();
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let cancel_for_task = cancel.clone();

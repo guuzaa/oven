@@ -18,7 +18,7 @@ pub mod skill;
 pub mod tools;
 
 pub use mcp::McpServerConfig;
-pub use oven_agent::{AgentEvent, AgentId, Cancel};
+pub use oven_agent::{AgentEvent, AgentId, CancellationToken};
 pub use runtime::{AppCmd, AppEvent, AppHandle, AppId};
 pub use skill::Skill;
 pub use tools::ToolRegistry;

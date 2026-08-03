@@ -4,8 +4,8 @@ use oven_llm::{
     StreamCollector, StreamEvent, ToolChoice, Usage,
 };
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
 
-use crate::cancel::Cancel;
 use crate::error::AgentError;
 use crate::event::{AgentEvent, AgentId};
 use crate::history::History;
@@ -40,7 +40,7 @@ impl Agent {
             model: ModelId::new("default"),
             system: None,
             max_iters: 100,
-            budget: 200_000,
+            budget: 128_000,
         }
     }
 
@@ -146,19 +146,11 @@ impl Agent {
         }
     }
 
-    fn check_cancel(&self, cancel: Option<&Cancel>) -> Result<(), AgentError> {
-        if cancel.is_some_and(|c| c.is_cancelled()) {
-            Err(AgentError::cancelled())
-        } else {
-            Ok(())
-        }
-    }
-
     async fn dispatch(
         &self,
         name: &str,
         args: &serde_json::Value,
-        cancel: Option<&Cancel>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
         let tool = self
             .tools
@@ -172,30 +164,16 @@ impl Agent {
         &mut self,
         tools: Vec<oven_llm::Tool>,
         tx: &Option<UnboundedSender<AgentEvent>>,
-        cancel: Option<&Cancel>,
     ) -> Result<Response, AgentError> {
-        self.check_cancel(cancel)?;
         let req = self.build_request(tools);
 
         match self.provider.stream(&req).await {
             Ok(mut stream) => {
                 let mut collector = StreamCollector::new();
-                loop {
-                    self.check_cancel(cancel)?;
-                    let next = if let Some(c) = cancel {
-                        tokio::select! {
-                            biased;
-                            _ = c.cancelled() => return Err(AgentError::cancelled()),
-                            item = stream.next() => item,
-                        }
-                    } else {
-                        stream.next().await
-                    };
-
-                    match next {
-                        None => break,
-                        Some(Err(e)) => return Err(e.into()),
-                        Some(Ok(event)) => {
+                while let Some(event) = stream.next().await {
+                    match event {
+                        Err(e) => return Err(e.into()),
+                        Ok(event) => {
                             if let StreamEvent::ContentBlockDelta { delta, .. } = &event {
                                 match delta {
                                     Delta::ThinkingDelta { thinking } if !thinking.is_empty() => {
@@ -226,16 +204,7 @@ impl Agent {
                 Ok(collector.finish()?)
             }
             Err(_) => {
-                self.check_cancel(cancel)?;
-                let response = if let Some(c) = cancel {
-                    tokio::select! {
-                        biased;
-                        _ = c.cancelled() => return Err(AgentError::cancelled()),
-                        result = self.provider.complete(&req) => result?,
-                    }
-                } else {
-                    self.provider.complete(&req).await?
-                };
+                let response = self.provider.complete(&req).await?;
                 if !response.has_tool_use() {
                     let thinking = response.thinking();
                     if !thinking.is_empty() {
@@ -267,9 +236,9 @@ impl Agent {
         &mut self,
         tools: Vec<oven_llm::Tool>,
         tx: &Option<UnboundedSender<AgentEvent>>,
-        cancel: Option<&Cancel>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<Option<String>, AgentError> {
-        let response = self.complete_response(tools, tx, cancel).await?;
+        let response = self.complete_response(tools, tx).await?;
         if let Some(usage) = &response.usage {
             self.history.record_usage(usage);
         }
@@ -287,7 +256,6 @@ impl Agent {
             let ContentBlock::ToolUse { id, name, input } = block else {
                 continue;
             };
-            self.check_cancel(cancel)?;
             Self::emit(
                 tx,
                 AgentEvent::ToolStart {
@@ -308,9 +276,6 @@ impl Agent {
                     ok,
                 },
             );
-            // A cancel landing during tool work aborts the turn; the result
-            // must not be recorded into the history of an aborted turn.
-            self.check_cancel(cancel)?;
             let summary = truncate(&result, 2000);
             self.history
                 .push(Message::tool_result(id.clone(), summary, !ok));
@@ -319,12 +284,12 @@ impl Agent {
     }
 
     /// Run one user turn, optionally streaming [`AgentEvent`]s and honoring
-    /// cooperative [`Cancel`].
+    /// cooperative cancellation via [`CancellationToken`].
     pub async fn run_with_emitter(
         &mut self,
         input: impl Into<String>,
         tx: Option<UnboundedSender<AgentEvent>>,
-        cancel: Option<&Cancel>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
         let input: String = input.into();
         let finish = |this: &Agent, tx: &Option<UnboundedSender<AgentEvent>>, text: String| {
@@ -339,42 +304,58 @@ impl Agent {
             text
         };
 
-        if let Err(e) = self.check_cancel(cancel) {
-            Self::emit(&tx, AgentEvent::Cancelled { agent_id: self.id });
-            return Err(e);
-        }
-
-        // Move the slash registry out of `self` so commands can borrow `self`
-        // mutably while executing (commands often touch `agent.history` etc.).
-        let registry = std::mem::take(&mut self.slash);
-        let outcome = registry.parse_and_run(self, &input);
-        self.slash = registry;
-        match outcome? {
-            CommandOutcome::Passthrough => {}
-            CommandOutcome::Reply(r) => return Ok(finish(self, &tx, r)),
-            CommandOutcome::Exit => return Ok(finish(self, &tx, "goodbye".to_string())),
-        }
-
-        self.history.push(Message::user_text(input));
-        let tools = self.llm_tools();
-
-        for _ in 0..self.max_iters {
-            if let Err(e) = self.check_cancel(cancel) {
-                Self::emit(&tx, AgentEvent::Cancelled { agent_id: self.id });
-                return Err(e);
+        // Race the whole turn against the cancellation token: a cancel landing
+        // at any await point (streaming, tool work) drops the turn future and
+        // aborts the in-flight provider stream or tool. The token is also
+        // passed to tools so long-running ones can stop promptly on their own.
+        let turn = async {
+            // Move the slash registry out of `self` so commands can borrow
+            // `self` mutably while executing (commands often touch
+            // `agent.history` etc.).
+            let registry = std::mem::take(&mut self.slash);
+            let outcome = registry.parse_and_run(self, &input);
+            self.slash = registry;
+            match outcome? {
+                CommandOutcome::Passthrough => {}
+                CommandOutcome::Reply(r) => return Ok(finish(self, &tx, r)),
+                CommandOutcome::Exit => return Ok(finish(self, &tx, "goodbye".to_string())),
             }
-            self.history.trim_to_budget(self.budget);
-            match self.step(tools.clone(), &tx, cancel).await {
-                Ok(Some(final_text)) => return Ok(finish(self, &tx, final_text)),
-                Ok(None) => continue,
-                Err(e) if e.is_cancelled() => {
-                    Self::emit(&tx, AgentEvent::Cancelled { agent_id: self.id });
-                    return Err(e);
+
+            self.history.push(Message::user_text(input));
+            let tools = self.llm_tools();
+            self.budget = self
+                .provider
+                .resolve_model(&self.model)
+                .map(|info| info.context_window as usize)
+                .unwrap_or(128_000);
+
+            for _ in 0..self.max_iters {
+                self.history.trim_to_budget(self.budget);
+                match self.step(tools.clone(), &tx, cancel).await {
+                    Ok(Some(final_text)) => return Ok(finish(self, &tx, final_text)),
+                    Ok(None) => continue,
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
             }
+            Err(AgentError::from("agent loop exceeded max iterations"))
+        };
+
+        let result = match cancel {
+            Some(token) => {
+                tokio::pin!(turn);
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => Err(AgentError::cancelled()),
+                    res = &mut turn => res,
+                }
+            }
+            None => turn.await,
+        };
+
+        if result.as_ref().is_err_and(AgentError::is_cancelled) {
+            Self::emit(&tx, AgentEvent::Cancelled { agent_id: self.id });
         }
-        Err(AgentError::from("agent loop exceeded max iterations"))
+        result
     }
 
     /// Run one user turn. Collects no events; equivalent to
@@ -597,7 +578,7 @@ mod tests {
     async fn cancel_before_run_emits_cancelled() {
         let mock = MockProvider::new(vec![]);
         let mut agent = Agent::new(Box::new(mock), Vec::new()).with_id(AgentId(1));
-        let cancel = Cancel::new();
+        let cancel = CancellationToken::new();
         cancel.cancel();
         let (tx, mut rx) = unbounded_channel();
         let err = agent
