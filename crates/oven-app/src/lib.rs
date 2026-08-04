@@ -2,7 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use oven_agent::{Agent, AgentError, RetryingProvider};
-use oven_llm::{CompletionsProvider, Provider, ProviderName};
+use oven_llm::{Provider, ProviderBuilder, ProviderName};
 use thiserror::Error;
 
 use crate::config::{AppConfig, ConfigError};
@@ -37,6 +37,12 @@ pub enum AppError {
     Runtime(String),
     #[error("provider: {0}")]
     Provider(String),
+}
+
+impl From<oven_llm::ProviderError> for AppError {
+    fn from(err: oven_llm::ProviderError) -> Self {
+        AppError::Provider(err.to_string())
+    }
 }
 
 /// App holds workspace context and resolves Provider + Agent runtime config
@@ -215,10 +221,15 @@ impl App {
         }
 
         let provider = match &base_url {
-            Some(u) => CompletionsProvider::with_base_url(u.clone(), provider_name, api_key),
-            None => CompletionsProvider::new(provider_name, api_key),
+            Some(u) => ProviderBuilder::completions()
+                .provider_name(provider_name)
+                .api_key(api_key)
+                .base_url(u),
+            None => ProviderBuilder::completions()
+                .provider_name(provider_name)
+                .api_key(api_key),
         };
-        let retrying = RetryingProvider::new(Box::new(provider))
+        let retrying = RetryingProvider::new(provider.build()?)
             .with_timeout(self.config.request_timeout())
             .with_retries(self.config.max_retries)
             .with_base_backoff(self.config.base_backoff());
