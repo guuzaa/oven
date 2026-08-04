@@ -155,9 +155,9 @@ impl AppConfig {
     /// Default user config location: `$XDG_CONFIG_HOME/oven/config.toml`
     /// (or `~/.config/oven/config.toml`).
     pub fn default_user_config_path() -> Option<PathBuf> {
-        xdg::BaseDirectories::with_prefix("oven")
-            .get_config_home()
-            .map(|d| d.join("config.toml"))
+        cross_xdg::BaseDirs::with_prefix("oven")
+            .ok()
+            .map(|d| d.config_home().join("config.toml"))
     }
 
     /// Default project config path: `.oven.toml` in the given workspace root.

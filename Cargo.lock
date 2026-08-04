@@ -399,6 +399,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
+name = "cross-xdg"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a2c3eba735b0ffa1d092ed87f90066d60494435e3567d205e7c3378c0893ef4"
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1512,6 +1518,7 @@ name = "oven-app"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "cross-xdg",
  "futures",
  "mockall",
  "oven-agent",
@@ -1522,14 +1529,13 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml",
- "xdg",
 ]
 
 [[package]]
 name = "oven-llm"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "922f85b4cc5bd764d17639859764d040191bf471f929147377a9e0dec7cfcae4"
+checksum = "bbe064ae5131bbdc695287aadbc24ed55762af7db7093d0f3dcdccc0a5c4ea85"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3196,12 +3202,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "xdg"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fb433233f2df9344722454bc7e96465c9d03bff9d77c248f9e7523fe79585b5"
 
 [[package]]
 name = "yoke"

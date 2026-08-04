@@ -25,9 +25,9 @@ pub enum SessionError {
 /// Where sessions are stored. Defaults to `$XDG_DATA_HOME/oven/sessions/` (or
 /// `~/.local/share/oven/sessions/`).
 pub fn default_sessions_dir() -> Option<PathBuf> {
-    xdg::BaseDirectories::with_prefix("oven")
-        .get_data_home()
-        .map(|d| d.join("sessions"))
+    cross_xdg::BaseDirs::with_prefix("oven")
+        .ok()
+        .map(|d| d.data_home().join("sessions"))
 }
 
 #[derive(Debug, Clone)]
