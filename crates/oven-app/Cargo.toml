@@ -5,12 +5,12 @@ version = "0.0.1"
 edition = { workspace = true }
 
 [dependencies]
-dirs = { workspace = true }
 oven-llm = { workspace = true }
 oven-agent = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
+toml = { workspace = true }
+xdg = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
     "macros",

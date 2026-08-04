@@ -4,15 +4,15 @@
 //! the **registration** side: declaring which MCP servers the user wants
 //! enabled and surfacing them so a future transport layer can spin them up.
 //!
-//! Config shape (in `.oven.yaml`):
+//! Config shape (in `.oven.toml`):
 //!
-//! ```yaml
-//! mcps:
-//!   filesystem:
-//!     command: "npx"
-//!     args: ["-y", "@modelcontextprotocol/server-filesystem", "/abs/path"]
-//!     env:
-//!       FOO: bar
+//! ```toml
+//! [mcps.filesystem]
+//! command = "npx"
+//! args = ["-y", "@modelcontextprotocol/server-filesystem", "/abs/path"]
+//!
+//! [mcps.filesystem.env]
+//! FOO = "bar"
 //! ```
 
 use std::collections::BTreeMap;

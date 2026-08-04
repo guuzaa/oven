@@ -53,32 +53,31 @@ Set `OVEN_MODEL` to pick the model. Override the base URL with
 
 ## Configuration
 
-Put a `.oven.yaml` in your project root, or configure globally at
-`~/.config/oven/config.yaml`. Available options:
+Put a `.oven.toml` in your project root, or configure globally at
+`$XDG_CONFIG_HOME/oven/config.toml` (default `~/.config/oven/config.toml`).
+On first run Oven creates the global config as a template if it is missing.
+Available options:
 
-```yaml
-provider:
-  model: deepseek-v4-flash
-  base_url: https://api.deepseek.com
-  api_key: sk-xxx
+```toml
+request_timeout_secs = 60
+max_retries = 2
+base_backoff_ms = 500
 
-request_timeout_secs: 60
-max_retries: 2
-base_backoff_ms: 500
+skills = []
+tools = ["file_read", "file_write", "bash"]
 
-skills:
-  # reserved: skill module ids (currently none bundled)
+[provider]
+model = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+api_key = "sk-xxx"
 
-tools:
-  - file_read
-  - file_write
-  - bash
-
-mcps:
-  # MCP server declarations (transport support coming)
+[mcps]
+# MCP server declarations (transport support coming)
 ```
 
-If no `.oven.yaml` exists, Oven uses sensible defaults.
+If neither file exists, Oven uses sensible defaults. Sessions are stored as
+JSONL under `$XDG_DATA_HOME/oven/sessions/` (default
+`~/.local/share/oven/sessions/`).
 
 `skills` opts into guidance modules that inject instructions into the system
 prompt; no skills are bundled yet, so entries are accepted and currently

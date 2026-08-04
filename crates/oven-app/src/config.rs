@@ -12,7 +12,9 @@ pub enum ConfigError {
     #[error("read config {0}: {1}")]
     Read(PathBuf, #[source] std::io::Error),
     #[error("parse config {0}: {1}")]
-    Parse(PathBuf, #[source] serde_yaml::Error),
+    Parse(PathBuf, #[source] toml::de::Error),
+    #[error("write config {0}: {1}")]
+    Write(PathBuf, #[source] std::io::Error),
 }
 
 /// LLM provider configuration. All fields optional so users can override just
@@ -121,8 +123,8 @@ impl AppConfig {
     fn load_file(path: &Path) -> Result<Option<AppConfig>, ConfigError> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
-                let cfg: AppConfig = serde_yaml::from_str(&text)
-                    .map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
+                let cfg: AppConfig =
+                    toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
                 Ok(Some(cfg))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -150,13 +152,94 @@ impl AppConfig {
         Ok(cfg)
     }
 
-    /// Default user config location: `$HOME/.config/oven/config.yaml`.
+    /// Default user config location: `$XDG_CONFIG_HOME/oven/config.toml`
+    /// (or `~/.config/oven/config.toml`).
     pub fn default_user_config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("oven").join("config.yaml"))
+        xdg::BaseDirectories::with_prefix("oven")
+            .get_config_home()
+            .map(|d| d.join("config.toml"))
     }
 
-    /// Default project config path: `.oven.yaml` in the given workspace root.
+    /// Default project config path: `.oven.toml` in the given workspace root.
     pub fn default_project_config_path(root: &Path) -> PathBuf {
-        root.join(".oven.yaml")
+        root.join(".oven.toml")
+    }
+
+    /// Create a template user config at the default location if it does not
+    /// exist yet. Existing configs are left untouched.
+    pub fn ensure_user_config() -> Result<(), ConfigError> {
+        if let Some(path) = Self::default_user_config_path() {
+            Self::ensure_user_config_at(&path)?;
+        }
+        Ok(())
+    }
+
+    fn ensure_user_config_at(path: &Path) -> Result<(), ConfigError> {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ConfigError::Write(path.to_path_buf(), e))?;
+        }
+        std::fs::write(path, DEFAULT_USER_CONFIG)
+            .map_err(|e| ConfigError::Write(path.to_path_buf(), e))
+    }
+}
+
+const DEFAULT_USER_CONFIG: &str = r#"# Oven user configuration. All fields are optional;
+# uncomment what you want to override.
+
+# [provider]
+#   # Model name (provider inferred from prefix, e.g. "claude*" -> Anthropic).
+#   model = "deepseek-v4-flash"
+#   # Override the API endpoint. Useful for OpenAI/Anthropic-compatible proxies.
+#   base_url = "https://api.deepseek.com"
+#   # Explicit API key. If unset, the adapter's default env var is used
+#   # (ANTHROPIC_API_KEY / OPENAI_API_KEY / ...).
+#   api_key = "sk-..."
+
+# Per-request timeout in seconds.
+# request_timeout_secs = 60
+
+# Number of retries after a transient failure before giving up.
+# max_retries = 2
+
+# Initial backoff between retries, in ms. Doubles per attempt (exponential).
+# base_backoff_ms = 500
+
+# Built-in skills to enable. Unknown ids are silently ignored.
+# skills = ["files", "bash"]
+
+# Tools to mount. Empty means the built-in default set
+# (file_read, file_write, bash).
+# tools = ["file_read", "file_write", "bash"]
+
+# MCP servers to declare. The transport itself is not yet implemented; this
+# only registers them so future features can spin them up.
+# [mcps.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/abs/path"]
+# [mcps.filesystem.env]
+# FOO = "bar"
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_user_config_creates_template_once() {
+        let tmp = tempdir::TempDir::new("oven-config").unwrap();
+        let path = tmp.path().join("config.toml");
+        AppConfig::ensure_user_config_at(&path).unwrap();
+        assert!(path.exists());
+        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        assert_eq!(cfg, AppConfig::default());
+
+        std::fs::write(&path, "[provider]\nmodel = \"edited\"\n").unwrap();
+        AppConfig::ensure_user_config_at(&path).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        assert_eq!(cfg.provider.model.as_deref(), Some("edited"));
     }
 }

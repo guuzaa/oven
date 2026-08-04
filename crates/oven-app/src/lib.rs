@@ -88,11 +88,12 @@ impl App {
     }
 
     /// Load config from the bundled default locations: user-level
-    /// (`~/.config/oven/config.yaml`) then project-level (`.oven.yaml` in the
-    /// workspace root). After loading, skills requested in `skills:` and tools
-    /// requested in `tools:` are registered, and MCP servers declared under
-    /// `mcps:` are registered.
+    /// (`$XDG_CONFIG_HOME/oven/config.toml`, created as a template on first
+    /// run) then project-level (`.oven.toml` in the workspace root). After
+    /// loading, skills requested in `skills:` and tools requested in `tools:`
+    /// are registered, and MCP servers declared under `mcps:` are registered.
     pub fn load_config(&mut self) -> Result<(), AppError> {
+        AppConfig::ensure_user_config()?;
         let user = AppConfig::default_user_config_path();
         let project = AppConfig::default_project_config_path(&self.root);
         let cfg = AppConfig::load(user.as_deref(), Some(&project))?;

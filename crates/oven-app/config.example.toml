@@ -1,0 +1,37 @@
+# Oven project-level configuration. Place at the workspace root as
+# `.oven.toml`. All fields are optional; environment variables take
+# precedence where noted.
+
+# Per-request timeout in seconds.
+request_timeout_secs = 60
+
+# Number of retries after a transient failure before giving up.
+max_retries = 2
+
+# Initial backoff between retries, in ms. Doubles per attempt (exponential).
+base_backoff_ms = 500
+
+# Built-in skills to enable. Unknown ids are silently ignored.
+# skills = ["files", "bash"]
+
+# Tools to mount. Empty means the built-in default set
+# (file_read, file_write, bash).
+# tools = ["file_read", "file_write", "bash"]
+
+# LLM provider settings.
+# [provider]
+#   # Model name (provider inferred from prefix, e.g. "claude*" -> Anthropic).
+#   model = "gpt-4o-mini"
+#   # Override the API endpoint. Useful for OpenAI/Anthropic-compatible proxies.
+#   base_url = "https://api.moonshot.cn/anthropic/v1/"
+#   # Explicit API key. If unset, the adapter's default env var is used
+#   # (ANTHROPIC_API_KEY / OPENAI_API_KEY / ...).
+#   api_key = "sk-..."
+
+# MCP servers to declare. The transport itself is not yet implemented; this
+# only registers them so future features can spin them up.
+# [mcps.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/abs/path"]
+# [mcps.filesystem.env]
+# FOO = "bar"

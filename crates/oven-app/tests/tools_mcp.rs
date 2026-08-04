@@ -11,21 +11,15 @@ fn config_enables_tools_and_mcps() {
     let tmp = tempdir::TempDir::new("app-apply").unwrap();
     let root = tmp.path().join("ws");
     std::fs::create_dir_all(&root).unwrap();
-    let cfg_path = root.join(".oven.yaml");
+    let cfg_path = root.join(".oven.toml");
     write(
         &cfg_path,
         r#"
-tools:
-  - file_read
-  - file_write
-  - bash
-mcps:
-  filesystem:
-    command: npx
-    args:
-      - -y
-      - "@modelcontextprotocol/server-filesystem"
-      - /tmp
+tools = ["file_read", "file_write", "bash"]
+
+[mcps.filesystem]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 "#,
     );
     let cfg = AppConfig::load(None, Some(&cfg_path)).unwrap();
@@ -47,7 +41,7 @@ mcps:
 
 #[test]
 fn unknown_tool_is_skipped_silently() {
-    let cfg: AppConfig = serde_yaml::from_str("tools: [\"file_read\", \"nope-tool\"]").unwrap();
+    let cfg: AppConfig = toml::from_str(r#"tools = ["file_read", "nope-tool"]"#).unwrap();
     let tmp = tempdir::TempDir::new("app-unknown-ids").unwrap();
     let app = App::new(tmp.path()).with_config(cfg);
     assert!(app.tools().contains("file_read"));
@@ -56,7 +50,7 @@ fn unknown_tool_is_skipped_silently() {
 
 #[test]
 fn unregistered_skill_ids_leave_empty_registry() {
-    let cfg: AppConfig = serde_yaml::from_str("skills: [\"files\", \"nope-skill\"]").unwrap();
+    let cfg: AppConfig = toml::from_str(r#"skills = ["files", "nope-skill"]"#).unwrap();
     let tmp = tempdir::TempDir::new("app-skill-skip").unwrap();
     let app = App::new(tmp.path()).with_config(cfg);
     // No bundled skill modules are registered anymore; ids are accepted but
@@ -93,12 +87,11 @@ fn register_skill_contributes_prompt() {
 
 #[test]
 fn empty_command_mcp_is_dropped() {
-    let cfg_yaml = r#"
-mcps:
-  bad:
-    command: ""
+    let cfg_toml = r#"
+[mcps.bad]
+command = ""
 "#;
-    let cfg: AppConfig = serde_yaml::from_str(cfg_yaml).unwrap();
+    let cfg: AppConfig = toml::from_str(cfg_toml).unwrap();
     let tmp = tempdir::TempDir::new("app-bad-mcp").unwrap();
     let app = App::new(tmp.path()).with_config(cfg);
     assert!(app.mcps().is_empty());
@@ -128,7 +121,7 @@ fn _mcp_server_config_roundtrip() {
         args: vec!["-d".into()],
         env: [("X".to_string(), "Y".to_string())].into(),
     };
-    let s = serde_yaml::to_string(&cfg).unwrap();
-    let back: McpServerConfig = serde_yaml::from_str(&s).unwrap();
+    let s = toml::to_string(&cfg).unwrap();
+    let back: McpServerConfig = toml::from_str(&s).unwrap();
     assert_eq!(cfg, back);
 }

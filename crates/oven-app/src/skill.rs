@@ -3,7 +3,7 @@
 //!
 //! A skill is deliberately *not* a tool bundle: it only injects instructions
 //! into the system prompt under a stable id the user opts into via the
-//! `skills:` list in `config.yaml`. Tools are a separate concern, mounted
+//! `skills:` list in `config.toml`. Tools are a separate concern, mounted
 //! independently through [`crate::tools::ToolRegistry`] (see the `tools:`
 //! config key). Keeping the two apart means a skill is pure context while a
 //! tool is an executable capability.
