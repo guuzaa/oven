@@ -80,6 +80,11 @@ impl Agent {
         self
     }
 
+    /// Names and descriptions of the registered slash commands.
+    pub fn slash_commands(&self) -> Vec<(String, String)> {
+        self.slash.commands()
+    }
+
     pub fn history(&self) -> &[Message] {
         self.history.messages()
     }
@@ -318,7 +323,16 @@ impl Agent {
             match outcome? {
                 CommandOutcome::Passthrough => {}
                 CommandOutcome::Reply(r) => return Ok(finish(self, &tx, r)),
-                CommandOutcome::Exit => return Ok(finish(self, &tx, "goodbye".to_string())),
+                CommandOutcome::Cleared => {
+                    let text = finish(self, &tx, "history cleared".to_string());
+                    Self::emit(&tx, AgentEvent::HistoryCleared { agent_id: self.id });
+                    return Ok(text);
+                }
+                CommandOutcome::Exit => {
+                    let text = finish(self, &tx, "goodbye".to_string());
+                    Self::emit(&tx, AgentEvent::Exit { agent_id: self.id });
+                    return Ok(text);
+                }
             }
 
             self.history.push(Message::user_text(input));
@@ -607,18 +621,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slash_help_returns_text() {
-        let mock = MockProvider::new(vec![]);
-        let mut agent = Agent::new(Box::new(mock), Vec::new());
-        let out = agent.run("/help").await.unwrap();
-        assert!(out.contains("/clear"));
-    }
-
-    #[tokio::test]
     async fn slash_exit_returns_goodbye() {
         let mock = MockProvider::new(vec![]);
         let mut agent = Agent::new(Box::new(mock), Vec::new());
         let out = agent.run("/exit").await.unwrap();
         assert_eq!(out, "goodbye");
+    }
+
+    #[tokio::test]
+    async fn slash_exit_emits_exit_event() {
+        let mock = MockProvider::new(vec![]);
+        let mut agent = Agent::new(Box::new(mock), Vec::new()).with_id(AgentId(3));
+        let (tx, mut rx) = unbounded_channel();
+        let out = agent
+            .run_with_emitter("/exit", Some(tx), None)
+            .await
+            .unwrap();
+        assert_eq!(out, "goodbye");
+
+        let mut saw_done = false;
+        let mut saw_exit = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AgentEvent::Done {
+                    agent_id: AgentId(3),
+                    text,
+                    ..
+                } if text == "goodbye" => saw_done = true,
+                AgentEvent::Exit {
+                    agent_id: AgentId(3),
+                } => saw_exit = true,
+                _ => {}
+            }
+        }
+        assert!(saw_done);
+        assert!(saw_exit);
+    }
+
+    #[tokio::test]
+    async fn slash_clear_emits_history_cleared_event() {
+        let mock = MockProvider::new(vec![]);
+        let mut agent = Agent::new(Box::new(mock), Vec::new()).with_id(AgentId(4));
+        agent.history.push(Message::user_text("prior"));
+        let (tx, mut rx) = unbounded_channel();
+        let out = agent
+            .run_with_emitter("/clear", Some(tx), None)
+            .await
+            .unwrap();
+        assert_eq!(out, "history cleared");
+
+        let mut saw_done = false;
+        let mut saw_cleared = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AgentEvent::Done { text, .. } if text == "history cleared" => saw_done = true,
+                AgentEvent::HistoryCleared { .. } => saw_cleared = true,
+                _ => {}
+            }
+        }
+        assert!(saw_done);
+        assert!(saw_cleared);
+        assert!(agent.history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn slash_clear_resets_total_usage() {
+        let mock = MockProvider::new(vec![text_response("one")]);
+        let mut agent = Agent::new(Box::new(mock), Vec::new());
+        let out = agent.run("hello").await.unwrap();
+        assert_eq!(out, "one");
+        assert!(agent.total_usage().input_tokens > 0);
+
+        let out = agent.run("/clear").await.unwrap();
+        assert_eq!(out, "history cleared");
+        assert_eq!(agent.total_usage().input_tokens, 0);
+        assert_eq!(agent.total_usage().output_tokens, 0);
     }
 }

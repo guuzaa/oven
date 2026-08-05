@@ -11,6 +11,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::component::{Component, KeyResult, State};
 
 const MOUSE_SCROLL_STEP: u16 = 3;
+const START_HINT: &str =
+    "oven — Enter send · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-C quit";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LineKind {
@@ -33,10 +35,7 @@ pub struct Transcript {
 impl Transcript {
     pub fn new() -> Self {
         Self {
-            line_cache: format_lines(
-                LineKind::System,
-                "oven — Enter send · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-C quit",
-            ),
+            line_cache: format_lines(LineKind::System, START_HINT),
             streaming: String::new(),
             stream_kind: LineKind::Text,
             scroll: 0,
@@ -46,6 +45,13 @@ impl Transcript {
 
     pub fn push_user(&mut self, text: &str) {
         self.push_row(LineKind::User, text);
+    }
+
+    fn reset(&mut self) {
+        self.line_cache = format_lines(LineKind::System, START_HINT);
+        self.streaming.clear();
+        self.stream_kind = LineKind::Text;
+        self.scroll = 0;
     }
 
     fn push_row(&mut self, kind: LineKind, text: &str) {
@@ -144,6 +150,8 @@ impl Component for Transcript {
                     }
                     self.push_row(LineKind::System, "cancelled");
                 }
+                AgentEvent::Exit { .. } => {}
+                AgentEvent::HistoryCleared { .. } => self.reset(),
             },
             AppEvent::Idle { .. } => {
                 self.flush_streaming();

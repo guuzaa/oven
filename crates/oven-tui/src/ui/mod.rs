@@ -15,7 +15,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
-use oven_app::{AppCmd, AppEvent, AppHandle};
+use oven_app::{AgentEvent, AppCmd, AppEvent, AppHandle};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -31,6 +31,7 @@ pub struct Ui {
     handle: AppHandle,
     events: broadcast::Receiver<AppEvent>,
     state: State,
+    quit: bool,
     transcript: Transcript,
     status: StatusBar,
     usage: UsageBar,
@@ -40,14 +41,16 @@ pub struct Ui {
 impl Ui {
     pub fn new(handle: AppHandle) -> Self {
         let events = handle.subscribe();
+        let slash_commands = handle.slash_commands().to_vec();
         Self {
             handle,
             events,
             state: State::new(),
+            quit: false,
             transcript: Transcript::new(),
             status: StatusBar::new(),
             usage: UsageBar::new(),
-            input: InputView::new(),
+            input: InputView::new(slash_commands),
         }
     }
 
@@ -91,6 +94,9 @@ impl Ui {
                         }
                     }
                     self.drain_events();
+                    if self.quit {
+                        break;
+                    }
                 }
             }
             terminal.draw(|f| self.draw(f))?;
@@ -114,6 +120,15 @@ impl Ui {
     }
 
     fn apply_event(&mut self, ev: AppEvent) {
+        if matches!(
+            ev,
+            AppEvent::Agent {
+                event: AgentEvent::Exit { .. },
+                ..
+            }
+        ) {
+            self.quit = true;
+        }
         self.transcript.on_event(&ev, &mut self.state);
         self.status.on_event(&ev, &mut self.state);
         self.usage.on_event(&ev, &mut self.state);
@@ -165,20 +180,31 @@ impl Ui {
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
         let input_h = self.input.height();
+        let menu_h = self
+            .input
+            .menu_height(&self.state)
+            .min(f.area().height.saturating_sub(3 + 1 + 1 + input_h));
+        let mut constraints = vec![
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(input_h),
+        ];
+        if menu_h > 0 {
+            constraints.push(Constraint::Length(menu_h));
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(input_h),
-            ])
+            .constraints(constraints)
             .split(f.area());
 
         self.transcript.draw(f, chunks[0], &self.state);
         self.status.draw(f, chunks[1], &self.state);
         self.usage.draw(f, chunks[2], &self.state);
         self.input.draw(f, chunks[3], &self.state);
+        if menu_h > 0 {
+            self.input.draw_menu(f, chunks[4], &self.state);
+        }
     }
 }
 

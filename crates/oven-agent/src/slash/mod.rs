@@ -1,17 +1,16 @@
 mod clear;
 mod exit;
-mod help;
 
 use crate::agent::Agent;
 use crate::error::AgentError;
 
 pub use clear::Clear;
 pub use exit::Exit;
-pub use help::Help;
 
 #[derive(Debug, Clone)]
 pub enum CommandOutcome {
     Reply(String),
+    Cleared,
     Exit,
     Passthrough,
 }
@@ -35,7 +34,6 @@ impl SlashRegistry {
 
     pub fn with_builtin() -> Self {
         let mut r = Self::new();
-        r.register(Box::new(Help));
         r.register(Box::new(Clear));
         r.register(Box::new(Exit));
         r
@@ -47,6 +45,15 @@ impl SlashRegistry {
 
     pub fn command_names(&self) -> Vec<&str> {
         self.commands.iter().map(|c| c.name()).collect()
+    }
+
+    /// (name, description) pairs for every registered command, in
+    /// registration order.
+    pub fn commands(&self) -> Vec<(String, String)> {
+        self.commands
+            .iter()
+            .map(|c| (c.name().to_string(), c.description().to_string()))
+            .collect()
     }
 
     pub fn parse_and_run(
@@ -140,17 +147,12 @@ mod tests {
     }
 
     #[test]
-    fn help_lists_commands() {
+    fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
-        let mut agent = fresh_agent();
-        let outcome = reg.parse_and_run(&mut agent, "/help").unwrap();
-        match outcome {
-            CommandOutcome::Reply(s) => {
-                assert!(s.contains("/clear"));
-                assert!(s.contains("/exit"));
-            }
-            _ => panic!("expected Reply"),
-        }
+        let cmds = reg.commands();
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, _)| n == "exit"));
     }
 
     #[test]
@@ -159,7 +161,7 @@ mod tests {
         let mut agent = fresh_agent();
         agent.history.push(Message::user_text("hi"));
         let outcome = reg.parse_and_run(&mut agent, "/clear").unwrap();
-        assert!(matches!(outcome, CommandOutcome::Reply(_)));
+        assert!(matches!(outcome, CommandOutcome::Cleared));
         assert!(agent.history.is_empty());
     }
 

@@ -108,13 +108,13 @@ echo "summarize this" | oven
 
 ## Sessions
 
-Use `--session <id>` to persist conversation history. Next time you
-run with the same id, the history is loaded and continued.
+Use `--session <id>` to resume an existing session; its history is
+loaded and continued. A new session always gets an auto-generated id
+(uuid v7) that the app manages internally, so you never provide an id
+for a new chat.
 
 ```bash
-oven --session my-project "start implementing the parser"
-# later…
-oven --session my-project "add error handling to the parser"
+oven --session my-project "continue the previous chat"
 ```
 
 Sessions are stored as JSONL files in the platform's data directory.
@@ -125,8 +125,7 @@ In both one-shot and interactive modes:
 
 | Command        | What it does                  |
 |----------------|-------------------------------|
-| `/clear`       | Clear conversation history    |
-| `/help`        | Show available commands       |
+| `/clear`       | Clear the screen and start a new chat (switches to a new uuid v7 session; the old file is kept) |
 | `/exit`        | Exit the agent                |
 
 ## Building from source

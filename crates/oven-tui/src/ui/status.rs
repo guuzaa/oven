@@ -47,6 +47,8 @@ impl Component for StatusBar {
                 }
                 AgentEvent::Done { .. } => {}
                 AgentEvent::Cancelled { .. } => self.text = "cancelled".into(),
+                AgentEvent::Exit { .. } => {}
+                AgentEvent::HistoryCleared { .. } => {}
             },
             AppEvent::Idle { .. } => {
                 state.busy = false;

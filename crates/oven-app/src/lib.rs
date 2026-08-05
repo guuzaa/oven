@@ -291,7 +291,7 @@ impl App {
         session_id: &str,
         user: impl Into<String>,
     ) -> Result<String, AppError> {
-        let handle = self.spawn_session_in(sessions_dir, session_id)?;
+        let handle = self.spawn_session_in(sessions_dir, Some(session_id))?;
         let out = handle.prompt(user).await;
         handle.shutdown().await;
         out

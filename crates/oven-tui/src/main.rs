@@ -8,7 +8,7 @@ use oven_app::App;
 mod ui;
 
 #[derive(Debug, Parser)]
-#[command(name = "oven", about = "Oven coding agent")]
+#[command(name = "oven", about = "A toy coding agent for joy only.")]
 struct Cli {
     /// Workspace root
     #[arg(long, short, default_value = ".")]
@@ -65,7 +65,7 @@ fn read_piped_prompt() -> Option<String> {
 async fn headless(app: &App, session: Option<&str>, prompt: &str) -> ExitCode {
     let result = match session {
         Some(sid) => {
-            let handle = match app.spawn_session(sid) {
+            let handle = match app.spawn_session(Some(sid)) {
                 Ok(h) => h,
                 Err(err) => {
                     eprintln!("error: {}", err);
@@ -103,21 +103,12 @@ async fn headless(app: &App, session: Option<&str>, prompt: &str) -> ExitCode {
 }
 
 async fn interactive(app: &App, session: Option<&str>) -> ExitCode {
-    let handle = match session {
-        Some(sid) => match app.spawn_session(sid) {
-            Ok(h) => h,
-            Err(err) => {
-                eprintln!("error: {err}");
-                return ExitCode::FAILURE;
-            }
-        },
-        None => match app.spawn() {
-            Ok(h) => h,
-            Err(err) => {
-                eprintln!("error: {err}");
-                return ExitCode::FAILURE;
-            }
-        },
+    let handle = match app.spawn_session(session) {
+        Ok(h) => h,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
+        }
     };
 
     match ui::Ui::new(handle).run().await {

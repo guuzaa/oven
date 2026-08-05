@@ -8,10 +8,10 @@ use oven_llm::{ContentBlock, Message, Role, Usage};
 /// adds a negligible number of tokens relative to the budget, and refresh
 /// the count from the next API response.
 ///
-/// The `revision` bumped whenever the message list is structurally replaced (`clear` /
-/// `set_messages`).
-/// The App layer uses this to detect that a rewrite of
-/// the persisted session store is required instead of an append.
+/// The `revision` is bumped whenever the message list is structurally replaced
+/// (`clear` / `set_messages`). The App layer uses this to detect an in-memory
+/// reset so it can keep the persisted session store untouched and resume
+/// appending after it.
 #[derive(Debug)]
 pub struct History {
     messages: Vec<Message>,
@@ -42,12 +42,14 @@ impl History {
         self.revision += 1;
         self.messages.clear();
         self.last_prompt_tokens = 0;
+        self.total = Usage::default();
     }
 
     pub fn set_messages(&mut self, msgs: Vec<Message>) {
         self.revision += 1;
         self.messages = msgs;
         self.last_prompt_tokens = 0;
+        self.total = Usage::default();
     }
 
     pub fn revision(&self) -> u64 {
@@ -188,6 +190,19 @@ mod tests {
         assert_eq!(h.prompt_tokens(), 150);
         assert_eq!(h.total_usage().input_tokens, 250);
         assert_eq!(h.total_usage().output_tokens, 20);
+    }
+
+    #[test]
+    fn clear_resets_total_usage() {
+        let mut h = History::new();
+        h.push(Message::user_text("hi"));
+        h.record_usage(&usage(100));
+
+        h.clear();
+
+        assert!(h.is_empty());
+        assert_eq!(h.total_usage().input_tokens, 0);
+        assert_eq!(h.total_usage().output_tokens, 0);
     }
 
     #[test]

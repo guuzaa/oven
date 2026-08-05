@@ -13,6 +13,6 @@ impl SlashCommand for Clear {
     }
     fn execute(&self, agent: &mut Agent, _args: &str) -> Result<CommandOutcome, AgentError> {
         agent.clear_history();
-        Ok(CommandOutcome::Reply("history cleared".to_string()))
+        Ok(CommandOutcome::Cleared)
     }
 }
