@@ -1,4 +1,5 @@
 mod component;
+mod info;
 mod input;
 mod slash_command_popup;
 mod status;
@@ -23,6 +24,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use tokio::sync::broadcast;
 
 use component::{Action, Component, KeyResult, State};
+use info::InfoBar;
 use input::InputView;
 use status::StatusBar;
 use transcript::Transcript;
@@ -36,6 +38,7 @@ pub struct Ui {
     transcript: Transcript,
     status: StatusBar,
     usage: UsageBar,
+    info: InfoBar,
     input: InputView,
 }
 
@@ -43,6 +46,11 @@ impl Ui {
     pub fn new(handle: AppHandle) -> Self {
         let events = handle.subscribe();
         let slash_commands = handle.slash_commands().to_vec();
+        let model = handle.model().to_string();
+        let root = handle
+            .root()
+            .canonicalize()
+            .unwrap_or_else(|_| handle.root().to_owned());
         Self {
             handle,
             events,
@@ -51,6 +59,7 @@ impl Ui {
             transcript: Transcript::new(),
             status: StatusBar::new(),
             usage: UsageBar::new(),
+            info: InfoBar::new(model, &root),
             input: InputView::new(slash_commands),
         }
     }
@@ -193,6 +202,8 @@ impl Ui {
         ];
         if slash_command_h > 0 {
             constraints.push(Constraint::Length(slash_command_h));
+        } else {
+            constraints.push(Constraint::Length(1));
         }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -205,6 +216,8 @@ impl Ui {
         self.input.draw(f, chunks[3], &self.state);
         if slash_command_h > 0 {
             self.input.draw_slash_command(f, chunks[4], &self.state);
+        } else {
+            self.info.draw(f, chunks[4], &self.state);
         }
     }
 }

@@ -42,6 +42,8 @@ pub struct AppHandle {
     event_tx: broadcast::Sender<AppEvent>,
     join: JoinHandle<()>,
     slash_commands: Vec<(String, String)>,
+    model: String,
+    root: PathBuf,
 }
 
 impl AppHandle {
@@ -60,6 +62,16 @@ impl AppHandle {
     /// (name, description) pairs for the registered slash commands.
     pub fn slash_commands(&self) -> &[(String, String)] {
         &self.slash_commands
+    }
+
+    /// Model name in effect for this runtime.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Workspace root the runtime was started with.
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Send one user turn and wait until the app returns to [`AppEvent::Idle`].
@@ -99,7 +111,13 @@ impl App {
     /// Spawn a long-lived app task with no session persistence.
     pub fn spawn(&self) -> Result<AppHandle, AppError> {
         let agent = self.build_agent()?;
-        Ok(spawn_runtime(AppId::next(), agent, None))
+        Ok(spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            self.effective_model(),
+            self.root.clone(),
+        ))
     }
 
     /// Spawn with a persisted session under the platform data dir. `Some(id)`
@@ -125,7 +143,13 @@ impl App {
         for m in prior.into_iter().filter(|m| m.role != Role::System) {
             agent.push_history(m);
         }
-        Ok(spawn_runtime(AppId::next(), agent, Some(session)))
+        Ok(spawn_runtime(
+            AppId::next(),
+            agent,
+            Some(session),
+            self.effective_model(),
+            self.root.clone(),
+        ))
     }
 
     /// Test/custom wiring variant of [`App::spawn_session_in`] with an
@@ -142,13 +166,25 @@ impl App {
         for m in prior.into_iter().filter(|m| m.role != Role::System) {
             agent.push_history(m);
         }
-        Ok(spawn_runtime(AppId::next(), agent, Some(session)))
+        Ok(spawn_runtime(
+            AppId::next(),
+            agent,
+            Some(session),
+            self.effective_model(),
+            self.root.clone(),
+        ))
     }
 
     /// Spawn with an explicit provider (tests / custom wiring).
     pub fn spawn_with_provider(&self, provider: Box<dyn Provider>) -> AppHandle {
         let agent = self.build_agent_with_provider(provider);
-        spawn_runtime(AppId::next(), agent, None)
+        spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            self.effective_model(),
+            self.root.clone(),
+        )
     }
 
     /// Spawn with provider + session store (tests).
@@ -162,7 +198,13 @@ impl App {
         for m in prior.iter().filter(|m| m.role != Role::System) {
             agent.push_history(m.clone());
         }
-        Ok(spawn_runtime(AppId::next(), agent, Some(session)))
+        Ok(spawn_runtime(
+            AppId::next(),
+            agent,
+            Some(session),
+            self.effective_model(),
+            self.root.clone(),
+        ))
     }
 }
 
@@ -193,7 +235,13 @@ fn resolve_session(sessions_dir: &Path, session_id: Option<&str>) -> Result<Sess
     Ok(session)
 }
 
-fn spawn_runtime(app_id: AppId, agent: Agent, session: Option<Session>) -> AppHandle {
+fn spawn_runtime(
+    app_id: AppId,
+    agent: Agent,
+    session: Option<Session>,
+    model: String,
+    root: PathBuf,
+) -> AppHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (event_tx, _) = broadcast::channel(8192);
     let event_tx_task = event_tx.clone();
@@ -211,6 +259,8 @@ fn spawn_runtime(app_id: AppId, agent: Agent, session: Option<Session>) -> AppHa
         event_tx,
         join,
         slash_commands,
+        model,
+        root,
     }
 }
 
