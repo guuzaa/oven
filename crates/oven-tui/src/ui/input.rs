@@ -1,30 +1,24 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{Block, Borders};
 use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthStr;
 
 use super::component::{Action, Component, KeyResult, State};
-
-const MAX_MENU_ROWS: usize = 6;
+use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
 
 pub struct InputView {
     textarea: TextArea<'static>,
-    commands: Vec<(String, String)>,
-    menu_open: bool,
-    selected: usize,
+    slash_command: SlashCommandPopup,
 }
 
 impl InputView {
     pub fn new(commands: Vec<(String, String)>) -> Self {
         Self {
             textarea: new_textarea(),
-            commands,
-            menu_open: false,
-            selected: 0,
+            slash_command: SlashCommandPopup::new(commands),
         }
     }
 
@@ -36,105 +30,26 @@ impl InputView {
 
     pub fn clear(&mut self) {
         self.textarea = new_textarea();
-        self.menu_open = false;
-        self.selected = 0;
+        self.slash_command.close();
     }
 
     /// Height of the command popup below the input, or 0 when hidden.
-    pub fn menu_height(&self, state: &State) -> u16 {
-        if state.busy || !self.menu_open {
-            return 0;
-        }
-        let rows = self.matches().len().clamp(1, MAX_MENU_ROWS);
-        (rows as u16).saturating_add(2)
+    pub fn slash_command_height(&self, state: &State) -> u16 {
+        self.slash_command.height(state)
     }
 
-    pub fn draw_menu(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        if state.busy || !self.menu_open {
-            return;
-        }
-        let indices = self.matches();
-        let mut lines = Vec::with_capacity(indices.len());
-        for (row, &idx) in indices.iter().take(MAX_MENU_ROWS).enumerate() {
-            let (name, desc) = &self.commands[idx];
-            let style = if row == self.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("/{name}"), style),
-                Span::styled(format!("  {desc}"), style),
-            ]));
-        }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "no matching command",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        let block = Block::default().borders(Borders::ALL).title(" commands ");
-        f.render_widget(Paragraph::new(lines).block(block), area);
+    pub fn draw_slash_command(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
+        self.slash_command.draw(f, area, state);
     }
 
     fn text(&self) -> String {
         self.textarea.lines().join("\n")
     }
 
-    fn token(&self) -> String {
-        let text = self.text();
-        let trimmed = text.trim_start();
-        if !trimmed.starts_with('/') {
-            return String::new();
-        }
-        trimmed[1..]
-            .split(char::is_whitespace)
-            .next()
-            .unwrap_or("")
-            .to_lowercase()
-    }
-
-    fn matches(&self) -> Vec<usize> {
-        let token = self.token();
-        self.commands
-            .iter()
-            .enumerate()
-            .filter(|(_, (name, _))| name.to_lowercase().starts_with(&token))
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    fn selected_command(&self) -> Option<usize> {
-        self.matches().get(self.selected).copied()
-    }
-
-    fn refresh_menu(&mut self) {
-        let was_open = self.menu_open;
-        self.menu_open = self.text().trim_start().starts_with('/');
-        if !self.menu_open {
-            self.selected = 0;
-            return;
-        }
-        if !was_open {
-            self.selected = self
-                .matches()
-                .iter()
-                .position(|&i| self.commands[i].0.to_lowercase() == self.token())
-                .unwrap_or(0);
-        }
-        let n = self.matches().len();
-        if n == 0 {
-            self.selected = 0;
-        } else if self.selected >= n {
-            self.selected = n - 1;
-        }
-    }
-
-    fn fill_command(&mut self, idx: usize) {
-        let text = format!("/{} ", self.commands[idx].0);
+    fn fill_command(&mut self, text: &str) {
         let col = text.width();
-        self.textarea.set_lines(vec![text], (0, col));
-        self.refresh_menu();
+        self.textarea.set_lines(vec![text.to_string()], (0, col));
+        self.slash_command.refresh(&self.text());
     }
 }
 
@@ -143,47 +58,22 @@ impl Component for InputView {
         if state.busy {
             return KeyResult::Ignored;
         }
-        self.refresh_menu();
-        if self.menu_open {
-            match key.code {
-                KeyCode::Esc => {
-                    self.menu_open = false;
-                    self.selected = 0;
-                    return KeyResult::Handled;
+        let text = self.text();
+        self.slash_command.refresh(&text);
+        if self.slash_command.is_open()
+            && let Some(action) = self.slash_command.handle_key(key)
+        {
+            return match action {
+                SlashCommandPopupAction::Handled => KeyResult::Handled,
+                SlashCommandPopupAction::Fill(text) => {
+                    self.fill_command(&text);
+                    KeyResult::Handled
                 }
-                KeyCode::Up => {
-                    let n = self.matches().len();
-                    if n > 0 {
-                        self.selected = (self.selected + n - 1) % n;
-                    }
-                    return KeyResult::Handled;
+                SlashCommandPopupAction::Submit(text) => {
+                    self.clear();
+                    KeyResult::Action(Action::Submit(text))
                 }
-                KeyCode::Down => {
-                    let n = self.matches().len();
-                    if n > 0 {
-                        self.selected = (self.selected + 1) % n;
-                    }
-                    return KeyResult::Handled;
-                }
-                KeyCode::Tab => {
-                    if let Some(idx) = self.selected_command() {
-                        self.fill_command(idx);
-                    }
-                    return KeyResult::Handled;
-                }
-                KeyCode::Enter if key.modifiers.is_empty() => {
-                    if let Some(idx) = self.selected_command() {
-                        if self.token() == self.commands[idx].0.to_lowercase() {
-                            let submitted = self.text().trim().to_string();
-                            self.clear();
-                            return KeyResult::Action(Action::Submit(submitted));
-                        }
-                        self.fill_command(idx);
-                        return KeyResult::Handled;
-                    }
-                }
-                _ => {}
-            }
+            };
         }
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -201,7 +91,7 @@ impl Component for InputView {
             }
             _ => {
                 self.textarea.input(key);
-                self.refresh_menu();
+                self.slash_command.refresh(&self.text());
                 KeyResult::Handled
             }
         }
@@ -260,50 +150,50 @@ mod tests {
     }
 
     #[test]
-    fn menu_opens_on_slash() {
+    fn slash_command_opens_on_slash() {
         let mut view = InputView::new(commands());
         type_text(&mut view, "/");
-        assert!(view.menu_open);
-        assert_eq!(view.menu_height(&State::new()), 4);
+        assert!(view.slash_command.is_open());
+        assert_eq!(view.slash_command_height(&State::new()), 4);
     }
 
     #[test]
-    fn menu_filters_by_prefix() {
+    fn slash_command_filters_by_prefix() {
         let mut view = InputView::new(commands());
         type_text(&mut view, "/c");
-        assert_eq!(view.matches(), vec![0]);
+        assert_eq!(view.slash_command.matches(), vec![0]);
     }
 
     #[test]
-    fn menu_filter_is_case_insensitive() {
+    fn slash_command_filter_is_case_insensitive() {
         let mut view = InputView::new(commands());
         type_text(&mut view, "/E");
-        assert_eq!(view.matches(), vec![1]);
+        assert_eq!(view.slash_command.matches(), vec![1]);
     }
 
     #[test]
-    fn menu_closes_when_slash_deleted() {
+    fn slash_command_closes_when_slash_deleted() {
         let mut view = InputView::new(commands());
         type_text(&mut view, "/c");
         view.handle_key(key(KeyCode::Backspace), &State::new());
         view.handle_key(key(KeyCode::Backspace), &State::new());
-        assert!(!view.menu_open);
+        assert!(!view.slash_command.is_open());
     }
 
     #[test]
     fn no_match_yields_empty_list() {
         let mut view = InputView::new(commands());
         type_text(&mut view, "/nope");
-        assert!(view.matches().is_empty());
+        assert!(view.slash_command.matches().is_empty());
     }
 
     #[test]
-    fn esc_closes_menu() {
+    fn esc_closes_slash_command() {
         let mut view = InputView::new(commands());
         type_text(&mut view, "/");
         let result = view.handle_key(key(KeyCode::Esc), &State::new());
         assert!(matches!(result, KeyResult::Handled));
-        assert!(!view.menu_open);
+        assert!(!view.slash_command.is_open());
     }
 
     #[test]
@@ -335,7 +225,7 @@ mod tests {
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         assert!(matches!(result, KeyResult::Handled));
         assert_eq!(view.textarea.lines()[0], "/exit ");
-        assert!(view.menu_open);
+        assert!(view.slash_command.is_open());
     }
 
     #[test]
@@ -351,11 +241,11 @@ mod tests {
     fn arrows_change_selection() {
         let mut view = InputView::new(commands());
         type_text(&mut view, "/");
-        assert_eq!(view.selected, 0);
+        assert_eq!(view.slash_command.selected_command(), Some(0));
         view.handle_key(key(KeyCode::Down), &State::new());
-        assert_eq!(view.selected, 1);
+        assert_eq!(view.slash_command.selected_command(), Some(1));
         view.handle_key(key(KeyCode::Down), &State::new());
-        assert_eq!(view.selected, 0);
+        assert_eq!(view.slash_command.selected_command(), Some(0));
     }
 
     #[test]
@@ -373,7 +263,7 @@ mod tests {
     fn busy_ignores_keys() {
         let mut view = InputView::new(commands());
         type_text(&mut view, "/");
-        assert!(view.menu_open);
+        assert!(view.slash_command.is_open());
         let state = State { busy: true };
         let result = view.handle_key(key(KeyCode::Char('x')), &state);
         assert!(matches!(result, KeyResult::Ignored));

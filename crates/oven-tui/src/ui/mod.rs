@@ -1,5 +1,6 @@
 mod component;
 mod input;
+mod slash_command_popup;
 mod status;
 mod transcript;
 mod usage;
@@ -180,9 +181,9 @@ impl Ui {
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
         let input_h = self.input.height();
-        let menu_h = self
+        let slash_command_h = self
             .input
-            .menu_height(&self.state)
+            .slash_command_height(&self.state)
             .min(f.area().height.saturating_sub(3 + 1 + 1 + input_h));
         let mut constraints = vec![
             Constraint::Min(3),
@@ -190,8 +191,8 @@ impl Ui {
             Constraint::Length(1),
             Constraint::Length(input_h),
         ];
-        if menu_h > 0 {
-            constraints.push(Constraint::Length(menu_h));
+        if slash_command_h > 0 {
+            constraints.push(Constraint::Length(slash_command_h));
         }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -202,8 +203,8 @@ impl Ui {
         self.status.draw(f, chunks[1], &self.state);
         self.usage.draw(f, chunks[2], &self.state);
         self.input.draw(f, chunks[3], &self.state);
-        if menu_h > 0 {
-            self.input.draw_menu(f, chunks[4], &self.state);
+        if slash_command_h > 0 {
+            self.input.draw_slash_command(f, chunks[4], &self.state);
         }
     }
 }
