@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use oven_llm::ProviderKind;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -21,11 +22,18 @@ pub enum ConfigError {
 /// what they need; environment variables can supply the rest at runtime.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderConfig {
+    pub name: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    /// Override of the API key. When unset, the bundled adapter's default env
-    /// var is consulted (e.g. `ANTHROPIC_API_KEY`).
+    pub kind: Option<ProviderKind>,
     pub api_key: Option<String>,
+}
+
+impl ProviderConfig {
+    /// The effective API kind, defaulting to chat completions.
+    pub fn effective_kind(&self) -> ProviderKind {
+        self.kind.unwrap_or(ProviderKind::Completions)
+    }
 }
 
 /// Per-process behavioural knobs that are provider-agnostic.
@@ -86,11 +94,17 @@ impl AppConfig {
 
     /// Apply `overlay` on top of `self`. Non-default fields in `overlay` win.
     pub fn merge(&mut self, overlay: AppConfig) {
+        if let Some(n) = overlay.provider.name {
+            self.provider.name = Some(n);
+        }
         if let Some(m) = overlay.provider.model {
             self.provider.model = Some(m);
         }
         if let Some(u) = overlay.provider.base_url {
             self.provider.base_url = Some(u);
+        }
+        if let Some(e) = overlay.provider.kind {
+            self.provider.kind = Some(e);
         }
         if let Some(k) = overlay.provider.api_key {
             self.provider.api_key = Some(k);
@@ -187,42 +201,9 @@ impl AppConfig {
     }
 }
 
-const DEFAULT_USER_CONFIG: &str = r#"# Oven user configuration. All fields are optional;
-# uncomment what you want to override.
-
-# [provider]
-#   # Model name (provider inferred from prefix, e.g. "claude*" -> Anthropic).
-#   model = "deepseek-v4-flash"
-#   # Override the API endpoint. Useful for OpenAI/Anthropic-compatible proxies.
-#   base_url = "https://api.deepseek.com"
-#   # Explicit API key. If unset, the adapter's default env var is used
-#   # (ANTHROPIC_API_KEY / OPENAI_API_KEY / ...).
-#   api_key = "sk-..."
-
-# Per-request timeout in seconds.
-# request_timeout_secs = 60
-
-# Number of retries after a transient failure before giving up.
-# max_retries = 2
-
-# Initial backoff between retries, in ms. Doubles per attempt (exponential).
-# base_backoff_ms = 500
-
-# Built-in skills to enable. Unknown ids are silently ignored.
-# skills = ["files", "bash"]
-
-# Tools to mount. Empty means the built-in default set
-# (file_read, file_write, bash).
-# tools = ["file_read", "file_write", "bash"]
-
-# MCP servers to declare. The transport itself is not yet implemented; this
-# only registers them so future features can spin them up.
-# [mcps.filesystem]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/abs/path"]
-# [mcps.filesystem.env]
-# FOO = "bar"
-"#;
+/// Template written to the user config location on first run. Sourced from
+/// `config.example.toml` so the example and the default template stay in sync.
+const DEFAULT_USER_CONFIG: &str = include_str!("../config.example.toml");
 
 #[cfg(test)]
 mod tests {
@@ -235,11 +216,41 @@ mod tests {
         AppConfig::ensure_user_config_at(&path).unwrap();
         assert!(path.exists());
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
-        assert_eq!(cfg, AppConfig::default());
+        let expected: AppConfig = toml::from_str(include_str!("../config.example.toml")).unwrap();
+        assert_eq!(cfg, expected);
 
         std::fs::write(&path, "[provider]\nmodel = \"edited\"\n").unwrap();
         AppConfig::ensure_user_config_at(&path).unwrap();
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
         assert_eq!(cfg.provider.model.as_deref(), Some("edited"));
+    }
+
+    #[test]
+    fn kind_defaults_to_completions_and_merges() {
+        let cfg: AppConfig = toml::from_str("[provider]\nmodel = \"m\"\n").unwrap();
+        assert_eq!(
+            cfg.provider.effective_kind(),
+            ProviderKind::Completions
+        );
+
+        let mut cfg: AppConfig =
+            toml::from_str("[provider]\nkind = \"responses\"\n").unwrap();
+        assert_eq!(
+            cfg.provider.effective_kind(),
+            ProviderKind::Responses
+        );
+
+        // An overlay without entrypoint must not override an explicit value.
+        cfg.merge(AppConfig::default());
+        assert_eq!(
+            cfg.provider.effective_kind(),
+            ProviderKind::Responses
+        );
+    }
+
+    #[test]
+    fn kind_rejects_unknown_values() {
+        let err = toml::from_str::<AppConfig>("[provider]\nkind = \"chat\"\n").unwrap_err();
+        assert!(err.to_string().contains("unknown variant"));
     }
 }

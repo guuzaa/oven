@@ -220,15 +220,14 @@ impl App {
             )));
         }
 
+        let builder = ProviderBuilder::new(self.config.provider.effective_kind())
+            .provider_name(provider_name)
+            .api_key(api_key);
         let provider = match &base_url {
-            Some(u) => ProviderBuilder::completions()
-                .provider_name(provider_name)
-                .api_key(api_key)
-                .base_url(u),
-            None => ProviderBuilder::completions()
-                .provider_name(provider_name)
-                .api_key(api_key),
+            Some(u) => builder.base_url(u),
+            None => builder,
         };
+
         let retrying = RetryingProvider::new(provider.build()?)
             .with_timeout(self.config.request_timeout())
             .with_retries(self.config.max_retries)

@@ -1,6 +1,7 @@
-# Oven project-level configuration. Place at the workspace root as
-# `.oven.toml`. All fields are optional; environment variables take
-# precedence where noted.
+# Oven configuration template. Used as the project-level example (copy it to
+# the workspace root as `.oven.toml`) and as the default user config written
+# to `$XDG_CONFIG_HOME/oven/config.toml` on first run. All fields are
+# optional; environment variables take precedence where noted.
 
 # Per-request timeout in seconds.
 request_timeout_secs = 60
@@ -19,14 +20,18 @@ base_backoff_ms = 500
 # tools = ["file_read", "file_write", "bash"]
 
 # LLM provider settings.
-# [provider]
-#   # Model name (provider inferred from prefix, e.g. "claude*" -> Anthropic).
-#   model = "gpt-4o-mini"
-#   # Override the API endpoint. Useful for OpenAI/Anthropic-compatible proxies.
-#   base_url = "https://api.moonshot.cn/anthropic/v1/"
-#   # Explicit API key. If unset, the adapter's default env var is used
-#   # (ANTHROPIC_API_KEY / OPENAI_API_KEY / ...).
-#   api_key = "sk-..."
+[provider]
+# Provider name
+# name = "deepseek"
+# Model name (provider inferred from prefix, e.g. "claude*" -> Anthropic, if not present).
+# model = "deepseek-v4-flash"
+# Override the API endpoint. Useful for OpenAI/Anthropic-compatible proxies.
+# base_url = "https://api.deepseek.com"
+# API entrypoint kind: "responses", "messages", or "completions". Defaults to "completions" when unset.
+# kind = "completions"
+# Explicit API key. If unset, the adapter's default env var is used
+# (ANTHROPIC_API_KEY / OPENAI_API_KEY / ...).
+# api_key = "sk-..."
 
 # MCP servers to declare. The transport itself is not yet implemented; this
 # only registers them so future features can spin them up.
