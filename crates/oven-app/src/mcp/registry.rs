@@ -1,8 +1,8 @@
-//! MCP (Model Context Protocol) server registration.
+//! MCP server registration.
 //!
-//! The wire protocol itself is large; this module intentionally only covers
-//! the **registration** side: declaring which MCP servers the user wants
-//! enabled and surfacing them so a future transport layer can spin them up.
+//! The wire protocol itself lives in [`crate::mcp::client`]; this module only
+//! declares which MCP servers the user wants enabled and keeps them in an
+//! in-memory registry.
 //!
 //! Config shape (in `.oven.toml`):
 //!
@@ -13,6 +13,16 @@
 //!
 //! [mcps.filesystem.env]
 //! FOO = "bar"
+//!
+//! Alternatively point at a streamable HTTP endpoint (headers optional):
+//!
+//! ```toml
+//! [mcps.remote]
+//! url = "https://example.com/mcp"
+//!
+//! [mcps.remote.headers]
+//! Authorization = "Bearer sk-xxx"
+//! ```
 //! ```
 
 use std::collections::BTreeMap;
@@ -22,11 +32,18 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct McpServerConfig {
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Streamable HTTP endpoint. When set, `command`/`args`/`env` are ignored.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Extra headers for HTTP servers (e.g. `Authorization`).
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Error)]
@@ -35,8 +52,8 @@ pub enum McpError {
     Duplicate(String),
     #[error("unknown mcp id: {0}")]
     Unknown(String),
-    #[error("empty command for mcp '{0}'")]
-    EmptyCommand(String),
+    #[error("empty mcp config for '{0}' (need command or url)")]
+    EmptyConfig(String),
 }
 
 /// In-memory registry of declared MCP servers. Built from `AppConfig::mcps`.
@@ -56,8 +73,9 @@ impl McpRegistry {
         cfg: McpServerConfig,
     ) -> Result<(), McpError> {
         let id: String = id.into();
-        if cfg.command.trim().is_empty() {
-            return Err(McpError::EmptyCommand(id));
+        let has_url = cfg.url.as_deref().is_some_and(|u| !u.trim().is_empty());
+        if !has_url && cfg.command.trim().is_empty() {
+            return Err(McpError::EmptyConfig(id));
         }
         if self.servers.contains_key(&id) {
             return Err(McpError::Duplicate(id));
@@ -98,6 +116,7 @@ mod tests {
             command: cmd.to_string(),
             args: vec!["--foo".into()],
             env: BTreeMap::from([("KEY".into(), "val".into())]),
+            ..Default::default()
         }
     }
 
@@ -120,10 +139,25 @@ mod tests {
     }
 
     #[test]
-    fn empty_command_rejected() {
+    fn empty_config_rejected() {
         let mut reg = McpRegistry::new();
         let err = reg.register("fs", McpServerConfig::default()).unwrap_err();
-        assert!(matches!(err, McpError::EmptyCommand(_)));
+        assert!(matches!(err, McpError::EmptyConfig(_)));
+    }
+
+    #[test]
+    fn url_only_config_accepted() {
+        let mut reg = McpRegistry::new();
+        reg.register(
+            "http",
+            McpServerConfig {
+                command: String::new(),
+                url: Some("https://example.com/mcp".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.len(), 1);
     }
 
     #[test]

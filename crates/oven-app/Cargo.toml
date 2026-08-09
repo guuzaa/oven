@@ -21,9 +21,14 @@ tokio = { workspace = true, features = [
 ] }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+rmcp = { workspace = true }
+http = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
 futures = { workspace = true }
 mockall = { workspace = true }
 tempdir = { workspace = true }
+axum = { workspace = true, default-features = false, features = ["http1", "tokio"] }
+# Test-only MCP server features; unified only when building tests.
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }

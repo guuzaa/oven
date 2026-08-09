@@ -1,12 +1,14 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use oven_agent::{Agent, AgentError, RetryingProvider};
+use oven_agent::{Agent, AgentError, RetryingProvider, Tool};
 use oven_llm::{Provider, ProviderBuilder, ProviderName};
 use thiserror::Error;
 
 use crate::config::{AppConfig, ConfigError};
 use crate::mcp::McpRegistry;
+use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::session::{SessionError, default_sessions_dir};
 use crate::skill::SkillRegistry;
 
@@ -37,6 +39,8 @@ pub enum AppError {
     Runtime(String),
     #[error("provider: {0}")]
     Provider(String),
+    #[error("mcp: {0}")]
+    Mcp(String),
 }
 
 impl From<oven_llm::ProviderError> for AppError {
@@ -53,6 +57,7 @@ pub struct App {
     skills: SkillRegistry,
     tools: ToolRegistry,
     mcps: McpRegistry,
+    mcp_connector: Arc<dyn McpConnector>,
 }
 
 impl App {
@@ -64,6 +69,7 @@ impl App {
             skills: SkillRegistry::new(),
             tools: ToolRegistry::from_config(root, &[]),
             mcps: McpRegistry::new(),
+            mcp_connector: Arc::new(DefaultMcpConnector),
         }
     }
 
@@ -91,6 +97,12 @@ impl App {
 
     pub fn mcps(&self) -> &McpRegistry {
         &self.mcps
+    }
+
+    /// Override how MCP servers are connected (used by tests).
+    pub fn with_mcp_connector(mut self, connector: Arc<dyn McpConnector>) -> Self {
+        self.mcp_connector = connector;
+        self
     }
 
     /// Load config from the bundled default locations: user-level
@@ -245,21 +257,31 @@ impl App {
         base
     }
 
-    pub(crate) fn build_agent(&self) -> Result<Agent, AppError> {
+    pub(crate) async fn build_agent(&self) -> Result<Agent, AppError> {
         let model = self.effective_model();
-        Ok(self
+        let agent = self
             .build_agent_with_provider(self.build_provider(&model)?)
-            .with_model(model))
+            .await?;
+        Ok(agent.with_model(model))
     }
 
-    pub(crate) fn build_agent_with_provider(&self, provider: Box<dyn Provider>) -> Agent {
-        let tools = self.tools.merged_tools();
-        Agent::new(provider, tools).with_system(self.build_system_prompt())
+    pub(crate) async fn build_agent_with_provider(
+        &self,
+        provider: Box<dyn Provider>,
+    ) -> Result<Agent, AppError> {
+        let mut tools = self.tools.merged_tools();
+        let mcp_tools = self
+            .mcp_connector
+            .connect(&self.mcps, &self.root)
+            .await
+            .map_err(AppError::Mcp)?;
+        tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
+        Ok(Agent::new(provider, tools).with_system(self.build_system_prompt()))
     }
 
     /// Run a single chat turn with no persistence (via the app runtime channel API).
     pub async fn run_chat(&self, user: impl Into<String>) -> Result<String, AppError> {
-        let handle = self.spawn()?;
+        let handle = self.spawn().await?;
         let out = handle.prompt(user).await;
         handle.shutdown().await;
         out
@@ -290,7 +312,9 @@ impl App {
         session_id: &str,
         user: impl Into<String>,
     ) -> Result<String, AppError> {
-        let handle = self.spawn_session_in(sessions_dir, Some(session_id))?;
+        let handle = self
+            .spawn_session_in(sessions_dir, Some(session_id))
+            .await?;
         let out = handle.prompt(user).await;
         handle.shutdown().await;
         out

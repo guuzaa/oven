@@ -69,7 +69,7 @@ fn read_piped_prompt() -> Option<String> {
 async fn headless(app: &App, session: Option<&str>, prompt: &str) -> ExitCode {
     let result = match session {
         Some(sid) => {
-            let handle = match app.spawn_session(Some(sid)) {
+            let handle = match app.spawn_session(Some(sid)).await {
                 Ok(h) => h,
                 Err(err) => {
                     eprintln!("error: {}", err);
@@ -81,7 +81,7 @@ async fn headless(app: &App, session: Option<&str>, prompt: &str) -> ExitCode {
             out
         }
         None => {
-            let handle = match app.spawn() {
+            let handle = match app.spawn().await {
                 Ok(h) => h,
                 Err(err) => {
                     eprintln!("error: {err}");
@@ -107,7 +107,7 @@ async fn headless(app: &App, session: Option<&str>, prompt: &str) -> ExitCode {
 }
 
 async fn interactive(app: &App, session: Option<&str>) -> ExitCode {
-    let handle = match app.spawn_session(session) {
+    let handle = match app.spawn_session(session).await {
         Ok(h) => h,
         Err(err) => {
             eprintln!("error: {err}");

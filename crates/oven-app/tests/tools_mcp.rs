@@ -120,6 +120,7 @@ fn _mcp_server_config_roundtrip() {
         command: "nvim".into(),
         args: vec!["-d".into()],
         env: [("X".to_string(), "Y".to_string())].into(),
+        ..Default::default()
     };
     let s = toml::to_string(&cfg).unwrap();
     let back: McpServerConfig = toml::from_str(&s).unwrap();

@@ -228,24 +228,14 @@ mod tests {
     #[test]
     fn kind_defaults_to_completions_and_merges() {
         let cfg: AppConfig = toml::from_str("[provider]\nmodel = \"m\"\n").unwrap();
-        assert_eq!(
-            cfg.provider.effective_kind(),
-            ProviderKind::Completions
-        );
+        assert_eq!(cfg.provider.effective_kind(), ProviderKind::Completions);
 
-        let mut cfg: AppConfig =
-            toml::from_str("[provider]\nkind = \"responses\"\n").unwrap();
-        assert_eq!(
-            cfg.provider.effective_kind(),
-            ProviderKind::Responses
-        );
+        let mut cfg: AppConfig = toml::from_str("[provider]\nkind = \"responses\"\n").unwrap();
+        assert_eq!(cfg.provider.effective_kind(), ProviderKind::Responses);
 
         // An overlay without entrypoint must not override an explicit value.
         cfg.merge(AppConfig::default());
-        assert_eq!(
-            cfg.provider.effective_kind(),
-            ProviderKind::Responses
-        );
+        assert_eq!(cfg.provider.effective_kind(), ProviderKind::Responses);
     }
 
     #[test]

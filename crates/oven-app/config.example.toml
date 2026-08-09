@@ -33,10 +33,16 @@ base_backoff_ms = 500
 # (ANTHROPIC_API_KEY / OPENAI_API_KEY / ...).
 # api_key = "sk-..."
 
-# MCP servers to declare. The transport itself is not yet implemented; this
-# only registers them so future features can spin them up.
+# MCP servers to connect to at startup: stdio via command/args/env, or a
+# remote streamable HTTP endpoint via url (headers optional). Each server's
+# tools are discovered via tools/list and mounted as `<server_id>_<tool_name>`
+# (e.g. the filesystem server's read_file tool becomes filesystem_read_file).
 # [mcps.filesystem]
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/abs/path"]
 # [mcps.filesystem.env]
 # FOO = "bar"
+# [mcps.remote]
+# url = "https://example.com/mcp"
+# [mcps.remote.headers]
+# Authorization = "Bearer sk-xxx"

@@ -72,7 +72,17 @@ base_url = "https://api.deepseek.com"
 api_key = "sk-xxx"
 
 [mcps]
-# MCP server declarations (transport support coming)
+# MCP servers, e.g.
+# [mcps.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/abs/path"]
+# [mcps.filesystem.env]
+# FOO = "bar"
+# ...or a remote streamable HTTP server:
+# [mcps.remote]
+# url = "https://example.com/mcp"
+# [mcps.remote.headers]
+# Authorization = "Bearer sk-xxx"
 ```
 
 If neither file exists, Oven uses sensible defaults. Sessions are stored as
@@ -83,7 +93,13 @@ JSONL under `$XDG_DATA_HOME/oven/sessions/` (default
 prompt; no skills are bundled yet, so entries are accepted and currently
 skipped. `tools` selects which capabilities the agent can actually invoke; an
 empty `tools:` list mounts the built-in default set (`file_read`,
-`file_write`, `bash`). The two are independent.
+`file_write`, `bash`). MCP servers declared under `mcps:` are connected at
+startup — stdio servers via a spawned child process (`command`/`args`/`env`),
+remote servers via a streamable HTTP endpoint (`url` plus optional `headers`).
+Each server's tools are discovered via `tools/list` and mounted for the agent
+under a `<server_id>_<tool_name>` name (for example, the `filesystem` server's
+`read_file` tool becomes `filesystem_read_file`). Connection or negotiation
+failures abort startup with a clear error.
 
 ## Modes
 

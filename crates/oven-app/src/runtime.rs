@@ -109,8 +109,8 @@ impl AppHandle {
 
 impl App {
     /// Spawn a long-lived app task with no session persistence.
-    pub fn spawn(&self) -> Result<AppHandle, AppError> {
-        let agent = self.build_agent()?;
+    pub async fn spawn(&self) -> Result<AppHandle, AppError> {
+        let agent = self.build_agent().await?;
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -124,22 +124,22 @@ impl App {
     /// resumes that session when its file exists; otherwise (or for `None`) a
     /// new session is started with an auto-generated uuid v7 id that the
     /// caller never has to provide.
-    pub fn spawn_session(&self, session_id: Option<&str>) -> Result<AppHandle, AppError> {
+    pub async fn spawn_session(&self, session_id: Option<&str>) -> Result<AppHandle, AppError> {
         let Some(dir) = crate::session::default_sessions_dir() else {
-            return self.spawn();
+            return self.spawn().await;
         };
-        self.spawn_session_in(&dir, session_id)
+        self.spawn_session_in(&dir, session_id).await
     }
 
     /// Same as [`App::spawn_session`] with an explicit sessions directory.
-    pub fn spawn_session_in(
+    pub async fn spawn_session_in(
         &self,
         sessions_dir: &Path,
         session_id: Option<&str>,
     ) -> Result<AppHandle, AppError> {
         let session = resolve_session(sessions_dir, session_id)?;
         let prior = session.load()?;
-        let mut agent = self.build_agent()?;
+        let mut agent = self.build_agent().await?;
         for m in prior.into_iter().filter(|m| m.role != Role::System) {
             agent.push_history(m);
         }
@@ -154,7 +154,7 @@ impl App {
 
     /// Test/custom wiring variant of [`App::spawn_session_in`] with an
     /// explicit provider.
-    pub fn spawn_session_with_provider_in(
+    pub async fn spawn_session_with_provider_in(
         &self,
         sessions_dir: &Path,
         provider: Box<dyn Provider>,
@@ -162,7 +162,7 @@ impl App {
     ) -> Result<AppHandle, AppError> {
         let session = resolve_session(sessions_dir, session_id)?;
         let prior = session.load()?;
-        let mut agent = self.build_agent_with_provider(provider);
+        let mut agent = self.build_agent_with_provider(provider).await?;
         for m in prior.into_iter().filter(|m| m.role != Role::System) {
             agent.push_history(m);
         }
@@ -176,25 +176,28 @@ impl App {
     }
 
     /// Spawn with an explicit provider (tests / custom wiring).
-    pub fn spawn_with_provider(&self, provider: Box<dyn Provider>) -> AppHandle {
-        let agent = self.build_agent_with_provider(provider);
-        spawn_runtime(
+    pub async fn spawn_with_provider(
+        &self,
+        provider: Box<dyn Provider>,
+    ) -> Result<AppHandle, AppError> {
+        let agent = self.build_agent_with_provider(provider).await?;
+        Ok(spawn_runtime(
             AppId::next(),
             agent,
             None,
             self.effective_model(),
             self.root.clone(),
-        )
+        ))
     }
 
     /// Spawn with provider + session store (tests).
-    pub fn spawn_with_provider_session(
+    pub async fn spawn_with_provider_session(
         &self,
         provider: Box<dyn Provider>,
         session: Session,
     ) -> Result<AppHandle, AppError> {
         let prior = session.load()?;
-        let mut agent = self.build_agent_with_provider(provider);
+        let mut agent = self.build_agent_with_provider(provider).await?;
         for m in prior.iter().filter(|m| m.role != Role::System) {
             agent.push_history(m.clone());
         }
@@ -476,7 +479,7 @@ mod tests {
         let tmp = tempdir::TempDir::new("app-runtime").unwrap();
         let app = App::new(tmp.path());
         let mock = MockProvider::new(vec![text_response("hello")]);
-        let handle = app.spawn_with_provider(Box::new(mock));
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
 
         let mut rx = handle.subscribe();
         let text = handle.prompt("hi").await.unwrap();
@@ -505,7 +508,7 @@ mod tests {
         let tmp = tempdir::TempDir::new("app-runtime-slash").unwrap();
         let app = App::new(tmp.path());
         let mock = MockProvider::new(vec![]);
-        let handle = app.spawn_with_provider(Box::new(mock));
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
 
         let names: Vec<&str> = handle
             .slash_commands()
@@ -523,7 +526,7 @@ mod tests {
         let tmp = tempdir::TempDir::new("app-runtime-exit").unwrap();
         let app = App::new(tmp.path());
         let mock = MockProvider::new(vec![]);
-        let handle = app.spawn_with_provider(Box::new(mock));
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
 
         let mut rx = handle.subscribe();
         handle.send(AppCmd::UserInput("/exit".into())).unwrap();
@@ -556,6 +559,7 @@ mod tests {
         let session = Session::open(&dir, "s1").unwrap();
         let handle = app
             .spawn_with_provider_session(Box::new(mock1), session)
+            .await
             .unwrap();
         assert_eq!(handle.prompt("first").await.unwrap(), "one");
         handle.shutdown().await;
@@ -578,6 +582,7 @@ mod tests {
         let session = Session::open(&dir, "s1").unwrap();
         let handle = app
             .spawn_with_provider_session(Box::new(mock2), session)
+            .await
             .unwrap();
         assert_eq!(handle.prompt("second").await.unwrap(), "two");
         handle.shutdown().await;
@@ -598,6 +603,7 @@ mod tests {
         let session = Session::open(&dir, "s1").unwrap();
         let handle = app
             .spawn_with_provider_session(Box::new(mock), session)
+            .await
             .unwrap();
         assert_eq!(handle.prompt("first").await.unwrap(), "one");
 
@@ -660,6 +666,7 @@ mod tests {
         let mock = MockProvider::new(vec![text_response("one")]);
         let handle = app
             .spawn_session_with_provider_in(&dir, Box::new(mock), Some("missing"))
+            .await
             .unwrap();
         assert_eq!(handle.prompt("hello").await.unwrap(), "one");
         handle.shutdown().await;
@@ -686,6 +693,7 @@ mod tests {
         let mock = MockProvider::new(vec![text_response("one")]);
         let handle = app
             .spawn_session_with_provider_in(&dir, Box::new(mock), None)
+            .await
             .unwrap();
         assert_eq!(handle.prompt("hi").await.unwrap(), "one");
         handle.shutdown().await;
@@ -712,6 +720,7 @@ mod tests {
         let session = Session::open(&dir, "s1").unwrap();
         let handle = app
             .spawn_with_provider_session(Box::new(mock1), session)
+            .await
             .unwrap();
         assert_eq!(handle.prompt("first").await.unwrap(), "one");
         handle.shutdown().await;
@@ -719,6 +728,7 @@ mod tests {
         let mock2 = MockProvider::new(vec![text_response("two")]);
         let handle = app
             .spawn_session_with_provider_in(&dir, Box::new(mock2), Some("s1"))
+            .await
             .unwrap();
         assert_eq!(handle.prompt("second").await.unwrap(), "two");
         handle.shutdown().await;
@@ -780,7 +790,7 @@ mod tests {
 
         let tmp = tempdir::TempDir::new("app-runtime-cancel").unwrap();
         let app = App::new(tmp.path());
-        let handle = app.spawn_with_provider(Box::new(provider));
+        let handle = app.spawn_with_provider(Box::new(provider)).await.unwrap();
         let mut sub = handle.subscribe();
         handle.send(AppCmd::UserInput("block".into())).unwrap();
 
