@@ -63,7 +63,6 @@ request_timeout_secs = 60
 max_retries = 2
 base_backoff_ms = 500
 
-skills = []
 tools = ["file_read", "file_write", "bash"]
 
 [provider]
@@ -89,11 +88,16 @@ If neither file exists, Oven uses sensible defaults. Sessions are stored as
 JSONL under `$XDG_DATA_HOME/oven/sessions/` (default
 `~/.local/share/oven/sessions/`).
 
-`skills` opts into guidance modules that inject instructions into the system
-prompt; no skills are bundled yet, so entries are accepted and currently
-skipped. `tools` selects which capabilities the agent can actually invoke; an
-empty `tools:` list mounts the built-in default set (`file_read`,
-`file_write`, `bash`). MCP servers declared under `mcps:` are connected at
+Skills are guidance modules loaded from the filesystem. Each skill is a
+directory containing a `SKILL.md` file; its `description:` YAML frontmatter
+is injected into the system prompt as `- **<name>**: <description>`, and the
+full document body is loaded on demand by the `skill_read` tool. Skills are
+searched in `~/.local/share/oven/skills/<name>/` (user-wide) and
+`.oven/skills/<name>/` in the project (project skills override user skills
+with the same name). `tools` selects which capabilities the agent can
+actually invoke; an empty `tools:` list mounts the built-in default set
+(`file_read`, `file_write`, `bash`). MCP servers declared under `mcps:` are
+connected at
 startup — stdio servers via a spawned child process (`command`/`args`/`env`),
 remote servers via a streamable HTTP endpoint (`url` plus optional `headers`).
 Each server's tools are discovered via `tools/list` and mounted for the agent

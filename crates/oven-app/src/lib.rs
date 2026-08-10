@@ -2,7 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oven_agent::{Agent, AgentError, RetryingProvider, Tool};
+use oven_agent::{Agent, AgentError, RetryingProvider, SkillReadTool, Tool};
 use oven_llm::{Provider, ProviderBuilder, ProviderName};
 use thiserror::Error;
 
@@ -10,7 +10,7 @@ use crate::config::{AppConfig, ConfigError};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::session::{SessionError, default_sessions_dir};
-use crate::skill::SkillRegistry;
+use crate::skill::skill_dirs;
 
 pub mod config;
 pub mod mcp;
@@ -20,9 +20,8 @@ pub mod skill;
 pub mod tools;
 
 pub use mcp::McpServerConfig;
-pub use oven_agent::{AgentEvent, AgentId, CancellationToken};
+pub use oven_agent::{AgentEvent, AgentId, CancellationToken, Skill, SkillRegistry};
 pub use runtime::{AppCmd, AppEvent, AppHandle, AppId};
-pub use skill::Skill;
 pub use tools::ToolRegistry;
 
 #[derive(Debug, Error)]
@@ -85,8 +84,10 @@ impl App {
         &self.skills
     }
 
-    /// Register a skill module. Skills contribute system-prompt guidance
-    /// only; they never mount tools (see [`crate::tools::ToolRegistry`]).
+    /// Register a skill module from code. Filesystem skills are discovered
+    /// automatically when config is applied; this is for programmatic skills.
+    /// Skills contribute system-prompt guidance only; they never mount tools
+    /// (see [`crate::tools::ToolRegistry`]).
     pub fn register_skill(&mut self, skill: Box<dyn Skill>) {
         self.skills.register(skill);
     }
@@ -108,8 +109,9 @@ impl App {
     /// Load config from the bundled default locations: user-level
     /// (`$XDG_CONFIG_HOME/oven/config.toml`, created as a template on first
     /// run) then project-level (`.oven.toml` in the workspace root). After
-    /// loading, skills requested in `skills:` and tools requested in `tools:`
-    /// are registered, and MCP servers declared under `mcps:` are registered.
+    /// loading, tools requested in `tools:` are mounted, MCP servers declared
+    /// under `mcps:` are registered, and skills are discovered from the
+    /// filesystem.
     pub fn load_config(&mut self) -> Result<(), AppError> {
         AppConfig::ensure_user_config()?;
         let user = AppConfig::default_user_config_path();
@@ -126,13 +128,23 @@ impl App {
     }
 
     fn apply_config(&mut self, config: AppConfig) {
-        self.skills = SkillRegistry::new();
         self.tools = ToolRegistry::from_config(&self.root, &config.tools);
         self.mcps = McpRegistry::new();
+        self.skills = SkillRegistry::new();
+        self.skills.load_from_dirs(&skill_dirs(&self.root));
 
         for (id, server) in &config.mcps {
             let _ = self.mcps.register(id.clone(), server.clone());
         }
+        let sources = Arc::new(
+            self.skills
+                .sources()
+                .into_iter()
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        self.tools.register("read_skill", move || {
+            Box::new(SkillReadTool::new(sources.clone()))
+        });
         self.config = config;
     }
 
@@ -251,8 +263,7 @@ impl App {
         let mut base =
             String::from("You are a coding assistant working inside the user's repository.");
         if let Some(extra) = self.skills.merged_system_prompt() {
-            base.push_str("\n\n");
-            base.push_str(&extra);
+            base.push_str(&format!("## Available Skills\n\n{}", extra));
         }
         base
     }

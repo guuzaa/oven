@@ -47,10 +47,6 @@ pub struct AppConfig {
     pub max_retries: u32,
     #[serde(default = "default_base_backoff_ms")]
     pub base_backoff_ms: u64,
-    /// Skills to enable, by id. Entries that match no registered skill are
-    /// silently skipped.
-    #[serde(default)]
-    pub skills: Vec<String>,
     /// Tools to mount, by name (`file_read`, `file_write`, `bash`). Empty
     /// means the built-in default set.
     #[serde(default)]
@@ -77,7 +73,6 @@ impl Default for AppConfig {
             request_timeout_secs: default_request_timeout_secs(),
             max_retries: default_max_retries(),
             base_backoff_ms: default_base_backoff_ms(),
-            skills: Vec::new(),
             tools: Vec::new(),
             mcps: BTreeMap::new(),
         }
@@ -119,11 +114,6 @@ impl AppConfig {
             self.base_backoff_ms = overlay.base_backoff_ms;
         }
         // Lists/maps: union-with-overlay-wins per key/id.
-        for id in overlay.skills {
-            if !self.skills.contains(&id) {
-                self.skills.push(id);
-            }
-        }
         for name in overlay.tools {
             if !self.tools.contains(&name) {
                 self.tools.push(name);

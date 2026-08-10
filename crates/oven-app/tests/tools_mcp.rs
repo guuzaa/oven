@@ -49,18 +49,31 @@ fn unknown_tool_is_skipped_silently() {
 }
 
 #[test]
-fn unregistered_skill_ids_leave_empty_registry() {
-    let cfg: AppConfig = toml::from_str(r#"skills = ["files", "nope-skill"]"#).unwrap();
-    let tmp = tempdir::TempDir::new("app-skill-skip").unwrap();
-    let app = App::new(tmp.path()).with_config(cfg);
-    // No bundled skill modules are registered anymore; ids are accepted but
-    // nothing is mounted, and the registry stays empty.
-    assert!(app.skills().ids().is_empty());
-    assert!(!app.skills().contains("files"));
+fn filesystem_skills_are_loaded_and_mounted() {
+    let tmp = tempdir::TempDir::new("app-skill-fs").unwrap();
+    let root = tmp.path();
+    let dir = root.join(".oven/skills/test");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\ndescription: be precise\n---\nfull guidance body\n",
+    )
+    .unwrap();
+
+    let app = App::new(root).with_config(AppConfig::default());
+    assert!(app.skills().contains("test"));
+    let prompt = app.skills().merged_system_prompt().unwrap();
+    assert!(prompt.contains("- **test**: be precise"));
+    assert!(prompt.contains("be precise"));
+    assert!(!prompt.contains("full guidance body"));
+
+    let tools = app.tools().merged_tools();
+    let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+    assert!(names.contains(&"skill_read"));
 }
 
 #[test]
-fn register_skill_contributes_prompt() {
+fn register_skill_contributes_description() {
     use oven_app::Skill;
 
     struct TestSkill;
@@ -69,10 +82,7 @@ fn register_skill_contributes_prompt() {
             "test"
         }
         fn description(&self) -> &str {
-            "test skill"
-        }
-        fn system_prompt(&self) -> Option<String> {
-            Some("use the tools carefully".into())
+            "use the tools carefully"
         }
     }
 
@@ -81,7 +91,7 @@ fn register_skill_contributes_prompt() {
     app.register_skill(Box::new(TestSkill));
     assert!(app.skills().contains("test"));
     let prompt = app.skills().merged_system_prompt().unwrap();
-    assert!(prompt.contains("[skill: test]"));
+    assert!(prompt.contains("- **test**: use the tools carefully"));
     assert!(prompt.contains("use the tools carefully"));
 }
 

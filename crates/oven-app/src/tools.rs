@@ -40,7 +40,7 @@ impl ToolRegistry {
 
     /// Resolve the configured tool set for a workspace root. An empty
     /// `requested` list mounts the built-in defaults; unknown names are
-    /// silently skipped, matching how unknown skills are handled.
+    /// silently skipped.
     pub fn from_config(root: impl Into<PathBuf>, requested: &[String]) -> Self {
         let root = root.into();
         let selected: Vec<String> = if requested.is_empty() {

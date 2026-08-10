@@ -1,6 +1,7 @@
 mod bash;
 mod file_read;
 mod file_write;
+mod skill_read;
 
 use std::path::{Component, Path, PathBuf};
 
@@ -13,6 +14,7 @@ use crate::error::AgentError;
 pub use bash::BashTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
+pub use skill_read::SkillReadTool;
 
 #[async_trait]
 pub trait Tool: Send + Sync {

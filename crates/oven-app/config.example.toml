@@ -12,9 +12,6 @@ max_retries = 2
 # Initial backoff between retries, in ms. Doubles per attempt (exponential).
 base_backoff_ms = 500
 
-# Built-in skills to enable. Unknown ids are silently ignored.
-# skills = ["files", "bash"]
-
 # Tools to mount. Empty means the built-in default set
 # (file_read, file_write, bash).
 # tools = ["file_read", "file_write", "bash"]
