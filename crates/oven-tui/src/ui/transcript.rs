@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::component::{Component, KeyResult, State};
+use super::tool_display;
 
 const MOUSE_SCROLL_STEP: u16 = 3;
 const START_HINT: &str =
@@ -124,9 +125,9 @@ impl Component for Transcript {
                 AgentEvent::TextDelta { text, .. } => {
                     self.push_stream(LineKind::Text, text);
                 }
-                AgentEvent::ToolStart { name, .. } => {
+                AgentEvent::ToolStart { name, input, .. } => {
                     self.flush_streaming();
-                    self.push_row(LineKind::Tool, name);
+                    self.push_row(LineKind::Tool, &tool_display(name, input));
                 }
                 AgentEvent::ToolEnd { .. } => {}
                 AgentEvent::Done { text, .. } => {

@@ -20,6 +20,7 @@ pub enum AgentEvent {
         agent_id: AgentId,
         call_id: String,
         name: String,
+        input: serde_json::Value,
     },
     ToolEnd {
         agent_id: AgentId,

@@ -8,6 +8,7 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
 use super::component::{Component, KeyResult, State};
+use super::tool_display;
 
 pub struct StatusBar {
     text: String,
@@ -35,8 +36,8 @@ impl Component for StatusBar {
             AppEvent::Agent { event, .. } => match event {
                 AgentEvent::ThinkingDelta { .. } => self.text = "thinking…".into(),
                 AgentEvent::TextDelta { .. } => self.text = "streaming…".into(),
-                AgentEvent::ToolStart { name, .. } => {
-                    self.text = format!("tool: {name}…");
+                AgentEvent::ToolStart { name, input, .. } => {
+                    self.text = format!("tool: {}…", tool_display(name, input));
                 }
                 AgentEvent::ToolEnd { ok, .. } => {
                     self.text = if *ok {

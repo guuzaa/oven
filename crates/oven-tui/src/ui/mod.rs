@@ -30,6 +30,18 @@ use status::StatusBar;
 use transcript::Transcript;
 use usage::UsageBar;
 
+fn tool_display(name: &str, input: &serde_json::Value) -> String {
+    if name == "bash" {
+        if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
+            let command = command.trim();
+            if !command.is_empty() {
+                return format!("Ran {command}");
+            }
+        }
+    }
+    name.to_string()
+}
+
 pub struct Ui {
     handle: AppHandle,
     events: broadcast::Receiver<AppEvent>,

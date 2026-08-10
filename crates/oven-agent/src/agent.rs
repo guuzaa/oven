@@ -267,6 +267,7 @@ impl Agent {
                     agent_id: self.id,
                     call_id: id.clone(),
                     name: name.clone(),
+                    input: input.clone(),
                 },
             );
             let (ok, result) = match self.dispatch(name, input, cancel).await {
@@ -560,8 +561,11 @@ mod tests {
             AgentEvent::ToolStart {
                 agent_id: AgentId(7),
                 call_id,
-                name
-            } if call_id == "call_1" && name == "file_read"
+                name,
+                input
+            } if call_id == "call_1"
+                && name == "file_read"
+                && *input == json!({"path": "note.txt"})
         )));
         assert!(events.iter().any(|e| matches!(
             e,
