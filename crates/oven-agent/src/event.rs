@@ -26,6 +26,7 @@ pub enum AgentEvent {
         agent_id: AgentId,
         call_id: String,
         ok: bool,
+        output: String,
     },
     Done {
         agent_id: AgentId,

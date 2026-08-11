@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use oven_agent::{Agent, AgentEvent, CancellationToken};
 use oven_llm::{Provider, Role};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::session::Session;
@@ -11,6 +12,11 @@ use crate::{App, AppError};
 /// Id for one long-lived oven-app instance inside a TUI process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AppId(pub u64);
+
+/// Event fan-out for one runtime. Each subscriber gets its own lossless
+/// unbounded channel, so a slow UI never silently drops streaming chunks
+/// the way a broadcast receiver would when it lags.
+type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<AppEvent>>>>;
 
 /// Commands sent from TUI / CLI into an app task.
 #[derive(Debug, Clone)]
@@ -39,7 +45,7 @@ struct SessionStore {
 pub struct AppHandle {
     id: AppId,
     cmd_tx: mpsc::UnboundedSender<AppCmd>,
-    event_tx: broadcast::Sender<AppEvent>,
+    subscribers: Subscribers,
     join: JoinHandle<()>,
     slash_commands: Vec<(String, String)>,
     model: String,
@@ -55,8 +61,13 @@ impl AppHandle {
         self.cmd_tx.send(cmd).map_err(|_| AppError::ChannelClosed)
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<AppEvent> {
-        self.event_tx.subscribe()
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<AppEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(tx);
+        rx
     }
 
     /// (name, description) pairs for the registered slash commands.
@@ -83,19 +94,16 @@ impl AppHandle {
         let mut text = String::new();
         loop {
             match rx.recv().await {
-                Ok(AppEvent::Agent {
+                Some(AppEvent::Agent {
                     event: AgentEvent::Done { text: t, .. },
                     ..
                 }) => text = t,
-                Ok(AppEvent::Idle { .. }) => return Ok(text),
-                Ok(AppEvent::Error { message, .. }) => {
+                Some(AppEvent::Idle { .. }) => return Ok(text),
+                Some(AppEvent::Error { message, .. }) => {
                     return Err(AppError::Runtime(message));
                 }
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Closed) => {
-                    return Err(AppError::ChannelClosed);
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Some(_) => {}
+                None => return Err(AppError::ChannelClosed),
             }
         }
     }
@@ -246,20 +254,20 @@ fn spawn_runtime(
     root: PathBuf,
 ) -> AppHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, _) = broadcast::channel(8192);
-    let event_tx_task = event_tx.clone();
+    let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
+    let subscribers_task = Arc::clone(&subscribers);
     let slash_commands = agent.slash_commands();
     let session_store = session.map(|s| {
         let dir = s.path().parent().map(Path::to_path_buf).unwrap_or_default();
         SessionStore { dir, current: s }
     });
     let join = tokio::spawn(async move {
-        runtime_loop(app_id, agent, session_store, cmd_rx, event_tx_task).await;
+        runtime_loop(app_id, agent, session_store, cmd_rx, subscribers_task).await;
     });
     AppHandle {
         id: app_id,
         cmd_tx,
-        event_tx,
+        subscribers,
         join,
         slash_commands,
         model,
@@ -267,22 +275,19 @@ fn spawn_runtime(
     }
 }
 
-fn emit(tx: &broadcast::Sender<AppEvent>, event: AppEvent) {
-    let _ = tx.send(event);
+fn emit(subs: &Subscribers, event: AppEvent) {
+    let mut subs = subs.lock().unwrap_or_else(|e| e.into_inner());
+    subs.retain(|tx| tx.send(event.clone()).is_ok());
 }
 
-fn switch_session(
-    store: &mut Option<SessionStore>,
-    event_tx: &broadcast::Sender<AppEvent>,
-    app_id: AppId,
-) {
+fn switch_session(store: &mut Option<SessionStore>, subs: &Subscribers, app_id: AppId) {
     if let Some(store) = store {
         let id = uuid::Uuid::now_v7().to_string();
         match Session::open(&store.dir, &id) {
             Ok(next) => store.current = next,
             Err(e) => {
                 emit(
-                    event_tx,
+                    subs,
                     AppEvent::Error {
                         app_id,
                         message: e.to_string(),
@@ -298,7 +303,7 @@ async fn runtime_loop(
     mut agent: Agent,
     mut session_store: Option<SessionStore>,
     mut cmd_rx: mpsc::UnboundedReceiver<AppCmd>,
-    event_tx: broadcast::Sender<AppEvent>,
+    subscribers: Subscribers,
 ) {
     // Leading in-memory messages already written to the store. On `/clear`
     // the in-memory history is replaced, so this resets to 0 while the store
@@ -338,9 +343,13 @@ async fn runtime_loop(
                                 match ev {
                                     Some(event) => {
                                         if matches!(&event, AgentEvent::HistoryCleared { .. }) {
-                                            switch_session(&mut session_store, &event_tx, app_id);
+                                            switch_session(
+                                                &mut session_store,
+                                                &subscribers,
+                                                app_id,
+                                            );
                                         }
-                                        emit(&event_tx, AppEvent::Agent { app_id, event });
+                                        emit(&subscribers, AppEvent::Agent { app_id, event });
                                     }
                                     None => break turn.await,
                                 }
@@ -352,9 +361,9 @@ async fn runtime_loop(
 
                 while let Ok(event) = agent_rx.try_recv() {
                     if matches!(&event, AgentEvent::HistoryCleared { .. }) {
-                        switch_session(&mut session_store, &event_tx, app_id);
+                        switch_session(&mut session_store, &subscribers, app_id);
                     }
-                    emit(&event_tx, AppEvent::Agent { app_id, event });
+                    emit(&subscribers, AppEvent::Agent { app_id, event });
                 }
 
                 match result {
@@ -372,7 +381,7 @@ async fn runtime_loop(
                                 if let Err(e) = store.current.append_all(&after[persisted_prefix..])
                                 {
                                     emit(
-                                        &event_tx,
+                                        &subscribers,
                                         AppEvent::Error {
                                             app_id,
                                             message: e.to_string(),
@@ -387,7 +396,7 @@ async fn runtime_loop(
                     Err(e) if e.is_cancelled() => {}
                     Err(e) => {
                         emit(
-                            &event_tx,
+                            &subscribers,
                             AppEvent::Error {
                                 app_id,
                                 message: e.to_string(),
@@ -396,7 +405,7 @@ async fn runtime_loop(
                     }
                 }
 
-                emit(&event_tx, AppEvent::Idle { app_id });
+                emit(&subscribers, AppEvent::Idle { app_id });
             }
         }
     }
@@ -532,7 +541,7 @@ mod tests {
         handle.send(AppCmd::UserInput("/exit".into())).unwrap();
 
         let mut saw_exit = false;
-        while let Ok(ev) = rx.recv().await {
+        while let Some(ev) = rx.recv().await {
             if let AppEvent::Agent {
                 event: AgentEvent::Exit { .. },
                 ..
@@ -610,7 +619,7 @@ mod tests {
         // `/clear` switches the runtime to a fresh uuid v7 session.
         let mut rx = handle.subscribe();
         handle.send(AppCmd::UserInput("/clear".into())).unwrap();
-        while let Ok(ev) = rx.recv().await {
+        while let Some(ev) = rx.recv().await {
             if let AppEvent::Idle { .. } = ev {
                 break;
             }
@@ -803,13 +812,13 @@ mod tests {
         let mut saw_error = false;
         loop {
             match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-                Ok(Ok(AppEvent::Idle { .. })) => {
+                Ok(Some(AppEvent::Idle { .. })) => {
                     saw_idle = true;
                     break;
                 }
-                Ok(Ok(AppEvent::Error { .. })) => saw_error = true,
-                Ok(Ok(_)) => {}
-                Ok(Err(_)) => break,
+                Ok(Some(AppEvent::Error { .. })) => saw_error = true,
+                Ok(Some(_)) => {}
+                Ok(None) => break,
                 Err(_) => panic!("timeout waiting for idle after cancel"),
             }
         }

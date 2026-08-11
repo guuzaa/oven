@@ -274,15 +274,16 @@ impl Agent {
                 Ok(r) => (true, r),
                 Err(e) => (false, format!("error: {e}")),
             };
+            let summary = truncate(&result, 2000);
             Self::emit(
                 tx,
                 AgentEvent::ToolEnd {
                     agent_id: self.id,
                     call_id: id.clone(),
                     ok,
+                    output: summary.clone(),
                 },
             );
-            let summary = truncate(&result, 2000);
             self.history
                 .push(Message::tool_result(id.clone(), summary, !ok));
         }
@@ -572,8 +573,10 @@ mod tests {
             AgentEvent::ToolEnd {
                 agent_id: AgentId(7),
                 call_id,
-                ok: true
+                ok: true,
+                output
             } if call_id == "call_1"
+                && output == "hello world"
         )));
         assert!(events.iter().any(|e| matches!(
             e,

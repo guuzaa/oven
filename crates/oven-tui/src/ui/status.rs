@@ -1,28 +1,32 @@
+use std::path::Path;
+
 use crossterm::event::KeyEvent;
 use oven_agent::AgentEvent;
 use oven_app::AppEvent;
+use oven_llm::Usage;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::component::{Component, KeyResult, State};
-use super::tool_display;
 
+/// Single status row below the input: model · root · token usage.
 pub struct StatusBar {
-    text: String,
+    model: String,
+    root: String,
+    total: Usage,
 }
 
 impl StatusBar {
-    pub fn new() -> Self {
+    pub fn new(model: impl Into<String>, root: &Path) -> Self {
         Self {
-            text: "ready".into(),
+            model: model.into(),
+            root: display_path(root),
+            total: Usage::default(),
         }
-    }
-
-    pub fn set(&mut self, text: impl Into<String>) {
-        self.text = text.into();
     }
 }
 
@@ -34,46 +38,204 @@ impl Component for StatusBar {
     fn on_event(&mut self, ev: &AppEvent, state: &mut State) {
         match ev {
             AppEvent::Agent { event, .. } => match event {
-                AgentEvent::ThinkingDelta { .. } => self.text = "thinking…".into(),
-                AgentEvent::TextDelta { .. } => self.text = "streaming…".into(),
-                AgentEvent::ToolStart { name, input, .. } => {
-                    self.text = format!("tool: {}…", tool_display(name, input));
+                AgentEvent::Done { usage, .. } => {
+                    self.total = *usage;
                 }
-                AgentEvent::ToolEnd { ok, .. } => {
-                    self.text = if *ok {
-                        "tool done".into()
-                    } else {
-                        "tool failed".into()
-                    };
+                AgentEvent::HistoryCleared { .. } => {
+                    self.total = Usage::default();
                 }
-                AgentEvent::Done { .. } => {}
-                AgentEvent::Cancelled { .. } => self.text = "cancelled".into(),
-                AgentEvent::Exit { .. } => {}
-                AgentEvent::HistoryCleared { .. } => {}
+                _ => {}
             },
             AppEvent::Idle { .. } => {
                 state.busy = false;
-                if self.text == "streaming…"
-                    || self.text == "thinking…"
-                    || self.text.starts_with("tool:")
-                    || self.text == "cancelled"
-                {
-                    self.text = "ready".into();
-                }
             }
-            AppEvent::Error { .. } => {
-                self.text = "error".into();
-            }
+            AppEvent::Error { .. } => {}
         }
     }
 
-    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        let style = if state.busy {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::DarkGray)
+    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, _state: &State) {
+        let gray = Style::default().fg(Color::DarkGray);
+        let line = Line::from(vec![
+            Span::styled(self.model.clone(), Style::default().fg(Color::LightYellow)),
+            Span::styled(" · ", gray),
+            Span::styled(self.root.clone(), Style::default().fg(Color::LightGreen)),
+            Span::styled(" · ", gray),
+            Span::styled(format_usage(&self.total), gray),
+        ]);
+        let line = truncate_line(line, area.width.saturating_sub(1) as usize);
+        f.render_widget(Paragraph::new(line), area);
+    }
+}
+
+fn format_usage(u: &Usage) -> String {
+    let i = human(u.input_tokens);
+    let o = human(u.output_tokens);
+    let mut s = format!("{i} in · {o} out");
+    s.push_str(&format!(" · {} cache", human(u.cache_read_tokens)));
+    if u.reasoning_tokens > 0 {
+        s.push_str(&format!(" · {} reasoning", human(u.reasoning_tokens)));
+    }
+    s
+}
+
+fn human(n: u32) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+fn truncate_str(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if width + cw > max_width.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        width += cw;
+    }
+    out.push('…');
+    out
+}
+
+fn truncate_line<'a>(line: Line<'a>, max_width: usize) -> Line<'a> {
+    let mut spans = Vec::new();
+    let mut width = 0usize;
+    for span in line.spans {
+        let text = truncate_str(&span.content, max_width.saturating_sub(width));
+        let span_width = text.width();
+        if span_width > 0 {
+            spans.push(Span::styled(text, span.style));
+        }
+        width += span_width;
+        if width >= max_width {
+            break;
+        }
+    }
+    Line::from(spans)
+}
+
+/// Absolute path with `~` in place of the home directory, if it lives there.
+fn display_path(path: &Path) -> String {
+    let Some(home) = std::env::var_os("HOME") else {
+        return path.display().to_string();
+    };
+    let home = Path::new(&home);
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
+    display_path_with_home(path, &home)
+}
+
+fn display_path_with_home(path: &Path, home: &Path) -> String {
+    if path == home {
+        return "~".into();
+    }
+    if let Ok(rest) = path.strip_prefix(home) {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oven_agent::AgentId;
+    use oven_app::AppId;
+
+    fn agent_event(event: AgentEvent) -> AppEvent {
+        AppEvent::Agent {
+            app_id: AppId(1),
+            event,
+        }
+    }
+
+    #[test]
+    fn idle_clears_busy() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"));
+        let mut state = State { busy: true };
+        bar.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut state);
+        assert!(!state.busy);
+    }
+
+    #[test]
+    fn history_cleared_resets_usage() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"));
+        let mut state = State::new();
+        bar.total = Usage {
+            input_tokens: 1000,
+            output_tokens: 2000,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
         };
-        let para = Paragraph::new(Span::styled(format!(" {} ", self.text), style));
-        f.render_widget(para, area);
+        bar.on_event(
+            &agent_event(AgentEvent::HistoryCleared {
+                agent_id: AgentId(1),
+            }),
+            &mut state,
+        );
+        assert_eq!(bar.total, Usage::default());
+    }
+
+    #[test]
+    fn done_updates_token_usage() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"));
+        let mut state = State::new();
+        let usage = Usage {
+            input_tokens: 1234,
+            output_tokens: 56,
+            cache_read_tokens: 789,
+            reasoning_tokens: 10,
+        };
+        bar.on_event(
+            &agent_event(AgentEvent::Done {
+                agent_id: AgentId(1),
+                text: "done".into(),
+                usage,
+            }),
+            &mut state,
+        );
+        assert_eq!(bar.total, usage);
+    }
+
+    #[test]
+    fn home_dir_itself_becomes_tilde() {
+        assert_eq!(
+            display_path_with_home(Path::new("/home/u"), Path::new("/home/u")),
+            "~"
+        );
+    }
+
+    #[test]
+    fn path_under_home_uses_tilde_prefix() {
+        assert_eq!(
+            display_path_with_home(Path::new("/home/u/code/oven"), Path::new("/home/u")),
+            "~/code/oven"
+        );
+    }
+
+    #[test]
+    fn path_outside_home_stays_absolute() {
+        assert_eq!(
+            display_path_with_home(Path::new("/tmp/oven"), Path::new("/home/u")),
+            "/tmp/oven"
+        );
+    }
+
+    #[test]
+    fn similar_prefix_is_not_treated_as_home() {
+        assert_eq!(
+            display_path_with_home(Path::new("/home/user2/x"), Path::new("/home/user")),
+            "/home/user2/x"
+        );
     }
 }

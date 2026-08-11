@@ -1,10 +1,8 @@
 mod component;
-mod info;
 mod input;
 mod slash_command_popup;
 mod status;
 mod transcript;
-mod usage;
 
 use std::io::{self, Stdout};
 
@@ -21,22 +19,20 @@ use oven_app::{AgentEvent, AppCmd, AppEvent, AppHandle};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 
 use component::{Action, Component, KeyResult, State};
-use info::InfoBar;
 use input::InputView;
 use status::StatusBar;
 use transcript::Transcript;
-use usage::UsageBar;
 
 fn tool_display(name: &str, input: &serde_json::Value) -> String {
-    if name == "bash" {
-        if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
-            let command = command.trim();
-            if !command.is_empty() {
-                return format!("Ran {command}");
-            }
+    if name == "bash"
+        && let Some(command) = input.get("command").and_then(|v| v.as_str())
+    {
+        let command = command.trim();
+        if !command.is_empty() {
+            return format!("Ran {command}");
         }
     }
     name.to_string()
@@ -44,13 +40,11 @@ fn tool_display(name: &str, input: &serde_json::Value) -> String {
 
 pub struct Ui {
     handle: AppHandle,
-    events: broadcast::Receiver<AppEvent>,
+    events: mpsc::UnboundedReceiver<AppEvent>,
     state: State,
     quit: bool,
     transcript: Transcript,
     status: StatusBar,
-    usage: UsageBar,
-    info: InfoBar,
     input: InputView,
 }
 
@@ -69,9 +63,7 @@ impl Ui {
             state: State::new(),
             quit: false,
             transcript: Transcript::new(),
-            status: StatusBar::new(),
-            usage: UsageBar::new(),
-            info: InfoBar::new(model, &root),
+            status: StatusBar::new(model, &root),
             input: InputView::new(slash_commands),
         }
     }
@@ -108,10 +100,8 @@ impl Ui {
                 }
                 result = self.events.recv() => {
                     match result {
-                        Ok(ev) => self.apply_event(ev),
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(broadcast::error::RecvError::Closed) => {
-                            self.status.set("app closed");
+                        Some(ev) => self.apply_event(ev),
+                        None => {
                             self.state.busy = false;
                         }
                     }
@@ -130,10 +120,8 @@ impl Ui {
         loop {
             match self.events.try_recv() {
                 Ok(ev) => self.apply_event(ev),
-                Err(broadcast::error::TryRecvError::Empty) => break,
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    self.status.set("app closed");
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
                     self.state.busy = false;
                     break;
                 }
@@ -153,7 +141,6 @@ impl Ui {
         }
         self.transcript.on_event(&ev, &mut self.state);
         self.status.on_event(&ev, &mut self.state);
-        self.usage.on_event(&ev, &mut self.state);
         self.input.on_event(&ev, &mut self.state);
     }
 
@@ -183,17 +170,14 @@ impl Ui {
             }
             KeyResult::Action(Action::Cancel) => {
                 let _ = self.handle.send(AppCmd::Cancel);
-                self.status.set("cancelling…");
                 false
             }
             KeyResult::Action(Action::Submit(text)) => {
                 self.transcript.push_user(&text);
                 self.input.clear();
                 self.state.busy = true;
-                self.status.set("thinking…");
                 if self.handle.send(AppCmd::UserInput(text)).is_err() {
                     self.state.busy = false;
-                    self.status.set("app channel closed");
                 }
                 false
             }
@@ -202,16 +186,11 @@ impl Ui {
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
         let input_h = self.input.height();
+        let mut constraints = vec![Constraint::Min(3), Constraint::Length(input_h)];
         let slash_command_h = self
             .input
             .slash_command_height(&self.state)
-            .min(f.area().height.saturating_sub(3 + 1 + 1 + input_h));
-        let mut constraints = vec![
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(input_h),
-        ];
+            .min(f.area().height.saturating_sub(3 + input_h));
         if slash_command_h > 0 {
             constraints.push(Constraint::Length(slash_command_h));
         } else {
@@ -223,13 +202,11 @@ impl Ui {
             .split(f.area());
 
         self.transcript.draw(f, chunks[0], &self.state);
-        self.status.draw(f, chunks[1], &self.state);
-        self.usage.draw(f, chunks[2], &self.state);
-        self.input.draw(f, chunks[3], &self.state);
+        self.input.draw(f, chunks[1], &self.state);
         if slash_command_h > 0 {
-            self.input.draw_slash_command(f, chunks[4], &self.state);
+            self.input.draw_slash_command(f, chunks[2], &self.state);
         } else {
-            self.info.draw(f, chunks[4], &self.state);
+            self.status.draw(f, chunks[2], &self.state);
         }
     }
 }

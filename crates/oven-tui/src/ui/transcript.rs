@@ -14,58 +14,171 @@ use super::tool_display;
 const MOUSE_SCROLL_STEP: u16 = 3;
 const START_HINT: &str =
     "oven — Enter send · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-C quit";
+const LINE_PREFIX_WIDTH: usize = 11;
+const LINE_INDENT: &str = "           ";
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LineKind {
     User,
     Thinking,
     Text,
     Tool,
+    ToolResult(bool),
     Error,
     System,
 }
 
+impl LineKind {
+    fn label(self) -> &'static str {
+        match self {
+            LineKind::User => "you",
+            LineKind::Thinking => "thinking",
+            LineKind::Text => "oven",
+            LineKind::Tool => "tool",
+            LineKind::ToolResult(true) => "ok",
+            LineKind::ToolResult(false) => "fail",
+            LineKind::Error => "error",
+            LineKind::System => "sys",
+        }
+    }
+
+    fn style(self) -> Style {
+        match self {
+            LineKind::User => Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+            LineKind::Thinking => Style::default().fg(Color::DarkGray),
+            LineKind::Text => Style::default().fg(Color::Green),
+            LineKind::Tool => Style::default().fg(Color::Magenta),
+            LineKind::ToolResult(true) => Style::default().fg(Color::DarkGray),
+            LineKind::ToolResult(false) => Style::default().fg(Color::Red),
+            LineKind::Error => Style::default().fg(Color::Red),
+            LineKind::System => Style::default().fg(Color::DarkGray),
+        }
+    }
+}
+
+/// One source row of the conversation. The wrapped rendering is cached in
+/// `Transcript::wrapped` so redraws only re-wrap the live stream.
+struct Row {
+    kind: LineKind,
+    text: String,
+}
+
 pub struct Transcript {
-    line_cache: Vec<Line<'static>>,
+    rows: Vec<Row>,
+    wrapped: Vec<Line<'static>>,
     streaming: String,
     stream_kind: LineKind,
-    scroll: u16,
+    wrapped_stream: Vec<Line<'static>>,
+    stream_dirty: bool,
+    /// Content width (excluding borders) used by the cached wrap; 0 until
+    /// the first draw.
+    width: usize,
+    /// Viewport: when `pinned` the view follows the newest content; when the
+    /// user scrolled up, `top` is the absolute wrapped-line index of the
+    /// first visible line and stays put while new content arrives.
+    pinned: bool,
+    top: usize,
+    /// Viewport height from the last draw, used by scroll commands.
+    view_height: usize,
     area: Rect,
 }
 
 impl Transcript {
     pub fn new() -> Self {
-        Self {
-            line_cache: format_lines(LineKind::System, START_HINT),
+        let mut t = Self {
+            rows: Vec::new(),
+            wrapped: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
-            scroll: 0,
+            wrapped_stream: Vec::new(),
+            stream_dirty: false,
+            width: 0,
+            pinned: true,
+            top: 0,
+            view_height: 0,
             area: Rect::default(),
-        }
+        };
+        t.push_row(LineKind::System, START_HINT);
+        t
     }
 
     pub fn push_user(&mut self, text: &str) {
         self.push_row(LineKind::User, text);
     }
 
+    fn total_lines(&self) -> usize {
+        self.wrapped.len() + self.wrapped_stream.len()
+    }
+
+    fn current_top(&self) -> usize {
+        if self.pinned {
+            self.total_lines().saturating_sub(self.view_height)
+        } else {
+            self.top
+        }
+    }
+
+    /// Keep the viewport anchored: a pinned view follows the newest content,
+    /// a scrolled-up view keeps its absolute position.
+    fn keep_following(&mut self) {
+        if self.pinned {
+            self.top = self.total_lines().saturating_sub(self.view_height);
+        }
+    }
+
+    fn scroll_up(&mut self, n: u16) {
+        self.top = self.current_top().saturating_sub(n as usize);
+        self.pinned = false;
+    }
+
+    fn scroll_down(&mut self, n: u16) {
+        let total = self.total_lines();
+        let height = self.view_height.max(1);
+        let max_top = total.saturating_sub(height);
+        let top = self.current_top().saturating_add(n as usize).min(max_top);
+        self.top = top;
+        self.pinned = top.saturating_add(height) >= total;
+    }
+
     fn reset(&mut self) {
-        self.line_cache = format_lines(LineKind::System, START_HINT);
-        self.streaming.clear();
-        self.stream_kind = LineKind::Text;
-        self.scroll = 0;
+        self.rows.clear();
+        self.wrapped.clear();
+        self.clear_stream();
+        self.pinned = true;
+        self.top = 0;
+        self.push_row(LineKind::System, START_HINT);
     }
 
     fn push_row(&mut self, kind: LineKind, text: &str) {
-        self.line_cache.extend(format_lines(kind, text));
-        self.scroll = 0;
+        let mut wrapped = Vec::new();
+        if self.width > 0 {
+            for line in format_lines(kind, text) {
+                wrap_line_into(&mut wrapped, &line, self.width);
+            }
+        }
+        self.rows.push(Row {
+            kind,
+            text: text.to_string(),
+        });
+        self.wrapped.extend(wrapped);
+        self.keep_following();
     }
 
     fn flush_streaming(&mut self) {
-        let body = std::mem::take(&mut self.streaming);
-        let body = trim_message(&body);
+        let body = trim_message(&std::mem::take(&mut self.streaming));
+        self.wrapped_stream.clear();
+        self.stream_dirty = false;
         if !body.is_empty() {
             self.push_row(self.stream_kind, &body);
         }
+    }
+
+    fn clear_stream(&mut self) {
+        self.streaming.clear();
+        self.wrapped_stream.clear();
+        self.stream_dirty = false;
     }
 
     fn push_stream(&mut self, kind: LineKind, text: &str) {
@@ -77,7 +190,37 @@ impl Transcript {
         }
         self.stream_kind = kind;
         self.streaming.push_str(text);
-        self.scroll = 0;
+        self.stream_dirty = true;
+        self.keep_following();
+    }
+
+    fn wrap_rows_from(&mut self, start: usize) {
+        let width = self.width;
+        if width == 0 {
+            return;
+        }
+        for row in &self.rows[start..] {
+            for line in format_lines(row.kind, &row.text) {
+                wrap_line_into(&mut self.wrapped, &line, width);
+            }
+        }
+    }
+
+    fn rewrap_stream(&mut self) {
+        self.wrapped_stream.clear();
+        self.stream_dirty = false;
+        if self.width == 0 || self.streaming.is_empty() {
+            return;
+        }
+        for line in format_lines(self.stream_kind, &self.streaming) {
+            wrap_line_into(&mut self.wrapped_stream, &line, self.width);
+        }
+    }
+
+    fn rewrap_all(&mut self) {
+        self.wrapped.clear();
+        self.wrap_rows_from(0);
+        self.rewrap_stream();
     }
 }
 
@@ -85,11 +228,11 @@ impl Component for Transcript {
     fn handle_key(&mut self, key: KeyEvent, _state: &State) -> KeyResult {
         match key.code {
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_add(1);
+                self.scroll_up(1);
                 KeyResult::Handled
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_sub(1);
+                self.scroll_down(1);
                 KeyResult::Handled
             }
             _ => KeyResult::Ignored,
@@ -105,11 +248,11 @@ impl Component for Transcript {
         }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                self.scroll = self.scroll.saturating_add(MOUSE_SCROLL_STEP);
+                self.scroll_up(MOUSE_SCROLL_STEP);
                 KeyResult::Handled
             }
             MouseEventKind::ScrollDown => {
-                self.scroll = self.scroll.saturating_sub(MOUSE_SCROLL_STEP);
+                self.scroll_down(MOUSE_SCROLL_STEP);
                 KeyResult::Handled
             }
             _ => KeyResult::Ignored,
@@ -129,10 +272,21 @@ impl Component for Transcript {
                     self.flush_streaming();
                     self.push_row(LineKind::Tool, &tool_display(name, input));
                 }
-                AgentEvent::ToolEnd { .. } => {}
+                AgentEvent::ToolEnd { ok, output, .. } => {
+                    let body = trim_message(output);
+                    if *ok && body.is_empty() {
+                        return;
+                    }
+                    let body = if body.is_empty() {
+                        "(no output)".to_string()
+                    } else {
+                        body
+                    };
+                    self.push_row(LineKind::ToolResult(*ok), &body);
+                }
                 AgentEvent::Done { text, .. } => {
                     if self.stream_kind == LineKind::Text {
-                        self.streaming.clear();
+                        self.clear_stream();
                     } else {
                         self.flush_streaming();
                     }
@@ -145,6 +299,8 @@ impl Component for Transcript {
                     if !self.streaming.is_empty() {
                         let kind = self.stream_kind;
                         let partial = trim_message(&std::mem::take(&mut self.streaming));
+                        self.wrapped_stream.clear();
+                        self.stream_dirty = false;
                         if !partial.is_empty() {
                             self.push_row(kind, &format!("{partial}…"));
                         }
@@ -167,23 +323,26 @@ impl Component for Transcript {
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, _state: &State) {
         self.area = area;
         let width = area.width.saturating_sub(2) as usize;
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(self.line_cache.len() + 8);
-        for line in &self.line_cache {
-            wrap_line_into(&mut lines, line, width);
-        }
-        if !self.streaming.is_empty() {
-            for line in format_lines(self.stream_kind, &self.streaming) {
-                wrap_line_into(&mut lines, &line, width);
-            }
+        if width != self.width {
+            self.width = width;
+            self.rewrap_all();
+        } else if self.stream_dirty {
+            self.rewrap_stream();
         }
 
         let height = area.height.saturating_sub(2) as usize;
-        let total = lines.len();
-        let max_scroll = total.saturating_sub(height);
-        let scroll = (self.scroll as usize).min(max_scroll);
-        let start = total.saturating_sub(height + scroll);
-        let end = total.saturating_sub(scroll);
-        let visible = lines[start..end].to_vec();
+        self.view_height = height;
+        let total = self.total_lines();
+        let max_top = total.saturating_sub(height);
+        if !self.pinned {
+            self.top = self.top.min(max_top);
+            if self.top.saturating_add(height) >= total {
+                self.pinned = true;
+            }
+        }
+        let start = if self.pinned { max_top } else { self.top };
+        let end = start.saturating_add(height).min(total);
+        let visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -193,28 +352,31 @@ impl Component for Transcript {
     }
 }
 
+fn collect_lines(
+    history: &[Line<'static>],
+    stream: &[Line<'static>],
+    start: usize,
+    end: usize,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::with_capacity(end.saturating_sub(start));
+    for idx in start..end {
+        if idx < history.len() {
+            out.push(history[idx].clone());
+        } else {
+            out.push(stream[idx - history.len()].clone());
+        }
+    }
+    out
+}
+
 fn trim_message(text: &str) -> String {
     text.trim_matches(|c: char| c == '\n' || c == '\r')
         .to_string()
 }
 
-const LINE_PREFIX_WIDTH: usize = 11;
-const LINE_INDENT: &str = "           ";
-
 fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
-    let (prefix, style) = match kind {
-        LineKind::User => (
-            "you      | ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        LineKind::Thinking => ("thinking | ", Style::default().fg(Color::DarkGray)),
-        LineKind::Text => ("text     | ", Style::default().fg(Color::Green)),
-        LineKind::Tool => ("tool     | ", Style::default().fg(Color::Magenta)),
-        LineKind::Error => ("err      | ", Style::default().fg(Color::Red)),
-        LineKind::System => ("sys      | ", Style::default().fg(Color::DarkGray)),
-    };
+    let prefix = format!("{:<8} | ", kind.label());
+    let style = kind.style();
     let mut lines = Vec::new();
     let mut prev_blank = false;
     for part in text.lines() {
@@ -224,7 +386,7 @@ fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         }
         prev_blank = blank;
         let head = if lines.is_empty() {
-            prefix
+            prefix.as_str()
         } else {
             LINE_INDENT
         };
@@ -307,4 +469,130 @@ fn split_at_width(s: &str, max_width: usize) -> (&str, &str) {
         width += cw;
     }
     (s, "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oven_agent::AgentId;
+    use oven_app::AppId;
+
+    fn wide(t: &mut Transcript) {
+        t.width = 80;
+        t.rewrap_all();
+    }
+
+    fn fill(t: &mut Transcript, n: usize) {
+        for i in 0..n {
+            t.push_row(LineKind::Text, &format!("line {i}"));
+        }
+    }
+
+    #[test]
+    fn all_labels_are_eleven_wide() {
+        let kinds = [
+            LineKind::User,
+            LineKind::Thinking,
+            LineKind::Text,
+            LineKind::Tool,
+            LineKind::ToolResult(true),
+            LineKind::ToolResult(false),
+            LineKind::Error,
+            LineKind::System,
+        ];
+        for kind in kinds {
+            assert_eq!(format!("{:<8} | ", kind.label()).width(), LINE_PREFIX_WIDTH);
+        }
+    }
+
+    #[test]
+    fn assistant_label_is_oven() {
+        let lines = format_lines(LineKind::Text, "hi");
+        assert_eq!(lines[0].spans[0].content.as_ref(), "oven     | ");
+    }
+
+    #[test]
+    fn tool_result_labels() {
+        let ok = format_lines(LineKind::ToolResult(true), "out");
+        assert_eq!(ok[0].spans[0].content.as_ref(), "ok       | ");
+        let fail = format_lines(LineKind::ToolResult(false), "boom");
+        assert_eq!(fail[0].spans[0].content.as_ref(), "fail     | ");
+    }
+
+    #[test]
+    fn streaming_does_not_yank_scrolled_view() {
+        let mut t = Transcript::new();
+        wide(&mut t);
+        t.view_height = 3;
+        fill(&mut t, 10);
+        t.scroll_up(2);
+        let anchored = t.top;
+        assert!(!t.pinned);
+        t.push_stream(LineKind::Text, "more");
+        assert_eq!(t.top, anchored, "reading position must not move");
+        assert!(!t.pinned);
+    }
+
+    #[test]
+    fn streaming_follows_when_pinned() {
+        let mut t = Transcript::new();
+        wide(&mut t);
+        t.view_height = 3;
+        fill(&mut t, 10);
+        assert!(t.pinned);
+        t.push_stream(LineKind::Text, "more");
+        assert!(t.pinned);
+        t.rewrap_stream();
+        assert_eq!(
+            t.current_top(),
+            t.total_lines().saturating_sub(t.view_height)
+        );
+    }
+
+    #[test]
+    fn scroll_down_returns_to_bottom() {
+        let mut t = Transcript::new();
+        wide(&mut t);
+        t.view_height = 3;
+        fill(&mut t, 10);
+        t.scroll_up(5);
+        assert!(!t.pinned);
+        t.scroll_down(5);
+        assert!(t.pinned);
+    }
+
+    #[test]
+    fn tool_end_renders_result_row() {
+        let mut t = Transcript::new();
+        let ev = AppEvent::Agent {
+            app_id: AppId(1),
+            event: AgentEvent::ToolEnd {
+                agent_id: AgentId(1),
+                call_id: "c1".into(),
+                ok: false,
+                output: "boom\n".into(),
+            },
+        };
+        t.on_event(&ev, &mut State::new());
+        let row = t.rows.last().unwrap();
+        assert_eq!(row.kind, LineKind::ToolResult(false));
+        assert_eq!(row.text, "boom");
+    }
+
+    #[test]
+    fn empty_ok_tool_end_renders_nothing() {
+        let mut t = Transcript::new();
+        let n = t.rows.len();
+        let ev = AppEvent::Agent {
+            app_id: AppId(1),
+            event: AgentEvent::ToolEnd {
+                agent_id: AgentId(1),
+                call_id: "c1".into(),
+                ok: true,
+                output: String::new(),
+            },
+        };
+        t.on_event(&ev, &mut State::new());
+        assert_eq!(t.rows.len(), n);
+    }
 }
