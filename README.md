@@ -20,7 +20,7 @@ OVEN_MODEL=deepseek-v4-flash OVEN_DEEPSEEK_API_KEY=sk-xxx oven
 oven --session my-session
 
 # Work in a different directory
-oven --root /path/to/project
+oven -C /path/to/project
 ```
 
 ## How it works

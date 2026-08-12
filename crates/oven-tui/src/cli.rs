@@ -8,11 +8,11 @@ use oven_app::App;
 use crate::ui;
 
 #[derive(Debug, Parser)]
-#[command(name = "oven", about = "A toy coding agent for joy only.")]
+#[command(name = "oven", version, about = "A toy coding agent for joy only.")]
 pub struct Cli {
-    /// Workspace root
-    #[arg(long, short, default_value = ".")]
-    root: PathBuf,
+    /// Tell oven to use the specified directory as its workspace root
+    #[arg(long = "cd", short = 'C', default_value = ".")]
+    dir: PathBuf,
 
     /// Resume / persist a JSONL session id
     #[arg(long, short = 's', env = "OVEN_SESSION")]
@@ -25,7 +25,7 @@ pub struct Cli {
 
 impl Cli {
     pub fn spawn(&self) -> App {
-        let mut app = App::new(&self.root);
+        let mut app = App::new(&self.dir);
         if let Err(e) = app.load_config() {
             eprintln!("warning: loading config: {}", e);
         }
@@ -47,7 +47,7 @@ impl Cli {
                 interactive(&app, self.session.as_deref()).await
             }
             None => {
-                eprintln!("usage: oven [--root DIR] [--session ID] [prompt...]");
+                eprintln!("usage: oven [-C DIR] [--session ID] [prompt...]");
                 ExitCode::from(2)
             }
         }
