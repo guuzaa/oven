@@ -188,10 +188,9 @@ impl Transcript {
     /// Place queued user messages at the end of the transcript, after the
     /// current activity (tool result or final answer) is rendered.
     fn flush_pending_user(&mut self) {
-        let pending = std::mem::take(&mut self.pending_user);
-        for text in pending {
-            self.push_row(LineKind::User, &text);
-        }
+        std::mem::take(&mut self.pending_user)
+            .into_iter()
+            .for_each(|text| self.push_row(LineKind::User, &text));
     }
 
     fn clear_stream(&mut self) {

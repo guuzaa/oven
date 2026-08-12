@@ -88,6 +88,12 @@ If neither file exists, Oven uses sensible defaults. Sessions are stored as
 JSONL under `$XDG_DATA_HOME/oven/sessions/` (default
 `~/.local/share/oven/sessions/`).
 
+Instruction files (`AGENTS.md` / `CLAUDE.md`) are loaded from the user config
+dir (`~/.config/oven/`) and the workspace root, and their contents are injected
+into the system prompt. Both files are loaded when present (`AGENTS.md` before
+`CLAUDE.md`), user-level instructions first, project instructions after;
+missing, empty, or unreadable files are ignored.
+
 Skills are guidance modules loaded from the filesystem. Each skill is a
 directory containing a `SKILL.md` file; its `description:` YAML frontmatter
 is injected into the system prompt as `- **<name>**: <description>`, and the

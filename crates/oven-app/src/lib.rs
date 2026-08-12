@@ -7,12 +7,14 @@ use oven_llm::{Provider, ProviderBuilder, ProviderName};
 use thiserror::Error;
 
 use crate::config::{AppConfig, ConfigError};
+use crate::instructions::{InstructionDoc, default_config_home, load_instructions};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::session::{SessionError, default_sessions_dir};
 use crate::skill::skill_dirs;
 
 pub mod config;
+mod instructions;
 pub mod mcp;
 pub mod runtime;
 pub mod session;
@@ -56,6 +58,7 @@ pub struct App {
     skills: SkillRegistry,
     tools: ToolRegistry,
     mcps: McpRegistry,
+    instructions: Vec<InstructionDoc>,
     mcp_connector: Arc<dyn McpConnector>,
 }
 
@@ -68,6 +71,7 @@ impl App {
             skills: SkillRegistry::new(),
             tools: ToolRegistry::from_config(root, &[]),
             mcps: McpRegistry::new(),
+            instructions: Vec::new(),
             mcp_connector: Arc::new(DefaultMcpConnector),
         }
     }
@@ -132,6 +136,7 @@ impl App {
         self.mcps = McpRegistry::new();
         self.skills = SkillRegistry::new();
         self.skills.load_from_dirs(&skill_dirs(&self.root));
+        self.instructions = load_instructions(default_config_home().as_deref(), &self.root);
 
         for (id, server) in &config.mcps {
             let _ = self.mcps.register(id.clone(), server.clone());
@@ -262,6 +267,14 @@ impl App {
     fn build_system_prompt(&self) -> String {
         let mut base =
             String::from("You are a coding assistant working inside the user's repository.");
+        for doc in &self.instructions {
+            base.push_str(&format!(
+                "\n\n## {} Instructions (from {})\n\n{}\n\n",
+                doc.scope,
+                doc.path.display(),
+                doc.content
+            ));
+        }
         if let Some(extra) = self.skills.merged_system_prompt() {
             base.push_str(&format!("## Available Skills\n\n{}", extra));
         }
@@ -334,7 +347,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::App;
+    use super::*;
+    use crate::instructions::InstructionScope;
     use oven_llm::ProviderName;
 
     #[test]
@@ -350,5 +364,39 @@ mod tests {
         for (model, expected) in cases {
             assert_eq!(App::determine_provider_name(model), expected, "{model}");
         }
+    }
+
+    #[test]
+    fn system_prompt_includes_instruction_docs() {
+        let tmp = tempdir::TempDir::new("app-instructions").unwrap();
+        let root = tmp.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "project rules\n").unwrap();
+
+        let app = App::new(&root).with_config(AppConfig::default());
+        let prompt = app.build_system_prompt();
+        assert!(prompt.contains("## Project Instructions"));
+        assert!(prompt.contains("project rules"));
+    }
+
+    #[test]
+    fn system_prompt_labels_user_and_project_docs() {
+        let mut app = App::new(".");
+        app.instructions = vec![
+            InstructionDoc {
+                scope: InstructionScope::Global,
+                path: PathBuf::from("/cfg/AGENTS.md"),
+                content: "global rules\n".into(),
+            },
+            InstructionDoc {
+                scope: InstructionScope::Project,
+                path: PathBuf::from("/ws/CLAUDE.md"),
+                content: "project rules\n".into(),
+            },
+        ];
+        let prompt = app.build_system_prompt();
+        assert!(prompt.contains("## Global Instructions (from /cfg/AGENTS.md)"));
+        assert!(prompt.contains("## Project Instructions (from /ws/CLAUDE.md)"));
+        assert!(prompt.find("global rules").unwrap() < prompt.find("project rules").unwrap());
     }
 }

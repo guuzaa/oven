@@ -19,7 +19,7 @@ impl BashTool {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(300),
             max_output: 4000,
         }
     }
