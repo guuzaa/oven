@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -311,7 +312,18 @@ async fn runtime_loop(
     let mut persisted_prefix = agent.history().len();
     let mut persisted_rev = agent.history_revision();
 
-    while let Some(cmd) = cmd_rx.recv().await {
+    // Commands received while a turn is in flight are buffered here and run
+    // in order once the current turn finishes, so UserInput is never dropped.
+    let mut pending_cmds: VecDeque<AppCmd> = VecDeque::new();
+
+    loop {
+        let cmd = match pending_cmds.pop_front() {
+            Some(cmd) => cmd,
+            None => match cmd_rx.recv().await {
+                Some(cmd) => cmd,
+                None => break,
+            },
+        };
         match cmd {
             AppCmd::Shutdown => break,
             AppCmd::Cancel => {
@@ -336,7 +348,9 @@ async fn runtime_loop(
                                         return;
                                     }
                                     Some(AppCmd::Cancel) => cancel.cancel(),
-                                    Some(AppCmd::UserInput(_)) => {}
+                                    Some(AppCmd::UserInput(input)) => {
+                                        pending_cmds.push_back(AppCmd::UserInput(input));
+                                    }
                                 }
                             }
                             ev = agent_rx.recv() => {
@@ -825,6 +839,87 @@ mod tests {
         assert!(saw_idle);
         assert!(!saw_error);
         drop(tx);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn user_input_during_turn_is_buffered_and_runs_after() {
+        use tokio::sync::oneshot;
+
+        struct BlockOnceProvider {
+            release: Mutex<Option<oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl Provider for BlockOnceProvider {
+            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+                let rx = self.release.lock().unwrap().take();
+                if let Some(rx) = rx {
+                    let _ = rx.await;
+                }
+                Ok(text_response("done"))
+            }
+
+            async fn stream(
+                &self,
+                _req: &Request,
+            ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
+            {
+                Err(ProviderError::Api {
+                    status: 500,
+                    body: "no stream".into(),
+                })
+            }
+
+            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+                None
+            }
+
+            fn provider_name(&self) -> ProviderName {
+                ProviderName::Custom("block-once".into())
+            }
+        }
+
+        // The first turn blocks until released; a UserInput sent while it is
+        // in flight must be buffered and run as its own turn afterwards.
+        let (tx, rx) = oneshot::channel();
+        let provider = BlockOnceProvider {
+            release: Mutex::new(Some(rx)),
+        };
+
+        let tmp = tempdir::TempDir::new("app-runtime-buffer").unwrap();
+        let app = App::new(tmp.path());
+        let handle = app.spawn_with_provider(Box::new(provider)).await.unwrap();
+        let mut sub = handle.subscribe();
+
+        handle.send(AppCmd::UserInput("first".into())).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        handle.send(AppCmd::UserInput("second".into())).unwrap();
+
+        drop(tx);
+
+        let mut dones = 0usize;
+        let mut idles = 0usize;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+                Ok(Some(AppEvent::Agent {
+                    event: AgentEvent::Done { .. },
+                    ..
+                })) => dones += 1,
+                Ok(Some(AppEvent::Idle { .. })) => {
+                    idles += 1;
+                    if idles == 2 {
+                        break;
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => panic!("timeout waiting for two idle events"),
+            }
+        }
+        assert_eq!(dones, 2);
+        assert_eq!(idles, 2);
         handle.shutdown().await;
     }
 }

@@ -87,16 +87,16 @@ impl SlashCommandPopup {
     }
 
     /// Height of the popup, or 0 when hidden.
-    pub(crate) fn height(&self, state: &State) -> u16 {
-        if state.busy || !self.open {
+    pub(crate) fn height(&self, _state: &State) -> u16 {
+        if !self.open {
             return 0;
         }
         let rows = self.matches().len().clamp(1, MAX_COMMAND_ROWS);
         (rows as u16).saturating_add(2)
     }
 
-    pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        if state.busy || !self.open {
+    pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect, _state: &State) {
+        if !self.open {
             return;
         }
         let indices = self.matches();

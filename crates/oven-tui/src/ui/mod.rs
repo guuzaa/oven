@@ -1,5 +1,6 @@
 mod component;
 mod input;
+mod queue;
 mod slash_command_popup;
 mod status;
 mod transcript;
@@ -23,6 +24,7 @@ use tokio::sync::mpsc;
 
 use component::{Action, Component, KeyResult, State};
 use input::InputView;
+use queue::QueueWidget;
 use status::StatusBar;
 use transcript::Transcript;
 
@@ -46,6 +48,7 @@ pub struct Ui {
     transcript: Transcript,
     status: StatusBar,
     input: InputView,
+    queue: QueueWidget,
 }
 
 impl Ui {
@@ -65,6 +68,7 @@ impl Ui {
             transcript: Transcript::new(),
             status: StatusBar::new(model, &root),
             input: InputView::new(slash_commands),
+            queue: QueueWidget::new(),
         }
     }
 
@@ -142,6 +146,25 @@ impl Ui {
         self.transcript.on_event(&ev, &mut self.state);
         self.status.on_event(&ev, &mut self.state);
         self.input.on_event(&ev, &mut self.state);
+        self.maybe_flush();
+    }
+
+    /// Send each queued message to the app as its own turn once it is idle.
+    fn maybe_flush(&mut self) {
+        if self.state.busy || self.input.queue_len() == 0 {
+            return;
+        }
+        let texts = self.input.drain_pending();
+        self.state.busy = true;
+        let remaining = send_each(texts, |text| {
+            self.handle
+                .send(AppCmd::UserInput(text.to_string()))
+                .is_ok()
+        });
+        if !remaining.is_empty() {
+            self.input.restore_pending(remaining);
+            self.state.busy = false;
+        }
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -153,7 +176,9 @@ impl Ui {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 KeyResult::Action(Action::Quit)
             }
-            KeyCode::Esc if self.state.busy => KeyResult::Action(Action::Cancel),
+            KeyCode::Esc if self.state.busy && !self.input.slash_open() => {
+                KeyResult::Action(Action::Cancel)
+            }
             _ => match self.transcript.handle_key(key, &self.state) {
                 KeyResult::Ignored => self.input.handle_key(key, &self.state),
                 other => other,
@@ -172,6 +197,10 @@ impl Ui {
                 let _ = self.handle.send(AppCmd::Cancel);
                 false
             }
+            KeyResult::Action(Action::Queue(text)) => {
+                self.transcript.push_user_queued(&text);
+                false
+            }
             KeyResult::Action(Action::Submit(text)) => {
                 self.transcript.push_user(&text);
                 self.input.clear();
@@ -186,11 +215,19 @@ impl Ui {
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
         let input_h = self.input.height();
-        let mut constraints = vec![Constraint::Min(3), Constraint::Length(input_h)];
+        let queue_h = self
+            .queue
+            .height(self.input.pending())
+            .min(f.area().height.saturating_sub(3 + input_h));
+        let mut constraints = vec![Constraint::Min(3)];
+        if queue_h > 0 {
+            constraints.push(Constraint::Length(queue_h));
+        }
+        constraints.push(Constraint::Length(input_h));
         let slash_command_h = self
             .input
             .slash_command_height(&self.state)
-            .min(f.area().height.saturating_sub(3 + input_h));
+            .min(f.area().height.saturating_sub(3 + input_h + queue_h));
         if slash_command_h > 0 {
             constraints.push(Constraint::Length(slash_command_h));
         } else {
@@ -201,14 +238,36 @@ impl Ui {
             .constraints(constraints)
             .split(f.area());
 
-        self.transcript.draw(f, chunks[0], &self.state);
-        self.input.draw(f, chunks[1], &self.state);
+        let mut next = 0;
+        self.transcript.draw(f, chunks[next], &self.state);
+        next += 1;
+        if queue_h > 0 {
+            self.queue.draw(f, chunks[next], self.input.pending());
+            next += 1;
+        }
+        self.input.draw(f, chunks[next], &self.state);
+        next += 1;
         if slash_command_h > 0 {
-            self.input.draw_slash_command(f, chunks[2], &self.state);
+            self.input.draw_slash_command(f, chunks[next], &self.state);
         } else {
-            self.status.draw(f, chunks[2], &self.state);
+            self.status.draw(f, chunks[next], &self.state);
         }
     }
+}
+
+/// Send each message as its own `UserInput`, in order. Returns the messages
+/// that were not sent: the first failed one and everything after it.
+fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<String> {
+    let mut iter = texts.into_iter();
+    let mut remaining = Vec::new();
+    while let Some(text) = iter.next() {
+        if !send(&text) {
+            remaining.push(text);
+            remaining.extend(iter);
+            break;
+        }
+    }
+    remaining
 }
 
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
@@ -228,4 +287,37 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Re
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_each_sends_messages_separately_in_order() {
+        let mut sent = Vec::new();
+        let remaining = send_each(
+            vec!["one".to_string(), "two".to_string(), "three".to_string()],
+            |text| {
+                sent.push(text.to_string());
+                true
+            },
+        );
+        assert!(remaining.is_empty());
+        assert_eq!(sent, vec!["one", "two", "three"]);
+    }
+
+    #[test]
+    fn send_each_stops_at_first_failure_and_returns_remainder() {
+        let mut calls = Vec::new();
+        let remaining = send_each(
+            vec!["one".to_string(), "two".to_string(), "three".to_string()],
+            |text| {
+                calls.push(text.to_string());
+                text != "two"
+            },
+        );
+        assert_eq!(calls, vec!["one", "two"]);
+        assert_eq!(remaining, vec!["two", "three"]);
+    }
 }

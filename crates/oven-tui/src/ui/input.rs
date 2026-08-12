@@ -12,6 +12,8 @@ use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
 pub struct InputView {
     textarea: TextArea<'static>,
     slash_command: SlashCommandPopup,
+    /// Messages accepted while the app is busy, flushed once it idles again.
+    pending: Vec<String>,
 }
 
 impl InputView {
@@ -19,6 +21,7 @@ impl InputView {
         Self {
             textarea: new_textarea(),
             slash_command: SlashCommandPopup::new(commands),
+            pending: Vec::new(),
         }
     }
 
@@ -42,6 +45,32 @@ impl InputView {
         self.slash_command.draw(f, area, state);
     }
 
+    /// Number of messages waiting to be flushed to the app.
+    pub(crate) fn queue_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Messages waiting to be flushed, in queue order.
+    pub(crate) fn pending(&self) -> &[String] {
+        &self.pending
+    }
+
+    /// Take all queued messages in order, clearing the queue.
+    pub(crate) fn drain_pending(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Put messages back at the front of the queue (e.g. after a failed send).
+    pub(crate) fn restore_pending(&mut self, mut texts: Vec<String>) {
+        texts.append(&mut self.pending);
+        self.pending = texts;
+    }
+
+    /// Whether the slash-command popup is currently open.
+    pub(crate) fn slash_open(&self) -> bool {
+        self.slash_command.is_open()
+    }
+
     fn text(&self) -> String {
         self.textarea.lines().join("\n")
     }
@@ -55,9 +84,6 @@ impl InputView {
 
 impl Component for InputView {
     fn handle_key(&mut self, key: KeyEvent, state: &State) -> KeyResult {
-        if state.busy {
-            return KeyResult::Ignored;
-        }
         let text = self.text();
         self.slash_command.refresh(&text);
         if self.slash_command.is_open()
@@ -84,6 +110,10 @@ impl Component for InputView {
                 let text = self.text().trim().to_string();
                 if text.is_empty() {
                     KeyResult::Handled
+                } else if state.busy {
+                    self.pending.push(text.clone());
+                    self.clear();
+                    KeyResult::Action(Action::Queue(text))
                 } else {
                     self.clear();
                     KeyResult::Action(Action::Submit(text))
@@ -99,23 +129,16 @@ impl Component for InputView {
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
         let title = if state.busy {
-            " input (busy) "
+            " input (busy) ".to_string()
         } else {
-            " input "
+            " input ".to_string()
         };
         self.textarea
             .set_block(Block::default().borders(Borders::ALL).title(title));
-        if state.busy {
-            self.textarea
-                .set_style(Style::default().fg(ratatui::style::Color::DarkGray));
-            self.textarea.set_cursor_style(Style::default());
-            self.textarea.set_cursor_line_style(Style::default());
-        } else {
-            self.textarea.set_style(Style::default());
-            self.textarea
-                .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
-            self.textarea.set_cursor_line_style(Style::default());
-        }
+        self.textarea.set_style(Style::default());
+        self.textarea
+            .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        self.textarea.set_cursor_line_style(Style::default());
         f.render_widget(&self.textarea, area);
     }
 }
@@ -260,12 +283,83 @@ mod tests {
     }
 
     #[test]
-    fn busy_ignores_keys() {
+    fn busy_allows_typing() {
         let mut view = InputView::new(commands());
-        type_text(&mut view, "/");
-        assert!(view.slash_command.is_open());
         let state = State { busy: true };
         let result = view.handle_key(key(KeyCode::Char('x')), &state);
-        assert!(matches!(result, KeyResult::Ignored));
+        assert!(matches!(result, KeyResult::Handled));
+        assert_eq!(view.textarea.lines()[0], "x");
+    }
+
+    #[test]
+    fn busy_enter_queues_text() {
+        let mut view = InputView::new(commands());
+        type_text(&mut view, "hello");
+        let state = State { busy: true };
+        let result = view.handle_key(key(KeyCode::Enter), &state);
+        match result {
+            KeyResult::Action(Action::Queue(text)) => assert_eq!(text, "hello"),
+            _ => panic!("expected queue"),
+        }
+        assert_eq!(view.queue_len(), 1);
+        assert!(view.textarea.lines()[0].is_empty());
+    }
+
+    #[test]
+    fn busy_enter_empty_does_not_queue() {
+        let mut view = InputView::new(commands());
+        let state = State { busy: true };
+        let result = view.handle_key(key(KeyCode::Enter), &state);
+        assert!(matches!(result, KeyResult::Handled));
+        assert_eq!(view.queue_len(), 0);
+    }
+
+    #[test]
+    fn busy_alt_enter_inserts_newline() {
+        let mut view = InputView::new(commands());
+        type_text(&mut view, "a");
+        let state = State { busy: true };
+        let result = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT), &state);
+        assert!(matches!(result, KeyResult::Handled));
+        assert_eq!(view.textarea.lines()[0], "a");
+        assert_eq!(view.textarea.lines().len(), 2);
+    }
+
+    #[test]
+    fn busy_exact_slash_submits_immediately() {
+        let mut view = InputView::new(commands());
+        type_text(&mut view, "/clear");
+        let state = State { busy: true };
+        let result = view.handle_key(key(KeyCode::Enter), &state);
+        match result {
+            KeyResult::Action(Action::Submit(text)) => assert_eq!(text, "/clear"),
+            _ => panic!("expected submit"),
+        }
+        assert_eq!(view.queue_len(), 0);
+    }
+
+    #[test]
+    fn drain_pending_returns_in_order() {
+        let mut view = InputView::new(commands());
+        type_text(&mut view, "one");
+        view.handle_key(key(KeyCode::Enter), &State { busy: true });
+        type_text(&mut view, "two");
+        view.handle_key(key(KeyCode::Enter), &State { busy: true });
+        assert_eq!(view.queue_len(), 2);
+        assert_eq!(
+            view.drain_pending(),
+            vec!["one".to_string(), "two".to_string()]
+        );
+        assert_eq!(view.queue_len(), 0);
+    }
+
+    #[test]
+    fn pending_returns_queued_in_order() {
+        let mut view = InputView::new(commands());
+        type_text(&mut view, "one");
+        view.handle_key(key(KeyCode::Enter), &State { busy: true });
+        type_text(&mut view, "two");
+        view.handle_key(key(KeyCode::Enter), &State { busy: true });
+        assert_eq!(view.pending(), &["one".to_string(), "two".to_string()]);
     }
 }

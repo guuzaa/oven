@@ -12,8 +12,7 @@ use super::component::{Component, KeyResult, State};
 use super::tool_display;
 
 const MOUSE_SCROLL_STEP: u16 = 3;
-const START_HINT: &str =
-    "oven — Enter send · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-C quit";
+const START_HINT: &str = "oven — Enter send (queues while busy) · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-C quit";
 const LINE_PREFIX_WIDTH: usize = 11;
 const LINE_INDENT: &str = "           ";
 
@@ -72,6 +71,9 @@ pub struct Transcript {
     stream_kind: LineKind,
     wrapped_stream: Vec<Line<'static>>,
     stream_dirty: bool,
+    /// User messages queued while busy; rendered as `User` rows once the
+    /// in-flight answer finishes so they appear after it.
+    pending_user: Vec<String>,
     /// Content width (excluding borders) used by the cached wrap; 0 until
     /// the first draw.
     width: usize,
@@ -94,6 +96,7 @@ impl Transcript {
             stream_kind: LineKind::Text,
             wrapped_stream: Vec::new(),
             stream_dirty: false,
+            pending_user: Vec::new(),
             width: 0,
             pinned: true,
             top: 0,
@@ -106,6 +109,12 @@ impl Transcript {
 
     pub fn push_user(&mut self, text: &str) {
         self.push_row(LineKind::User, text);
+    }
+
+    /// Remember a user message accepted while the app was busy; it is shown
+    /// as a normal user row once the current answer finishes.
+    pub fn push_user_queued(&mut self, text: &str) {
+        self.pending_user.push(text.to_string());
     }
 
     fn total_lines(&self) -> usize {
@@ -146,6 +155,7 @@ impl Transcript {
         self.rows.clear();
         self.wrapped.clear();
         self.clear_stream();
+        self.pending_user.clear();
         self.pinned = true;
         self.top = 0;
         self.push_row(LineKind::System, START_HINT);
@@ -172,6 +182,15 @@ impl Transcript {
         self.stream_dirty = false;
         if !body.is_empty() {
             self.push_row(self.stream_kind, &body);
+        }
+    }
+
+    /// Place queued user messages at the end of the transcript, after the
+    /// current activity (tool result or final answer) is rendered.
+    fn flush_pending_user(&mut self) {
+        let pending = std::mem::take(&mut self.pending_user);
+        for text in pending {
+            self.push_row(LineKind::User, &text);
         }
     }
 
@@ -274,15 +293,15 @@ impl Component for Transcript {
                 }
                 AgentEvent::ToolEnd { ok, output, .. } => {
                     let body = trim_message(output);
-                    if *ok && body.is_empty() {
-                        return;
+                    if !(*ok && body.is_empty()) {
+                        let body = if body.is_empty() {
+                            "(no output)".to_string()
+                        } else {
+                            body
+                        };
+                        self.push_row(LineKind::ToolResult(*ok), &body);
                     }
-                    let body = if body.is_empty() {
-                        "(no output)".to_string()
-                    } else {
-                        body
-                    };
-                    self.push_row(LineKind::ToolResult(*ok), &body);
+                    self.flush_pending_user();
                 }
                 AgentEvent::Done { text, .. } => {
                     if self.stream_kind == LineKind::Text {
@@ -312,6 +331,7 @@ impl Component for Transcript {
             },
             AppEvent::Idle { .. } => {
                 self.flush_streaming();
+                self.flush_pending_user();
             }
             AppEvent::Error { message, .. } => {
                 self.flush_streaming();
@@ -594,5 +614,70 @@ mod tests {
         };
         t.on_event(&ev, &mut State::new());
         assert_eq!(t.rows.len(), n);
+    }
+
+    #[test]
+    fn push_user_queued_is_deferred_until_idle() {
+        let mut t = Transcript::new();
+        let n = t.rows.len();
+        t.push_user_queued("hello");
+        assert_eq!(t.rows.len(), n);
+        t.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut State::new());
+        assert_eq!(
+            t.rows.last().map(|r| (r.kind, r.text.as_str())),
+            Some((LineKind::User, "hello"))
+        );
+    }
+
+    #[test]
+    fn queued_user_renders_after_streamed_answer() {
+        let mut t = Transcript::new();
+        t.push_stream(LineKind::Text, "answer");
+        t.push_user_queued("hello");
+        t.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut State::new());
+        let kinds: Vec<LineKind> = t.rows.iter().map(|r| r.kind).collect();
+        assert_eq!(&kinds[kinds.len() - 2..], &[LineKind::Text, LineKind::User]);
+    }
+
+    #[test]
+    fn queued_user_renders_after_tool_end() {
+        let mut t = Transcript::new();
+        t.push_user_queued("hello");
+        let ev = AppEvent::Agent {
+            app_id: AppId(1),
+            event: AgentEvent::ToolEnd {
+                agent_id: AgentId(1),
+                call_id: "c1".into(),
+                ok: false,
+                output: "boom\n".into(),
+            },
+        };
+        t.on_event(&ev, &mut State::new());
+        let kinds: Vec<LineKind> = t.rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            &kinds[kinds.len() - 2..],
+            &[LineKind::ToolResult(false), LineKind::User]
+        );
+        assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some("hello"));
+    }
+
+    #[test]
+    fn queued_user_renders_after_empty_tool_end() {
+        let mut t = Transcript::new();
+        t.push_user_queued("hello");
+        let ev = AppEvent::Agent {
+            app_id: AppId(1),
+            event: AgentEvent::ToolEnd {
+                agent_id: AgentId(1),
+                call_id: "c1".into(),
+                ok: true,
+                output: String::new(),
+            },
+        };
+        t.on_event(&ev, &mut State::new());
+        assert_eq!(
+            t.rows.last().map(|r| (r.kind, r.text.as_str())),
+            Some((LineKind::User, "hello"))
+        );
     }
 }

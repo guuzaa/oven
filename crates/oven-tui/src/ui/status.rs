@@ -88,7 +88,7 @@ fn human(n: u32) -> String {
     }
 }
 
-fn truncate_str(s: &str, max_width: usize) -> String {
+pub(crate) fn truncate_str(s: &str, max_width: usize) -> String {
     if s.width() <= max_width {
         return s.to_string();
     }

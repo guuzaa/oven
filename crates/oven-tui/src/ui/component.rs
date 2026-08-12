@@ -17,6 +17,7 @@ pub enum Action {
     Quit,
     Cancel,
     Submit(String),
+    Queue(String),
 }
 
 pub enum KeyResult {
