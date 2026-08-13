@@ -113,10 +113,11 @@ failures abort startup with a clear error.
 
 ## Modes
 
-**One-shot** — pass a prompt as arguments. Oven replies and exits.
+**One-shot** — pass a prompt with `--query`. Oven replies and exits.
 
 ```bash
-oven "what is love?"
+oven --query "what is love?"
+oven -Q "what is love?"
 ```
 
 **Interactive** — run without arguments for a TUI. Type your prompt,
@@ -124,12 +125,6 @@ press Enter to send. `Esc` cancels the current request, `Ctrl-C` quits.
 
 ```bash
 oven
-```
-
-**Piped** — pipe input in:
-
-```bash
-echo "summarize this" | oven
 ```
 
 ## Sessions

@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -18,9 +18,9 @@ pub struct Cli {
     #[arg(long, short = 's', env = "OVEN_SESSION")]
     session: Option<String>,
 
-    /// One-shot prompt words (joined). If omitted on a TTY, opens the interactive UI.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    prompt: Vec<String>,
+    /// Run a one-shot query and exit
+    #[arg(long, short = 'Q', value_name = "QUERY")]
+    query: Option<String>,
 }
 
 impl Cli {
@@ -35,34 +35,16 @@ impl Cli {
     pub async fn run(&self) -> ExitCode {
         let app = self.spawn();
 
-        let joined = {
-            let s = self.prompt.join(" ");
-            if s.trim().is_empty() { None } else { Some(s) }
-        };
-        let one_shot = joined.or_else(read_piped_prompt);
-
-        match one_shot {
+        match self.query.as_deref() {
             Some(prompt) => headless(&app, self.session.as_deref(), prompt.trim()).await,
             None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
                 interactive(&app, self.session.as_deref()).await
             }
             None => {
-                eprintln!("usage: oven [-C DIR] [--session ID] [prompt...]");
+                eprintln!("usage: oven [-C DIR] [--session ID] [-Q|--query QUERY]");
                 ExitCode::from(2)
             }
         }
-    }
-}
-
-fn read_piped_prompt() -> Option<String> {
-    if io::stdin().is_terminal() {
-        return None;
-    }
-    let mut buf = String::new();
-    if io::stdin().read_to_string(&mut buf).is_ok() && !buf.trim().is_empty() {
-        Some(buf)
-    } else {
-        None
     }
 }
 
