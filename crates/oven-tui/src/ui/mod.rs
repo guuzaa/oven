@@ -72,7 +72,13 @@ impl Ui {
         }
     }
 
+    #[inline]
+    fn load_transcript(&mut self) {
+        self.transcript.seed(self.handle.history());
+    }
+
     pub async fn run(mut self) -> io::Result<()> {
+        self.load_transcript();
         let mut terminal = setup_terminal()?;
         let result = self.event_loop(&mut terminal).await;
         restore_terminal(&mut terminal)?;

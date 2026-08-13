@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use oven_agent::AgentEvent;
 use oven_app::AppEvent;
+use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -115,6 +116,84 @@ impl Transcript {
     /// as a normal user row once the current answer finishes.
     pub fn push_user_queued(&mut self, text: &str) {
         self.pending_user.push(text.to_string());
+    }
+
+    /// Pre-fill the transcript from a persisted session's messages when
+    /// resuming. Renders the same row kinds the live event stream produces;
+    /// images are skipped since they cannot be drawn in a terminal.
+    pub fn seed(&mut self, messages: &[Message]) {
+        for m in messages {
+            match m.role {
+                Role::User => {
+                    for block in &m.content {
+                        match block {
+                            ContentBlock::Text { text } => {
+                                self.push_row(LineKind::User, text);
+                            }
+                            ContentBlock::ToolResult {
+                                content, is_error, ..
+                            } => self.push_tool_result(*is_error, content),
+                            _ => {}
+                        }
+                    }
+                }
+                Role::Tool => {
+                    for block in &m.content {
+                        if let ContentBlock::ToolResult {
+                            content, is_error, ..
+                        } = block
+                        {
+                            self.push_tool_result(*is_error, content);
+                        }
+                    }
+                }
+                Role::Assistant => {
+                    for block in &m.content {
+                        match block {
+                            ContentBlock::Thinking { thinking } => {
+                                self.push_row(LineKind::Thinking, thinking);
+                            }
+                            ContentBlock::Text { text } => {
+                                let body = trim_message(text);
+                                if !body.is_empty() {
+                                    self.push_row(LineKind::Text, &body);
+                                }
+                            }
+                            ContentBlock::ToolUse { name, input, .. } => {
+                                self.push_row(LineKind::Tool, &tool_display(name, input));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Role::System => {}
+            }
+        }
+    }
+
+    fn push_tool_result(&mut self, is_error: bool, content: &[ContentBlock]) {
+        let tool_result = content
+            .iter()
+            .filter_map(|block| {
+                if let ContentBlock::Text { text } = block {
+                    Some(text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<&str>>()
+            .join("\n");
+        let body = trim_message(&tool_result);
+        if is_error || !body.is_empty() {
+            self.push_row(
+                LineKind::ToolResult(is_error),
+                if body.is_empty() {
+                    "(no output)"
+                } else {
+                    body.as_str()
+                },
+            );
+        }
     }
 
     fn total_lines(&self) -> usize {
@@ -677,6 +756,78 @@ mod tests {
         assert_eq!(
             t.rows.last().map(|r| (r.kind, r.text.as_str())),
             Some((LineKind::User, "hello"))
+        );
+    }
+
+    #[test]
+    fn seed_renders_persisted_messages() {
+        let mut t = Transcript::new();
+        let messages = vec![
+            Message::user_text("hello"),
+            Message::assistant(vec![
+                ContentBlock::Thinking {
+                    thinking: "hmm".into(),
+                },
+                ContentBlock::Text {
+                    text: "hi there".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": "ls" }),
+                },
+            ]),
+            Message::tool_result("c1", "done", false),
+            Message::user(vec![
+                ContentBlock::Text {
+                    text: "thanks".into(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "c1".into(),
+                    content: vec![ContentBlock::text("boom")],
+                    is_error: true,
+                },
+            ]),
+        ];
+        t.seed(&messages);
+
+        let kinds: Vec<LineKind> = t.rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                LineKind::System, // START_HINT
+                LineKind::User,
+                LineKind::Thinking,
+                LineKind::Text,
+                LineKind::Tool,
+                LineKind::ToolResult(false),
+                LineKind::User,
+                LineKind::ToolResult(true),
+            ]
+        );
+        assert_eq!(t.rows[1].text, "hello");
+        assert_eq!(t.rows[4].text, "Ran ls");
+    }
+
+    #[test]
+    fn seed_empty_history_keeps_only_hint() {
+        let mut t = Transcript::new();
+        t.seed(&[]);
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(t.rows[0].kind, LineKind::System);
+    }
+
+    #[test]
+    fn seed_mirrors_empty_tool_result_handling() {
+        let mut t = Transcript::new();
+        t.seed(&[Message::tool_result("c1", "", false)]);
+        assert_eq!(t.rows.len(), 1, "empty ok output is skipped");
+
+        let mut t = Transcript::new();
+        t.seed(&[Message::tool_result("c1", "", true)]);
+        assert_eq!(
+            t.rows.last().map(|r| (r.kind, r.text.as_str())),
+            Some((LineKind::ToolResult(true), "(no output)"))
         );
     }
 }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use oven_agent::{Agent, AgentEvent, CancellationToken};
-use oven_llm::{Provider, Role};
+use oven_llm::{Message, Provider, Role};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -51,6 +51,8 @@ pub struct AppHandle {
     slash_commands: Vec<(String, String)>,
     model: String,
     root: PathBuf,
+    /// Conversation history snapshot taken when the runtime was spawned.
+    history: Vec<Message>,
 }
 
 impl AppHandle {
@@ -84,6 +86,12 @@ impl AppHandle {
     /// Workspace root the runtime was started with.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Messages loaded at spawn time (empty for a fresh session). This is a
+    /// startup snapshot, not a live view of the in-flight conversation.
+    pub fn history(&self) -> &[Message] {
+        &self.history
     }
 
     /// Send one user turn and wait until the app returns to [`AppEvent::Idle`].
@@ -207,8 +215,8 @@ impl App {
     ) -> Result<AppHandle, AppError> {
         let prior = session.load()?;
         let mut agent = self.build_agent_with_provider(provider).await?;
-        for m in prior.iter().filter(|m| m.role != Role::System) {
-            agent.push_history(m.clone());
+        for m in prior.into_iter().filter(|m| m.role != Role::System) {
+            agent.push_history(m);
         }
         Ok(spawn_runtime(
             AppId::next(),
@@ -258,6 +266,7 @@ fn spawn_runtime(
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
     let subscribers_task = Arc::clone(&subscribers);
     let slash_commands = agent.slash_commands();
+    let history = agent.history().to_vec();
     let session_store = session.map(|s| {
         let dir = s.path().parent().map(Path::to_path_buf).unwrap_or_default();
         SessionStore { dir, current: s }
@@ -273,6 +282,7 @@ fn spawn_runtime(
         slash_commands,
         model,
         root,
+        history,
     }
 }
 
@@ -691,6 +701,7 @@ mod tests {
             .spawn_session_with_provider_in(&dir, Box::new(mock), Some("missing"))
             .await
             .unwrap();
+        assert!(handle.history().is_empty(), "fresh session has no history");
         assert_eq!(handle.prompt("hello").await.unwrap(), "one");
         handle.shutdown().await;
 
@@ -753,6 +764,20 @@ mod tests {
             .spawn_session_with_provider_in(&dir, Box::new(mock2), Some("s1"))
             .await
             .unwrap();
+        let resumed = handle.history();
+        assert_eq!(resumed.iter().filter(|m| m.role == Role::User).count(), 1);
+        assert!(resumed.iter().any(|m| {
+            m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { text } if text == "first"))
+        }));
+        assert!(resumed.iter().any(|m| {
+            m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text { text } if text == "one"))
+        }));
         assert_eq!(handle.prompt("second").await.unwrap(), "two");
         handle.shutdown().await;
 
