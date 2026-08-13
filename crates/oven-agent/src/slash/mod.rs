@@ -1,17 +1,24 @@
 mod clear;
 mod exit;
+mod model;
 
 use crate::agent::Agent;
 use crate::error::AgentError;
+use oven_llm::ReasoningEffort;
 
 pub use clear::Clear;
 pub use exit::Exit;
+pub use model::Model;
 
 #[derive(Debug, Clone)]
 pub enum CommandOutcome {
     Reply(String),
     Cleared,
     Exit,
+    ModelChanged {
+        model: String,
+        reasoning_effort: Option<ReasoningEffort>,
+    },
     Passthrough,
 }
 
@@ -36,6 +43,7 @@ impl SlashRegistry {
         let mut r = Self::new();
         r.register(Box::new(Clear));
         r.register(Box::new(Exit));
+        r.register(Box::new(Model));
         r
     }
 
@@ -150,9 +158,10 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds.len(), 3);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
+        assert!(cmds.iter().any(|(n, d)| n == "model" && !d.is_empty()));
     }
 
     #[test]

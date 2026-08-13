@@ -1,4 +1,4 @@
-use oven_llm::Usage;
+use oven_llm::{ReasoningEffort, Usage};
 
 /// Stable id for an agent instance (main or sub-agent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -41,5 +41,10 @@ pub enum AgentEvent {
     },
     HistoryCleared {
         agent_id: AgentId,
+    },
+    ModelChanged {
+        agent_id: AgentId,
+        model: String,
+        reasoning_effort: Option<ReasoningEffort>,
     },
 }

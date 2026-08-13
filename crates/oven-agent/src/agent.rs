@@ -1,7 +1,7 @@
 use futures::StreamExt;
 use oven_llm::{
-    ContentBlock, Delta, Message, ModelId, Provider, Request, Response, Role, SamplingParams,
-    StreamCollector, StreamEvent, ToolChoice, Usage,
+    ContentBlock, Delta, Message, ModelId, Provider, ReasoningEffort, Request, Response, Role,
+    SamplingParams, StreamCollector, StreamEvent, ThinkingMode, ToolChoice, Usage,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -23,6 +23,7 @@ pub struct Agent {
     pub(crate) history: History,
     model: ModelId,
     system: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
     max_iters: usize,
     /// Soft budget on conversation tokens; oldest turns are dropped to stay
     /// under it before each provider call.
@@ -39,6 +40,7 @@ impl Agent {
             history: History::new(),
             model: ModelId::new("default"),
             system: None,
+            reasoning_effort: None,
             max_iters: 100,
             budget: 128_000,
         }
@@ -58,8 +60,35 @@ impl Agent {
         self
     }
 
+    pub fn model(&self) -> &ModelId {
+        &self.model
+    }
+
+    pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        self.reasoning_effort
+    }
+
+    /// The provider in effect (used by the App layer for model listing).
+    pub fn provider(&self) -> &dyn Provider {
+        self.provider.as_ref()
+    }
+
+    pub fn set_model(&mut self, model: impl Into<ModelId>) {
+        self.model = model.into();
+    }
+
+    pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
+        self.reasoning_effort = effort;
+    }
+
     pub fn with_system(mut self, content: impl Into<String>) -> Self {
         self.system = Some(content.into());
+        self
+    }
+
+    /// Set the reasoning effort for provider calls.
+    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.reasoning_effort = Some(effort);
         self
     }
 
@@ -139,8 +168,17 @@ impl Agent {
             tools,
             tool_choice: ToolChoice::Auto,
             sampling: SamplingParams::default(),
-            thinking: None,
-            reasoning_effort: None,
+            thinking: Some(
+                if self
+                    .reasoning_effort
+                    .is_some_and(|effort| effort != ReasoningEffort::None)
+                {
+                    ThinkingMode::Enabled
+                } else {
+                    ThinkingMode::Disabled
+                },
+            ),
+            reasoning_effort: self.reasoning_effort,
             provider_options: Default::default(),
         }
     }
@@ -335,6 +373,28 @@ impl Agent {
                     Self::emit(&tx, AgentEvent::Exit { agent_id: self.id });
                     return Ok(text);
                 }
+                CommandOutcome::ModelChanged {
+                    model,
+                    reasoning_effort,
+                } => {
+                    self.set_model(&*model);
+                    self.set_reasoning_effort(reasoning_effort);
+                    Self::emit(
+                        &tx,
+                        AgentEvent::ModelChanged {
+                            agent_id: self.id,
+                            model: model.clone(),
+                            reasoning_effort,
+                        },
+                    );
+                    let text = match reasoning_effort {
+                        Some(e) => {
+                            format!("model switched to {model} (effort: {})", effort_label(e))
+                        }
+                        None => format!("model switched to {model}"),
+                    };
+                    return Ok(finish(self, &tx, text));
+                }
             }
 
             self.history.push(Message::user_text(input));
@@ -398,6 +458,15 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let end = s.floor_char_boundary(max);
         format!("{}\n...[truncated]", &s[..end])
+    }
+}
+
+pub fn effort_label(e: ReasoningEffort) -> &'static str {
+    match e {
+        ReasoningEffort::None => "none",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
     }
 }
 
@@ -703,5 +772,43 @@ mod tests {
         assert_eq!(out, "history cleared");
         assert_eq!(agent.total_usage().input_tokens, 0);
         assert_eq!(agent.total_usage().output_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn model_slash_command_switches_model_and_effort() {
+        let mut agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new());
+        let (tx, mut rx) = unbounded_channel();
+        let result = agent
+            .run_with_emitter("/model deepseek-chat high", Some(tx), None)
+            .await
+            .unwrap();
+        assert_eq!(result, "model switched to deepseek-chat (effort: high)");
+        assert_eq!(agent.model().as_str(), "deepseek-chat");
+        assert_eq!(agent.reasoning_effort(), Some(ReasoningEffort::High));
+
+        let mut saw_changed = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let AgentEvent::ModelChanged {
+                model,
+                reasoning_effort,
+                ..
+            } = ev
+            {
+                assert_eq!(model, "deepseek-chat");
+                assert_eq!(reasoning_effort, Some(ReasoningEffort::High));
+                saw_changed = true;
+            }
+        }
+        assert!(saw_changed);
+    }
+
+    #[tokio::test]
+    async fn model_slash_command_model_only_keeps_effort() {
+        let mut agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new())
+            .with_reasoning_effort(ReasoningEffort::Low);
+        let result = agent.run("/model gpt-4o").await.unwrap();
+        assert_eq!(result, "model switched to gpt-4o (effort: low)");
+        assert_eq!(agent.model().as_str(), "gpt-4o");
+        assert_eq!(agent.reasoning_effort(), Some(ReasoningEffort::Low));
     }
 }

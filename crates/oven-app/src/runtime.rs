@@ -1,9 +1,10 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use oven_agent::{Agent, AgentEvent, CancellationToken};
-use oven_llm::{Message, Provider, Role};
+use oven_llm::{Message, ModelInfo, Provider, ProviderName, Role};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -30,9 +31,21 @@ pub enum AppCmd {
 /// Events emitted by an app task (agent events plus app lifecycle).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
-    Agent { app_id: AppId, event: AgentEvent },
-    Idle { app_id: AppId },
-    Error { app_id: AppId, message: String },
+    Agent {
+        app_id: AppId,
+        event: AgentEvent,
+    },
+    ModelsUpdated {
+        app_id: AppId,
+        models: Vec<(String, String)>,
+    },
+    Idle {
+        app_id: AppId,
+    },
+    Error {
+        app_id: AppId,
+        message: String,
+    },
 }
 
 /// Persisted session tracking for one runtime. `/clear` replaces `current`
@@ -134,6 +147,7 @@ impl App {
             None,
             self.effective_model(),
             self.root.clone(),
+            self.model_list_timeout(),
         ))
     }
 
@@ -166,6 +180,7 @@ impl App {
             Some(session),
             self.effective_model(),
             self.root.clone(),
+            self.model_list_timeout(),
         ))
     }
 
@@ -189,6 +204,7 @@ impl App {
             Some(session),
             self.effective_model(),
             self.root.clone(),
+            self.model_list_timeout(),
         ))
     }
 
@@ -204,6 +220,7 @@ impl App {
             None,
             self.effective_model(),
             self.root.clone(),
+            self.model_list_timeout(),
         ))
     }
 
@@ -224,6 +241,7 @@ impl App {
             Some(session),
             self.effective_model(),
             self.root.clone(),
+            self.model_list_timeout(),
         ))
     }
 }
@@ -261,6 +279,7 @@ fn spawn_runtime(
     session: Option<Session>,
     model: String,
     root: PathBuf,
+    model_list_timeout: Duration,
 ) -> AppHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
@@ -271,8 +290,18 @@ fn spawn_runtime(
         let dir = s.path().parent().map(Path::to_path_buf).unwrap_or_default();
         SessionStore { dir, current: s }
     });
+    let task_model = model.clone();
     let join = tokio::spawn(async move {
-        runtime_loop(app_id, agent, session_store, cmd_rx, subscribers_task).await;
+        runtime_loop(
+            app_id,
+            agent,
+            session_store,
+            cmd_rx,
+            subscribers_task,
+            task_model,
+            model_list_timeout,
+        )
+        .await;
     });
     AppHandle {
         id: app_id,
@@ -309,18 +338,67 @@ fn switch_session(store: &mut Option<SessionStore>, subs: &Subscribers, app_id: 
     }
 }
 
+/// Best-effort model list for the `/model` popup: static presets merged with
+/// the provider's dynamic `/models` listing and the current model. A failed or
+/// timed-out dynamic fetch silently falls back to the static data.
+async fn refresh_model_choices(
+    provider: &dyn Provider,
+    current_model: &str,
+    timeout: Duration,
+) -> Vec<(String, String)> {
+    let known = provider.known_models();
+    let dynamic = match tokio::time::timeout(timeout, provider.list_models()).await {
+        Ok(Ok(list)) => list,
+        _ => Vec::new(),
+    };
+    merge_model_choices(known, dynamic, current_model, &provider.provider_name())
+}
+
+fn merge_model_choices(
+    known: Vec<ModelInfo>,
+    dynamic: Vec<ModelInfo>,
+    current_model: &str,
+    current_provider: &ProviderName,
+) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let choices = std::iter::once((current_model.to_string(), current_provider.clone()))
+        .chain(known.into_iter().map(|m| (m.id, m.provider)))
+        .chain(dynamic.into_iter().map(|m| (m.id, m.provider)));
+    for (id, provider) in choices {
+        if seen.insert(id.clone()) {
+            out.push((id, provider_label(&provider)));
+        }
+    }
+    out
+}
+
+fn provider_label(name: &ProviderName) -> String {
+    match name {
+        ProviderName::Custom(name) => format!("Custom({name})"),
+        other => format!("{other:?}"),
+    }
+}
+
 async fn runtime_loop(
     app_id: AppId,
     mut agent: Agent,
     mut session_store: Option<SessionStore>,
     mut cmd_rx: mpsc::UnboundedReceiver<AppCmd>,
     subscribers: Subscribers,
+    model: String,
+    model_list_timeout: Duration,
 ) {
     // Leading in-memory messages already written to the store. On `/clear`
     // the in-memory history is replaced, so this resets to 0 while the store
     // itself is kept untouched; later turns append after the old content.
     let mut persisted_prefix = agent.history().len();
     let mut persisted_rev = agent.history_revision();
+
+    // Publish the initial model list for the `/model` popup completion.
+    let models = refresh_model_choices(agent.provider(), &model, model_list_timeout).await;
+    emit(&subscribers, AppEvent::ModelsUpdated { app_id, models });
 
     // Commands received while a turn is in flight are buffered here and run
     // in order once the current turn finishes, so UserInput is never dropped.
@@ -446,6 +524,9 @@ mod tests {
         ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
         Role, StopReason, StreamEvent, Usage,
     };
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     fn text_response(text: &str) -> Response {
         Response {
@@ -507,6 +588,51 @@ mod tests {
         }
     }
 
+    /// Provider that records every request model and echoes it back, so tests
+    /// can observe which provider/model handled a turn.
+    struct RecordingProvider {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingProvider {
+        fn new(seen: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { seen }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for RecordingProvider {
+        async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("request:{}", req.model.as_str()));
+            Ok(text_response(&format!("echo:{}", req.model.as_str())))
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "stream disabled in mock".into(),
+            })
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("mock".into())
+        }
+    }
+
+    fn recorder() -> Arc<Mutex<Vec<String>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
     #[tokio::test]
     async fn spawn_prompt_emits_done_and_idle() {
         let tmp = tempdir::TempDir::new("app-runtime").unwrap();
@@ -548,9 +674,31 @@ mod tests {
             .iter()
             .map(|(n, _)| n.as_str())
             .collect();
-        assert_eq!(names, ["clear", "exit"]);
+        assert_eq!(names, ["clear", "exit", "model"]);
         assert!(handle.slash_commands().iter().all(|(_, d)| !d.is_empty()));
 
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn model_slash_switch_uses_request_model() {
+        let seen = recorder();
+        let agent = Agent::new(Box::new(RecordingProvider::new(seen.clone())), Vec::new())
+            .with_model("gpt-4o");
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "gpt-4o".into(),
+            PathBuf::from("/tmp"),
+            Duration::from_secs(1),
+        );
+
+        let out = handle.prompt("/model gpt-4o-turbo low").await.unwrap();
+        assert_eq!(out, "model switched to gpt-4o-turbo (effort: low)");
+        // The switch only changes the model carried by subsequent requests;
+        // the provider object is never rebuilt or replaced.
+        assert_eq!(handle.prompt("hello").await.unwrap(), "echo:gpt-4o-turbo");
         handle.shutdown().await;
     }
 

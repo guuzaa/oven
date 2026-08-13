@@ -1,9 +1,9 @@
 use std::path::Path;
 
 use crossterm::event::KeyEvent;
-use oven_agent::AgentEvent;
+use oven_agent::{AgentEvent, effort_label};
 use oven_app::AppEvent;
-use oven_llm::Usage;
+use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -16,6 +16,7 @@ use super::component::{Component, KeyResult, State};
 /// Single status row below the input: model · root · token usage.
 pub struct StatusBar {
     model: String,
+    effort: Option<ReasoningEffort>,
     root: String,
     total: Usage,
 }
@@ -24,6 +25,7 @@ impl StatusBar {
     pub fn new(model: impl Into<String>, root: &Path) -> Self {
         Self {
             model: model.into(),
+            effort: None,
             root: display_path(root),
             total: Usage::default(),
         }
@@ -44,11 +46,20 @@ impl Component for StatusBar {
                 AgentEvent::HistoryCleared { .. } => {
                     self.total = Usage::default();
                 }
+                AgentEvent::ModelChanged {
+                    model,
+                    reasoning_effort,
+                    ..
+                } => {
+                    self.model = model.clone();
+                    self.effort = *reasoning_effort;
+                }
                 _ => {}
             },
             AppEvent::Idle { .. } => {
                 state.busy = false;
             }
+            AppEvent::ModelsUpdated { .. } => {}
             AppEvent::Error { .. } => {}
         }
     }
@@ -62,6 +73,17 @@ impl Component for StatusBar {
             Span::styled(" · ", gray),
             Span::styled(format_usage(&self.total), gray),
         ]);
+        let line = if let Some(effort) = self.effort {
+            let mut spans = line.spans;
+            spans.push(Span::styled(" · ", gray));
+            spans.push(Span::styled(
+                format!("effort {}", effort_label(effort)),
+                Style::default().fg(Color::LightBlue),
+            ));
+            Line::from(spans)
+        } else {
+            line
+        };
         let line = truncate_line(line, area.width.saturating_sub(1) as usize);
         f.render_widget(Paragraph::new(line), area);
     }
@@ -205,6 +227,33 @@ mod tests {
             &mut state,
         );
         assert_eq!(bar.total, usage);
+    }
+
+    #[test]
+    fn model_changed_updates_model_and_effort() {
+        let mut bar = StatusBar::new("gpt-4o", Path::new("/tmp"));
+        let mut state = State::new();
+        bar.on_event(
+            &agent_event(AgentEvent::ModelChanged {
+                agent_id: AgentId(1),
+                model: "deepseek-chat".into(),
+                reasoning_effort: Some(ReasoningEffort::High),
+            }),
+            &mut state,
+        );
+        assert_eq!(bar.model, "deepseek-chat");
+        assert_eq!(bar.effort, Some(ReasoningEffort::High));
+
+        bar.on_event(
+            &agent_event(AgentEvent::ModelChanged {
+                agent_id: AgentId(1),
+                model: "gpt-4o".into(),
+                reasoning_effort: None,
+            }),
+            &mut state,
+        );
+        assert_eq!(bar.model, "gpt-4o");
+        assert_eq!(bar.effort, None);
     }
 
     #[test]

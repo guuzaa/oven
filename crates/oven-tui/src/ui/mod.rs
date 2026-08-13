@@ -1,5 +1,6 @@
 mod component;
 mod input;
+mod model_picker;
 mod queue;
 mod slash_command_popup;
 mod status;
@@ -230,12 +231,21 @@ impl Ui {
             constraints.push(Constraint::Length(queue_h));
         }
         constraints.push(Constraint::Length(input_h));
+        let picker_h = self
+            .input
+            .model_picker_height(&self.state)
+            .min(f.area().height.saturating_sub(3 + input_h + queue_h));
         let slash_command_h = self
             .input
             .slash_command_height(&self.state)
             .min(f.area().height.saturating_sub(3 + input_h + queue_h));
-        if slash_command_h > 0 {
-            constraints.push(Constraint::Length(slash_command_h));
+        let extra_h = if picker_h > 0 {
+            picker_h
+        } else {
+            slash_command_h
+        };
+        if extra_h > 0 {
+            constraints.push(Constraint::Length(extra_h));
         } else {
             constraints.push(Constraint::Length(1));
         }
@@ -253,7 +263,9 @@ impl Ui {
         }
         self.input.draw(f, chunks[next], &self.state);
         next += 1;
-        if slash_command_h > 0 {
+        if picker_h > 0 {
+            self.input.draw_model_picker(f, chunks[next], &self.state);
+        } else if slash_command_h > 0 {
             self.input.draw_slash_command(f, chunks[next], &self.state);
         } else {
             self.status.draw(f, chunks[next], &self.state);

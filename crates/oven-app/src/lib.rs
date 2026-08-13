@@ -1,6 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use oven_agent::{Agent, AgentError, RetryingProvider, SkillReadTool, Tool};
 use oven_llm::{Provider, ProviderBuilder, ProviderName};
@@ -262,6 +263,10 @@ impl App {
             .with_retries(self.config.max_retries)
             .with_base_backoff(self.config.base_backoff());
         Ok(Box::new(retrying))
+    }
+
+    fn model_list_timeout(&self) -> Duration {
+        self.config.request_timeout().min(Duration::from_secs(5))
     }
 
     fn build_system_prompt(&self) -> String {

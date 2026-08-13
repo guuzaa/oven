@@ -406,7 +406,9 @@ impl Component for Transcript {
                 }
                 AgentEvent::Exit { .. } => {}
                 AgentEvent::HistoryCleared { .. } => self.reset(),
+                AgentEvent::ModelChanged { .. } => {}
             },
+            AppEvent::ModelsUpdated { .. } => {}
             AppEvent::Idle { .. } => {
                 self.flush_streaming();
                 self.flush_pending_user();
