@@ -60,6 +60,9 @@ impl Component for StatusBar {
             }
             AppEvent::ModelsUpdated { .. } => {}
             AppEvent::Error { .. } => {}
+            AppEvent::Rewound { usage, .. } => {
+                self.total = *usage;
+            }
         }
     }
 
@@ -222,6 +225,34 @@ mod tests {
                 text: "done".into(),
                 usage,
             }),
+            &mut state,
+        );
+        assert_eq!(bar.total, usage);
+    }
+
+    #[test]
+    fn rewound_syncs_token_usage() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"));
+        let mut state = State::new();
+        bar.total = Usage {
+            input_tokens: 1000,
+            output_tokens: 2000,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let usage = Usage {
+            input_tokens: 500,
+            output_tokens: 100,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        bar.on_event(
+            &AppEvent::Rewound {
+                app_id: AppId(1),
+                text: Some("restored".into()),
+                messages: Vec::new(),
+                usage,
+            },
             &mut state,
         );
         assert_eq!(bar.total, usage);

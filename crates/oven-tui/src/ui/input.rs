@@ -80,6 +80,21 @@ impl InputView {
         self.pending = texts;
     }
 
+    /// Remove and return the most recently queued message, if any.
+    pub(crate) fn pop_pending(&mut self) -> Option<String> {
+        self.pending.pop()
+    }
+
+    /// Replace the input content with `text` (multi-line supported) and move
+    /// the cursor to the end.
+    pub(crate) fn set_text(&mut self, text: &str) {
+        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        let row = lines.len().saturating_sub(1);
+        let col = lines.last().map(|l| l.width()).unwrap_or(0);
+        self.textarea.set_lines(lines, (row, col));
+        self.slash_command.refresh(&self.text());
+    }
+
     /// Whether the slash-command popup or the model picker is currently open.
     pub(crate) fn slash_open(&self) -> bool {
         self.slash_command.is_open() || self.model_picker.is_open()
@@ -98,8 +113,17 @@ impl InputView {
 
 impl Component for InputView {
     fn on_event(&mut self, ev: &AppEvent, _state: &mut State) {
-        if let AppEvent::ModelsUpdated { models, .. } = ev {
-            self.model_picker.update_models(models.clone());
+        match ev {
+            AppEvent::ModelsUpdated { models, .. } => {
+                self.model_picker.update_models(models.clone());
+            }
+            AppEvent::Rewound {
+                text: Some(text), ..
+            } => {
+                self.set_text(text);
+            }
+            AppEvent::Rewound { .. } => {}
+            _ => {}
         }
     }
 
@@ -587,5 +611,46 @@ mod tests {
         type_text(&mut view, "/model");
         view.handle_key(key(KeyCode::Enter), &State::new());
         assert_eq!(view.model_picker.matches(), vec![0]);
+    }
+
+    #[test]
+    fn pop_pending_pops_most_recent() {
+        let mut view = view();
+        view.pending.push("a".into());
+        view.pending.push("b".into());
+        assert_eq!(view.pop_pending().as_deref(), Some("b"));
+        assert_eq!(view.pop_pending().as_deref(), Some("a"));
+        assert_eq!(view.pop_pending(), None);
+    }
+
+    #[test]
+    fn set_text_replaces_single_line_and_places_cursor() {
+        let mut view = view();
+        type_text(&mut view, "draft");
+        view.set_text("hello");
+        assert_eq!(view.textarea.lines()[0], "hello");
+        assert_eq!(view.textarea.cursor(), (0, 5));
+    }
+
+    #[test]
+    fn set_text_supports_multiline() {
+        let mut view = view();
+        view.set_text("line one\nline two");
+        assert_eq!(view.textarea.lines(), &["line one", "line two"]);
+        assert_eq!(view.textarea.cursor(), (1, 8));
+    }
+
+    #[test]
+    fn rewound_event_restores_input_text() {
+        let mut view = view();
+        type_text(&mut view, "draft");
+        let ev = AppEvent::Rewound {
+            app_id: oven_app::AppId(1),
+            text: Some("restored".into()),
+            messages: Vec::new(),
+            usage: oven_llm::Usage::default(),
+        };
+        view.on_event(&ev, &mut State::new());
+        assert_eq!(view.textarea.lines()[0], "restored");
     }
 }

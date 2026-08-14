@@ -121,7 +121,10 @@ oven -Q "what is love?"
 ```
 
 **Interactive** — run without arguments for a TUI. Type your prompt,
-press Enter to send. `Esc` cancels the current request, `Ctrl-C` quits.
+press Enter to send. While a request is running, `Esc` cancels it (or pops
+a queued message back into the input if any are queued); once idle, `Esc`
+rewinds the last exchange and restores your message to the input — keep
+pressing to rewind further, down to the first message. `Ctrl-C` quits.
 
 ```bash
 oven

@@ -16,6 +16,10 @@ use oven_llm::{ContentBlock, Message, Role, Usage};
 pub struct History {
     messages: Vec<Message>,
     last_prompt_tokens: usize,
+    /// Per-turn cumulative usage, one entry per `Role::User` message in
+    /// `messages`. Kept in sync with every mutation so `rewind_last_turn`
+    /// can subtract exactly the usage the rolled-back turn consumed.
+    turn_usage: Vec<Usage>,
     total: Usage,
     revision: u64,
 }
@@ -25,13 +29,18 @@ impl History {
         Self {
             messages: Vec::new(),
             last_prompt_tokens: 0,
+            turn_usage: Vec::new(),
             total: Usage::default(),
             revision: 0,
         }
     }
 
     pub fn push(&mut self, m: Message) {
+        let starts_turn = m.role == Role::User;
         self.messages.push(m);
+        if starts_turn {
+            self.turn_usage.push(Usage::default());
+        }
     }
 
     pub fn insert_system(&mut self, m: Message) {
@@ -42,14 +51,32 @@ impl History {
         self.revision += 1;
         self.messages.clear();
         self.last_prompt_tokens = 0;
+        self.turn_usage.clear();
         self.total = Usage::default();
     }
 
     pub fn set_messages(&mut self, msgs: Vec<Message>) {
         self.revision += 1;
+        let turns = msgs.iter().filter(|m| m.role == Role::User).count();
         self.messages = msgs;
         self.last_prompt_tokens = 0;
+        self.turn_usage = vec![Usage::default(); turns];
         self.total = Usage::default();
+    }
+
+    /// Remove the last user turn (the user message and everything after it),
+    /// returning the removed user message. Returns `None` when there is no
+    /// user message to rewind. The cached prompt-token count is cleared so
+    /// the next provider call refreshes the conversation-size estimate, and
+    /// the removed turn's cumulative usage is rolled back out of `total`.
+    pub fn rewind_last_turn(&mut self) -> Option<Message> {
+        let idx = self.messages.iter().rposition(|m| m.role == Role::User)?;
+        let removed = self.messages.drain(idx..).next()?;
+        if let Some(turn) = self.turn_usage.pop() {
+            self.total -= turn;
+        }
+        self.last_prompt_tokens = 0;
+        Some(removed)
     }
 
     pub fn revision(&self) -> u64 {
@@ -84,10 +111,15 @@ impl History {
     }
 
     /// Record a provider response's usage. Refreshes `last_prompt_tokens`
-    /// (the current conversation size) and accumulates cumulative totals.
+    /// (the current conversation size), accumulates cumulative totals, and
+    /// attributes the usage to the turn currently being run so a later
+    /// rewind can roll it back.
     pub fn record_usage(&mut self, usage: &Usage) {
         self.last_prompt_tokens = usage.input_tokens as usize;
         self.total += *usage;
+        if let Some(turn) = self.turn_usage.last_mut() {
+            *turn += *usage;
+        }
     }
 
     /// Drop the oldest non-system turn when the last API-reported
@@ -113,7 +145,14 @@ impl History {
         } else {
             self.messages.len()
         };
-        self.messages.drain(start..end);
+        let removed_turns = self
+            .messages
+            .drain(start..end)
+            .filter(|m| m.role == Role::User)
+            .count();
+        if removed_turns > 0 {
+            self.turn_usage.drain(..removed_turns);
+        }
         self.last_prompt_tokens = 0;
     }
 }
@@ -268,5 +307,164 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rewind_removes_last_turn_and_returns_user_message() {
+        let mut h = History::new();
+        h.push(Message::user_text("first"));
+        h.push(Message::assistant(vec![ContentBlock::text("one")]));
+        h.push(Message::user_text("second"));
+        h.push(assistant_tools(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
+        h.push(Message::tool_result("c1", "out", false));
+        h.record_usage(&usage(100));
+
+        let removed = h.rewind_last_turn().unwrap();
+        assert_eq!(removed.role, Role::User);
+        assert!(matches!(&removed.content[0], ContentBlock::Text { text } if text == "second"));
+
+        let roles: Vec<Role> = h.iter().map(|m| m.role).collect();
+        assert_eq!(roles, vec![Role::User, Role::Assistant]);
+        assert!(matches!(&h[0].content[0], ContentBlock::Text { text } if text == "first"));
+        assert_eq!(h.prompt_tokens(), 0);
+        assert_eq!(h.total_usage().input_tokens, 0);
+        assert_eq!(h.total_usage().output_tokens, 0);
+    }
+
+    #[test]
+    fn rewind_of_interrupted_turn_removes_only_user_message() {
+        let mut h = History::new();
+        h.push(Message::user_text("ping"));
+
+        let removed = h.rewind_last_turn().unwrap();
+        assert!(matches!(&removed.content[0], ContentBlock::Text { text } if text == "ping"));
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn rewind_rolls_back_only_the_removed_turn_usage() {
+        let mut h = History::new();
+        h.push(Message::user_text("first"));
+        h.push(Message::assistant_text("one"));
+        h.record_usage(&usage(100));
+        h.push(Message::user_text("second"));
+        h.push(assistant_tools(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
+        h.push(Message::tool_result("c1", "out", false));
+        h.record_usage(&usage(200));
+        assert_eq!(h.total_usage().input_tokens, 300);
+
+        assert!(h.rewind_last_turn().is_some());
+        assert_eq!(h.total_usage().input_tokens, 100);
+
+        assert!(h.rewind_last_turn().is_some());
+        assert_eq!(h.total_usage().input_tokens, 0);
+        assert!(h.is_empty());
+
+        assert!(h.rewind_last_turn().is_none());
+        assert_eq!(h.total_usage().input_tokens, 0);
+    }
+
+    #[test]
+    fn rewind_rolls_back_every_call_within_the_turn() {
+        let mut h = History::new();
+        h.push(Message::user_text("first"));
+        h.push(Message::assistant(vec![ContentBlock::text("one")]));
+        h.record_usage(&usage(10));
+        h.push(Message::user_text("second"));
+        h.push(assistant_tools(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
+        h.push(Message::tool_result("c1", "out", false));
+        h.record_usage(&usage(100));
+        h.push(Message::assistant(vec![ContentBlock::text("two")]));
+        h.record_usage(&usage(50));
+        assert_eq!(h.total_usage().input_tokens, 160);
+
+        h.rewind_last_turn();
+        assert_eq!(h.total_usage().input_tokens, 10);
+    }
+
+    #[test]
+    fn trim_then_rewind_rolls_back_only_remaining_turn() {
+        let mut h = History::new();
+        h.push(Message::user_text("first"));
+        h.push(Message::assistant_text("one"));
+        h.record_usage(&usage(100));
+        h.push(Message::user_text("second"));
+        h.push(Message::assistant_text("two"));
+        h.record_usage(&usage(200));
+
+        // Budget trim drops the first turn but keeps the cumulative total.
+        h.trim_to_budget(1);
+        let roles: Vec<Role> = h.iter().map(|m| m.role).collect();
+        assert_eq!(roles, vec![Role::User, Role::Assistant]);
+        assert_eq!(h.total_usage().input_tokens, 300);
+
+        h.rewind_last_turn();
+        assert_eq!(h.total_usage().input_tokens, 100);
+
+        // Nothing left to rewind; the trimmed turn's usage stays in the
+        // cumulative total (trim rolls back history, not billing).
+        assert!(h.rewind_last_turn().is_none());
+        assert_eq!(h.total_usage().input_tokens, 100);
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn set_messages_restarts_turn_usage_attribution() {
+        let mut h = History::new();
+        h.push(Message::user_text("old"));
+        h.push(Message::assistant_text("one"));
+        h.record_usage(&usage(100));
+
+        h.set_messages(vec![
+            Message::user_text("resumed"),
+            Message::assistant_text("two"),
+        ]);
+        assert_eq!(h.total_usage().input_tokens, 0);
+
+        h.record_usage(&usage(300));
+        assert_eq!(h.total_usage().input_tokens, 300);
+
+        h.rewind_last_turn();
+        assert_eq!(h.total_usage().input_tokens, 0);
+        assert!(h.is_empty());
+    }
+
+    #[test]
+    fn rewind_repeats_until_history_is_empty() {
+        let mut h = History::new();
+        h.push(Message::user_text("first"));
+        h.push(Message::assistant(vec![ContentBlock::text("one")]));
+        h.push(Message::user_text("second"));
+        h.push(assistant_tools(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
+        h.push(Message::tool_result("c1", "out", false));
+
+        assert!(h.rewind_last_turn().is_some());
+        assert_eq!(h.len(), 2);
+        assert!(h.rewind_last_turn().is_some());
+        assert!(h.is_empty());
+        assert!(h.rewind_last_turn().is_none());
+    }
+
+    #[test]
+    fn rewind_on_empty_history_returns_none() {
+        let mut h = History::new();
+        assert!(h.rewind_last_turn().is_none());
+        assert!(h.is_empty());
     }
 }

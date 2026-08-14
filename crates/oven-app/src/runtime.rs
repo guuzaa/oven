@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use oven_agent::{Agent, AgentEvent, CancellationToken};
-use oven_llm::{Message, ModelInfo, Provider, ProviderName, Role};
+use oven_llm::{ContentBlock, Message, ModelInfo, Provider, ProviderName, Role, Usage};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -25,11 +25,14 @@ type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<AppEvent>>>>;
 pub enum AppCmd {
     UserInput(String),
     Cancel,
+    /// Drop the last user turn from the conversation (in-memory history and
+    /// the persisted session file) so its message can be edited and resent.
+    Rewind,
     Shutdown,
 }
 
 /// Events emitted by an app task (agent events plus app lifecycle).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum AppEvent {
     Agent {
         app_id: AppId,
@@ -45,6 +48,15 @@ pub enum AppEvent {
     Error {
         app_id: AppId,
         message: String,
+    },
+    /// One exchange was rewound by the TUI: `text` is the removed user
+    /// message (joined text blocks), `messages` is the truncated history,
+    /// and `usage` is the cumulative token usage after the rollback.
+    Rewound {
+        app_id: AppId,
+        text: Option<String>,
+        messages: Vec<Message>,
+        usage: Usage,
     },
 }
 
@@ -381,6 +393,19 @@ fn provider_label(name: &ProviderName) -> String {
     }
 }
 
+/// Text of a user message: its text blocks joined with newlines. Empty when
+/// the message carries no text (e.g. embedded tool results only).
+fn user_message_text(m: &Message) -> String {
+    m.content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 async fn runtime_loop(
     app_id: AppId,
     mut agent: Agent,
@@ -417,6 +442,39 @@ async fn runtime_loop(
             AppCmd::Cancel => {
                 // no in-flight turn
             }
+            AppCmd::Rewind => {
+                let removed = agent.rewind_last_turn();
+                let text = removed.map(|m| user_message_text(&m));
+                let store_ok = match &session_store {
+                    Some(store) => match store.current.overwrite(agent.history()) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            emit(
+                                &subscribers,
+                                AppEvent::Error {
+                                    app_id,
+                                    message: e.to_string(),
+                                },
+                            );
+                            false
+                        }
+                    },
+                    None => true,
+                };
+                if store_ok {
+                    persisted_prefix = agent.history().len();
+                }
+                persisted_rev = agent.history_revision();
+                emit(
+                    &subscribers,
+                    AppEvent::Rewound {
+                        app_id,
+                        text,
+                        messages: agent.history().to_vec(),
+                        usage: *agent.total_usage(),
+                    },
+                );
+            }
             AppCmd::UserInput(input) => {
                 let cancel = CancellationToken::new();
                 let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
@@ -438,6 +496,9 @@ async fn runtime_loop(
                                     Some(AppCmd::Cancel) => cancel.cancel(),
                                     Some(AppCmd::UserInput(input)) => {
                                         pending_cmds.push_back(AppCmd::UserInput(input));
+                                    }
+                                    Some(AppCmd::Rewind) => {
+                                        pending_cmds.push_back(AppCmd::Rewind);
                                     }
                                 }
                             }
@@ -1093,6 +1154,198 @@ mod tests {
         }
         assert_eq!(dones, 2);
         assert_eq!(idles, 2);
+        handle.shutdown().await;
+    }
+
+    fn user_texts(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .filter_map(|m| match &m.content[0] {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn wait_rewound(
+        sub: &mut mpsc::UnboundedReceiver<AppEvent>,
+    ) -> (Option<String>, Vec<Message>, Usage) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match sub.recv().await {
+                    Some(AppEvent::Rewound {
+                        text,
+                        messages,
+                        usage,
+                        ..
+                    }) => return (text, messages, usage),
+                    Some(_) => {}
+                    None => panic!("channel closed before rewind"),
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for Rewound")
+    }
+
+    #[tokio::test]
+    async fn rewind_while_idle_emits_rewound_and_drops_last_exchange() {
+        let tmp = tempdir::TempDir::new("app-runtime-rewind").unwrap();
+        let app = App::new(tmp.path());
+        let mock = MockProvider::new(vec![
+            text_response("one"),
+            text_response("two"),
+            text_response("three"),
+        ]);
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
+
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+        assert_eq!(handle.prompt("second").await.unwrap(), "two");
+
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::Rewind).unwrap();
+        let (text, messages, usage) = wait_rewound(&mut sub).await;
+        assert_eq!(text.as_deref(), Some("second"));
+        assert_eq!(user_texts(&messages), vec!["first"]);
+        // Each mocked response is 10 in / 5 out; after dropping the second
+        // exchange only the first one's usage remains.
+        assert_eq!((usage.input_tokens, usage.output_tokens), (10, 5));
+
+        // A later turn runs without the rolled-back exchange in context.
+        assert_eq!(handle.prompt("third").await.unwrap(), "three");
+        handle.send(AppCmd::Rewind).unwrap();
+        let (text, messages, usage) = wait_rewound(&mut sub).await;
+        assert_eq!(text.as_deref(), Some("third"));
+        assert_eq!(user_texts(&messages), vec!["first"]);
+        assert_eq!((usage.input_tokens, usage.output_tokens), (10, 5));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rewind_with_nothing_to_remove_emits_none() {
+        let tmp = tempdir::TempDir::new("app-runtime-rewind-empty").unwrap();
+        let app = App::new(tmp.path());
+        let mock = MockProvider::new(vec![]);
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
+
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::Rewind).unwrap();
+        let (text, messages, usage) = wait_rewound(&mut sub).await;
+        assert!(text.is_none());
+        assert!(messages.is_empty());
+        assert_eq!(usage, Usage::default());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rewind_truncates_persisted_session_file() {
+        let tmp = tempdir::TempDir::new("app-runtime-rewind-session").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mock = MockProvider::new(vec![text_response("one"), text_response("two")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+        assert_eq!(handle.prompt("second").await.unwrap(), "two");
+
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::Rewind).unwrap();
+        wait_rewound(&mut sub).await;
+        handle.shutdown().await;
+
+        let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+        assert_eq!(user_texts(&loaded), vec!["first"]);
+    }
+
+    #[tokio::test]
+    async fn rewind_during_turn_is_queued_until_turn_ends() {
+        use tokio::sync::oneshot;
+
+        struct BlockOnceProvider {
+            release: Mutex<Option<oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl Provider for BlockOnceProvider {
+            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+                let rx = self.release.lock().unwrap().take();
+                if let Some(rx) = rx {
+                    let _ = rx.await;
+                }
+                Ok(text_response("done"))
+            }
+
+            async fn stream(
+                &self,
+                _req: &Request,
+            ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
+            {
+                Err(ProviderError::Api {
+                    status: 500,
+                    body: "no stream".into(),
+                })
+            }
+
+            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+                None
+            }
+
+            fn provider_name(&self) -> ProviderName {
+                ProviderName::Custom("rewind-block".into())
+            }
+        }
+
+        // Rewind sent while a turn is in flight must be applied after the
+        // turn completes (the TUI never does this, but a stale sender or
+        // boundary race must stay safe).
+        let (tx, rx) = oneshot::channel();
+        let provider = BlockOnceProvider {
+            release: Mutex::new(Some(rx)),
+        };
+
+        let tmp = tempdir::TempDir::new("app-runtime-rewind-queue").unwrap();
+        let app = App::new(tmp.path());
+        let handle = app.spawn_with_provider(Box::new(provider)).await.unwrap();
+        let mut sub = handle.subscribe();
+
+        handle.send(AppCmd::UserInput("block".into())).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        handle.send(AppCmd::Rewind).unwrap();
+        drop(tx);
+
+        let mut saw_idle = false;
+        let mut rewound = None;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+                Ok(Some(AppEvent::Idle { .. })) => saw_idle = true,
+                Ok(Some(AppEvent::Rewound {
+                    text,
+                    messages,
+                    usage,
+                    ..
+                })) => {
+                    rewound = Some((text, messages, usage));
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => panic!("timeout waiting for rewind after turn"),
+            }
+        }
+        assert!(saw_idle, "Idle must arrive before the queued Rewind runs");
+        let (text, messages, usage) = rewound.expect("Rewound must be emitted");
+        assert_eq!(text.as_deref(), Some("block"));
+        assert!(messages.is_empty(), "the whole exchange is rolled back");
+        assert_eq!(usage, Usage::default());
         handle.shutdown().await;
     }
 }

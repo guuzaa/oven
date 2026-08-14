@@ -12,7 +12,7 @@ use super::component::{Component, KeyResult, State};
 use super::tool_display;
 
 const MOUSE_SCROLL_STEP: u16 = 3;
-const START_HINT: &str = "oven — Enter send (queues while busy) · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel · Ctrl-C quit";
+const START_HINT: &str = "oven — Enter send (queues while busy) · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel/undo · Ctrl-C quit";
 const LINE_PREFIX_WIDTH: usize = 11;
 const LINE_INDENT: &str = "           ";
 
@@ -115,6 +115,35 @@ impl Transcript {
     /// as a normal user row once the current answer finishes.
     pub fn push_user_queued(&mut self, text: &str) {
         self.pending_user.push(text.to_string());
+    }
+
+    /// Text of the most recent user message, or `None` when the transcript
+    /// has none (fresh session or everything already rewound).
+    pub(crate) fn last_user_text(&self) -> Option<String> {
+        self.rows
+            .iter()
+            .rev()
+            .find(|r| r.kind == LineKind::User)
+            .map(|r| r.text.clone())
+    }
+
+    /// Drop the most recently queued user message; mirrors the input queue
+    /// so popped messages do not reappear once the turn ends.
+    pub(crate) fn pop_pending_user(&mut self) -> Option<String> {
+        self.pending_user.pop()
+    }
+
+    /// Rebuild the transcript from a message list (e.g. after a rewind).
+    /// Keeps queued user messages and returns the view to following the
+    /// newest content.
+    pub(crate) fn replace_from(&mut self, messages: &[Message]) {
+        self.rows.clear();
+        self.wrapped.clear();
+        self.clear_stream();
+        self.pinned = true;
+        self.top = 0;
+        self.push_row(LineKind::System, START_HINT);
+        self.seed(messages);
     }
 
     /// Pre-fill the transcript from a persisted session's messages when
@@ -370,7 +399,7 @@ impl Component for Transcript {
                 }
                 AgentEvent::ToolEnd { ok, output, .. } => {
                     let body = trim_message(output);
-                    if !(*ok && body.is_empty()) {
+                    if !*ok || !body.is_empty() {
                         let body = if body.is_empty() {
                             "(no output)".to_string()
                         } else {
@@ -408,6 +437,7 @@ impl Component for Transcript {
                 AgentEvent::ModelChanged { .. } => {}
             },
             AppEvent::ModelsUpdated { .. } => {}
+            AppEvent::Rewound { messages, .. } => self.replace_from(messages),
             AppEvent::Idle { .. } => {
                 self.flush_streaming();
                 self.flush_pending_user();
@@ -829,5 +859,42 @@ mod tests {
             t.rows.last().map(|r| (r.kind, r.text.as_str())),
             Some((LineKind::ToolResult(true), "(no output)"))
         );
+    }
+
+    #[test]
+    fn last_user_text_returns_most_recent_user_row() {
+        let mut t = Transcript::new();
+        t.push_user("first");
+        t.push_row(LineKind::Text, "one");
+        t.push_user("second");
+        assert_eq!(t.last_user_text().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn last_user_text_none_without_user_rows() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "one");
+        assert_eq!(t.last_user_text(), None);
+    }
+
+    #[test]
+    fn pop_pending_user_pops_last() {
+        let mut t = Transcript::new();
+        t.push_user_queued("a");
+        t.push_user_queued("b");
+        assert_eq!(t.pop_pending_user().as_deref(), Some("b"));
+        assert_eq!(t.pop_pending_user().as_deref(), Some("a"));
+        assert_eq!(t.pop_pending_user(), None);
+    }
+
+    #[test]
+    fn replace_from_rebuilds_rows_and_keeps_pending_user() {
+        let mut t = Transcript::new();
+        t.push_user("old");
+        t.push_user_queued("queued");
+        t.replace_from(&[Message::user_text("resumed")]);
+        assert_eq!(t.rows[0].kind, LineKind::System);
+        assert_eq!(t.rows[1].text, "resumed");
+        assert_eq!(t.pending_user, vec!["queued".to_string()]);
     }
 }

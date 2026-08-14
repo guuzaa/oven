@@ -138,6 +138,14 @@ impl Agent {
         self.history.push(message);
     }
 
+    /// Remove the last user turn from the conversation history, returning
+    /// the removed user message, or `None` when there is nothing to rewind.
+    /// The removed turn's cumulative token usage is rolled back out of the
+    /// running total.
+    pub fn rewind_last_turn(&mut self) -> Option<Message> {
+        self.history.rewind_last_turn()
+    }
+
     fn llm_tools(&self) -> Vec<oven_llm::Tool> {
         self.tools
             .iter()

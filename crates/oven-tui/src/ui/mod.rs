@@ -46,6 +46,9 @@ pub struct Ui {
     events: mpsc::UnboundedReceiver<AppEvent>,
     state: State,
     quit: bool,
+    /// A rewind is in flight: Esc is ignored until `Rewound` arrives so a
+    /// second fallback cannot desync the transcript from the backend.
+    rewinding: bool,
     transcript: Transcript,
     status: StatusBar,
     input: InputView,
@@ -66,6 +69,7 @@ impl Ui {
             events,
             state: State::new(),
             quit: false,
+            rewinding: false,
             transcript: Transcript::new(),
             status: StatusBar::new(model, &root),
             input: InputView::new(slash_commands),
@@ -153,6 +157,9 @@ impl Ui {
         self.transcript.on_event(&ev, &mut self.state);
         self.status.on_event(&ev, &mut self.state);
         self.input.on_event(&ev, &mut self.state);
+        if matches!(ev, AppEvent::Rewound { .. }) {
+            self.rewinding = false;
+        }
         self.maybe_flush();
     }
 
@@ -183,9 +190,33 @@ impl Ui {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 KeyResult::Action(Action::Quit)
             }
-            KeyCode::Esc if self.state.busy && !self.input.slash_open() => {
-                KeyResult::Action(Action::Cancel)
-            }
+            KeyCode::Esc if !self.input.slash_open() => match EscAction::new(
+                self.input.pop_pending(),
+                self.state.busy,
+                self.rewinding,
+                self.transcript.last_user_text(),
+            ) {
+                EscAction::PopQueue(text) => {
+                    self.transcript.pop_pending_user();
+                    self.input.set_text(&text);
+                    KeyResult::Handled
+                }
+                EscAction::Cancel => KeyResult::Action(Action::Cancel),
+                EscAction::Rewind(text) => {
+                    self.input.set_text(&text);
+                    self.rewinding = true;
+                    if self.handle.send(AppCmd::Rewind).is_err() {
+                        self.rewinding = false;
+                    }
+                    KeyResult::Handled
+                }
+                EscAction::Ignore => KeyResult::Handled,
+            },
+            // While a rewind is in flight (idle, a few ms), plain Enter would
+            // submit before the backend truncates history, letting the
+            // Rewound event clobber the fresh submission. Block it until the
+            // rewind completes; Alt-Enter newline still edits normally.
+            KeyCode::Enter if self.rewinding && key.modifiers.is_empty() => KeyResult::Handled,
             _ => match self.transcript.handle_key(key, &self.state) {
                 KeyResult::Ignored => self.input.handle_key(key, &self.state),
                 other => other,
@@ -273,6 +304,33 @@ impl Ui {
     }
 }
 
+/// What pressing Esc should do, in priority order: pop a queued message,
+/// interrupt an in-flight turn, or rewind the last finished exchange.
+enum EscAction {
+    PopQueue(String),
+    Cancel,
+    Rewind(String),
+    Ignore,
+}
+
+impl EscAction {
+    fn new(queued: Option<String>, busy: bool, rewinding: bool, last_user: Option<String>) -> Self {
+        if let Some(text) = queued {
+            return EscAction::PopQueue(text);
+        }
+        if busy {
+            return EscAction::Cancel;
+        }
+        if rewinding {
+            return EscAction::Ignore;
+        }
+        match last_user {
+            Some(text) => EscAction::Rewind(text),
+            None => EscAction::Ignore,
+        }
+    }
+}
+
 /// Send each message as its own `UserInput`, in order. Returns the messages
 /// that were not sent: the first failed one and everything after it.
 fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<String> {
@@ -310,6 +368,39 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn esc_action_priority_queue_then_cancel_then_rewind() {
+        // Queued message wins over everything else.
+        assert!(matches!(
+            EscAction::new(Some("q".into()), true, false, Some("u".into())),
+            EscAction::PopQueue(t) if t == "q"
+        ));
+        assert!(matches!(
+            EscAction::new(Some("q".into()), true, true, None),
+            EscAction::PopQueue(t) if t == "q"
+        ));
+        // Empty queue + busy means interrupt, not fallback.
+        assert!(matches!(
+            EscAction::new(None, true, false, Some("u".into())),
+            EscAction::Cancel
+        ));
+        // A rewind already in flight is ignored until it completes.
+        assert!(matches!(
+            EscAction::new(None, false, true, Some("u".into())),
+            EscAction::Ignore
+        ));
+        // Idle with a previous user message rewinds it.
+        assert!(matches!(
+            EscAction::new(None, false, false, Some("u".into())),
+            EscAction::Rewind(t) if t == "u"
+        ));
+        // Idle with nothing to fall back to is a no-op.
+        assert!(matches!(
+            EscAction::new(None, false, false, None),
+            EscAction::Ignore
+        ));
+    }
 
     #[test]
     fn send_each_sends_messages_separately_in_order() {
