@@ -1,6 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
-use oven_agent::AgentEvent;
-use oven_app::AppEvent;
+use oven_app::{AgentEvent, AppEvent};
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -574,8 +573,7 @@ fn split_at_width(s: &str, max_width: usize) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_agent::AgentId;
-    use oven_app::AppId;
+    use oven_app::{AgentId, AppId};
 
     fn wide(t: &mut Transcript) {
         t.width = 80;

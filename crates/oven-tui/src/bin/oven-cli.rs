@@ -1,8 +1,5 @@
-mod cli;
-mod ui;
-
-use crate::cli::Cli;
 use clap::Parser;
+use oven_tui::Cli;
 use std::process::ExitCode;
 
 #[tokio::main]

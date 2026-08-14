@@ -3,6 +3,7 @@ name = "oven-app"
 description = "Application layer: service composition"
 version = "0.0.1"
 edition = { workspace = true }
+rust-version = { workspace = true }
 
 [dependencies]
 oven-llm = { workspace = true }

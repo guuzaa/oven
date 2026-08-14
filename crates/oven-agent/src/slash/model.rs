@@ -33,8 +33,8 @@ impl SlashCommand for Model {
         match tokens.as_slice() {
             [] => {
                 let effort = match agent.reasoning_effort() {
-                    Some(e) => crate::agent::effort_label(e).to_string(),
-                    None => "default".to_string(),
+                    Some(e) => e.to_string(),
+                    None => "none".to_string(),
                 };
                 Ok(CommandOutcome::Reply(format!(
                     "current model: {} (reasoning effort: {effort})",

@@ -12,7 +12,7 @@ description = "A toy coding agent for joy only."
 oven-app = { path = "./crates/oven-app" }
 oven-agent = { path = "./crates/oven-agent" }
 oven-tui = { path = "./crates/oven-tui" }
-oven-llm = "0.2.2"
+oven-llm = "0.3.0"
 
 # External dependencies
 async-trait = "0.1"

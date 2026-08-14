@@ -3,18 +3,18 @@ name = "oven-tui"
 description = "TUI layer: entry point"
 version = "0.0.1"
 edition = { workspace = true }
+rust-version = { workspace = true }
 
 [[bin]]
 name = "oven"
-path = "src/main.rs"
+path = "src/bin/oven-cli.rs"
 
 [dependencies]
+oven-llm = { workspace = true }
+oven-app = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }
-oven-agent = { workspace = true }
-oven-app = { workspace = true }
 ratatui = { workspace = true }
-oven-llm = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
 tui-textarea-2 = { workspace = true }

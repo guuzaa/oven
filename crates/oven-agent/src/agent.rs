@@ -389,7 +389,7 @@ impl Agent {
                     );
                     let text = match reasoning_effort {
                         Some(e) => {
-                            format!("model switched to {model} (effort: {})", effort_label(e))
+                            format!("model switched to {model} (effort: {})", e)
                         }
                         None => format!("model switched to {model}"),
                     };
@@ -458,15 +458,6 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let end = s.floor_char_boundary(max);
         format!("{}\n...[truncated]", &s[..end])
-    }
-}
-
-pub fn effort_label(e: ReasoningEffort) -> &'static str {
-    match e {
-        ReasoningEffort::None => "none",
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
     }
 }
 

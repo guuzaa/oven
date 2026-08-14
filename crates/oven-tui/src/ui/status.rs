@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use crossterm::event::KeyEvent;
-use oven_agent::{AgentEvent, effort_label};
-use oven_app::AppEvent;
+use oven_app::{AgentEvent, AppEvent};
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -77,7 +76,7 @@ impl Component for StatusBar {
             let mut spans = line.spans;
             spans.push(Span::styled(" · ", gray));
             spans.push(Span::styled(
-                format!("effort {}", effort_label(effort)),
+                format!("effort {}", effort),
                 Style::default().fg(Color::LightBlue),
             ));
             Line::from(spans)
@@ -171,8 +170,7 @@ fn display_path_with_home(path: &Path, home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_agent::AgentId;
-    use oven_app::AppId;
+    use oven_app::{AgentId, AppId};
 
     fn agent_event(event: AgentEvent) -> AppEvent {
         AppEvent::Agent {

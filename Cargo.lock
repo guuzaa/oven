@@ -1771,9 +1771,9 @@ dependencies = [
 
 [[package]]
 name = "oven-llm"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5242452c5424622befdc3123e57ad3a61c80ec3dea7b499d71aceaf2a63cd512"
+checksum = "d3945b8feaeb3de2d33921f2d98ecb26fb9b8355f7db1140350100f751d5b5fc"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1795,7 +1795,6 @@ dependencies = [
  "crossterm",
  "futures",
  "mockall",
- "oven-agent",
  "oven-app",
  "oven-llm",
  "ratatui",

@@ -7,7 +7,7 @@ mod skills;
 mod slash;
 mod tools;
 
-pub use agent::{Agent, effort_label};
+pub use agent::Agent;
 pub use error::AgentError;
 pub use event::{AgentEvent, AgentId};
 pub use history::History;
