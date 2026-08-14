@@ -149,7 +149,8 @@ impl Agent {
             .collect()
     }
 
-    fn build_request(&self, tools: Vec<oven_llm::Tool>) -> Request {
+    fn build_request(&self) -> Request {
+        let tools = self.llm_tools();
         let mut system = self.system.clone();
         let mut messages = Vec::with_capacity(self.history.len());
         for m in self.history.messages() {
@@ -205,10 +206,9 @@ impl Agent {
 
     async fn complete_response(
         &mut self,
-        tools: Vec<oven_llm::Tool>,
         tx: &Option<UnboundedSender<AgentEvent>>,
     ) -> Result<Response, AgentError> {
-        let req = self.build_request(tools);
+        let req = self.build_request();
 
         match self.provider.stream(&req).await {
             Ok(mut stream) => {
@@ -277,11 +277,10 @@ impl Agent {
 
     async fn step(
         &mut self,
-        tools: Vec<oven_llm::Tool>,
         tx: &Option<UnboundedSender<AgentEvent>>,
         cancel: Option<&CancellationToken>,
     ) -> Result<Option<String>, AgentError> {
-        let response = self.complete_response(tools, tx).await?;
+        let response = self.complete_response(tx).await?;
         if let Some(usage) = &response.usage {
             self.history.record_usage(usage);
         }
@@ -398,7 +397,6 @@ impl Agent {
             }
 
             self.history.push(Message::user_text(input));
-            let tools = self.llm_tools();
             self.budget = self
                 .provider
                 .resolve_model(&self.model)
@@ -407,7 +405,7 @@ impl Agent {
 
             for _ in 0..self.max_iters {
                 self.history.trim_to_budget(self.budget);
-                match self.step(tools.clone(), &tx, cancel).await {
+                match self.step(&tx, cancel).await {
                     Ok(Some(final_text)) => return Ok(finish(self, &tx, final_text)),
                     Ok(None) => continue,
                     Err(e) => return Err(e),
