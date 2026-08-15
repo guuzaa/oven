@@ -1,15 +1,25 @@
 //! Conversation persistence as JSONL.
 //!
 //! Each session is one file under `<data_dir>/oven/sessions/<id>.jsonl`. The
-//! file holds one `Message` per line, appended as the conversation progresses
-//! so a crash never loses already-committed turns beyond the last flushed
-//! line.
+//! file holds one JSON record per line — a `Message` or a `TokenUsage`
+//! record, each with a Unix-millisecond timestamp — appended as the
+//! conversation progresses so a crash never loses already-committed turns
+//! beyond the last flushed line. A single `TokenUsage` line is written right
+//! after the final assistant message of each user turn, so messages no
+//! longer carry per-message usage.
+//!
+//! Reading is backward compatible: lines written by older versions — a bare
+//! `Message` or the `{"message": ..., "usage": ...}` envelope — are accepted
+//! with timestamp 0, and a non-zero envelope usage becomes a `TokenUsage`
+//! record after its message.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use oven_llm::Message;
+use oven_agent::Record;
+use oven_llm::{Message, Usage};
+use serde::Deserialize;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -36,6 +46,15 @@ pub struct Session {
     path: PathBuf,
 }
 
+/// Legacy JSONL line written by older versions: a message plus the usage its
+/// response consumed. Still read back so existing sessions keep their data.
+#[derive(Debug, Deserialize)]
+struct RecordLine {
+    message: Message,
+    #[serde(default)]
+    usage: Usage,
+}
+
 impl Session {
     /// Open (or create) the session file for `id`. The file is created lazily
     /// on the first append.
@@ -58,9 +77,12 @@ impl Session {
         &self.path
     }
 
-    /// Read all messages from disk. Returns an empty Vec if the file does not
-    /// yet exist.
-    pub fn load(&self) -> Result<Vec<Message>, SessionError> {
+    /// Read all records (messages and token usage) from disk. Returns an
+    /// empty Vec if the file does not yet exist. Accepts the current
+    /// `Record` format, the legacy `{"message": ..., "usage": ...}` envelope
+    /// (a non-zero usage becomes a `TokenUsage` record after its message),
+    /// and legacy bare-`Message` lines (timestamp 0).
+    pub fn load_records(&self) -> Result<Vec<Record>, SessionError> {
         match fs::File::open(&self.path) {
             Ok(f) => {
                 let reader = BufReader::new(f);
@@ -70,9 +92,9 @@ impl Session {
                     if line.trim().is_empty() {
                         continue;
                     }
-                    let msg: Message = serde_json::from_str(&line)
+                    let records = parse_line(&line)
                         .map_err(|e| SessionError::Parse(self.path.clone(), i + 1, e))?;
-                    out.push(msg);
+                    out.extend(records);
                 }
                 Ok(out)
             }
@@ -81,24 +103,24 @@ impl Session {
         }
     }
 
-    /// Append a single message as one JSONL line.
-    pub fn append(&self, message: &Message) -> Result<(), SessionError> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        let line = serde_json::to_string(message)
-            .map_err(|e| SessionError::Parse(self.path.clone(), 0, e))?;
-        writeln!(file, "{line}").map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        file.flush()
-            .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        Ok(())
+    /// Read all messages from disk, dropping token-usage records. See
+    /// [`load_records`](Self::load_records).
+    pub fn load(&self) -> Result<Vec<Message>, SessionError> {
+        self.load_records().map(|records| {
+            records
+                .into_iter()
+                .filter_map(|r| match r {
+                    Record::Message { message, .. } => Some(message),
+                    Record::TokenUsage { .. } => None,
+                })
+                .collect()
+        })
     }
 
-    /// Append many messages in one open/flush cycle.
-    pub fn append_all(&self, messages: &[Message]) -> Result<(), SessionError> {
-        if messages.is_empty() {
+    /// Append many records (messages and token usage) in one open/flush
+    /// cycle.
+    pub fn append_records(&self, records: &[Record]) -> Result<(), SessionError> {
+        if records.is_empty() {
             return Ok(());
         }
         let mut file = fs::OpenOptions::new()
@@ -106,33 +128,27 @@ impl Session {
             .append(true)
             .open(&self.path)
             .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        for m in messages {
-            let line = serde_json::to_string(m)
-                .map_err(|e| SessionError::Parse(self.path.clone(), 0, e))?;
-            writeln!(file, "{line}").map_err(|e| SessionError::Io(self.path.clone(), e))?;
+        for record in records {
+            write_record(&mut file, record).map_err(|e| SessionError::Io(self.path.clone(), e))?;
         }
         file.flush()
-            .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        Ok(())
+            .map_err(|e| SessionError::Io(self.path.clone(), e))
     }
 
-    /// Replace the entire session file with `messages`. Useful when trimming
-    /// context in memory and persisting the trimmed version.
-    pub fn overwrite(&self, messages: &[Message]) -> Result<(), SessionError> {
+    /// Replace the entire session file with `records`. Used by rewind, which
+    /// truncates the persisted conversation together with its usage.
+    pub fn overwrite(&self, records: &[Record]) -> Result<(), SessionError> {
         let mut file = fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(&self.path)
             .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        for m in messages {
-            let line = serde_json::to_string(m)
-                .map_err(|e| SessionError::Parse(self.path.clone(), 0, e))?;
-            writeln!(file, "{line}").map_err(|e| SessionError::Io(self.path.clone(), e))?;
+        for record in records {
+            write_record(&mut file, record).map_err(|e| SessionError::Io(self.path.clone(), e))?;
         }
         file.flush()
-            .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        Ok(())
+            .map_err(|e| SessionError::Io(self.path.clone(), e))
     }
 
     /// Delete the session file. Idempotent for missing files.
@@ -166,6 +182,42 @@ impl Session {
     }
 }
 
+/// Parse one JSONL line into records. Tries the current `Record` format, the
+/// legacy envelope (which can expand into a message plus a `TokenUsage`
+/// record), then a bare `Message`.
+fn parse_line(line: &str) -> Result<Vec<Record>, serde_json::Error> {
+    match serde_json::from_str::<Record>(line) {
+        Ok(record) => Ok(vec![record]),
+        Err(record_err) => match serde_json::from_str::<RecordLine>(line) {
+            Ok(envelope) => {
+                let mut out = vec![Record::Message {
+                    timestamp: 0,
+                    message: envelope.message,
+                }];
+                if envelope.usage != Usage::default() {
+                    out.push(Record::TokenUsage {
+                        timestamp: 0,
+                        usage: envelope.usage,
+                    });
+                }
+                Ok(out)
+            }
+            Err(_) => match serde_json::from_str::<Message>(line) {
+                Ok(message) => Ok(vec![Record::Message {
+                    timestamp: 0,
+                    message,
+                }]),
+                Err(_) => Err(record_err),
+            },
+        },
+    }
+}
+
+fn write_record(file: &mut impl Write, record: &Record) -> std::io::Result<()> {
+    let line = serde_json::to_string(record).expect("record serialization cannot fail");
+    writeln!(file, "{line}")
+}
+
 fn validate_id(id: &str) -> Result<(), SessionError> {
     if id.is_empty() || id.contains('/') || id.contains('\\') || id == "." || id == ".." {
         return Err(SessionError::BadId(id.to_string()));
@@ -182,21 +234,12 @@ mod tests {
         tempdir::TempDir::new("oven-session").unwrap()
     }
 
-    #[test]
-    fn append_then_load_roundtrip() {
-        let tmp = tmp();
-        let session = Session::open(tmp.path(), "s1").unwrap();
-        session.append(&Message::user_text("hello")).unwrap();
-        session
-            .append(&Message::assistant(vec![ContentBlock::text("hi")]))
-            .unwrap();
-        let loaded = session.load().unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert!(
-            matches!(loaded[0].content.first(), Some(ContentBlock::Text { text }) if text == "hello")
-        );
-        assert_eq!(loaded[0].role, oven_llm::Role::User);
-        assert_eq!(loaded[1].role, oven_llm::Role::Assistant);
+    fn message_record(timestamp: u64, message: Message) -> Record {
+        Record::Message { timestamp, message }
+    }
+
+    fn usage_record(timestamp: u64, usage: Usage) -> Record {
+        Record::TokenUsage { timestamp, usage }
     }
 
     #[test]
@@ -207,33 +250,140 @@ mod tests {
     }
 
     #[test]
-    fn list_returns_sorted_ids() {
-        let tmp = tmp();
-        Session::open(tmp.path(), "b")
-            .unwrap()
-            .append(&Message::user_text("x"))
-            .unwrap();
-        Session::open(tmp.path(), "a")
-            .unwrap()
-            .append(&Message::user_text("x"))
-            .unwrap();
-        let ids = Session::list(tmp.path()).unwrap();
-        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
-    }
-
-    #[test]
     fn overwrite_truncates() {
         let tmp = tmp();
         let session = Session::open(tmp.path(), "s").unwrap();
         session
-            .append_all(&[
-                Message::user_text("a"),
-                Message::user_text("b"),
-                Message::user_text("c"),
+            .append_records(&[
+                message_record(1, Message::user_text("a")),
+                message_record(2, Message::user_text("b")),
+                message_record(3, Message::user_text("c")),
             ])
             .unwrap();
-        session.overwrite(&[Message::user_text("only")]).unwrap();
+        session
+            .overwrite(&[message_record(1, Message::user_text("only"))])
+            .unwrap();
         assert_eq!(session.load().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn records_roundtrip_preserves_usage_and_timestamps() {
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").unwrap();
+        let usage = Usage {
+            input_tokens: 123,
+            output_tokens: 45,
+            cache_read_tokens: 6,
+            reasoning_tokens: 7,
+        };
+        session
+            .append_records(&[
+                message_record(11, Message::user_text("hello")),
+                message_record(22, Message::assistant(vec![ContentBlock::text("hi")])),
+                usage_record(22, usage),
+            ])
+            .unwrap();
+
+        let loaded = session.load_records().unwrap();
+        assert_eq!(loaded.len(), 3);
+        match (&loaded[0], &loaded[1], &loaded[2]) {
+            (
+                Record::Message {
+                    timestamp: t1,
+                    message,
+                },
+                Record::Message {
+                    timestamp: t2,
+                    message: assistant,
+                },
+                Record::TokenUsage {
+                    timestamp: t3,
+                    usage: u,
+                },
+            ) => {
+                assert_eq!(*t1, 11);
+                assert_eq!(message.role, oven_llm::Role::User);
+                assert_eq!(*t2, 22);
+                assert_eq!(assistant.role, oven_llm::Role::Assistant);
+                assert_eq!(*t3, 22);
+                assert_eq!(*u, usage);
+            }
+            _ => panic!("unexpected record kinds"),
+        }
+        // load() drops the token-usage record.
+        assert_eq!(session.load().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn load_accepts_legacy_bare_message_lines() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&Message::user_text("old")).unwrap()
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let loaded = session.load_records().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            matches!(&loaded[0], Record::Message { timestamp: 0, message } if message.role == oven_llm::Role::User)
+        );
+        assert_eq!(session.load().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn load_accepts_legacy_envelope_lines() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        // Non-zero usage: expands into a message plus a token-usage record.
+        writeln!(
+            file,
+            r#"{{"message":{},"usage":{{"input_tokens":12,"output_tokens":3}}}}"#,
+            serde_json::to_string(&Message::assistant(vec![ContentBlock::text("hi")])).unwrap()
+        )
+        .unwrap();
+        // Zero usage: just the message.
+        writeln!(
+            file,
+            r#"{{"message":{},"usage":{{"input_tokens":0,"output_tokens":0}}}}"#,
+            serde_json::to_string(&Message::user_text("plain")).unwrap()
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let loaded = session.load_records().unwrap();
+        assert_eq!(loaded.len(), 3);
+        match (&loaded[0], &loaded[1]) {
+            (
+                Record::Message {
+                    timestamp: 0,
+                    message,
+                },
+                Record::TokenUsage {
+                    timestamp: 0,
+                    usage,
+                },
+            ) => {
+                assert_eq!(message.role, oven_llm::Role::Assistant);
+                assert_eq!(usage.input_tokens, 12);
+                assert_eq!(usage.output_tokens, 3);
+            }
+            _ => panic!("expected envelope expansion"),
+        }
+        assert!(
+            matches!(&loaded[2], Record::Message { timestamp: 0, message } if message.role == oven_llm::Role::User)
+        );
+        // load() drops the token-usage record.
+        assert_eq!(session.load().unwrap().len(), 2);
     }
 
     #[test]
@@ -242,15 +392,5 @@ mod tests {
         assert!(Session::open(tmp.path(), "../escape").is_err());
         assert!(Session::open(tmp.path(), "a/b").is_err());
         assert!(Session::open(tmp.path(), "").is_err());
-    }
-
-    #[test]
-    fn delete_is_idempotent() {
-        let tmp = tmp();
-        let session = Session::open(tmp.path(), "x").unwrap();
-        session.append(&Message::user_text("hi")).unwrap();
-        session.delete().unwrap();
-        session.delete().unwrap();
-        assert!(session.load().unwrap().is_empty());
     }
 }

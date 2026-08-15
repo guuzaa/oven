@@ -21,12 +21,12 @@ pub struct StatusBar {
 }
 
 impl StatusBar {
-    pub fn new(model: impl Into<String>, root: &Path) -> Self {
+    pub fn new(model: impl Into<String>, root: &Path, total: Usage) -> Self {
         Self {
             model: model.into(),
             effort: None,
             root: display_path(root),
-            total: Usage::default(),
+            total,
         }
     }
 }
@@ -68,13 +68,13 @@ impl Component for StatusBar {
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, _state: &State) {
         let gray = Style::default().fg(Color::DarkGray);
-        let line = Line::from(vec![
+        let mut spans = vec![
             Span::styled(self.model.clone(), Style::default().fg(Color::LightYellow)),
             Span::styled(" · ", gray),
             Span::styled(self.root.clone(), Style::default().fg(Color::LightGreen)),
-            Span::styled(" · ", gray),
-            Span::styled(format_usage(&self.total), gray),
-        ]);
+        ];
+        spans.extend(usage_spans(&self.total, gray));
+        let line = Line::from(spans);
         let line = if let Some(effort) = self.effort {
             let mut spans = line.spans;
             spans.push(Span::styled(" · ", gray));
@@ -88,6 +88,20 @@ impl Component for StatusBar {
         };
         let line = truncate_line(line, area.width.saturating_sub(1) as usize);
         f.render_widget(Paragraph::new(line), area);
+    }
+}
+
+/// Token-usage segment of the status row: empty while nothing has been
+/// recorded (all-zero `Usage`), otherwise a separator plus the formatted
+/// totals.
+fn usage_spans(total: &Usage, gray: Style) -> Vec<Span<'static>> {
+    if *total == Usage::default() {
+        Vec::new()
+    } else {
+        vec![
+            Span::styled(" · ", gray),
+            Span::styled(format_usage(total), gray),
+        ]
     }
 }
 
@@ -184,7 +198,7 @@ mod tests {
 
     #[test]
     fn idle_clears_busy() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"));
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         let mut state = State { busy: true };
         bar.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut state);
         assert!(!state.busy);
@@ -192,7 +206,7 @@ mod tests {
 
     #[test]
     fn history_cleared_resets_usage() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"));
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         let mut state = State::new();
         bar.total = Usage {
             input_tokens: 1000,
@@ -211,7 +225,7 @@ mod tests {
 
     #[test]
     fn done_updates_token_usage() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"));
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         let mut state = State::new();
         let usage = Usage {
             input_tokens: 1234,
@@ -232,7 +246,7 @@ mod tests {
 
     #[test]
     fn rewound_syncs_token_usage() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"));
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         let mut state = State::new();
         bar.total = Usage {
             input_tokens: 1000,
@@ -260,7 +274,7 @@ mod tests {
 
     #[test]
     fn model_changed_updates_model_and_effort() {
-        let mut bar = StatusBar::new("gpt-4o", Path::new("/tmp"));
+        let mut bar = StatusBar::new("gpt-4o", Path::new("/tmp"), Usage::default());
         let mut state = State::new();
         bar.on_event(
             &agent_event(AgentEvent::ModelChanged {
@@ -283,6 +297,38 @@ mod tests {
         );
         assert_eq!(bar.model, "gpt-4o");
         assert_eq!(bar.effort, None);
+    }
+
+    #[test]
+    fn initial_usage_seeds_total() {
+        let usage = Usage {
+            input_tokens: 4200,
+            output_tokens: 1300,
+            cache_read_tokens: 900,
+            reasoning_tokens: 0,
+        };
+        let bar = StatusBar::new("m", Path::new("/tmp"), usage);
+        assert_eq!(bar.total, usage);
+    }
+
+    #[test]
+    fn usage_hidden_while_default() {
+        let gray = Style::default().fg(Color::DarkGray);
+        assert!(usage_spans(&Usage::default(), gray).is_empty());
+    }
+
+    #[test]
+    fn usage_shown_once_recorded() {
+        let gray = Style::default().fg(Color::DarkGray);
+        let usage = Usage {
+            input_tokens: 1200,
+            output_tokens: 30,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let spans = usage_spans(&usage, gray);
+        assert_eq!(spans.len(), 2);
+        assert!(spans[1].content.as_ref().contains("1.2k in"));
     }
 
     #[test]

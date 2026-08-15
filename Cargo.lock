@@ -1740,6 +1740,7 @@ dependencies = [
  "futures",
  "mockall",
  "oven-llm",
+ "serde",
  "serde_json",
  "serde_yaml",
  "tempdir",

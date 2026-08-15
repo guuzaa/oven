@@ -64,6 +64,7 @@ impl Ui {
             .root()
             .canonicalize()
             .unwrap_or_else(|_| handle.root().to_owned());
+        let total_usage = handle.total_usage();
         Self {
             handle,
             events,
@@ -71,7 +72,7 @@ impl Ui {
             quit: false,
             rewinding: false,
             transcript: Transcript::new(),
-            status: StatusBar::new(model, &root),
+            status: StatusBar::new(model, &root, total_usage),
             input: InputView::new(slash_commands),
             queue: QueueWidget::new(),
         }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use oven_agent::{Agent, AgentEvent, CancellationToken};
+use oven_agent::{Agent, AgentEvent, CancellationToken, Record};
 use oven_llm::{ContentBlock, Message, ModelInfo, Provider, ProviderName, Role, Usage};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -76,6 +76,10 @@ pub struct AppHandle {
     slash_commands: Vec<(String, String)>,
     model: String,
     root: PathBuf,
+    /// Cumulative token usage at spawn time: the restored usage of a resumed
+    /// session, or zero for a fresh one. Startup snapshot, updated afterwards
+    /// via `AgentEvent::Done` / `AppEvent::Rewound`.
+    total_usage: Usage,
     /// Conversation history snapshot taken when the runtime was spawned.
     history: Vec<Message>,
 }
@@ -117,6 +121,12 @@ impl AppHandle {
     /// startup snapshot, not a live view of the in-flight conversation.
     pub fn history(&self) -> &[Message] {
         &self.history
+    }
+
+    /// Token usage loaded at spawn time (zero for a fresh session). This is a
+    /// startup snapshot; later changes arrive as events.
+    pub fn total_usage(&self) -> Usage {
+        self.total_usage
     }
 
     /// Send one user turn and wait until the app returns to [`AppEvent::Idle`].
@@ -181,11 +191,15 @@ impl App {
         session_id: Option<&str>,
     ) -> Result<AppHandle, AppError> {
         let session = resolve_session(sessions_dir, session_id)?;
-        let prior = session.load()?;
+        let prior = session.load_records()?;
         let mut agent = self.build_agent().await?;
-        for m in prior.into_iter().filter(|m| m.role != Role::System) {
-            agent.push_history(m);
-        }
+        let records: Vec<_> = prior
+            .into_iter()
+            .filter(
+                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
+            )
+            .collect();
+        agent.restore_history(records);
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -205,11 +219,15 @@ impl App {
         session_id: Option<&str>,
     ) -> Result<AppHandle, AppError> {
         let session = resolve_session(sessions_dir, session_id)?;
-        let prior = session.load()?;
+        let prior = session.load_records()?;
         let mut agent = self.build_agent_with_provider(provider).await?;
-        for m in prior.into_iter().filter(|m| m.role != Role::System) {
-            agent.push_history(m);
-        }
+        let records: Vec<_> = prior
+            .into_iter()
+            .filter(
+                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
+            )
+            .collect();
+        agent.restore_history(records);
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -242,11 +260,15 @@ impl App {
         provider: Box<dyn Provider>,
         session: Session,
     ) -> Result<AppHandle, AppError> {
-        let prior = session.load()?;
+        let prior = session.load_records()?;
         let mut agent = self.build_agent_with_provider(provider).await?;
-        for m in prior.into_iter().filter(|m| m.role != Role::System) {
-            agent.push_history(m);
-        }
+        let records: Vec<_> = prior
+            .into_iter()
+            .filter(
+                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
+            )
+            .collect();
+        agent.restore_history(records);
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -297,7 +319,8 @@ fn spawn_runtime(
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
     let subscribers_task = Arc::clone(&subscribers);
     let slash_commands = agent.slash_commands();
-    let history = agent.history().to_vec();
+    let history: Vec<Message> = agent.history().cloned().collect();
+    let total_usage = *agent.total_usage();
     let session_store = session.map(|s| {
         let dir = s.path().parent().map(Path::to_path_buf).unwrap_or_default();
         SessionStore { dir, current: s }
@@ -323,6 +346,7 @@ fn spawn_runtime(
         slash_commands,
         model,
         root,
+        total_usage,
         history,
     }
 }
@@ -418,7 +442,7 @@ async fn runtime_loop(
     // Leading in-memory messages already written to the store. On `/clear`
     // the in-memory history is replaced, so this resets to 0 while the store
     // itself is kept untouched; later turns append after the old content.
-    let mut persisted_prefix = agent.history().len();
+    let mut persisted_prefix = agent.history_records().len();
     let mut persisted_rev = agent.history_revision();
 
     // Publish the initial model list for the `/model` popup completion.
@@ -446,7 +470,7 @@ async fn runtime_loop(
                 let removed = agent.rewind_last_turn();
                 let text = removed.map(|m| user_message_text(&m));
                 let store_ok = match &session_store {
-                    Some(store) => match store.current.overwrite(agent.history()) {
+                    Some(store) => match store.current.overwrite(&agent.history_records()) {
                         Ok(()) => true,
                         Err(e) => {
                             emit(
@@ -470,7 +494,7 @@ async fn runtime_loop(
                     AppEvent::Rewound {
                         app_id,
                         text,
-                        messages: agent.history().to_vec(),
+                        messages: agent.history().cloned().collect(),
                         usage: *agent.total_usage(),
                     },
                 );
@@ -533,7 +557,7 @@ async fn runtime_loop(
                     Ok(_) => {
                         if let Some(store) = &session_store {
                             let rev = agent.history_revision();
-                            let after = agent.history();
+                            let after = agent.history_records();
                             if rev != persisted_rev {
                                 // History was replaced in memory (`/clear`):
                                 // keep the store untouched and treat the new
@@ -541,7 +565,8 @@ async fn runtime_loop(
                                 persisted_prefix = 0;
                                 persisted_rev = rev;
                             } else if after.len() > persisted_prefix {
-                                if let Err(e) = store.current.append_all(&after[persisted_prefix..])
+                                if let Err(e) =
+                                    store.current.append_records(&after[persisted_prefix..])
                                 {
                                     emit(
                                         &subscribers,
@@ -831,6 +856,70 @@ mod tests {
 
         let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
         assert_eq!(loaded.iter().filter(|m| m.role == Role::User).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
+        let tmp = tempdir::TempDir::new("app-runtime-resume-usage").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // First process: two turns, each mocked as 10 in / 5 out.
+        let mock1 = MockProvider::new(vec![text_response("one"), text_response("two")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock1), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+        assert_eq!(handle.prompt("second").await.unwrap(), "two");
+        handle.shutdown().await;
+
+        // The persisted file carries one TokenUsage record per turn; the
+        // cumulative sum survives the restart.
+        let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
+        let persisted: Usage = records
+            .iter()
+            .filter_map(|r| match r {
+                Record::TokenUsage { usage, .. } => Some(*usage),
+                _ => None,
+            })
+            .fold(Usage::default(), |acc, u| acc + u);
+        assert_eq!((persisted.input_tokens, persisted.output_tokens), (20, 10));
+
+        // Second process: resume, then rewind the last exchange.
+        let mock2 = MockProvider::new(vec![text_response("three")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock2), session)
+            .await
+            .unwrap();
+        // The restored cumulative usage is visible on the handle immediately,
+        // before any new turn completes (the TUI seeds its status bar from
+        // this snapshot).
+        assert_eq!(
+            (
+                handle.total_usage().input_tokens,
+                handle.total_usage().output_tokens
+            ),
+            (20, 10)
+        );
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::Rewind).unwrap();
+        let (text, messages, usage) = wait_rewound(&mut sub).await;
+        assert_eq!(text.as_deref(), Some("second"));
+        assert_eq!(user_texts(&messages), vec!["first"]);
+        assert_eq!((usage.input_tokens, usage.output_tokens), (10, 5));
+
+        // A fresh turn keeps counting from the restored cumulative total.
+        assert_eq!(handle.prompt("third").await.unwrap(), "three");
+        handle.send(AppCmd::Rewind).unwrap();
+        let (text, _, usage) = wait_rewound(&mut sub).await;
+        assert_eq!(text.as_deref(), Some("third"));
+        assert_eq!((usage.input_tokens, usage.output_tokens), (10, 5));
+
+        handle.shutdown().await;
     }
 
     #[tokio::test]

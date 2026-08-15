@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::AgentError;
 use crate::event::{AgentEvent, AgentId};
-use crate::history::History;
+use crate::history::{History, Record};
 use crate::slash::CommandOutcome;
 use crate::slash::SlashRegistry;
 use crate::tools::Tool;
@@ -114,7 +114,7 @@ impl Agent {
         self.slash.commands()
     }
 
-    pub fn history(&self) -> &[Message] {
+    pub fn history(&self) -> impl ExactSizeIterator<Item = &Message> + '_ {
         self.history.messages()
     }
 
@@ -126,16 +126,25 @@ impl Agent {
         self.history.clear();
     }
 
-    /// Replace the entire conversation history. Useful for replaying a
-    /// persisted session before resuming it.
-    pub fn set_history(&mut self, history: Vec<Message>) {
-        self.history.set_messages(history);
+    /// Replace the entire history with records loaded from a persisted
+    /// session (messages plus a `TokenUsage` record after each turn's final
+    /// assistant message). The cumulative total is rebuilt from the restored
+    /// usage.
+    pub fn restore_history(&mut self, records: Vec<Record>) {
+        self.history.set_messages_with_records(records);
     }
 
     /// Append a message to the history. Used by the App layer to preload a
     /// persisted session.
     pub fn push_history(&mut self, message: Message) {
         self.history.push(message);
+    }
+
+    /// The history as persistence-ready records: messages plus a `TokenUsage`
+    /// record after each turn's final assistant message. The App layer
+    /// persists these as JSONL lines.
+    pub fn history_records(&self) -> Vec<Record> {
+        self.history.records()
     }
 
     /// Remove the last user turn from the conversation history, returning
@@ -289,18 +298,22 @@ impl Agent {
         cancel: Option<&CancellationToken>,
     ) -> Result<Option<String>, AgentError> {
         let response = self.complete_response(tx).await?;
-        if let Some(usage) = &response.usage {
-            self.history.record_usage(usage);
-        }
+        let text = response.text();
+        let has_tool_use = response.has_tool_use();
 
-        if !response.has_tool_use() {
-            let text = response.text();
+        if !has_tool_use {
             self.history.push(Message::assistant(response.content));
+            if let Some(usage) = &response.usage {
+                self.history.record_usage(usage);
+            }
             return Ok(Some(text));
         }
 
         self.history
             .push(Message::assistant(response.content.clone()));
+        if let Some(usage) = &response.usage {
+            self.history.record_usage(usage);
+        }
 
         for block in response.tool_uses() {
             let ContentBlock::ToolUse { id, name, input } = block else {
