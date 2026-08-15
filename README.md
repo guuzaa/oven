@@ -142,6 +142,9 @@ oven --session my-project "continue the previous chat"
 ```
 
 Sessions are stored as JSONL files in the platform's data directory.
+After an interactive session exits, its id is printed so you can resume it
+later with `oven --session <id>` — but only when the session actually has
+conversation content (an empty session prints nothing and creates no file).
 
 ## Slash commands
 

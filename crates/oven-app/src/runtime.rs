@@ -60,11 +60,46 @@ pub enum AppEvent {
     },
 }
 
-/// Persisted session tracking for one runtime. `/clear` replaces `current`
-/// with a fresh uuid v7 session so the old file is left untouched.
+/// Snapshot of the current persisted session, shared between the runtime
+/// task and its `AppHandle`. The runtime task owns the source of truth and
+/// updates this whenever the session switches or its content changes.
+struct SharedSession {
+    session: Session,
+    has_content: bool,
+}
+
+/// Persisted session tracking for one runtime. `/clear` replaces the shared
+/// current session with a fresh uuid v7 session so the old file is left
+/// untouched.
 struct SessionStore {
     dir: PathBuf,
-    current: Session,
+    shared: Arc<Mutex<SharedSession>>,
+}
+
+impl SessionStore {
+    /// The current session (id + path), cloned out of the shared snapshot.
+    fn current(&self) -> Session {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .session
+            .clone()
+    }
+
+    /// Replace the current session; a fresh session starts without content.
+    fn set_current(&self, session: Session) {
+        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared.session = session;
+        shared.has_content = false;
+    }
+
+    /// Update whether the current session holds conversation content.
+    fn mark_content(&self, has_content: bool) {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_content = has_content;
+    }
 }
 
 /// Handle to a running oven-app actor.
@@ -82,6 +117,9 @@ pub struct AppHandle {
     total_usage: Usage,
     /// Conversation history snapshot taken when the runtime was spawned.
     history: Vec<Message>,
+    /// Current persisted session snapshot, `None` when this runtime has no
+    /// session persistence. Updated live when `/clear` switches sessions.
+    session: Option<Arc<Mutex<SharedSession>>>,
 }
 
 impl AppHandle {
@@ -127,6 +165,16 @@ impl AppHandle {
     /// startup snapshot; later changes arrive as events.
     pub fn total_usage(&self) -> Usage {
         self.total_usage
+    }
+
+    /// Current persisted session id for this runtime. Returns `None` when the
+    /// runtime was spawned without session persistence, or when the current
+    /// session has no conversation content yet (nothing was ever written to
+    /// it). Tracks `/clear` switches.
+    pub fn session_id(&self) -> Option<String> {
+        let shared = self.session.as_ref()?;
+        let shared = shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared.has_content.then(|| shared.session.id().to_string())
     }
 
     /// Send one user turn and wait until the app returns to [`AppEvent::Idle`].
@@ -321,10 +369,23 @@ fn spawn_runtime(
     let slash_commands = agent.slash_commands();
     let history: Vec<Message> = agent.history().cloned().collect();
     let total_usage = *agent.total_usage();
-    let session_store = session.map(|s| {
-        let dir = s.path().parent().map(Path::to_path_buf).unwrap_or_default();
-        SessionStore { dir, current: s }
-    });
+    let (session_store, shared_session) = match session {
+        Some(s) => {
+            let shared = Arc::new(Mutex::new(SharedSession {
+                session: s.clone(),
+                has_content: !agent.history_records().is_empty(),
+            }));
+            let dir = s.path().parent().map(Path::to_path_buf).unwrap_or_default();
+            (
+                Some(SessionStore {
+                    dir,
+                    shared: shared.clone(),
+                }),
+                Some(shared),
+            )
+        }
+        None => (None, None),
+    };
     let task_model = model.clone();
     let join = tokio::spawn(async move {
         runtime_loop(
@@ -348,6 +409,7 @@ fn spawn_runtime(
         root,
         total_usage,
         history,
+        session: shared_session,
     }
 }
 
@@ -360,7 +422,7 @@ fn switch_session(store: &mut Option<SessionStore>, subs: &Subscribers, app_id: 
     if let Some(store) = store {
         let id = uuid::Uuid::now_v7().to_string();
         match Session::open(&store.dir, &id) {
-            Ok(next) => store.current = next,
+            Ok(next) => store.set_current(next),
             Err(e) => {
                 emit(
                     subs,
@@ -470,19 +532,25 @@ async fn runtime_loop(
                 let removed = agent.rewind_last_turn();
                 let text = removed.map(|m| user_message_text(&m));
                 let store_ok = match &session_store {
-                    Some(store) => match store.current.overwrite(&agent.history_records()) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            emit(
-                                &subscribers,
-                                AppEvent::Error {
-                                    app_id,
-                                    message: e.to_string(),
-                                },
-                            );
-                            false
+                    Some(store) => {
+                        let records = agent.history_records();
+                        match store.current().overwrite(&records) {
+                            Ok(()) => {
+                                store.mark_content(!records.is_empty());
+                                true
+                            }
+                            Err(e) => {
+                                emit(
+                                    &subscribers,
+                                    AppEvent::Error {
+                                        app_id,
+                                        message: e.to_string(),
+                                    },
+                                );
+                                false
+                            }
                         }
-                    },
+                    }
                     None => true,
                 };
                 if store_ok {
@@ -566,7 +634,7 @@ async fn runtime_loop(
                                 persisted_rev = rev;
                             } else if after.len() > persisted_prefix {
                                 if let Err(e) =
-                                    store.current.append_records(&after[persisted_prefix..])
+                                    store.current().append_records(&after[persisted_prefix..])
                                 {
                                     emit(
                                         &subscribers,
@@ -576,6 +644,7 @@ async fn runtime_loop(
                                         },
                                     );
                                 } else {
+                                    store.mark_content(true);
                                     persisted_prefix = after.len();
                                 }
                             }
@@ -727,6 +796,10 @@ mod tests {
         let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
 
         let mut rx = handle.subscribe();
+        assert!(
+            handle.session_id().is_none(),
+            "no session id without persistence"
+        );
         let text = handle.prompt("hi").await.unwrap();
         assert_eq!(text, "hello");
 
@@ -949,6 +1022,8 @@ mod tests {
 
         // Turn 3 continues in the same handle and persists to the new session.
         assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
+        let sid_after_clear = handle.session_id().expect("session id present");
+        assert!(uuid::Uuid::parse_str(&sid_after_clear).is_ok());
         handle.shutdown().await;
 
         let old = Session::open(&dir, "s1").unwrap().load().unwrap();
@@ -977,6 +1052,7 @@ mod tests {
             }
         }
         assert_eq!(fresh_ids.len(), 1, "expected one fresh uuid session file");
+        assert_eq!(fresh_ids, [sid_after_clear]);
         let fresh = Session::open(&dir, &fresh_ids[0]).unwrap().load().unwrap();
         assert_eq!(fresh.iter().filter(|m| m.role == Role::User).count(), 1);
         assert!(fresh.iter().any(|m| {
@@ -1016,6 +1092,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_session_without_messages_has_no_id_and_no_file() {
+        let tmp = tempdir::TempDir::new("app-runtime-fresh").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mock = MockProvider::new(vec![]);
+        let handle = app
+            .spawn_session_with_provider_in(&dir, Box::new(mock), None)
+            .await
+            .unwrap();
+        assert!(
+            handle.session_id().is_none(),
+            "empty session must not expose an id"
+        );
+        handle.shutdown().await;
+
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(
+            files.is_empty(),
+            "no jsonl should be created for an empty session"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_without_new_messages_has_no_id_and_no_file() {
+        let tmp = tempdir::TempDir::new("app-runtime-clear-empty").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mock = MockProvider::new(vec![text_response("one")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+
+        // `/clear` switches to a fresh empty session; nothing written after.
+        let mut rx = handle.subscribe();
+        handle.send(AppCmd::UserInput("/clear".into())).unwrap();
+        while let Some(ev) = rx.recv().await {
+            if let AppEvent::Idle { .. } = ev {
+                break;
+            }
+        }
+        assert!(
+            handle.session_id().is_none(),
+            "cleared session has no content yet"
+        );
+        handle.shutdown().await;
+
+        let files: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(files, ["s1.jsonl"]);
+    }
+
+    #[tokio::test]
     async fn spawn_session_without_id_creates_uuid() {
         let tmp = tempdir::TempDir::new("app-tui-session").unwrap();
         let app = App::new(tmp.path());
@@ -1028,6 +1165,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(handle.prompt("hi").await.unwrap(), "one");
+        let sid = handle.session_id().expect("session id present");
+        assert!(uuid::Uuid::parse_str(&sid).is_ok());
         handle.shutdown().await;
 
         let files: Vec<String> = std::fs::read_dir(&dir)
@@ -1039,6 +1178,7 @@ mod tests {
         let stem = files[0].strip_suffix(".jsonl").unwrap();
         let parsed = uuid::Uuid::parse_str(stem).unwrap();
         assert_eq!(parsed.get_version_num(), 7);
+        assert_eq!(sid, stem);
     }
 
     #[tokio::test]
@@ -1062,6 +1202,7 @@ mod tests {
             .spawn_session_with_provider_in(&dir, Box::new(mock2), Some("s1"))
             .await
             .unwrap();
+        assert_eq!(handle.session_id().as_deref(), Some("s1"));
         let resumed = handle.history();
         assert_eq!(resumed.iter().filter(|m| m.role == Role::User).count(), 1);
         assert!(resumed.iter().any(|m| {
@@ -1348,10 +1489,41 @@ mod tests {
         let mut sub = handle.subscribe();
         handle.send(AppCmd::Rewind).unwrap();
         wait_rewound(&mut sub).await;
+        assert_eq!(
+            handle.session_id().as_deref(),
+            Some("s1"),
+            "a rewind that leaves content keeps the session id"
+        );
         handle.shutdown().await;
 
         let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
         assert_eq!(user_texts(&loaded), vec!["first"]);
+    }
+
+    #[tokio::test]
+    async fn rewind_all_turns_clears_session_content() {
+        let tmp = tempdir::TempDir::new("app-runtime-rewind-empty").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mock = MockProvider::new(vec![text_response("one")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+        assert_eq!(handle.session_id().as_deref(), Some("s1"));
+
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::Rewind).unwrap();
+        wait_rewound(&mut sub).await;
+        assert!(
+            handle.session_id().is_none(),
+            "rewinding everything leaves nothing to resume"
+        );
+        handle.shutdown().await;
     }
 
     #[tokio::test]

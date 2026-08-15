@@ -88,7 +88,11 @@ impl Ui {
         let mut terminal = setup_terminal()?;
         let result = self.event_loop(&mut terminal).await;
         restore_terminal(&mut terminal)?;
+        let session_id = self.handle.session_id();
         self.handle.shutdown().await;
+        if let Some(id) = session_id {
+            println!("oven -s {id}");
+        }
         result
     }
 
