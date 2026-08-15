@@ -9,6 +9,9 @@ rust-version = { workspace = true }
 oven-llm = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+globset = { workspace = true }
+ignore = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 serde_json = { workspace = true }

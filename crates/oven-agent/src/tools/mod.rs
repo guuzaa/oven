@@ -1,6 +1,9 @@
 mod bash;
+mod file_edit;
 mod file_read;
 mod file_write;
+mod glob;
+mod grep;
 mod skill_read;
 
 use std::path::{Component, Path, PathBuf};
@@ -12,8 +15,11 @@ use tokio_util::sync::CancellationToken;
 use crate::error::AgentError;
 
 pub use bash::BashTool;
+pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
+pub use glob::GlobTool;
+pub use grep::GrepTool;
 pub use skill_read::SkillReadTool;
 
 #[async_trait]

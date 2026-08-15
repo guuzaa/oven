@@ -24,13 +24,16 @@ impl Tool for FileReadTool {
         "file_read"
     }
     fn description(&self) -> &str {
-        "Read the contents of a UTF-8 text file as a string."
+        "Read the contents of a UTF-8 text file as a string. Optionally restrict \
+         to a range of lines with `offset` (1-based) and `limit` to reduce output."
     }
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "File path relative to the workspace root." }
+                "path": { "type": "string", "description": "File path relative to the workspace root." },
+                "offset": { "type": "integer", "description": "1-based first line to read. Defaults to 1." },
+                "limit": { "type": "integer", "description": "Maximum number of lines to read. Defaults to all." }
             },
             "required": ["path"]
         })
@@ -45,8 +48,27 @@ impl Tool for FileReadTool {
         if !path.is_file() {
             return Err(AgentError::from(format!("not a file: {}", path.display())));
         }
-        fs::read_to_string(&path)
-            .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))
+        let content = fs::read_to_string(&path)
+            .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))?;
+
+        let offset = args.get("offset").and_then(|v| v.as_i64()).unwrap_or(1);
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(i64::MAX);
+
+        let lines: Vec<&str> = content.split_inclusive('\n').collect();
+        let total = lines.len() as i64;
+        let start = (offset.max(1) - 1).min(total);
+        let end = if limit <= 0 {
+            total
+        } else {
+            (start + limit).min(total)
+        };
+        if start >= total {
+            return Ok(String::new());
+        }
+        Ok(lines[start as usize..end as usize].concat())
     }
 }
 
@@ -68,5 +90,41 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("escapes root"));
+    }
+
+    #[tokio::test]
+    async fn reads_line_range() {
+        let tmp = tmp_dir();
+        let path = tmp.path().join("r.txt");
+        std::fs::write(&path, "l1\nl2\nl3\nl4\n").unwrap();
+        let read = FileReadTool::new(tmp.path());
+        let out = read
+            .run(&json!({"path": "r.txt", "offset": 2, "limit": 2}), None)
+            .await
+            .unwrap();
+        assert_eq!(out, "l2\nl3\n");
+    }
+
+    #[tokio::test]
+    async fn offset_beyond_end_returns_empty() {
+        let tmp = tmp_dir();
+        let path = tmp.path().join("r.txt");
+        std::fs::write(&path, "l1\nl2\n").unwrap();
+        let read = FileReadTool::new(tmp.path());
+        let out = read
+            .run(&json!({"path": "r.txt", "offset": 99, "limit": 5}), None)
+            .await
+            .unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[tokio::test]
+    async fn full_read_is_unchanged() {
+        let tmp = tmp_dir();
+        let path = tmp.path().join("r.txt");
+        std::fs::write(&path, "one\ntwo").unwrap();
+        let read = FileReadTool::new(tmp.path());
+        let out = read.run(&json!({"path": "r.txt"}), None).await.unwrap();
+        assert_eq!(out, "one\ntwo");
     }
 }

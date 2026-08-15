@@ -9,10 +9,17 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use oven_agent::{BashTool, FileReadTool, FileWriteTool, Tool};
+use oven_agent::{BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, Tool};
 
 /// Names of the built-in tools.
-pub const BUILTIN_TOOLS: [&str; 3] = ["file_read", "file_write", "bash"];
+pub const BUILTIN_TOOLS: [&str; 6] = [
+    "file_read",
+    "file_write",
+    "file_edit",
+    "bash",
+    "glob",
+    "grep",
+];
 
 /// A factory producing one tool instance. Tools are rebuilt on every agent
 /// spawn, so the registry hands out fresh `Box<dyn Tool>`s on demand.
@@ -90,7 +97,10 @@ fn builtin(name: &str, root: PathBuf) -> Option<Box<dyn Tool>> {
     match name {
         "file_read" => Some(Box::new(FileReadTool::new(root))),
         "file_write" => Some(Box::new(FileWriteTool::new(root))),
+        "file_edit" => Some(Box::new(FileEditTool::new(root))),
         "bash" => Some(Box::new(BashTool::new(root))),
+        "glob" => Some(Box::new(GlobTool::new(root))),
+        "grep" => Some(Box::new(GrepTool::new(root))),
         _ => None,
     }
 }
