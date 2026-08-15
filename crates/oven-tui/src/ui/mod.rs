@@ -4,9 +4,11 @@ mod model_picker;
 mod queue;
 mod slash_command_popup;
 mod status;
+mod theme;
 mod transcript;
 
 use std::io::{self, Stdout};
+use std::time::Duration;
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
@@ -35,7 +37,7 @@ fn tool_display(name: &str, input: &serde_json::Value) -> String {
     {
         let command = command.trim();
         if !command.is_empty() {
-            return format!("Ran {command}");
+            return command.to_string();
         }
     }
     name.to_string()
@@ -53,6 +55,7 @@ pub struct Ui {
     status: StatusBar,
     input: InputView,
     queue: QueueWidget,
+    spin: u8,
 }
 
 impl Ui {
@@ -75,6 +78,7 @@ impl Ui {
             status: StatusBar::new(model, &root, total_usage),
             input: InputView::new(slash_commands),
             queue: QueueWidget::new(),
+            spin: 0,
         }
     }
 
@@ -101,9 +105,14 @@ impl Ui {
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> io::Result<()> {
         let mut term_events = EventStream::new();
+        let mut tick = tokio::time::interval(Duration::from_millis(80));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         terminal.draw(|f| self.draw(f))?;
         loop {
             tokio::select! {
+                _ = tick.tick(), if self.state.busy => {
+                    self.spin = self.spin.wrapping_add(1);
+                }
                 Some(ev) = term_events.next() => {
                     match ev? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -257,34 +266,25 @@ impl Ui {
     }
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
-        let input_h = self.input.height();
+        let avail = f.area().height;
+        let input_h = self.input.height().min(avail.saturating_sub(4));
         let queue_h = self
             .queue
             .height(self.input.pending())
-            .min(f.area().height.saturating_sub(3 + input_h));
+            .min(avail.saturating_sub(4 + input_h));
+        let picker_h = self.input.model_picker_height(&self.state);
+        let slash_h = self.input.slash_command_height(&self.state);
+        let popup_h = if picker_h > 0 { picker_h } else { slash_h }
+            .min(avail.saturating_sub(4 + input_h + queue_h));
         let mut constraints = vec![Constraint::Min(3)];
         if queue_h > 0 {
             constraints.push(Constraint::Length(queue_h));
         }
         constraints.push(Constraint::Length(input_h));
-        let picker_h = self
-            .input
-            .model_picker_height(&self.state)
-            .min(f.area().height.saturating_sub(3 + input_h + queue_h));
-        let slash_command_h = self
-            .input
-            .slash_command_height(&self.state)
-            .min(f.area().height.saturating_sub(3 + input_h + queue_h));
-        let extra_h = if picker_h > 0 {
-            picker_h
-        } else {
-            slash_command_h
-        };
-        if extra_h > 0 {
-            constraints.push(Constraint::Length(extra_h));
-        } else {
-            constraints.push(Constraint::Length(1));
+        if popup_h > 0 {
+            constraints.push(Constraint::Length(popup_h));
         }
+        constraints.push(Constraint::Length(1));
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
@@ -301,11 +301,18 @@ impl Ui {
         next += 1;
         if picker_h > 0 {
             self.input.draw_model_picker(f, chunks[next], &self.state);
-        } else if slash_command_h > 0 {
+            next += 1;
+        } else if slash_h > 0 {
             self.input.draw_slash_command(f, chunks[next], &self.state);
-        } else {
-            self.status.draw(f, chunks[next], &self.state);
+            next += 1;
         }
+        self.status.draw_bar(
+            f,
+            chunks[next],
+            &self.state,
+            self.input.slash_open(),
+            self.spin,
+        );
     }
 }
 

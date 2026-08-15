@@ -2,14 +2,17 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use oven_app::AppEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders};
+use ratatui::text::Span;
+use ratatui::widgets::Paragraph;
 use tui_textarea::TextArea;
 use unicode_width::UnicodeWidthStr;
 
 use super::component::{Action, Component, KeyResult, State};
 use super::model_picker::{ModelPicker, ModelPickerAction};
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
+use super::theme;
 
 pub struct InputView {
     textarea: TextArea<'static>,
@@ -30,9 +33,7 @@ impl InputView {
     }
 
     pub fn height(&self) -> u16 {
-        (self.textarea.lines().len() as u16)
-            .clamp(1, 8)
-            .saturating_add(2)
+        (self.textarea.lines().len() as u16).clamp(1, 8)
     }
 
     pub fn clear(&mut self) {
@@ -195,18 +196,20 @@ impl Component for InputView {
     }
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        let title = if state.busy {
-            " input (busy) ".to_string()
-        } else {
-            " input ".to_string()
-        };
-        self.textarea
-            .set_block(Block::default().borders(Borders::ALL).title(title));
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(2), Constraint::Min(1)])
+            .split(area);
+        let prompt = if state.busy { "· " } else { "› " };
+        f.render_widget(
+            Paragraph::new(Span::styled(prompt, theme::user())),
+            chunks[0],
+        );
         self.textarea.set_style(Style::default());
         self.textarea
             .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
         self.textarea.set_cursor_line_style(Style::default());
-        f.render_widget(&self.textarea, area);
+        f.render_widget(&self.textarea, chunks[1]);
     }
 }
 
@@ -276,7 +279,7 @@ mod tests {
         let mut view = view();
         type_text(&mut view, "/");
         assert!(view.slash_command.is_open());
-        assert_eq!(view.slash_command_height(&State::new()), 5);
+        assert_eq!(view.slash_command_height(&State::new()), 3);
     }
 
     #[test]

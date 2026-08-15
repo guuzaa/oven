@@ -3,18 +3,19 @@ use oven_app::{AgentEvent, AppEvent};
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::component::{Component, KeyResult, State};
+use super::theme;
 use super::tool_display;
 
 const MOUSE_SCROLL_STEP: u16 = 3;
-const START_HINT: &str = "oven — Enter send (queues while busy) · Alt-Enter newline · PgUp/PgDn scroll · Esc cancel/undo · Ctrl-C quit";
-const LINE_PREFIX_WIDTH: usize = 11;
-const LINE_INDENT: &str = "           ";
+const LINE_PREFIX_WIDTH: usize = 2;
+const LINE_INDENT: &str = "  ";
+const MAX_RESULT_LINES: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LineKind {
@@ -28,31 +29,26 @@ enum LineKind {
 }
 
 impl LineKind {
-    fn label(self) -> &'static str {
+    fn style(self) -> Style {
         match self {
-            LineKind::User => "you",
-            LineKind::Thinking => "thinking",
-            LineKind::Text => "oven",
-            LineKind::Tool => "tool",
-            LineKind::ToolResult(true) => "ok",
-            LineKind::ToolResult(false) => "fail",
-            LineKind::Error => "error",
-            LineKind::System => "sys",
+            LineKind::User => theme::user(),
+            LineKind::Thinking => theme::thinking(),
+            LineKind::Text => theme::assistant(),
+            LineKind::Tool => theme::tool(),
+            LineKind::ToolResult(true) => theme::ok(),
+            LineKind::ToolResult(false) => theme::fail(),
+            LineKind::Error => theme::error(),
+            LineKind::System => theme::dim(),
         }
     }
 
-    fn style(self) -> Style {
+    fn gutter(self) -> &'static str {
         match self {
-            LineKind::User => Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-            LineKind::Thinking => Style::default().fg(Color::DarkGray),
-            LineKind::Text => Style::default().fg(Color::Green),
-            LineKind::Tool => Style::default().fg(Color::Magenta),
-            LineKind::ToolResult(true) => Style::default().fg(Color::DarkGray),
-            LineKind::ToolResult(false) => Style::default().fg(Color::Red),
-            LineKind::Error => Style::default().fg(Color::Red),
-            LineKind::System => Style::default().fg(Color::DarkGray),
+            LineKind::User => "› ",
+            LineKind::Text => "• ",
+            LineKind::Thinking => "· ",
+            LineKind::Tool => "$ ",
+            LineKind::ToolResult(_) | LineKind::Error | LineKind::System => "  ",
         }
     }
 }
@@ -89,7 +85,7 @@ pub struct Transcript {
 
 impl Transcript {
     pub fn new() -> Self {
-        let mut t = Self {
+        Self {
             rows: Vec::new(),
             wrapped: Vec::new(),
             streaming: String::new(),
@@ -102,9 +98,7 @@ impl Transcript {
             top: 0,
             view_height: 0,
             area: Rect::default(),
-        };
-        t.push_row(LineKind::System, START_HINT);
-        t
+        }
     }
 
     pub fn push_user(&mut self, text: &str) {
@@ -142,7 +136,6 @@ impl Transcript {
         self.clear_stream();
         self.pinned = true;
         self.top = 0;
-        self.push_row(LineKind::System, START_HINT);
         self.seed(messages);
     }
 
@@ -265,20 +258,24 @@ impl Transcript {
         self.pending_user.clear();
         self.pinned = true;
         self.top = 0;
-        self.push_row(LineKind::System, START_HINT);
     }
 
     fn push_row(&mut self, kind: LineKind, text: &str) {
+        let text = match kind {
+            LineKind::Thinking => collapse_thinking(text),
+            LineKind::ToolResult(_) => truncate_result(text),
+            _ => text.to_string(),
+        };
         let mut wrapped = Vec::new();
         if self.width > 0 {
-            for line in format_lines(kind, text) {
+            if !self.wrapped.is_empty() {
+                wrapped.push(Line::from(""));
+            }
+            for line in format_lines(kind, &text) {
                 wrap_line_into(&mut wrapped, &line, self.width);
             }
         }
-        self.rows.push(Row {
-            kind,
-            text: text.to_string(),
-        });
+        self.rows.push(Row { kind, text });
         self.wrapped.extend(wrapped);
         self.keep_following();
     }
@@ -325,6 +322,9 @@ impl Transcript {
             return;
         }
         for row in &self.rows[start..] {
+            if !self.wrapped.is_empty() {
+                self.wrapped.push(Line::from(""));
+            }
             for line in format_lines(row.kind, &row.text) {
                 wrap_line_into(&mut self.wrapped, &line, width);
             }
@@ -336,6 +336,9 @@ impl Transcript {
         self.stream_dirty = false;
         if self.width == 0 || self.streaming.is_empty() {
             return;
+        }
+        if !self.wrapped.is_empty() {
+            self.wrapped_stream.push(Line::from(""));
         }
         for line in format_lines(self.stream_kind, &self.streaming) {
             wrap_line_into(&mut self.wrapped_stream, &line, self.width);
@@ -451,7 +454,7 @@ impl Component for Transcript {
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, _state: &State) {
         self.area = area;
-        let width = area.width.saturating_sub(2) as usize;
+        let width = area.width as usize;
         if width != self.width {
             self.width = width;
             self.rewrap_all();
@@ -459,7 +462,7 @@ impl Component for Transcript {
             self.rewrap_stream();
         }
 
-        let height = area.height.saturating_sub(2) as usize;
+        let height = area.height as usize;
         self.view_height = height;
         let total = self.total_lines();
         let max_top = total.saturating_sub(height);
@@ -472,12 +475,7 @@ impl Component for Transcript {
         let start = if self.pinned { max_top } else { self.top };
         let end = start.saturating_add(height).min(total);
         let visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" conversation ");
-        let para = Paragraph::new(visible).block(block);
-        f.render_widget(para, area);
+        f.render_widget(Paragraph::new(visible), area);
     }
 }
 
@@ -503,8 +501,29 @@ fn trim_message(text: &str) -> String {
         .to_string()
 }
 
+fn collapse_thinking(text: &str) -> String {
+    let text = trim_message(text);
+    let mut iter = text.lines();
+    let first = iter.next().unwrap_or("").trim_end();
+    if iter.next().is_some() {
+        format!("{first}…")
+    } else {
+        first.to_string()
+    }
+}
+
+fn truncate_result(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= MAX_RESULT_LINES {
+        return text.to_string();
+    }
+    let mut out = lines[..MAX_RESULT_LINES].join("\n");
+    out.push_str(&format!("\n… {} more", lines.len() - MAX_RESULT_LINES));
+    out
+}
+
 fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
-    let prefix = format!("{:<8} | ", kind.label());
+    let prefix = kind.gutter();
     let style = kind.style();
     let mut lines = Vec::new();
     let mut prev_blank = false;
@@ -515,7 +534,7 @@ fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         }
         prev_blank = blank;
         let head = if lines.is_empty() {
-            prefix.as_str()
+            prefix
         } else {
             LINE_INDENT
         };
@@ -617,7 +636,24 @@ mod tests {
     }
 
     #[test]
-    fn all_labels_are_eleven_wide() {
+    fn collapse_thinking_keeps_first_line() {
+        assert_eq!(collapse_thinking("one\ntwo\nthree"), "one…");
+        assert_eq!(collapse_thinking("only"), "only");
+    }
+
+    #[test]
+    fn truncate_result_caps_lines() {
+        let text = (0..10)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let out = truncate_result(&text);
+        assert!(out.ends_with("… 4 more"));
+        assert_eq!(out.lines().count(), MAX_RESULT_LINES + 1);
+    }
+
+    #[test]
+    fn all_gutters_are_two_wide() {
         let kinds = [
             LineKind::User,
             LineKind::Thinking,
@@ -629,22 +665,22 @@ mod tests {
             LineKind::System,
         ];
         for kind in kinds {
-            assert_eq!(format!("{:<8} | ", kind.label()).width(), LINE_PREFIX_WIDTH);
+            assert_eq!(kind.gutter().width(), LINE_PREFIX_WIDTH);
         }
     }
 
     #[test]
-    fn assistant_label_is_oven() {
+    fn assistant_gutter_is_bullet() {
         let lines = format_lines(LineKind::Text, "hi");
-        assert_eq!(lines[0].spans[0].content.as_ref(), "oven     | ");
+        assert_eq!(lines[0].spans[0].content.as_ref(), "• ");
     }
 
     #[test]
-    fn tool_result_labels() {
+    fn tool_result_gutters() {
         let ok = format_lines(LineKind::ToolResult(true), "out");
-        assert_eq!(ok[0].spans[0].content.as_ref(), "ok       | ");
+        assert_eq!(ok[0].spans[0].content.as_ref(), "  ");
         let fail = format_lines(LineKind::ToolResult(false), "boom");
-        assert_eq!(fail[0].spans[0].content.as_ref(), "fail     | ");
+        assert_eq!(fail[0].spans[0].content.as_ref(), "  ");
     }
 
     #[test]
@@ -825,7 +861,6 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                LineKind::System, // START_HINT
                 LineKind::User,
                 LineKind::Thinking,
                 LineKind::Text,
@@ -835,23 +870,22 @@ mod tests {
                 LineKind::ToolResult(true),
             ]
         );
-        assert_eq!(t.rows[1].text, "hello");
-        assert_eq!(t.rows[4].text, "Ran ls");
+        assert_eq!(t.rows[0].text, "hello");
+        assert_eq!(t.rows[3].text, "ls");
     }
 
     #[test]
-    fn seed_empty_history_keeps_only_hint() {
+    fn seed_empty_history_is_empty() {
         let mut t = Transcript::new();
         t.seed(&[]);
-        assert_eq!(t.rows.len(), 1);
-        assert_eq!(t.rows[0].kind, LineKind::System);
+        assert!(t.rows.is_empty());
     }
 
     #[test]
     fn seed_mirrors_empty_tool_result_handling() {
         let mut t = Transcript::new();
         t.seed(&[Message::tool_result("c1", "", false)]);
-        assert_eq!(t.rows.len(), 1, "empty ok output is skipped");
+        assert!(t.rows.is_empty(), "empty ok output is skipped");
 
         let mut t = Transcript::new();
         t.seed(&[Message::tool_result("c1", "", true)]);
@@ -893,8 +927,7 @@ mod tests {
         t.push_user("old");
         t.push_user_queued("queued");
         t.replace_from(&[Message::user_text("resumed")]);
-        assert_eq!(t.rows[0].kind, LineKind::System);
-        assert_eq!(t.rows[1].text, "resumed");
+        assert_eq!(t.rows[0].text, "resumed");
         assert_eq!(t.pending_user, vec!["queued".to_string()]);
     }
 }

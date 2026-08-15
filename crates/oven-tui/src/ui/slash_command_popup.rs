@@ -1,11 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::component::State;
+use super::theme;
 
 const MAX_COMMAND_ROWS: usize = 6;
 
@@ -91,8 +91,7 @@ impl SlashCommandPopup {
         if !self.open {
             return 0;
         }
-        let rows = self.matches().len().clamp(1, MAX_COMMAND_ROWS);
-        (rows as u16).saturating_add(2)
+        self.matches().len().clamp(1, MAX_COMMAND_ROWS) as u16
     }
 
     pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect, _state: &State) {
@@ -103,24 +102,23 @@ impl SlashCommandPopup {
         let mut lines = Vec::with_capacity(indices.len());
         for (row, &idx) in indices.iter().take(MAX_COMMAND_ROWS).enumerate() {
             let (name, desc) = &self.commands[idx];
-            let style = if row == self.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+            let name_style = if row == self.selected {
+                theme::accent()
             } else {
-                Style::default()
+                ratatui::style::Style::default()
             };
             lines.push(Line::from(vec![
-                Span::styled(format!("/{name}"), style),
-                Span::styled(format!("  {desc}"), style),
+                Span::styled(format!("/{name}"), name_style),
+                Span::styled(format!("  {desc}"), theme::dim()),
             ]));
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "no matching command",
-                Style::default().fg(Color::DarkGray),
+                theme::dim(),
             )));
         }
-        let block = Block::default().borders(Borders::ALL).title(" commands ");
-        f.render_widget(Paragraph::new(lines).block(block), area);
+        f.render_widget(Paragraph::new(lines), area);
     }
 
     /// Handle keys while the popup is open.

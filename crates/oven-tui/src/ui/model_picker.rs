@@ -1,11 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::component::State;
+use super::theme;
 
 const MAX_MODEL_ROWS: usize = 6;
 
@@ -115,9 +115,9 @@ impl ModelPicker {
         match self.stage {
             Stage::Models => {
                 let rows = self.matches().len().clamp(1, MAX_MODEL_ROWS);
-                (rows as u16).saturating_add(3) // filter row + list + borders
+                (rows as u16).saturating_add(1)
             }
-            Stage::Effort => (EFFORT_ITEMS.len() as u16).saturating_add(2),
+            Stage::Effort => EFFORT_ITEMS.len() as u16,
         }
     }
 
@@ -222,51 +222,41 @@ impl ModelPicker {
     fn draw_models(&self, f: &mut Frame<'_>, area: Rect) {
         let mut lines = Vec::new();
         lines.push(Line::from(vec![
-            Span::styled("filter: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("filter: ", theme::dim()),
             Span::raw(self.filter.clone()),
         ]));
         let indices = self.matches();
         for (row, &idx) in indices.iter().take(MAX_MODEL_ROWS).enumerate() {
             let (id, provider) = &self.models[idx];
-            let style = if row == self.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+            let name_style = if row == self.selected {
+                theme::accent()
             } else {
-                Style::default()
+                ratatui::style::Style::default()
             };
             lines.push(Line::from(vec![
-                Span::styled(id.clone(), style),
-                Span::styled(format!("  {provider}"), style),
+                Span::styled(id.clone(), name_style),
+                Span::styled(format!("  {provider}"), theme::dim()),
             ]));
         }
         if indices.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "no matching models",
-                Style::default().fg(Color::DarkGray),
-            )));
+            lines.push(Line::from(Span::styled("no matching models", theme::dim())));
         }
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" model (1/2) ");
-        f.render_widget(Paragraph::new(lines).block(block), area);
+        f.render_widget(Paragraph::new(lines), area);
     }
 
     fn draw_effort(&self, f: &mut Frame<'_>, area: Rect) {
-        let model = self.model.as_deref().unwrap_or("");
         let mut lines = Vec::with_capacity(EFFORT_ITEMS.len());
         for (row, (name, desc)) in EFFORT_ITEMS.iter().enumerate() {
-            let style = if row == self.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+            let name_style = if row == self.selected {
+                theme::accent()
             } else {
-                Style::default()
+                ratatui::style::Style::default()
             };
             lines.push(Line::from(vec![
-                Span::styled(*name, style),
-                Span::styled(format!("  {desc}"), style),
+                Span::styled(*name, name_style),
+                Span::styled(format!("  {desc}"), theme::dim()),
             ]));
         }
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" reasoning effort (2/2) · {model} "));
-        f.render_widget(Paragraph::new(lines).block(block), area);
+        f.render_widget(Paragraph::new(lines), area);
     }
 }

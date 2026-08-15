@@ -5,12 +5,15 @@ use oven_app::{AgentEvent, AppEvent};
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::component::{Component, KeyResult, State};
+use super::theme;
+
+const SPIN_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Single status row below the input: model · root · token usage.
 pub struct StatusBar {
@@ -28,6 +31,52 @@ impl StatusBar {
             root: display_path(root),
             total,
         }
+    }
+
+    pub fn draw_bar(
+        &mut self,
+        f: &mut Frame<'_>,
+        area: Rect,
+        state: &State,
+        popup: bool,
+        spin: u8,
+    ) {
+        let gray = theme::dim();
+        let mut spans = Vec::new();
+        if state.busy {
+            let ch = SPIN_FRAMES[(spin as usize) % SPIN_FRAMES.len()];
+            spans.push(Span::styled(ch.to_string(), theme::accent()));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(self.model.clone(), theme::model()));
+        spans.push(Span::styled(" · ", gray));
+        spans.push(Span::styled(self.root.clone(), theme::path()));
+        spans.extend(usage_spans(&self.total, gray));
+        if let Some(effort) = self.effort {
+            spans.push(Span::styled(" · ", gray));
+            spans.push(Span::styled(format!("effort {effort}"), theme::effort()));
+        }
+        let hint = if popup {
+            "tab fill · enter · esc"
+        } else if state.busy {
+            "esc cancel · enter queue"
+        } else {
+            "enter send · alt-enter newline · esc undo"
+        };
+        let max = area.width as usize;
+        let hint_w = hint.width();
+        let left = Line::from(spans);
+        let left_w = left.width();
+        let line = if hint_w + 1 < max && left_w + 1 + hint_w <= max {
+            let pad = max - left_w - hint_w;
+            let mut spans = left.spans;
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(hint.to_string(), gray));
+            Line::from(spans)
+        } else {
+            truncate_line(left, max.saturating_sub(1))
+        };
+        f.render_widget(Paragraph::new(line), area);
     }
 }
 
@@ -66,28 +115,8 @@ impl Component for StatusBar {
         }
     }
 
-    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, _state: &State) {
-        let gray = Style::default().fg(Color::DarkGray);
-        let mut spans = vec![
-            Span::styled(self.model.clone(), Style::default().fg(Color::LightYellow)),
-            Span::styled(" · ", gray),
-            Span::styled(self.root.clone(), Style::default().fg(Color::LightGreen)),
-        ];
-        spans.extend(usage_spans(&self.total, gray));
-        let line = Line::from(spans);
-        let line = if let Some(effort) = self.effort {
-            let mut spans = line.spans;
-            spans.push(Span::styled(" · ", gray));
-            spans.push(Span::styled(
-                format!("effort {}", effort),
-                Style::default().fg(Color::LightBlue),
-            ));
-            Line::from(spans)
-        } else {
-            line
-        };
-        let line = truncate_line(line, area.width.saturating_sub(1) as usize);
-        f.render_widget(Paragraph::new(line), area);
+    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
+        self.draw_bar(f, area, state, false, 0);
     }
 }
 
@@ -313,13 +342,13 @@ mod tests {
 
     #[test]
     fn usage_hidden_while_default() {
-        let gray = Style::default().fg(Color::DarkGray);
+        let gray = theme::dim();
         assert!(usage_spans(&Usage::default(), gray).is_empty());
     }
 
     #[test]
     fn usage_shown_once_recorded() {
-        let gray = Style::default().fg(Color::DarkGray);
+        let gray = theme::dim();
         let usage = Usage {
             input_tokens: 1200,
             output_tokens: 30,
