@@ -1,4 +1,3 @@
-use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -154,78 +153,11 @@ impl App {
         self.config = config;
     }
 
-    fn effective_model(&self) -> String {
-        if let Some(m) = &self.config.provider.model {
-            return m.clone();
-        }
-        if let Ok(m) = env::var("OVEN_MODEL") {
-            return m;
-        }
-        "gpt-4o-mini".to_string()
-    }
-
-    fn effective_base_url(&self, model: &str) -> Option<String> {
-        if let Some(u) = &self.config.provider.base_url {
-            return Some(u.clone());
-        }
-        if let Ok(u) = env::var("OVEN_BASE_URL")
-            && !u.is_empty()
-        {
-            return Some(u);
-        }
-        let lower = model.to_ascii_lowercase();
-        if lower.starts_with("claude") {
-            env::var("ANTHROPIC_BASE_URL")
-                .ok()
-                .filter(|v| !v.is_empty())
-        } else if lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3") {
-            env::var("OPENAI_BASE_URL").ok().filter(|v| !v.is_empty())
-        } else {
-            None
-        }
-    }
-
-    fn effective_api_key(&self, model: &str) -> String {
-        if let Some(k) = &self.config.provider.api_key {
-            return k.clone();
-        }
-        let lower = model.to_ascii_lowercase();
-        if lower.starts_with("claude") {
-            env::var("ANTHROPIC_API_KEY").unwrap_or_default()
-        } else if lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3") {
-            env::var("OPENAI_API_KEY").unwrap_or_default()
-        } else if lower.starts_with("deepseek") {
-            env::var("DEEPSEEK_API_KEY").unwrap_or_default()
-        } else if lower.starts_with("kimi") {
-            env::var("MOONSHOT_API_KEY").unwrap_or_default()
-        } else if lower.starts_with("glm") {
-            env::var("OVEN_ZHIPU_API_KEY").unwrap_or_default()
-        } else {
-            env::var("OPENAI_API_KEY").unwrap_or_default()
-        }
-    }
-
-    fn determine_provider_name(model: &str) -> ProviderName {
-        let lower = model.to_ascii_lowercase();
-        if lower.starts_with("claude") {
-            ProviderName::Anthropic
-        } else if lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3") {
-            ProviderName::OpenAI
-        } else if lower.starts_with("deepseek") {
-            ProviderName::DeepSeek
-        } else if lower.starts_with("kimi") {
-            ProviderName::Moonshot
-        } else if lower.starts_with("glm") {
-            ProviderName::Zhipu
-        } else {
-            ProviderName::Custom("unknown".into())
-        }
-    }
-
     fn build_provider(&self, model: &str) -> Result<Box<dyn Provider>, AppError> {
-        let provider_name = Self::determine_provider_name(model);
-        let api_key = self.effective_api_key(model);
-        let base_url = self.effective_base_url(model);
+        let provider = &self.config.provider;
+        let provider_name = provider.effective_provider_name(model);
+        let api_key = provider.effective_api_key();
+        let base_url = provider.effective_base_url();
 
         // Anthropic and unknown models have no chat-completions preset; without
         // an explicit OpenAI-compatible base URL there is no endpoint to hit.
@@ -233,7 +165,7 @@ impl App {
             match &provider_name {
                 ProviderName::Anthropic => {
                     return Err(AppError::Provider(format!(
-                        "model '{model}' needs an OpenAI-compatible proxy; set ANTHROPIC_BASE_URL or provider.base_url"
+                        "model '{model}' needs an OpenAI-compatible proxy; set OVEN_BASE_URL or provider.base_url"
                     )));
                 }
                 ProviderName::Custom(_) => {
@@ -250,7 +182,7 @@ impl App {
             )));
         }
 
-        let builder = ProviderBuilder::new(self.config.provider.effective_kind())
+        let builder = ProviderBuilder::new(provider.effective_kind())
             .provider_name(provider_name)
             .api_key(api_key);
         let provider = match &base_url {
@@ -287,7 +219,7 @@ impl App {
     }
 
     pub(crate) async fn build_agent(&self) -> Result<Agent, AppError> {
-        let model = self.effective_model();
+        let model = self.config.provider.effective_model();
         let agent = self
             .build_agent_with_provider(self.build_provider(&model)?)
             .await?;
@@ -309,7 +241,7 @@ impl App {
     }
 
     /// Run a single chat turn with no persistence (via the app runtime channel API).
-    pub async fn run_chat(&self, user: impl Into<String>) -> Result<String, AppError> {
+    pub async fn query(&self, user: impl Into<String>) -> Result<String, AppError> {
         let handle = self.spawn().await?;
         let out = handle.prompt(user).await;
         handle.shutdown().await;
@@ -354,22 +286,6 @@ impl App {
 mod tests {
     use super::*;
     use crate::instructions::InstructionScope;
-    use oven_llm::ProviderName;
-
-    #[test]
-    fn provider_routes_model_prefixes() {
-        let cases = [
-            ("gpt-4o", ProviderName::OpenAI),
-            ("o3-mini", ProviderName::OpenAI),
-            ("deepseek-chat", ProviderName::DeepSeek),
-            ("kimi-k2", ProviderName::Moonshot),
-            ("glm-4", ProviderName::Zhipu),
-            ("claude-3-5-haiku", ProviderName::Anthropic),
-        ];
-        for (model, expected) in cases {
-            assert_eq!(App::determine_provider_name(model), expected, "{model}");
-        }
-    }
 
     #[test]
     fn system_prompt_includes_instruction_docs() {

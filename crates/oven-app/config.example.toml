@@ -26,8 +26,7 @@ base_backoff_ms = 500
 # base_url = "https://api.deepseek.com"
 # API entrypoint kind: "responses", "messages", or "completions". Defaults to "completions" when unset.
 # kind = "completions"
-# Explicit API key. If unset, the adapter's default env var is used
-# (ANTHROPIC_API_KEY / OPENAI_API_KEY / ...).
+# Explicit API key. If unset, the OVEN_API_KEY env var is used.
 # api_key = "sk-..."
 
 # MCP servers to connect to at startup: stdio via command/args/env, or a

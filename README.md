@@ -14,7 +14,7 @@ oven "what does this project do?"
 oven
 
 # With a specific model and API key
-OVEN_MODEL=deepseek-v4-flash OVEN_DEEPSEEK_API_KEY=sk-xxx oven
+OVEN_MODEL=deepseek-v4-flash OVEN_API_KEY=sk-xxx oven
 
 # Resume a previous session
 oven --session my-session
@@ -36,20 +36,16 @@ Oven runs inside your project directory. It:
 Oven speaks the OpenAI chat completions format, so it works with any
 provider that supports it:
 
-| Provider       | Model prefix     | Env var for API key          |
-|----------------|------------------|------------------------------|
-| OpenAI         | `gpt-*`, `o1-*`  | `OPENAI_API_KEY`             |
-| DeepSeek       | `deepseek-*`     | `DEEPSEEK_API_KEY`           |
-| Zhipu (智谱)   | `glm-*`          | `OVEN_ZHIPU_API_KEY`         |
-| Moonshot (Kimi)| `kimi-*`         | `MOONSHOT_API_KEY`           |
-| Anthropic*     | `claude-*`       | `ANTHROPIC_API_KEY`          |
+| Provider       | Model prefix     |
+|----------------|------------------|
+| OpenAI         | `gpt-*`, `o1-*`  |
+| DeepSeek       | `deepseek-*`     |
+| Zhipu (智谱)   | `glm-*`          |
+| Moonshot (Kimi)| `kimi-*`         |
 
-\* Anthropic requires an OpenAI-to-Anthropic proxy (e.g.
-`ANTHROPIC_BASE_URL` pointing to one).
-
-Set `OVEN_MODEL` to pick the model. Override the base URL with
-`OVEN_BASE_URL` (or the provider-specific vars like `ANTHROPIC_BASE_URL`,
-`OPENAI_BASE_URL`) if you need a proxy or self-hosted endpoint.
+Set `OVEN_MODEL` to pick the model, `OVEN_API_KEY` for the API key, and
+`OVEN_BASE_URL` to override the endpoint if you need a proxy or self-hosted
+endpoint.
 
 ## Configuration
 

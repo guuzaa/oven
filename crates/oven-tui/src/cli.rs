@@ -74,17 +74,7 @@ impl Cli {
 }
 
 async fn headless(app: &App, prompt: &str) -> ExitCode {
-    let handle = match app.spawn().await {
-        Ok(h) => h,
-        Err(err) => {
-            eprintln!("error: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let result = handle.prompt(prompt).await;
-    handle.shutdown().await;
-
-    match result {
+    match app.query(prompt).await {
         Ok(out) => {
             println!("{out}");
             ExitCode::SUCCESS

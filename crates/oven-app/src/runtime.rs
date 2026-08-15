@@ -216,7 +216,7 @@ impl App {
             AppId::next(),
             agent,
             None,
-            self.effective_model(),
+            self.config.provider.effective_model(),
             self.root.clone(),
             self.model_list_timeout(),
         ))
@@ -254,7 +254,7 @@ impl App {
             AppId::next(),
             agent,
             Some(session),
-            self.effective_model(),
+            self.config.provider.effective_model(),
             self.root.clone(),
             self.model_list_timeout(),
         ))
@@ -283,7 +283,7 @@ impl App {
             AppId::next(),
             agent,
             Some(session),
-            self.effective_model(),
+            self.config.provider.effective_model(),
             self.root.clone(),
             self.model_list_timeout(),
         ))
@@ -299,7 +299,7 @@ impl App {
             AppId::next(),
             agent,
             None,
-            self.effective_model(),
+            self.config.provider.effective_model(),
             self.root.clone(),
             self.model_list_timeout(),
         ))
@@ -325,7 +325,7 @@ impl App {
             AppId::next(),
             agent,
             Some(session),
-            self.effective_model(),
+            self.config.provider.effective_model(),
             self.root.clone(),
             self.model_list_timeout(),
         ))
