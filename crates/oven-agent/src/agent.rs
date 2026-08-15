@@ -140,6 +140,13 @@ impl Agent {
         self.history.push(message);
     }
 
+    /// Record the session's workspace root if it is not already known (a
+    /// resumed session keeps its original root and creation time). Persisted
+    /// as the first record of the session file.
+    pub fn ensure_session_meta(&mut self, root: String) {
+        self.history.ensure_session_meta(root);
+    }
+
     /// The history as persistence-ready records: messages plus a `TokenUsage`
     /// record after each turn's final assistant message. The App layer
     /// persists these as JSONL lines.

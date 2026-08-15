@@ -18,12 +18,36 @@ pub struct Cli {
     #[arg(long, short = 's', env = "OVEN_SESSION")]
     session: Option<String>,
 
+    /// Resume the most recent session for this workspace root
+    #[arg(long, short = 'c', conflicts_with = "session")]
+    r#continue: bool,
+
     /// Run a one-shot query and exit
     #[arg(long, short = 'Q', value_name = "QUERY")]
     query: Option<String>,
 }
 
 impl Cli {
+    /// The session id to use: an explicit `--session` wins; otherwise
+    /// `--continue` resumes the most recent session recorded for the
+    /// workspace root.
+    fn resolve_session_id(&self) -> Option<String> {
+        if let Some(id) = self.session.as_deref() {
+            return Some(id.to_string());
+        }
+        if !self.r#continue {
+            return None;
+        }
+        let dir = oven_app::session::default_sessions_dir()?;
+        match oven_app::session::recent_session_id(&dir, &self.dir) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("warning: resolving recent session: {e}");
+                None
+            }
+        }
+    }
+
     pub fn spawn(&self) -> App {
         let mut app = App::new(&self.dir);
         if let Err(e) = app.load_config() {
@@ -34,14 +58,15 @@ impl Cli {
 
     pub async fn run(&self) -> ExitCode {
         let app = self.spawn();
+        let session = self.resolve_session_id();
 
         match self.query.as_deref() {
-            Some(prompt) => headless(&app, self.session.as_deref(), prompt.trim()).await,
+            Some(prompt) => headless(&app, session.as_deref(), prompt.trim()).await,
             None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
-                interactive(&app, self.session.as_deref()).await
+                interactive(&app, session.as_deref()).await
             }
             None => {
-                eprintln!("usage: oven [-C DIR] [--session ID] [-Q|--query QUERY]");
+                eprintln!("usage: oven [-C DIR] [--session ID] [--continue] [-Q|--query QUERY]");
                 ExitCode::from(2)
             }
         }

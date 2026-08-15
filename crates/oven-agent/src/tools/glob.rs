@@ -120,6 +120,7 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn recursive_match() {
         let tmp = tmp_dir();

@@ -3,12 +3,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use oven_llm::{ContentBlock, Message, Role, Usage};
 use serde::{Deserialize, Serialize};
 
+type Timestamp = u64;
+
 /// One persisted conversation record: a message or the token usage of a turn.
 ///
 /// Sessions are stored as one JSON record per line. Messages no longer carry
 /// a per-message usage slot; instead a single `TokenUsage` record is written
 /// right after the final assistant message of each user turn, holding the
-/// usage of the turn's last provider response.
+/// usage of the turn's last provider response. A leading `SessionMeta` record
+/// records the workspace root the session was created in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Record {
@@ -25,6 +28,17 @@ pub enum Record {
         #[serde(flatten)]
         usage: Usage,
     },
+    /// Session-level metadata, written as the first line of a session file.
+    SessionMeta(SessionMeta),
+}
+
+/// Where and when a session was created. Written as the first JSONL record so
+/// the workspace root survives a resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionMeta {
+    pub root: String,
+    /// Unix milliseconds when the session first got content.
+    pub created_at: u64,
 }
 
 /// Current wall-clock time as Unix milliseconds.
@@ -34,8 +48,6 @@ fn now_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
-
-type Timestamp = u64;
 
 /// Conversation history with API-reported token tracking.
 ///
@@ -63,6 +75,7 @@ pub struct History {
     total: Usage,
     last_prompt_tokens: usize,
     revision: u64,
+    meta: Option<SessionMeta>,
 }
 
 impl History {
@@ -73,6 +86,7 @@ impl History {
             total: Usage::default(),
             last_prompt_tokens: 0,
             revision: 0,
+            meta: None,
         }
     }
 
@@ -93,6 +107,22 @@ impl History {
         self.turn_usage.clear();
         self.last_prompt_tokens = 0;
         self.total = Usage::default();
+        self.meta = None;
+    }
+
+    /// Record the session's workspace root if it is not already known (a
+    /// resumed session keeps its original root and creation time).
+    pub fn ensure_session_meta(&mut self, root: String) {
+        if self.meta.is_none() {
+            self.meta = Some(SessionMeta {
+                root,
+                created_at: now_ms(),
+            });
+        }
+    }
+
+    pub fn session_meta(&self) -> Option<&SessionMeta> {
+        self.meta.as_ref()
     }
 
     /// Replace the entire history from a persisted session: messages and the
@@ -104,6 +134,7 @@ impl History {
         self.revision += 1;
         self.messages.clear();
         self.turn_usage.clear();
+        self.meta = None;
         for record in records {
             match record {
                 Record::Message { timestamp, message } => {
@@ -116,6 +147,7 @@ impl History {
                     Some(last) => *last = (usage, timestamp),
                     None => self.turn_usage.push((usage, timestamp)),
                 },
+                Record::SessionMeta(meta) => self.meta = Some(meta),
             }
         }
         self.total = self
@@ -159,7 +191,10 @@ impl History {
     /// original ones, so a rewind that rewrites the file doesn't restamp
     /// older messages.
     pub fn records(&self) -> Vec<Record> {
-        let mut out = Vec::with_capacity(self.messages.len() + self.turn_usage.len());
+        let mut out = Vec::with_capacity(self.messages.len() + self.turn_usage.len() + 1);
+        if let Some(meta) = &self.meta {
+            out.push(Record::SessionMeta(meta.clone()));
+        }
         let first_user = self
             .messages
             .iter()
@@ -359,6 +394,7 @@ mod tests {
             .map(|r| match r {
                 Record::Message { .. } => "msg",
                 Record::TokenUsage { .. } => "usage",
+                Record::SessionMeta(_) => "meta",
             })
             .collect()
     }
@@ -393,6 +429,9 @@ mod tests {
                 ) => {
                     assert_eq!(t1, t2);
                     assert_eq!(u1, u2);
+                }
+                (Record::SessionMeta(m1), Record::SessionMeta(m2)) => {
+                    assert_eq!(m1, m2);
                 }
                 _ => panic!("record kind mismatch"),
             }
@@ -715,6 +754,35 @@ mod tests {
         assert_eq!(restored.total_usage().input_tokens, 11);
         assert!(restored.rewind_last_turn().is_some());
         assert_eq!(restored.total_usage().input_tokens, 0);
+    }
+
+    #[test]
+    fn session_meta_roundtrips_and_survives_clear() {
+        let mut h = History::new();
+        assert!(h.session_meta().is_none());
+
+        h.ensure_session_meta("/ws".into());
+        let first = h.session_meta().unwrap().clone();
+        assert_eq!(first.root, "/ws");
+        assert!(first.created_at > 0);
+
+        // ensure is a no-op once meta is known.
+        h.ensure_session_meta("/other".into());
+        assert_eq!(h.session_meta().unwrap().root, "/ws");
+
+        h.push(Message::user_text("a"));
+        let records = h.records();
+        assert_eq!(record_kinds(&records).first(), Some(&"meta"));
+        let mut restored = History::new();
+        restored.set_messages_with_records(records.clone());
+        assert_eq!(restored.session_meta(), Some(&first));
+        assert_records_equal(&restored.records(), &records);
+
+        // /clear drops the meta so a fresh session records its own root.
+        restored.clear();
+        assert!(restored.session_meta().is_none());
+        restored.ensure_session_meta("/other".into());
+        assert_eq!(restored.session_meta().unwrap().root, "/other");
     }
 
     #[test]

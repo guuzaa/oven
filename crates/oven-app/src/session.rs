@@ -17,7 +17,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use oven_agent::Record;
+use oven_agent::{Record, SessionMeta};
 use oven_llm::{Message, Usage};
 use serde::Deserialize;
 use thiserror::Error;
@@ -38,6 +38,16 @@ pub fn default_sessions_dir() -> Option<PathBuf> {
     cross_xdg::BaseDirs::with_prefix("oven")
         .ok()
         .map(|d| d.data_home().join("sessions"))
+}
+
+/// Absolute, symlink-resolved form of a workspace root, falling back to the
+/// raw path when canonicalization fails. Used as the key for both the session
+/// meta record and the `cwd_latest.json` index so they match.
+pub fn canonical_root(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[derive(Debug, Clone)]
@@ -111,10 +121,25 @@ impl Session {
                 .into_iter()
                 .filter_map(|r| match r {
                     Record::Message { message, .. } => Some(message),
-                    Record::TokenUsage { .. } => None,
+                    Record::TokenUsage { .. } | Record::SessionMeta(_) => None,
                 })
                 .collect()
         })
+    }
+
+    /// Read the session's metadata record (its workspace root and creation
+    /// time), the first line of the file. `None` for a missing file, an
+    /// empty file, or a legacy session that predates meta records.
+    pub fn load_meta(&self) -> Result<Option<SessionMeta>, SessionError> {
+        let Some(line) = read_first_line(&self.path)? else {
+            return Ok(None);
+        };
+        let records =
+            parse_line(&line).map_err(|e| SessionError::Parse(self.path.clone(), 1, e))?;
+        Ok(records.into_iter().find_map(|r| match r {
+            Record::SessionMeta(meta) => Some(meta),
+            _ => None,
+        }))
     }
 
     /// Append many records (messages and token usage) in one open/flush
@@ -179,6 +204,68 @@ impl Session {
         }
         out.sort();
         Ok(out)
+    }
+}
+
+/// `cwd_latest.json`: a map of canonical workspace root to the session id most
+/// recently used there. Kept separate from the session files so a `/continue`
+/// can resolve "which session did I last use in this directory?" with a single
+/// read instead of scanning every session.
+fn recent_path(dir: &Path) -> PathBuf {
+    dir.join("cwd_latest.json")
+}
+
+fn load_recent(dir: &Path) -> Result<std::collections::BTreeMap<String, String>, SessionError> {
+    let path = recent_path(dir);
+    match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| SessionError::Parse(path, 1, e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) => Err(SessionError::Io(path, e)),
+    }
+}
+
+fn save_recent(
+    dir: &Path,
+    map: &std::collections::BTreeMap<String, String>,
+) -> Result<(), SessionError> {
+    let path = recent_path(dir);
+    let tmp = dir.join("cwd_latest.json.tmp");
+    let text = serde_json::to_string_pretty(map).expect("recent map serialization cannot fail");
+    fs::write(&tmp, text).map_err(|e| SessionError::Io(path.clone(), e))?;
+    fs::rename(&tmp, &path).map_err(|e| SessionError::Io(path.clone(), e))
+}
+
+/// Remember that `session_id` is the most recent session used in `root`.
+pub fn record_recent(dir: &Path, root: &Path, session_id: &str) -> Result<(), SessionError> {
+    let mut map = load_recent(dir)?;
+    map.insert(canonical_root(root), session_id.to_string());
+    save_recent(dir, &map)
+}
+
+/// The most recent session id recorded for `root`, if any.
+pub fn recent_session_id(dir: &Path, root: &Path) -> Result<Option<String>, SessionError> {
+    Ok(load_recent(dir)?.get(&canonical_root(root)).cloned())
+}
+
+fn read_first_line(path: &Path) -> Result<Option<String>, SessionError> {
+    match fs::File::open(path) {
+        Ok(f) => {
+            let mut line = String::new();
+            let mut reader = BufReader::new(f);
+            let n = reader
+                .read_line(&mut line)
+                .map_err(|e| SessionError::Io(path.to_path_buf(), e))?;
+            if n == 0 {
+                return Ok(None);
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(trimmed.to_string()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(SessionError::Io(path.to_path_buf(), e)),
     }
 }
 
@@ -392,5 +479,70 @@ mod tests {
         assert!(Session::open(tmp.path(), "../escape").is_err());
         assert!(Session::open(tmp.path(), "a/b").is_err());
         assert!(Session::open(tmp.path(), "").is_err());
+    }
+
+    #[test]
+    fn session_meta_record_roundtrips_and_load_drops_it() {
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").unwrap();
+        let meta = SessionMeta {
+            root: "/ws".into(),
+            created_at: 123,
+        };
+        session
+            .append_records(&[
+                Record::SessionMeta(meta.clone()),
+                message_record(1, Message::user_text("hello")),
+            ])
+            .unwrap();
+
+        let loaded = session.load_records().unwrap();
+        assert!(
+            matches!(&loaded[0], Record::SessionMeta(m) if m == &meta),
+            "meta must parse from the first line"
+        );
+        assert_eq!(session.load_meta().unwrap(), Some(meta));
+        assert_eq!(session.load().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn load_meta_missing_or_legacy_returns_none() {
+        let tmp = tmp();
+        let missing = Session::open(tmp.path(), "missing").unwrap();
+        assert_eq!(missing.load_meta().unwrap(), None);
+
+        let legacy = Session::open(tmp.path(), "legacy").unwrap();
+        legacy
+            .append_records(&[message_record(1, Message::user_text("old"))])
+            .unwrap();
+        assert_eq!(legacy.load_meta().unwrap(), None);
+    }
+
+    #[test]
+    fn recent_index_records_latest_session_per_root() {
+        let tmp = tmp();
+        let root = PathBuf::from("/ws");
+        assert_eq!(recent_session_id(tmp.path(), &root).unwrap(), None);
+
+        record_recent(tmp.path(), &root, "s1").unwrap();
+        assert_eq!(
+            recent_session_id(tmp.path(), &root).unwrap().as_deref(),
+            Some("s1")
+        );
+
+        record_recent(tmp.path(), &root, "s2").unwrap();
+        assert_eq!(
+            recent_session_id(tmp.path(), &root).unwrap().as_deref(),
+            Some("s2"),
+            "latest recording wins"
+        );
+
+        assert_eq!(
+            recent_session_id(tmp.path(), Path::new("/other")).unwrap(),
+            None
+        );
+
+        assert!(tmp.path().join("cwd_latest.json").exists());
+        assert!(!tmp.path().join("cwd_latest.json.tmp").exists());
     }
 }

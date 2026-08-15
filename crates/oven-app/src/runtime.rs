@@ -8,7 +8,7 @@ use oven_llm::{ContentBlock, Message, ModelInfo, Provider, ProviderName, Role, U
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::session::Session;
+use crate::session::{Session, canonical_root, record_recent};
 use crate::{App, AppError};
 
 /// Id for one long-lived oven-app instance inside a TUI process.
@@ -73,6 +73,7 @@ struct SharedSession {
 /// untouched.
 struct SessionStore {
     dir: PathBuf,
+    root: String,
     shared: Arc<Mutex<SharedSession>>,
 }
 
@@ -248,6 +249,7 @@ impl App {
             )
             .collect();
         agent.restore_history(records);
+        agent.ensure_session_meta(canonical_root(&self.root));
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -276,6 +278,7 @@ impl App {
             )
             .collect();
         agent.restore_history(records);
+        agent.ensure_session_meta(canonical_root(&self.root));
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -317,6 +320,7 @@ impl App {
             )
             .collect();
         agent.restore_history(records);
+        agent.ensure_session_meta(canonical_root(&self.root));
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -373,12 +377,13 @@ fn spawn_runtime(
         Some(s) => {
             let shared = Arc::new(Mutex::new(SharedSession {
                 session: s.clone(),
-                has_content: !agent.history_records().is_empty(),
+                has_content: agent.history().len() != 0,
             }));
             let dir = s.path().parent().map(Path::to_path_buf).unwrap_or_default();
             (
                 Some(SessionStore {
                     dir,
+                    root: canonical_root(&root),
                     shared: shared.clone(),
                 }),
                 Some(shared),
@@ -504,7 +509,12 @@ async fn runtime_loop(
     // Leading in-memory messages already written to the store. On `/clear`
     // the in-memory history is replaced, so this resets to 0 while the store
     // itself is kept untouched; later turns append after the old content.
-    let mut persisted_prefix = agent.history_records().len();
+    // A brand-new session holds a meta record in memory but nothing on disk
+    // yet, so its prefix starts at 0 and the first append writes the meta.
+    let mut persisted_prefix = match &session_store {
+        Some(store) if store.current().path().exists() => agent.history_records().len(),
+        _ => 0,
+    };
     let mut persisted_rev = agent.history_revision();
 
     // Publish the initial model list for the `/model` popup completion.
@@ -536,7 +546,7 @@ async fn runtime_loop(
                         let records = agent.history_records();
                         match store.current().overwrite(&records) {
                             Ok(()) => {
-                                store.mark_content(!records.is_empty());
+                                store.mark_content(agent.history().len() != 0);
                                 true
                             }
                             Err(e) => {
@@ -554,7 +564,7 @@ async fn runtime_loop(
                     None => true,
                 };
                 if store_ok {
-                    persisted_prefix = agent.history().len();
+                    persisted_prefix = agent.history_records().len();
                 }
                 persisted_rev = agent.history_revision();
                 emit(
@@ -614,9 +624,19 @@ async fn runtime_loop(
                     }
                 };
 
+                // A `/clear` during the turn switched to a fresh session whose
+                // meta is still unset; stamp it with this workspace root now
+                // that the turn (and its borrow of `agent`) has completed.
+                if let Some(store) = &session_store {
+                    agent.ensure_session_meta(store.root.clone());
+                }
+
                 while let Ok(event) = agent_rx.try_recv() {
                     if matches!(&event, AgentEvent::HistoryCleared { .. }) {
                         switch_session(&mut session_store, &subscribers, app_id);
+                        if let Some(store) = &session_store {
+                            agent.ensure_session_meta(store.root.clone());
+                        }
                     }
                     emit(&subscribers, AppEvent::Agent { app_id, event });
                 }
@@ -646,6 +666,19 @@ async fn runtime_loop(
                                 } else {
                                     store.mark_content(true);
                                     persisted_prefix = after.len();
+                                    if let Err(e) = record_recent(
+                                        &store.dir,
+                                        Path::new(&store.root),
+                                        store.current().id(),
+                                    ) {
+                                        emit(
+                                            &subscribers,
+                                            AppEvent::Error {
+                                                app_id,
+                                                message: e.to_string(),
+                                            },
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1148,6 +1181,7 @@ mod tests {
         let files: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".jsonl"))
             .collect();
         assert_eq!(files, ["s1.jsonl"]);
     }
@@ -1385,6 +1419,76 @@ mod tests {
         assert_eq!(dones, 2);
         assert_eq!(idles, 2);
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_persists_root_meta_and_recent_index() {
+        use crate::session::{canonical_root, recent_session_id};
+
+        let tmp = tempdir::TempDir::new("app-runtime-meta").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mock = MockProvider::new(vec![text_response("one")]);
+        let handle = app
+            .spawn_session_with_provider_in(&dir, Box::new(mock), None)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("hi").await.unwrap(), "one");
+        let sid = handle.session_id().expect("session id after content");
+        handle.shutdown().await;
+
+        // The session file's first record is the meta with the root.
+        let records = Session::open(&dir, &sid).unwrap().load_records().unwrap();
+        match &records[0] {
+            Record::SessionMeta(meta) => {
+                assert_eq!(meta.root, canonical_root(tmp.path()));
+                assert!(meta.created_at > 0);
+            }
+            other => panic!("expected meta record, got {other:?}"),
+        }
+
+        // The recent index maps this root to the session id.
+        assert_eq!(
+            recent_session_id(&dir, tmp.path()).unwrap().as_deref(),
+            Some(sid.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_updates_recent_index_to_fresh_session() {
+        use crate::session::recent_session_id;
+
+        let tmp = tempdir::TempDir::new("app-runtime-recent-clear").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mock = MockProvider::new(vec![text_response("one"), text_response("fresh")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+
+        let mut rx = handle.subscribe();
+        handle.send(AppCmd::UserInput("/clear".into())).unwrap();
+        while let Some(ev) = rx.recv().await {
+            if let AppEvent::Idle { .. } = ev {
+                break;
+            }
+        }
+        assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
+        let fresh = handle.session_id().expect("new session after /clear");
+        handle.shutdown().await;
+
+        assert_eq!(
+            recent_session_id(&dir, tmp.path()).unwrap().as_deref(),
+            Some(fresh.as_str()),
+            "/clear session becomes the recent one for the root"
+        );
     }
 
     fn user_texts(messages: &[Message]) -> Vec<String> {
