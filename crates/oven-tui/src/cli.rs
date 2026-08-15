@@ -58,11 +58,11 @@ impl Cli {
 
     pub async fn run(&self) -> ExitCode {
         let app = self.spawn();
-        let session = self.resolve_session_id();
 
         match self.query.as_deref() {
-            Some(prompt) => headless(&app, session.as_deref(), prompt.trim()).await,
+            Some(prompt) => headless(&app, prompt.trim()).await,
             None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
+                let session = self.resolve_session_id();
                 interactive(&app, session.as_deref()).await
             }
             None => {
@@ -73,33 +73,16 @@ impl Cli {
     }
 }
 
-async fn headless(app: &App, session: Option<&str>, prompt: &str) -> ExitCode {
-    let result = match session {
-        Some(sid) => {
-            let handle = match app.spawn_session(Some(sid)).await {
-                Ok(h) => h,
-                Err(err) => {
-                    eprintln!("error: {}", err);
-                    return ExitCode::FAILURE;
-                }
-            };
-            let out = handle.prompt(prompt).await;
-            handle.shutdown().await;
-            out
-        }
-        None => {
-            let handle = match app.spawn().await {
-                Ok(h) => h,
-                Err(err) => {
-                    eprintln!("error: {err}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            let out = handle.prompt(prompt).await;
-            handle.shutdown().await;
-            out
+async fn headless(app: &App, prompt: &str) -> ExitCode {
+    let handle = match app.spawn().await {
+        Ok(h) => h,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return ExitCode::FAILURE;
         }
     };
+    let result = handle.prompt(prompt).await;
+    handle.shutdown().await;
 
     match result {
         Ok(out) => {
