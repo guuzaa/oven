@@ -295,9 +295,9 @@ mod tests {
         let cfg = ProviderConfig::default();
         let cases = [
             ("gpt-4o", ProviderName::OpenAI),
-            ("o3-mini", ProviderName::OpenAI),
+            ("gpt-o3-mini", ProviderName::OpenAI),
             ("deepseek-chat", ProviderName::DeepSeek),
-            ("kimi-k2", ProviderName::Moonshot),
+            ("kimi-k3", ProviderName::Moonshot),
             ("glm-4", ProviderName::Zhipu),
             ("claude-3-5-haiku", ProviderName::Anthropic),
             ("unknown-model", ProviderName::Custom("unknown".into())),

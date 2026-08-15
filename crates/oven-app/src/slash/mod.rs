@@ -2,9 +2,9 @@ mod clear;
 mod exit;
 mod model;
 
-use crate::agent::Agent;
-use crate::error::AgentError;
-use oven_llm::ReasoningEffort;
+use oven_agent::Agent;
+
+use crate::AppError;
 
 pub use clear::Clear;
 pub use exit::Exit;
@@ -17,7 +17,7 @@ pub enum CommandOutcome {
     Exit,
     ModelChanged {
         model: String,
-        reasoning_effort: Option<ReasoningEffort>,
+        reasoning_effort: Option<oven_llm::ReasoningEffort>,
     },
     Passthrough,
 }
@@ -25,7 +25,7 @@ pub enum CommandOutcome {
 pub trait SlashCommand: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AgentError>;
+    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError>;
 }
 
 pub struct SlashRegistry {
@@ -51,10 +51,6 @@ impl SlashRegistry {
         self.commands.push(cmd);
     }
 
-    pub fn command_names(&self) -> Vec<&str> {
-        self.commands.iter().map(|c| c.name()).collect()
-    }
-
     /// (name, description) pairs for every registered command, in
     /// registration order.
     pub fn commands(&self) -> Vec<(String, String)> {
@@ -68,7 +64,7 @@ impl SlashRegistry {
         &self,
         agent: &mut Agent,
         input: &str,
-    ) -> Result<CommandOutcome, AgentError> {
+    ) -> Result<CommandOutcome, AppError> {
         let trimmed = input.trim_start();
         if !trimmed.starts_with('/') {
             return Ok(CommandOutcome::Passthrough);
@@ -82,7 +78,7 @@ impl SlashRegistry {
             .commands
             .iter()
             .find(|c| c.name() == name)
-            .ok_or_else(|| AgentError::from(format!("unknown command: /{name}")))?;
+            .ok_or_else(|| AppError::Runtime(format!("unknown command: /{name}")))?;
         command.execute(agent, args)
     }
 }
@@ -96,7 +92,6 @@ impl Default for SlashRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::Agent;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_llm::{
@@ -151,7 +146,7 @@ mod tests {
         let reg = SlashRegistry::with_builtin();
         let mut agent = fresh_agent();
         let err = reg.parse_and_run(&mut agent, "/nope").unwrap_err();
-        assert!(err.message.contains("unknown command"));
+        assert!(err.to_string().contains("unknown command"));
     }
 
     #[test]
@@ -168,10 +163,10 @@ mod tests {
     fn clear_wipes_history() {
         let reg = SlashRegistry::with_builtin();
         let mut agent = fresh_agent();
-        agent.history.push(Message::user_text("hi"));
+        agent.push_history(Message::user_text("hi"));
         let outcome = reg.parse_and_run(&mut agent, "/clear").unwrap();
         assert!(matches!(outcome, CommandOutcome::Cleared));
-        assert!(agent.history.is_empty());
+        assert_eq!(agent.history().len(), 0);
     }
 
     #[test]
@@ -192,7 +187,7 @@ mod tests {
             fn description(&self) -> &str {
                 ""
             }
-            fn execute(&self, _a: &mut Agent, args: &str) -> Result<CommandOutcome, AgentError> {
+            fn execute(&self, _a: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
                 Ok(CommandOutcome::Reply(args.to_string()))
             }
         }

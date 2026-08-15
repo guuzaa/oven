@@ -435,11 +435,11 @@ impl Component for Transcript {
                     }
                     self.push_row(LineKind::System, "cancelled");
                 }
-                AgentEvent::Exit { .. } => {}
                 AgentEvent::HistoryCleared { .. } => self.reset(),
                 AgentEvent::ModelChanged { .. } => {}
             },
             AppEvent::ModelsUpdated { .. } => {}
+            AppEvent::Exit { .. } => {}
             AppEvent::Rewound { messages, .. } => self.replace_from(messages),
             AppEvent::Idle { .. } => {
                 self.flush_streaming();

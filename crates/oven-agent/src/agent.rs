@@ -9,8 +9,6 @@ use tokio_util::sync::CancellationToken;
 use crate::error::AgentError;
 use crate::event::{AgentEvent, AgentId};
 use crate::history::{History, Record};
-use crate::slash::CommandOutcome;
-use crate::slash::SlashRegistry;
 use crate::tools::Tool;
 
 /// The conversation driver. Holds tools and dispatches tool calls returned by
@@ -19,7 +17,6 @@ pub struct Agent {
     id: AgentId,
     pub(crate) provider: Box<dyn Provider>,
     pub(crate) tools: Vec<Box<dyn Tool>>,
-    pub(crate) slash: SlashRegistry,
     pub(crate) history: History,
     model: ModelId,
     system: Option<String>,
@@ -36,7 +33,6 @@ impl Agent {
             id: AgentId(0),
             provider,
             tools,
-            slash: SlashRegistry::with_builtin(),
             history: History::new(),
             model: ModelId::new("default"),
             system: None,
@@ -101,17 +97,6 @@ impl Agent {
     pub fn with_budget(mut self, budget: usize) -> Self {
         self.budget = budget;
         self
-    }
-
-    /// Replace the slash registry with a custom one.
-    pub fn with_slash(mut self, slash: SlashRegistry) -> Self {
-        self.slash = slash;
-        self
-    }
-
-    /// Names and descriptions of the registered slash commands.
-    pub fn slash_commands(&self) -> Vec<(String, String)> {
-        self.slash.commands()
     }
 
     pub fn history(&self) -> impl ExactSizeIterator<Item = &Message> + '_ {
@@ -381,49 +366,6 @@ impl Agent {
         // aborts the in-flight provider stream or tool. The token is also
         // passed to tools so long-running ones can stop promptly on their own.
         let turn = async {
-            // Move the slash registry out of `self` so commands can borrow
-            // `self` mutably while executing (commands often touch
-            // `agent.history` etc.).
-            let registry = std::mem::take(&mut self.slash);
-            let outcome = registry.parse_and_run(self, &input);
-            self.slash = registry;
-            match outcome? {
-                CommandOutcome::Passthrough => {}
-                CommandOutcome::Reply(r) => return Ok(finish(self, &tx, r)),
-                CommandOutcome::Cleared => {
-                    let text = finish(self, &tx, "history cleared".to_string());
-                    Self::emit(&tx, AgentEvent::HistoryCleared { agent_id: self.id });
-                    return Ok(text);
-                }
-                CommandOutcome::Exit => {
-                    let text = finish(self, &tx, "goodbye".to_string());
-                    Self::emit(&tx, AgentEvent::Exit { agent_id: self.id });
-                    return Ok(text);
-                }
-                CommandOutcome::ModelChanged {
-                    model,
-                    reasoning_effort,
-                } => {
-                    self.set_model(&*model);
-                    self.set_reasoning_effort(reasoning_effort);
-                    Self::emit(
-                        &tx,
-                        AgentEvent::ModelChanged {
-                            agent_id: self.id,
-                            model: model.clone(),
-                            reasoning_effort,
-                        },
-                    );
-                    let text = match reasoning_effort {
-                        Some(e) => {
-                            format!("model switched to {model} (effort: {})", e)
-                        }
-                        None => format!("model switched to {model}"),
-                    };
-                    return Ok(finish(self, &tx, text));
-                }
-            }
-
             self.history.push(Message::user_text(input));
             self.budget = self
                 .provider
@@ -700,132 +642,5 @@ mod tests {
                 agent_id: AgentId(1)
             }
         );
-    }
-
-    #[tokio::test]
-    async fn slash_clear_runs_without_model() {
-        let mock = MockProvider::new(vec![]);
-        let tools: Vec<Box<dyn Tool>> = Vec::new();
-        let mut agent = Agent::new(Box::new(mock), tools);
-        agent.history.push(Message::user_text("prior"));
-        let out = agent.run("/clear").await.unwrap();
-        assert_eq!(out, "history cleared");
-        assert!(agent.history.is_empty());
-    }
-
-    #[tokio::test]
-    async fn slash_exit_returns_goodbye() {
-        let mock = MockProvider::new(vec![]);
-        let mut agent = Agent::new(Box::new(mock), Vec::new());
-        let out = agent.run("/exit").await.unwrap();
-        assert_eq!(out, "goodbye");
-    }
-
-    #[tokio::test]
-    async fn slash_exit_emits_exit_event() {
-        let mock = MockProvider::new(vec![]);
-        let mut agent = Agent::new(Box::new(mock), Vec::new()).with_id(AgentId(3));
-        let (tx, mut rx) = unbounded_channel();
-        let out = agent
-            .run_with_emitter("/exit", Some(tx), None)
-            .await
-            .unwrap();
-        assert_eq!(out, "goodbye");
-
-        let mut saw_done = false;
-        let mut saw_exit = false;
-        while let Ok(ev) = rx.try_recv() {
-            match ev {
-                AgentEvent::Done {
-                    agent_id: AgentId(3),
-                    text,
-                    ..
-                } if text == "goodbye" => saw_done = true,
-                AgentEvent::Exit {
-                    agent_id: AgentId(3),
-                } => saw_exit = true,
-                _ => {}
-            }
-        }
-        assert!(saw_done);
-        assert!(saw_exit);
-    }
-
-    #[tokio::test]
-    async fn slash_clear_emits_history_cleared_event() {
-        let mock = MockProvider::new(vec![]);
-        let mut agent = Agent::new(Box::new(mock), Vec::new()).with_id(AgentId(4));
-        agent.history.push(Message::user_text("prior"));
-        let (tx, mut rx) = unbounded_channel();
-        let out = agent
-            .run_with_emitter("/clear", Some(tx), None)
-            .await
-            .unwrap();
-        assert_eq!(out, "history cleared");
-
-        let mut saw_done = false;
-        let mut saw_cleared = false;
-        while let Ok(ev) = rx.try_recv() {
-            match ev {
-                AgentEvent::Done { text, .. } if text == "history cleared" => saw_done = true,
-                AgentEvent::HistoryCleared { .. } => saw_cleared = true,
-                _ => {}
-            }
-        }
-        assert!(saw_done);
-        assert!(saw_cleared);
-        assert!(agent.history.is_empty());
-    }
-
-    #[tokio::test]
-    async fn slash_clear_resets_total_usage() {
-        let mock = MockProvider::new(vec![text_response("one")]);
-        let mut agent = Agent::new(Box::new(mock), Vec::new());
-        let out = agent.run("hello").await.unwrap();
-        assert_eq!(out, "one");
-        assert!(agent.total_usage().input_tokens > 0);
-
-        let out = agent.run("/clear").await.unwrap();
-        assert_eq!(out, "history cleared");
-        assert_eq!(agent.total_usage().input_tokens, 0);
-        assert_eq!(agent.total_usage().output_tokens, 0);
-    }
-
-    #[tokio::test]
-    async fn model_slash_command_switches_model_and_effort() {
-        let mut agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new());
-        let (tx, mut rx) = unbounded_channel();
-        let result = agent
-            .run_with_emitter("/model deepseek-chat high", Some(tx), None)
-            .await
-            .unwrap();
-        assert_eq!(result, "model switched to deepseek-chat (effort: high)");
-        assert_eq!(agent.model().as_str(), "deepseek-chat");
-        assert_eq!(agent.reasoning_effort(), Some(ReasoningEffort::High));
-
-        let mut saw_changed = false;
-        while let Ok(ev) = rx.try_recv() {
-            if let AgentEvent::ModelChanged {
-                model,
-                reasoning_effort,
-                ..
-            } = ev
-            {
-                assert_eq!(model, "deepseek-chat");
-                assert_eq!(reasoning_effort, Some(ReasoningEffort::High));
-                saw_changed = true;
-            }
-        }
-        assert!(saw_changed);
-    }
-
-    #[tokio::test]
-    async fn model_slash_command_model_only_keeps_effort() {
-        let mut agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new())
-            .with_reasoning_effort(ReasoningEffort::Low);
-        let result = agent.run("/model gpt-4o").await.unwrap();
-        assert_eq!(result, "model switched to gpt-4o (effort: low)");
-        assert_eq!(agent.model().as_str(), "gpt-4o");
-        assert_eq!(agent.reasoning_effort(), Some(ReasoningEffort::Low));
     }
 }

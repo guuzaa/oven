@@ -19,6 +19,7 @@ pub mod mcp;
 pub mod runtime;
 pub mod session;
 pub mod skill;
+mod slash;
 pub mod tools;
 
 pub use mcp::McpServerConfig;

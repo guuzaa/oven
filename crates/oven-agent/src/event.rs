@@ -36,9 +36,6 @@ pub enum AgentEvent {
     Cancelled {
         agent_id: AgentId,
     },
-    Exit {
-        agent_id: AgentId,
-    },
     HistoryCleared {
         agent_id: AgentId,
     },

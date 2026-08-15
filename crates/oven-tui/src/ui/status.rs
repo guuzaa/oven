@@ -109,6 +109,7 @@ impl Component for StatusBar {
             }
             AppEvent::ModelsUpdated { .. } => {}
             AppEvent::Error { .. } => {}
+            AppEvent::Exit { .. } => {}
             AppEvent::Rewound { usage, .. } => {
                 self.total = *usage;
             }

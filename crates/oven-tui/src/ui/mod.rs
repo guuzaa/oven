@@ -19,7 +19,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
-use oven_app::{AgentEvent, AppCmd, AppEvent, AppHandle};
+use oven_app::{AppCmd, AppEvent, AppHandle};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -159,13 +159,7 @@ impl Ui {
     }
 
     fn apply_event(&mut self, ev: AppEvent) {
-        if matches!(
-            ev,
-            AppEvent::Agent {
-                event: AgentEvent::Exit { .. },
-                ..
-            }
-        ) {
+        if matches!(ev, AppEvent::Exit { .. }) {
             self.quit = true;
         }
         self.transcript.on_event(&ev, &mut self.state);

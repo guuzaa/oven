@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::session::{Session, canonical_root, record_recent};
+use crate::slash::{CommandOutcome, SlashRegistry};
 use crate::{App, AppError};
 
 /// Id for one long-lived oven-app instance inside a TUI process.
@@ -57,6 +58,10 @@ pub enum AppEvent {
         text: Option<String>,
         messages: Vec<Message>,
         usage: Usage,
+    },
+    /// `/exit` asked the process to quit.
+    Exit {
+        app_id: AppId,
     },
 }
 
@@ -370,7 +375,7 @@ fn spawn_runtime(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
     let subscribers_task = Arc::clone(&subscribers);
-    let slash_commands = agent.slash_commands();
+    let slash_commands = SlashRegistry::with_builtin().commands();
     let history: Vec<Message> = agent.history().cloned().collect();
     let total_usage = *agent.total_usage();
     let (session_store, shared_session) = match session {
@@ -421,6 +426,81 @@ fn spawn_runtime(
 fn emit(subs: &Subscribers, event: AppEvent) {
     let mut subs = subs.lock().unwrap_or_else(|e| e.into_inner());
     subs.retain(|tx| tx.send(event.clone()).is_ok());
+}
+
+fn emit_agent(subs: &Subscribers, app_id: AppId, event: AgentEvent) {
+    emit(subs, AppEvent::Agent { app_id, event });
+}
+
+fn emit_done(subs: &Subscribers, app_id: AppId, agent: &Agent, text: String) {
+    emit_agent(
+        subs,
+        app_id,
+        AgentEvent::Done {
+            agent_id: agent.id(),
+            text,
+            usage: *agent.total_usage(),
+        },
+    );
+}
+
+fn apply_slash(
+    outcome: CommandOutcome,
+    app_id: AppId,
+    agent: &mut Agent,
+    session_store: &mut Option<SessionStore>,
+    persisted_prefix: &mut usize,
+    persisted_rev: &mut u64,
+    subs: &Subscribers,
+) {
+    match outcome {
+        CommandOutcome::Passthrough => {}
+        CommandOutcome::Reply(text) => {
+            emit_done(subs, app_id, agent, text);
+        }
+        CommandOutcome::Cleared => {
+            emit_done(subs, app_id, agent, "history cleared".to_string());
+            emit_agent(
+                subs,
+                app_id,
+                AgentEvent::HistoryCleared {
+                    agent_id: agent.id(),
+                },
+            );
+            switch_session(session_store, subs, app_id);
+            if let Some(store) = session_store {
+                agent.ensure_session_meta(store.root.clone());
+            }
+            *persisted_prefix = 0;
+            *persisted_rev = agent.history_revision();
+        }
+        CommandOutcome::Exit => {
+            emit_done(subs, app_id, agent, "goodbye".to_string());
+            emit(subs, AppEvent::Exit { app_id });
+        }
+        CommandOutcome::ModelChanged {
+            model,
+            reasoning_effort,
+        } => {
+            agent.set_model(&*model);
+            agent.set_reasoning_effort(reasoning_effort);
+            emit_agent(
+                subs,
+                app_id,
+                AgentEvent::ModelChanged {
+                    agent_id: agent.id(),
+                    model: model.clone(),
+                    reasoning_effort,
+                },
+            );
+            let text = match reasoning_effort {
+                Some(e) => format!("model switched to {model} (effort: {e})"),
+                None => format!("model switched to {model}"),
+            };
+            emit_done(subs, app_id, agent, text);
+        }
+    }
+    emit(subs, AppEvent::Idle { app_id });
 }
 
 fn switch_session(store: &mut Option<SessionStore>, subs: &Subscribers, app_id: AppId) {
@@ -506,6 +586,7 @@ async fn runtime_loop(
     model: String,
     model_list_timeout: Duration,
 ) {
+    let slash = SlashRegistry::with_builtin();
     // Leading in-memory messages already written to the store. On `/clear`
     // the in-memory history is replaced, so this resets to 0 while the store
     // itself is kept untouched; later turns append after the old content.
@@ -578,6 +659,33 @@ async fn runtime_loop(
                 );
             }
             AppCmd::UserInput(input) => {
+                match slash.parse_and_run(&mut agent, &input) {
+                    Ok(CommandOutcome::Passthrough) => {}
+                    Ok(outcome) => {
+                        apply_slash(
+                            outcome,
+                            app_id,
+                            &mut agent,
+                            &mut session_store,
+                            &mut persisted_prefix,
+                            &mut persisted_rev,
+                            &subscribers,
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        emit(
+                            &subscribers,
+                            AppEvent::Error {
+                                app_id,
+                                message: e.to_string(),
+                            },
+                        );
+                        emit(&subscribers, AppEvent::Idle { app_id });
+                        continue;
+                    }
+                }
+
                 let cancel = CancellationToken::new();
                 let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
 
@@ -607,13 +715,6 @@ async fn runtime_loop(
                             ev = agent_rx.recv() => {
                                 match ev {
                                     Some(event) => {
-                                        if matches!(&event, AgentEvent::HistoryCleared { .. }) {
-                                            switch_session(
-                                                &mut session_store,
-                                                &subscribers,
-                                                app_id,
-                                            );
-                                        }
                                         emit(&subscribers, AppEvent::Agent { app_id, event });
                                     }
                                     None => break turn.await,
@@ -624,20 +725,11 @@ async fn runtime_loop(
                     }
                 };
 
-                // A `/clear` during the turn switched to a fresh session whose
-                // meta is still unset; stamp it with this workspace root now
-                // that the turn (and its borrow of `agent`) has completed.
                 if let Some(store) = &session_store {
                     agent.ensure_session_meta(store.root.clone());
                 }
 
                 while let Ok(event) = agent_rx.try_recv() {
-                    if matches!(&event, AgentEvent::HistoryCleared { .. }) {
-                        switch_session(&mut session_store, &subscribers, app_id);
-                        if let Some(store) = &session_store {
-                            agent.ensure_session_meta(store.root.clone());
-                        }
-                    }
                     emit(&subscribers, AppEvent::Agent { app_id, event });
                 }
 
@@ -647,9 +739,6 @@ async fn runtime_loop(
                             let rev = agent.history_revision();
                             let after = agent.history_records();
                             if rev != persisted_rev {
-                                // History was replaced in memory (`/clear`):
-                                // keep the store untouched and treat the new
-                                // in-memory chat as unpersisted.
                                 persisted_prefix = 0;
                                 persisted_rev = rev;
                             } else if after.len() > persisted_prefix {
@@ -906,11 +995,7 @@ mod tests {
 
         let mut saw_exit = false;
         while let Some(ev) = rx.recv().await {
-            if let AppEvent::Agent {
-                event: AgentEvent::Exit { .. },
-                ..
-            } = ev
-            {
+            if let AppEvent::Exit { .. } = ev {
                 saw_exit = true;
             }
             if let AppEvent::Idle { .. } = ev {
@@ -918,6 +1003,82 @@ mod tests {
             }
         }
         assert!(saw_exit);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn slash_clear_does_not_call_provider() {
+        let tmp = tempdir::TempDir::new("app-runtime-clear-noprovider").unwrap();
+        let app = App::new(tmp.path());
+        let mock = MockProvider::new(vec![]);
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
+        assert_eq!(handle.prompt("/clear").await.unwrap(), "history cleared");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn slash_clear_emits_history_cleared_and_resets_usage() {
+        let tmp = tempdir::TempDir::new("app-runtime-clear-events").unwrap();
+        let app = App::new(tmp.path());
+        let mock = MockProvider::new(vec![text_response("one")]);
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
+
+        assert_eq!(handle.prompt("hello").await.unwrap(), "one");
+
+        let mut rx = handle.subscribe();
+        let out = handle.prompt("/clear").await.unwrap();
+        assert_eq!(out, "history cleared");
+
+        let mut saw_cleared = false;
+        let mut done_usage = None;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::Agent {
+                    event: AgentEvent::HistoryCleared { .. },
+                    ..
+                } => saw_cleared = true,
+                AppEvent::Agent {
+                    event: AgentEvent::Done { usage, text, .. },
+                    ..
+                } if text == "history cleared" => done_usage = Some(usage),
+                _ => {}
+            }
+        }
+        assert!(saw_cleared);
+        let usage = done_usage.expect("done after /clear");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn slash_exit_returns_goodbye() {
+        let tmp = tempdir::TempDir::new("app-runtime-exit-prompt").unwrap();
+        let app = App::new(tmp.path());
+        let mock = MockProvider::new(vec![]);
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
+        assert_eq!(handle.prompt("/exit").await.unwrap(), "goodbye");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn model_slash_model_only_keeps_effort() {
+        let seen = recorder();
+        let agent = Agent::new(Box::new(RecordingProvider::new(seen.clone())), Vec::new())
+            .with_model("gpt-4o")
+            .with_reasoning_effort(oven_llm::ReasoningEffort::Low);
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "gpt-4o".into(),
+            PathBuf::from("/tmp"),
+            Duration::from_secs(1),
+        );
+
+        let out = handle.prompt("/model gpt-4o-turbo").await.unwrap();
+        assert_eq!(out, "model switched to gpt-4o-turbo (effort: low)");
+        assert_eq!(handle.prompt("hello").await.unwrap(), "echo:gpt-4o-turbo");
         handle.shutdown().await;
     }
 

@@ -1,18 +1,19 @@
-use super::{CommandOutcome, SlashCommand};
-use crate::agent::Agent;
-use crate::error::AgentError;
+use oven_agent::Agent;
 use oven_llm::ReasoningEffort;
+
+use super::{CommandOutcome, SlashCommand};
+use crate::AppError;
 
 pub struct Model;
 
 impl Model {
-    fn parse_effort(s: &str) -> Result<ReasoningEffort, AgentError> {
+    fn parse_effort(s: &str) -> Result<ReasoningEffort, AppError> {
         match s.to_ascii_lowercase().as_str() {
             "none" => Ok(ReasoningEffort::None),
             "low" => Ok(ReasoningEffort::Low),
             "medium" => Ok(ReasoningEffort::Medium),
             "high" => Ok(ReasoningEffort::High),
-            _ => Err(AgentError::from(format!(
+            _ => Err(AppError::Runtime(format!(
                 "invalid reasoning effort '{s}'; expected none, low, medium, or high"
             ))),
         }
@@ -28,7 +29,7 @@ impl SlashCommand for Model {
         "Switch model and reasoning effort: /model <id> [none|low|medium|high]"
     }
 
-    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AgentError> {
+    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
         let tokens: Vec<&str> = args.split_whitespace().collect();
         match tokens.as_slice() {
             [] => {
@@ -49,7 +50,7 @@ impl SlashCommand for Model {
                 model: (*model).to_string(),
                 reasoning_effort: Some(Self::parse_effort(effort)?),
             }),
-            _ => Err(AgentError::from(
+            _ => Err(AppError::Runtime(
                 "usage: /model <id> [none|low|medium|high]".to_string(),
             )),
         }
@@ -59,7 +60,6 @@ impl SlashCommand for Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::Agent;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_llm::{
@@ -101,7 +101,7 @@ mod tests {
         Agent::new(Box::new(MockProvider), Vec::new())
     }
 
-    fn run(args: &str) -> Result<CommandOutcome, AgentError> {
+    fn run(args: &str) -> Result<CommandOutcome, AppError> {
         Model.execute(&mut fresh_agent(), args)
     }
 
@@ -154,12 +154,12 @@ mod tests {
     #[test]
     fn invalid_effort_errors() {
         let err = run("gpt-4o turbo").unwrap_err();
-        assert!(err.message.contains("invalid reasoning effort"));
+        assert!(err.to_string().contains("invalid reasoning effort"));
     }
 
     #[test]
     fn too_many_tokens_error() {
         let err = run("gpt-4o high extra").unwrap_err();
-        assert!(err.message.contains("usage:"));
+        assert!(err.to_string().contains("usage:"));
     }
 }

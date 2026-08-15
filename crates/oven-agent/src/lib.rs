@@ -4,7 +4,6 @@ mod event;
 mod history;
 mod retry;
 mod skills;
-mod slash;
 mod tools;
 
 pub use agent::Agent;
@@ -13,7 +12,6 @@ pub use event::{AgentEvent, AgentId};
 pub use history::{History, Record, SessionMeta};
 pub use retry::RetryingProvider;
 pub use skills::{Skill, SkillRegistry};
-pub use slash::{CommandOutcome, SlashCommand, SlashRegistry};
 pub use tokio_util::sync::CancellationToken;
 pub use tools::{
     BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, SkillReadTool, Tool,
