@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use oven_agent::{Agent, AgentError, SkillReadTool, Tool};
+use oven_agent::{Agent, AgentError, AgentLive, LiveHandle, SkillReadTool, TodoWriteTool, Tool};
 use oven_llm::Provider;
 use thiserror::Error;
 
@@ -23,7 +23,10 @@ mod slash;
 pub mod tools;
 
 pub use mcp::McpServerConfig;
-pub use oven_agent::{AgentEvent, AgentId, AgentMode, CancellationToken, Skill, SkillRegistry};
+pub use oven_agent::{
+    AgentEvent, AgentId, AgentMode, CancellationToken, Skill, SkillRegistry, TodoItem, TodoList,
+    TodoStatus,
+};
 pub use runtime::{AppCmd, AppEvent, AppHandle, AppId};
 pub use tools::ToolRegistry;
 
@@ -205,7 +208,10 @@ impl App {
             .await
             .map_err(AppError::Mcp)?;
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
-        let mut agent = Agent::new(provider, tools).with_system(self.build_system_prompt());
+        let live: LiveHandle =
+            Arc::new(Mutex::new(AgentLive::new(Some(self.build_system_prompt()))));
+        tools.push(Box::new(TodoWriteTool::new(live.clone())));
+        let mut agent = Agent::new_with_live(provider, tools, live);
         if let Some(effort) = self.config.provider.reasoning_effort {
             agent.set_reasoning_effort(Some(effort));
         }

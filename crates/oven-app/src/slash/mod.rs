@@ -172,9 +172,17 @@ mod tests {
         let reg = SlashRegistry::with_builtin();
         let mut agent = fresh_agent();
         agent.push_history(Message::user_text("hi"));
+        agent.set_todos(oven_agent::TodoList {
+            items: vec![oven_agent::TodoItem {
+                id: "a".into(),
+                content: "one".into(),
+                status: oven_agent::TodoStatus::Pending,
+            }],
+        });
         let outcome = reg.parse_and_run(&mut agent, "/clear").unwrap();
         assert!(matches!(outcome, CommandOutcome::Cleared));
         assert_eq!(agent.history().len(), 0);
+        assert!(agent.todos().is_empty());
     }
 
     #[test]

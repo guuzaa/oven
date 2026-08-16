@@ -1,10 +1,12 @@
 use std::sync::{Arc, Mutex};
 
 use crate::mode::AgentMode;
+use crate::todo::TodoList;
 
 pub struct AgentLive {
     pub mode: AgentMode,
     pub base_system: Option<String>,
+    pub todos: TodoList,
 }
 
 impl AgentLive {
@@ -12,6 +14,7 @@ impl AgentLive {
         Self {
             mode: AgentMode::Default,
             base_system,
+            todos: TodoList::default(),
         }
     }
 }

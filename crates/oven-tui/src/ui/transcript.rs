@@ -553,6 +553,7 @@ impl Component for Transcript {
                 }
                 AgentEvent::HistoryCleared { .. } => self.reset(),
                 AgentEvent::ModelChanged { .. } => {}
+                AgentEvent::TodoUpdated { .. } => {}
             },
             AppEvent::ModelsUpdated { .. } => {}
             AppEvent::ProviderUpdated { .. } => {}

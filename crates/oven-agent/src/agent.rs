@@ -13,6 +13,7 @@ use crate::event::{AgentEvent, AgentId};
 use crate::history::{History, Record};
 use crate::live::{AgentLive, LiveHandle};
 use crate::mode::AgentMode;
+use crate::todo::TodoList;
 use crate::tools::Tool;
 
 /// The conversation driver. Holds tools and dispatches tool calls returned by
@@ -29,20 +30,30 @@ pub struct Agent {
     /// Soft budget on conversation tokens; oldest turns are dropped to stay
     /// under it before each provider call.
     budget: usize,
+    todo_written_this_turn: bool,
 }
 
 impl Agent {
     pub fn new(provider: Box<dyn Provider>, tools: Vec<Box<dyn Tool>>) -> Self {
+        Self::new_with_live(provider, tools, Arc::new(Mutex::new(AgentLive::new(None))))
+    }
+
+    pub fn new_with_live(
+        provider: Box<dyn Provider>,
+        tools: Vec<Box<dyn Tool>>,
+        live: LiveHandle,
+    ) -> Self {
         Self {
             id: AgentId(0),
             provider,
             tools,
             history: History::new(),
             model: ModelId::new("default"),
-            live: Arc::new(Mutex::new(AgentLive::new(None))),
+            live,
             reasoning_effort: None,
             max_iters: 100,
             budget: 128_000,
+            todo_written_this_turn: false,
         }
     }
 
@@ -107,6 +118,22 @@ impl Agent {
 
     pub fn mode(&self) -> AgentMode {
         self.live.lock().unwrap_or_else(|e| e.into_inner()).mode
+    }
+
+    pub fn set_todos(&self, todos: TodoList) {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).todos = todos;
+    }
+
+    pub fn todos(&self) -> TodoList {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .todos
+            .clone()
+    }
+
+    pub fn todo_written_this_turn(&self) -> bool {
+        self.todo_written_this_turn
     }
 
     /// Set the reasoning effort for provider calls.
@@ -175,8 +202,10 @@ impl Agent {
     }
 
     fn llm_tools(&self) -> Vec<oven_llm::Tool> {
+        let mode = self.mode();
         self.tools
             .iter()
+            .filter(|t| mode == AgentMode::Plan || t.name() != "todo_write")
             .map(|t| oven_llm::Tool {
                 name: t.name().to_string(),
                 description: Some(t.description().to_string()),
@@ -360,6 +389,16 @@ impl Agent {
                 Ok(r) => (true, r),
                 Err(e) => (false, format!("error: {e}")),
             };
+            if ok && name == "todo_write" {
+                self.todo_written_this_turn = true;
+                Self::emit(
+                    tx,
+                    AgentEvent::TodoUpdated {
+                        agent_id: self.id,
+                        items: self.todos().items,
+                    },
+                );
+            }
             let summary = truncate(&result, 2000);
             Self::emit(
                 tx,
@@ -401,6 +440,7 @@ impl Agent {
         // at any await point (streaming, tool work) drops the turn future and
         // aborts the in-flight provider stream or tool. The token is also
         // passed to tools so long-running ones can stop promptly on their own.
+        self.todo_written_this_turn = false;
         let turn = async {
             self.history.push(Message::user_text(input));
             self.budget = self
@@ -745,6 +785,164 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap().clone(),
             Some(Some("from history".into()))
+        );
+    }
+
+    struct CaptureTools {
+        names: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl CaptureTools {
+        fn new() -> (Self, Arc<Mutex<Vec<Vec<String>>>>) {
+            let names = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    names: Arc::clone(&names),
+                },
+                names,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CaptureTools {
+        async fn complete(&self, req: &Request) -> LlmResult<Response> {
+            self.names
+                .lock()
+                .unwrap()
+                .push(req.tools.iter().map(|t| t.name.clone()).collect());
+            Ok(text_response("ok"))
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "stream disabled in mock".into(),
+            })
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("capture-tools".into())
+        }
+    }
+
+    fn agent_with_todo_write(provider: Box<dyn Provider>) -> Agent {
+        let live = Arc::new(Mutex::new(AgentLive::new(None)));
+        let tools: Vec<Box<dyn Tool>> =
+            vec![Box::new(crate::tools::TodoWriteTool::new(live.clone()))];
+        Agent::new_with_live(provider, tools, live)
+    }
+
+    #[tokio::test]
+    async fn default_request_omits_todo_write_tool() {
+        let (mock, names) = CaptureTools::new();
+        let mut agent = agent_with_todo_write(Box::new(mock));
+        agent.run("hi").await.unwrap();
+        let seen = names.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            !seen[0].iter().any(|n| n == "todo_write"),
+            "Default must hide todo_write: {:?}",
+            seen[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_request_includes_todo_write_tool() {
+        let (mock, names) = CaptureTools::new();
+        let mut agent = agent_with_todo_write(Box::new(mock));
+        agent.set_mode(AgentMode::Plan);
+        agent.run("hi").await.unwrap();
+        let seen = names.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].iter().any(|n| n == "todo_write"),
+            "Plan must include todo_write: {:?}",
+            seen[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn todo_write_updates_sot_and_emits_todo_updated() {
+        let todos = json!({"todos":[{"id":"a","content":"one","status":"in_progress"}]});
+        let mock = MockProvider::new(vec![
+            tool_response("c1", "todo_write", todos.clone()),
+            text_response("done"),
+        ]);
+        let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
+        let (tx, mut rx) = unbounded_channel();
+        let result = agent
+            .run_with_emitter("plan it", Some(tx), None)
+            .await
+            .unwrap();
+        assert_eq!(result, "done");
+        assert_eq!(agent.todos().items.len(), 1);
+        assert_eq!(agent.todos().items[0].id, "a");
+        assert!(agent.todo_written_this_turn());
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::TodoUpdated { items, .. } if items.len() == 1 && items[0].id == "a"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolEnd { ok: true, output, .. } if output.contains("1 todos")
+        )));
+    }
+
+    #[tokio::test]
+    async fn todo_write_error_leaves_sot_unchanged() {
+        let mock = MockProvider::new(vec![
+            tool_response(
+                "c1",
+                "todo_write",
+                json!({"todos":[
+                    {"id":"a","content":"one","status":"in_progress"},
+                    {"id":"b","content":"two","status":"in_progress"}
+                ]}),
+            ),
+            text_response("done"),
+        ]);
+        let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![crate::todo::TodoItem {
+                id: "keep".into(),
+                content: "old".into(),
+                status: crate::todo::TodoStatus::Pending,
+            }],
+        });
+        let (tx, mut rx) = unbounded_channel();
+        agent
+            .run_with_emitter("bad write", Some(tx), None)
+            .await
+            .unwrap();
+        assert_eq!(agent.todos().items[0].id, "keep");
+        assert!(!agent.todo_written_this_turn());
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolEnd { ok: false, output, .. }
+                if output.starts_with("error: agent error: todo_write:")
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TodoUpdated { .. }))
         );
     }
 }

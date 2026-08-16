@@ -3,6 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use oven_llm::{ContentBlock, Message, Role, Usage};
 use serde::{Deserialize, Serialize};
 
+use crate::todo::TodoItem;
+
 type Timestamp = u64;
 
 /// One persisted conversation record: a message or the token usage of a turn.
@@ -30,6 +32,10 @@ pub enum Record {
     },
     /// Session-level metadata, written as the first line of a session file.
     SessionMeta(SessionMeta),
+    TodoList {
+        timestamp: u64,
+        items: Vec<TodoItem>,
+    },
 }
 
 /// Where and when a session was created. Written as the first JSONL record so
@@ -148,6 +154,7 @@ impl History {
                     None => self.turn_usage.push((usage, timestamp)),
                 },
                 Record::SessionMeta(meta) => self.meta = Some(meta),
+                Record::TodoList { .. } => {}
             }
         }
         self.total = self
@@ -395,6 +402,7 @@ mod tests {
                 Record::Message { .. } => "msg",
                 Record::TokenUsage { .. } => "usage",
                 Record::SessionMeta(_) => "meta",
+                Record::TodoList { .. } => "todo_list",
             })
             .collect()
     }
@@ -432,6 +440,19 @@ mod tests {
                 }
                 (Record::SessionMeta(m1), Record::SessionMeta(m2)) => {
                     assert_eq!(m1, m2);
+                }
+                (
+                    Record::TodoList {
+                        timestamp: t1,
+                        items: i1,
+                    },
+                    Record::TodoList {
+                        timestamp: t2,
+                        items: i2,
+                    },
+                ) => {
+                    assert_eq!(t1, t2);
+                    assert_eq!(i1, i2);
                 }
                 _ => panic!("record kind mismatch"),
             }
@@ -824,5 +845,38 @@ mod tests {
             panic!("expected message record");
         };
         assert!(*timestamp > 0);
+    }
+
+    #[test]
+    fn records_never_emit_todo_list() {
+        use crate::todo::{TodoItem, TodoStatus};
+
+        let records = vec![
+            Record::Message {
+                timestamp: 1,
+                message: Message::user_text("hi"),
+            },
+            Record::TodoList {
+                timestamp: 2,
+                items: vec![TodoItem {
+                    id: "a".into(),
+                    content: "one".into(),
+                    status: TodoStatus::Pending,
+                }],
+            },
+            Record::Message {
+                timestamp: 3,
+                message: Message::assistant(vec![ContentBlock::text("ok")]),
+            },
+        ];
+        let mut h = History::new();
+        h.set_messages_with_records(records);
+        assert_eq!(h.len(), 2);
+        assert_eq!(record_kinds(&h.records()), vec!["msg", "msg"]);
+        assert!(
+            !h.records()
+                .iter()
+                .any(|r| matches!(r, Record::TodoList { .. }))
+        );
     }
 }

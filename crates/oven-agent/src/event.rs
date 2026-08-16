@@ -1,5 +1,7 @@
 use oven_llm::{ReasoningEffort, Usage};
 
+use crate::todo::TodoItem;
+
 /// Stable id for an agent instance (main or sub-agent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AgentId(pub u64);
@@ -43,5 +45,9 @@ pub enum AgentEvent {
         agent_id: AgentId,
         model: String,
         reasoning_effort: Option<ReasoningEffort>,
+    },
+    TodoUpdated {
+        agent_id: AgentId,
+        items: Vec<TodoItem>,
     },
 }
