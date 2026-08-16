@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use futures::StreamExt;
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, Provider, ReasoningEffort, Request, Response, Role,
@@ -9,6 +11,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::AgentError;
 use crate::event::{AgentEvent, AgentId};
 use crate::history::{History, Record};
+use crate::live::{AgentLive, LiveHandle};
+use crate::mode::AgentMode;
 use crate::tools::Tool;
 
 /// The conversation driver. Holds tools and dispatches tool calls returned by
@@ -19,7 +23,7 @@ pub struct Agent {
     pub(crate) tools: Vec<Box<dyn Tool>>,
     pub(crate) history: History,
     model: ModelId,
-    system: Option<String>,
+    live: LiveHandle,
     reasoning_effort: Option<ReasoningEffort>,
     max_iters: usize,
     /// Soft budget on conversation tokens; oldest turns are dropped to stay
@@ -35,7 +39,7 @@ impl Agent {
             tools,
             history: History::new(),
             model: ModelId::new("default"),
-            system: None,
+            live: Arc::new(Mutex::new(AgentLive::new(None))),
             reasoning_effort: None,
             max_iters: 100,
             budget: 128_000,
@@ -81,9 +85,28 @@ impl Agent {
         self.reasoning_effort = effort;
     }
 
-    pub fn with_system(mut self, content: impl Into<String>) -> Self {
-        self.system = Some(content.into());
+    pub fn live_handle(&self) -> LiveHandle {
+        Arc::clone(&self.live)
+    }
+
+    pub fn with_system(self, content: impl Into<String>) -> Self {
+        self.set_system(content);
         self
+    }
+
+    pub fn set_system(&self, content: impl Into<String>) {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .base_system = Some(content.into());
+    }
+
+    pub fn set_mode(&self, mode: AgentMode) {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).mode = mode;
+    }
+
+    pub fn mode(&self) -> AgentMode {
+        self.live.lock().unwrap_or_else(|e| e.into_inner()).mode
     }
 
     /// Set the reasoning effort for provider calls.
@@ -164,7 +187,12 @@ impl Agent {
 
     fn build_request(&self) -> Request {
         let tools = self.llm_tools();
-        let mut system = self.system.clone();
+        let mut system = self
+            .live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .base_system
+            .clone();
         let mut messages = Vec::with_capacity(self.history.len());
         for m in self.history.messages() {
             if m.role == Role::System {
@@ -446,7 +474,7 @@ mod tests {
     use oven_llm::{ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason};
     use serde_json::json;
     use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc::unbounded_channel;
 
     struct MockProvider {
@@ -649,6 +677,74 @@ mod tests {
             AgentEvent::Cancelled {
                 agent_id: AgentId(1)
             }
+        );
+    }
+
+    struct CaptureSystem {
+        system: Arc<Mutex<Option<Option<String>>>>,
+    }
+
+    impl CaptureSystem {
+        fn new() -> (Self, Arc<Mutex<Option<Option<String>>>>) {
+            let system = Arc::new(Mutex::new(None));
+            (
+                Self {
+                    system: Arc::clone(&system),
+                },
+                system,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CaptureSystem {
+        async fn complete(&self, req: &Request) -> LlmResult<Response> {
+            *self.system.lock().unwrap() = Some(req.system.clone());
+            Ok(text_response("ok"))
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "stream disabled in mock".into(),
+            })
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("capture".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn set_system_is_reflected_in_request() {
+        let (mock, seen) = CaptureSystem::new();
+        let mut agent = Agent::new(Box::new(mock), Vec::new());
+        agent.set_system("hello system");
+        let result = agent.run("hi").await.unwrap();
+        assert_eq!(result, "ok");
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some(Some("hello system".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn history_system_used_when_no_base_system() {
+        let (mock, seen) = CaptureSystem::new();
+        let mut agent = Agent::new(Box::new(mock), Vec::new());
+        agent.push_history(Message::system("from history"));
+        let result = agent.run("hi").await.unwrap();
+        assert_eq!(result, "ok");
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some(Some("from history".into()))
         );
     }
 }

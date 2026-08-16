@@ -558,6 +558,7 @@ impl Component for Transcript {
             AppEvent::ProviderUpdated { .. } => {}
             AppEvent::Exit { .. } => {}
             AppEvent::Notify { .. } => {}
+            AppEvent::ModeChanged { .. } => {}
             AppEvent::Rewound { messages, .. } => self.replace_from(messages),
             AppEvent::Idle { .. } => {
                 self.flush_streaming();
