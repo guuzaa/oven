@@ -51,6 +51,11 @@ impl StatusBar {
         }
     }
 
+    pub fn with_effort(mut self, effort: Option<ReasoningEffort>) -> Self {
+        self.effort = effort;
+        self
+    }
+
     pub fn has_reply(&self) -> bool {
         self.reply.as_ref().is_some_and(|t| !t.is_empty())
     }
@@ -409,6 +414,13 @@ mod tests {
         }));
         assert_eq!(bar.model, "gpt-4o");
         assert_eq!(bar.effort, None);
+    }
+
+    #[test]
+    fn with_effort_sets_initial_effort() {
+        let bar = StatusBar::new("gpt-4o", Path::new("/tmp"), Usage::default())
+            .with_effort(Some(ReasoningEffort::Medium));
+        assert_eq!(bar.effort, Some(ReasoningEffort::Medium));
     }
 
     #[test]

@@ -29,6 +29,23 @@ base_url = "https://example.com/v1/"
     assert_eq!(base.max_retries, 5);
     // Untouched fields keep defaults
     assert_eq!(base.base_backoff_ms, 500);
+    assert!(base.provider.reasoning_effort.is_none());
+}
+
+#[test]
+fn merge_overrides_reasoning_effort() {
+    let mut base = AppConfig::default();
+    let overlay = toml_lite(
+        r#"
+[provider]
+reasoning_effort = "medium"
+"#,
+    );
+    base.merge(overlay);
+    assert_eq!(
+        base.provider.reasoning_effort,
+        Some(oven_llm::ReasoningEffort::Medium)
+    );
 }
 
 #[test]

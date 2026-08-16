@@ -205,7 +205,11 @@ impl App {
             .await
             .map_err(AppError::Mcp)?;
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
-        Ok(Agent::new(provider, tools).with_system(self.build_system_prompt()))
+        let mut agent = Agent::new(provider, tools).with_system(self.build_system_prompt());
+        if let Some(effort) = self.config.provider.reasoning_effort {
+            agent.set_reasoning_effort(Some(effort));
+        }
+        Ok(agent)
     }
 
     /// Run a single chat turn with no persistence (via the app runtime channel API).

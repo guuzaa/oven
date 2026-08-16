@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use oven_agent::{Agent, AgentEvent, CancellationToken, Record};
 use oven_llm::{
-    ContentBlock, Message, ModelInfo, Provider, ProviderError, ProviderName, Role, Usage,
+    ContentBlock, Message, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Role,
+    Usage,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -527,6 +528,8 @@ async fn apply_slash(
         } => {
             agent.set_model(&*model);
             agent.set_reasoning_effort(reasoning_effort);
+            config.provider.model = Some(model.clone());
+            config.provider.reasoning_effort = reasoning_effort;
             emit_agent(
                 subs,
                 app_id,
@@ -536,10 +539,19 @@ async fn apply_slash(
                     reasoning_effort,
                 },
             );
-            let text = match reasoning_effort {
+            let overlay = ProviderConfig {
+                model: Some(model.clone()),
+                reasoning_effort,
+                ..Default::default()
+            };
+            let saved = save_provider_overlay(user_config_path, &overlay, app_id, subs);
+            let mut text = match reasoning_effort {
                 Some(e) => format!("model switched to {model} (effort: {e})"),
                 None => format!("model switched to {model}"),
             };
+            if let Some(path) = saved {
+                text.push_str(&format!("\nsaved to {}", path.display()));
+            }
             emit(subs, AppEvent::Notify { app_id, text });
         }
         CommandOutcome::ProviderChanged { provider } => {
@@ -558,6 +570,9 @@ async fn apply_provider_change(
     subs: &Subscribers,
 ) {
     overlay.apply_name_presets();
+    if overlay.reasoning_effort.is_none() && config.provider.reasoning_effort.is_none() {
+        overlay.reasoning_effort = Some(ReasoningEffort::Medium);
+    }
     let mut next = config.clone();
     next.merge(AppConfig {
         provider: overlay.clone(),
@@ -569,22 +584,8 @@ async fn apply_provider_change(
             *config = next;
             agent.set_provider(built);
             agent.set_model(model.clone());
-            let saved = match user_config_path {
-                Some(path) => match AppConfig::save_provider_at(path, &overlay) {
-                    Ok(()) => Some(path.to_path_buf()),
-                    Err(e) => {
-                        emit(
-                            subs,
-                            AppEvent::Error {
-                                app_id,
-                                message: e.to_string(),
-                            },
-                        );
-                        None
-                    }
-                },
-                None => None,
-            };
+            agent.set_reasoning_effort(config.provider.reasoning_effort);
+            let saved = save_provider_overlay(user_config_path, &overlay, app_id, subs);
             emit(
                 subs,
                 AppEvent::ProviderUpdated {
@@ -653,6 +654,9 @@ fn summarize_setup(overlay: &ProviderConfig, saved: Option<&Path>) -> String {
     if overlay.api_key.is_some() {
         parts.push("api_key=(set)".into());
     }
+    if let Some(e) = overlay.reasoning_effort {
+        parts.push(format!("reasoning_effort={e}"));
+    }
     let mut text = if parts.is_empty() {
         "provider unchanged".into()
     } else {
@@ -662,6 +666,28 @@ fn summarize_setup(overlay: &ProviderConfig, saved: Option<&Path>) -> String {
         text.push_str(&format!("\nsaved to {}", path.display()));
     }
     text
+}
+
+fn save_provider_overlay(
+    path: Option<&Path>,
+    overlay: &ProviderConfig,
+    app_id: AppId,
+    subs: &Subscribers,
+) -> Option<PathBuf> {
+    let path = path?;
+    match AppConfig::save_provider_at(path, overlay) {
+        Ok(()) => Some(path.to_path_buf()),
+        Err(e) => {
+            emit(
+                subs,
+                AppEvent::Error {
+                    app_id,
+                    message: e.to_string(),
+                },
+            );
+            None
+        }
+    }
 }
 
 fn switch_session(store: &mut Option<SessionStore>, subs: &Subscribers, app_id: AppId) {
@@ -1352,6 +1378,78 @@ mod tests {
         assert!(saved.contains("model = \"deepseek-v4-flash\""));
         assert!(saved.contains("base_url = \"https://api.deepseek.com\""));
         assert!(saved.contains("api_key = \"sk-test\""));
+        assert!(saved.contains("reasoning_effort = \"medium\""));
+        assert!(out.contains("reasoning_effort=medium"));
+
+        let current = handle.prompt("/model").await.unwrap();
+        assert!(current.contains("reasoning effort: medium"));
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn model_slash_persists_model_and_effort() {
+        let tmp = tempdir::TempDir::new("app-runtime-model-save").unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new());
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "default".into(),
+            tmp.path().to_path_buf(),
+            AppConfig::default(),
+            Some(cfg_path.clone()),
+        );
+
+        let out = handle.prompt("/model gpt-4o-turbo high").await.unwrap();
+        assert!(out.contains("model switched to gpt-4o-turbo (effort: high)"));
+        assert!(out.contains(cfg_path.to_str().unwrap()));
+
+        let saved = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(saved.contains("model = \"gpt-4o-turbo\""));
+        assert!(saved.contains("reasoning_effort = \"high\""));
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn setup_keeps_existing_reasoning_effort() {
+        let tmp = tempdir::TempDir::new("app-runtime-setup-keep-effort").unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new())
+            .with_reasoning_effort(oven_llm::ReasoningEffort::High);
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "default".into(),
+            tmp.path().to_path_buf(),
+            AppConfig {
+                provider: ProviderConfig {
+                    reasoning_effort: Some(oven_llm::ReasoningEffort::High),
+                    ..Default::default()
+                },
+                ..AppConfig::default()
+            },
+            Some(cfg_path.clone()),
+        );
+
+        let mut rx = handle.subscribe();
+        handle
+            .send(AppCmd::UserInput(
+                "/setup name=deepseek kind=completions api_key=sk-test".into(),
+            ))
+            .unwrap();
+        loop {
+            match rx.recv().await {
+                Some(AppEvent::Idle { .. }) => break,
+                Some(_) => {}
+                None => panic!("channel closed before idle"),
+            }
+        }
+        let current = handle.prompt("/model").await.unwrap();
+        assert!(current.contains("reasoning effort: high"));
+        let saved = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(!saved.contains("reasoning_effort"));
         handle.shutdown().await;
     }
 
@@ -1392,6 +1490,25 @@ mod tests {
             .unwrap();
         let err = handle.prompt("/setup kind=chat").await.unwrap_err();
         assert!(err.to_string().contains("invalid kind"));
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_applies_configured_reasoning_effort() {
+        let tmp = tempdir::TempDir::new("app-spawn-effort").unwrap();
+        let app = App::new(tmp.path()).with_config(AppConfig {
+            provider: ProviderConfig {
+                reasoning_effort: Some(oven_llm::ReasoningEffort::Medium),
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        });
+        let handle = app
+            .spawn_with_provider(Box::new(MockProvider::new(vec![])))
+            .await
+            .unwrap();
+        let out = handle.prompt("/model").await.unwrap();
+        assert!(out.contains("reasoning effort: medium"));
         handle.shutdown().await;
     }
 

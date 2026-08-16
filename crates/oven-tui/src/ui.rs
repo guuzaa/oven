@@ -66,7 +66,8 @@ impl Ui {
             rewinding: false,
             pending: Vec::new(),
             transcript: Transcript::new(),
-            status: StatusBar::new(model, &root, total_usage),
+            status: StatusBar::new(model, &root, total_usage)
+                .with_effort(provider.reasoning_effort),
             input,
             queue: QueueWidget::new(),
             spin: 0,

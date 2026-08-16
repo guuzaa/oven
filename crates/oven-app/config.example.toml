@@ -28,6 +28,9 @@ base_backoff_ms = 500
 # kind = "completions"
 # Explicit API key. If unset, the OVEN_API_KEY env var is used.
 # api_key = "sk-..."
+# Reasoning effort: "none", "low", "medium", or "high". Unset leaves thinking off
+# until /setup (which defaults to medium) or /model <id> <effort>.
+# reasoning_effort = "medium"
 
 # MCP servers to connect to at startup: stdio via command/args/env, or a
 # remote streamable HTTP endpoint via url (headers optional). Each server's

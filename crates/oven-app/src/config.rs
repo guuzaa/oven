@@ -3,7 +3,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use oven_llm::{ProviderKind, ProviderName};
+use oven_llm::{ProviderKind, ProviderName, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -30,6 +30,7 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     pub kind: Option<ProviderKind>,
     pub api_key: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ProviderConfig {
@@ -227,6 +228,9 @@ impl AppConfig {
         if let Some(k) = overlay.provider.api_key {
             self.provider.api_key = Some(k);
         }
+        if let Some(e) = overlay.provider.reasoning_effort {
+            self.provider.reasoning_effort = Some(e);
+        }
         if overlay.request_timeout_secs != default_request_timeout_secs() {
             self.request_timeout_secs = overlay.request_timeout_secs;
         }
@@ -358,6 +362,12 @@ impl AppConfig {
         }
         if let Some(k) = &overlay.api_key {
             provider.insert("api_key".into(), toml::Value::String(k.clone()));
+        }
+        if let Some(e) = overlay.reasoning_effort {
+            provider.insert(
+                "reasoning_effort".into(),
+                toml::Value::String(e.to_string()),
+            );
         }
         root.insert("provider".into(), toml::Value::Table(provider));
         if let Some(parent) = path.parent() {
@@ -594,5 +604,24 @@ mod tests {
         assert_eq!(cfg.provider.model.as_deref(), Some("old"));
         assert_eq!(cfg.provider.name.as_deref(), Some("moonshot"));
         assert!(text.find("max_retries").unwrap() < text.find("[provider]").unwrap());
+    }
+
+    #[test]
+    fn save_provider_at_writes_reasoning_effort() {
+        let tmp = tempdir::TempDir::new("oven-save-effort").unwrap();
+        let path = tmp.path().join("config.toml");
+        AppConfig::save_provider_at(
+            &path,
+            &ProviderConfig {
+                model: Some("gpt-4o".into()),
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        assert_eq!(cfg.provider.model.as_deref(), Some("gpt-4o"));
+        assert_eq!(cfg.provider.reasoning_effort, Some(ReasoningEffort::Medium));
     }
 }
