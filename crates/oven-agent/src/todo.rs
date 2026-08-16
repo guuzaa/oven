@@ -57,7 +57,7 @@ impl TodoList {
             if id.is_empty() {
                 return Err("todo_write: empty id".into());
             }
-            if id.len() > Self::MAX_ID {
+            if id.chars().count() > Self::MAX_ID {
                 return Err(format!("todo_write: id too long (max {})", Self::MAX_ID));
             }
             if !seen.insert(id) {
@@ -70,7 +70,7 @@ impl TodoList {
             if content.is_empty() {
                 return Err("todo_write: empty content".into());
             }
-            if content.len() > Self::MAX_CONTENT {
+            if content.chars().count() > Self::MAX_CONTENT {
                 return Err(format!(
                     "todo_write: content too long (max {})",
                     Self::MAX_CONTENT
@@ -244,6 +244,42 @@ mod tests {
         }))
         .unwrap_err();
         assert!(err.contains("content too long"));
+    }
+
+    #[test]
+    fn parse_limits_use_unicode_scalar_count() {
+        let content: String = "你".repeat(TodoList::MAX_CONTENT);
+        let list = TodoList::parse(&json!({
+            "todos": [{"id": "a", "content": content, "status": "pending"}]
+        }))
+        .unwrap();
+        assert_eq!(list.items[0].content.chars().count(), TodoList::MAX_CONTENT);
+
+        let err = TodoList::parse(&json!({
+            "todos": [{
+                "id": "a",
+                "content": "你".repeat(TodoList::MAX_CONTENT + 1),
+                "status": "pending"
+            }]
+        }))
+        .unwrap_err();
+        assert!(err.contains("content too long"));
+
+        let id: String = "项".repeat(TodoList::MAX_ID);
+        TodoList::parse(&json!({
+            "todos": [{"id": id, "content": "ok", "status": "pending"}]
+        }))
+        .unwrap();
+
+        let err = TodoList::parse(&json!({
+            "todos": [{
+                "id": "项".repeat(TodoList::MAX_ID + 1),
+                "content": "ok",
+                "status": "pending"
+            }]
+        }))
+        .unwrap_err();
+        assert!(err.contains("id too long"));
     }
 
     #[test]

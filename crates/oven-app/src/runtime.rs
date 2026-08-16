@@ -563,6 +563,14 @@ async fn apply_slash(
                     agent_id: agent.id(),
                 },
             );
+            emit_agent(
+                subs,
+                app_id,
+                AgentEvent::TodoUpdated {
+                    agent_id: agent.id(),
+                    items: Vec::new(),
+                },
+            );
             switch_session(session_store, subs, app_id);
             if let Some(store) = session_store {
                 agent.ensure_session_meta(store.root.clone());
@@ -1046,21 +1054,18 @@ async fn runtime_loop(
                                             },
                                         );
                                     }
-                                    if should_persist_todos(
-                                        &agent.todos(),
-                                        agent.todo_written_this_turn(),
-                                    ) && let Err(e) =
-                                        persist_todo_snapshot(store, &agent.todos())
-                                    {
-                                        emit(
-                                            &subscribers,
-                                            AppEvent::Error {
-                                                app_id,
-                                                message: e.to_string(),
-                                            },
-                                        );
-                                    }
                                 }
+                            }
+                            if should_persist_todos(&agent.todos(), agent.todo_written_this_turn())
+                                && let Err(e) = persist_todo_snapshot(store, &agent.todos())
+                            {
+                                emit(
+                                    &subscribers,
+                                    AppEvent::Error {
+                                        app_id,
+                                        message: e.to_string(),
+                                    },
+                                );
                             }
                         }
                     }
@@ -1371,6 +1376,7 @@ mod tests {
         assert_eq!(out, "history cleared");
 
         let mut saw_cleared = false;
+        let mut saw_todos_cleared = false;
         let mut done_usage = None;
         while let Ok(ev) = rx.try_recv() {
             match ev {
@@ -1379,6 +1385,10 @@ mod tests {
                     ..
                 } => saw_cleared = true,
                 AppEvent::Agent {
+                    event: AgentEvent::TodoUpdated { items, .. },
+                    ..
+                } if items.is_empty() => saw_todos_cleared = true,
+                AppEvent::Agent {
                     event: AgentEvent::Done { usage, text, .. },
                     ..
                 } if text == "history cleared" => done_usage = Some(usage),
@@ -1386,6 +1396,7 @@ mod tests {
             }
         }
         assert!(saw_cleared);
+        assert!(saw_todos_cleared);
         let usage = done_usage.expect("done after /clear");
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
