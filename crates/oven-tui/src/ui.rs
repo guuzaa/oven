@@ -9,6 +9,7 @@ mod slash_command_popup;
 mod status;
 mod terminal;
 mod theme;
+mod todos;
 mod transcript;
 
 use std::io;
@@ -25,6 +26,7 @@ use component::{Action, Component, KeyResult, State};
 use input::{InputView, Overlay, display_user_input};
 use queue::QueueWidget;
 use status::{StatusBar, StatusHint};
+use todos::TodosWidget;
 use transcript::Transcript;
 
 pub struct Ui {
@@ -40,6 +42,7 @@ pub struct Ui {
     status: StatusBar,
     input: InputView,
     queue: QueueWidget,
+    todos: TodosWidget,
     spin: u8,
 }
 
@@ -54,6 +57,7 @@ impl Ui {
             .canonicalize()
             .unwrap_or_else(|_| handle.root().to_owned());
         let total_usage = handle.total_usage();
+        let todos = handle.todos().clone();
         let mut input = InputView::new(slash_commands, provider.clone());
         if provider.needs_setup() {
             input.open_setup();
@@ -70,6 +74,7 @@ impl Ui {
                 .with_effort(provider.reasoning_effort),
             input,
             queue: QueueWidget::new(),
+            todos: TodosWidget::new(todos),
             spin: 0,
         }
     }
@@ -169,6 +174,7 @@ impl Ui {
         self.transcript.on_event(&ev);
         self.status.on_event(&ev);
         self.input.on_event(&ev);
+        self.todos.on_event(&ev);
         if matches!(ev, AppEvent::Rewound { .. }) {
             self.rewinding = false;
         }
@@ -297,6 +303,7 @@ impl Ui {
             area,
             self.input.height(area.width),
             self.queue.height(&self.pending),
+            self.todos.height(),
             self.input.overlay_height(),
             self.status.reply_height(area.width),
         );
@@ -304,6 +311,9 @@ impl Ui {
         self.transcript.draw(f, regions.transcript, &self.state);
         if let Some(queue) = regions.queue {
             self.queue.draw(f, queue, &self.pending);
+        }
+        if let Some(todos) = regions.todos {
+            self.todos.draw(f, todos);
         }
         self.input.draw(f, regions.input, &self.state);
         if let Some(overlay) = regions.overlay {
