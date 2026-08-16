@@ -1,5 +1,6 @@
 mod app;
 pub mod config;
+pub mod dirs;
 mod instructions;
 pub mod mcp;
 mod provider;

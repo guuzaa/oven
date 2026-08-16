@@ -1,6 +1,6 @@
 # Oven configuration template. Used as the project-level example (copy it to
 # the workspace root as `.oven.toml`) and as the default user config written
-# to `$XDG_CONFIG_HOME/oven/config.toml` on first run. All fields are
+# to `~/.oven/config.toml` on first run. All fields are
 # optional; environment variables take precedence where noted.
 
 # Per-request timeout in seconds.

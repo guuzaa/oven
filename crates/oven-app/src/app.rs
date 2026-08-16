@@ -7,7 +7,8 @@ use oven_llm::{Provider, Role};
 use thiserror::Error;
 
 use crate::config::{AppConfig, ConfigError};
-use crate::instructions::{InstructionDoc, default_config_home, load_instructions};
+use crate::dirs;
+use crate::instructions::{InstructionDoc, load_instructions};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::runtime::{AppHandle, AppId, hydrate_session, resolve_session, spawn_runtime};
@@ -100,7 +101,7 @@ impl App {
     }
 
     /// Load config from the bundled default locations: user-level
-    /// (`$XDG_CONFIG_HOME/oven/config.toml`, created as a template on first
+    /// (`~/.oven/config.toml`, created as a template on first
     /// run) then project-level (`.oven.toml` in the workspace root). After
     /// loading, tools requested in `tools:` are mounted, MCP servers declared
     /// under `mcps:` are registered, and skills are discovered from the
@@ -125,7 +126,7 @@ impl App {
         self.mcps = McpRegistry::new();
         self.skills = SkillRegistry::new();
         self.skills.load_from_dirs(&skill_dirs(&self.root));
-        self.instructions = load_instructions(default_config_home().as_deref(), &self.root);
+        self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root);
 
         for (id, server) in &config.mcps {
             let _ = self.mcps.register(id.clone(), server.clone());
@@ -353,7 +354,7 @@ impl App {
             self.config.provider.effective_model(),
             self.root.clone(),
             self.config.clone(),
-            AppConfig::default_user_config_path(),
+            crate::dirs::user_config_path(),
         ))
     }
 
@@ -382,7 +383,7 @@ impl App {
             self.config.provider.effective_model(),
             self.root.clone(),
             self.config.clone(),
-            AppConfig::default_user_config_path(),
+            crate::dirs::user_config_path(),
         ))
     }
 }

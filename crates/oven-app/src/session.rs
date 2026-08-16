@@ -32,12 +32,9 @@ pub enum SessionError {
     BadId(String),
 }
 
-/// Where sessions are stored. Defaults to `$XDG_DATA_HOME/oven/sessions/` (or
-/// `~/.local/share/oven/sessions/`).
+/// Where sessions are stored. Defaults to `~/.oven/sessions/`.
 pub fn default_sessions_dir() -> Option<PathBuf> {
-    cross_xdg::BaseDirs::with_prefix("oven")
-        .ok()
-        .map(|d| d.data_home().join("sessions"))
+    crate::dirs::sessions_dir()
 }
 
 /// Absolute, symlink-resolved form of a workspace root, falling back to the

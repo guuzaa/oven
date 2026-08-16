@@ -89,7 +89,7 @@ and write files and run shell commands; responses stream back in real time.
 ## Configuration
 
 Config lives in `.oven.toml` at the project root, or globally at
-`~/.config/oven/config.toml` (created as a template on first run). Env vars
+`~/.oven/config.toml` (created as a template on first run). Env vars
 `OVEN_MODEL`, `OVEN_API_KEY`, and `OVEN_BASE_URL` override it.
 
 ```toml
@@ -106,11 +106,11 @@ api_key = "sk-xxx"
 - `[mcps]` — MCP servers: stdio (`command`/`args`/`env`) or remote
   streamable HTTP (`url`/`headers`); their tools are mounted as
   `<server>_<tool>`.
-- `AGENTS.md` / `CLAUDE.md` from `~/.config/oven/` and the project root are
+- `AGENTS.md` / `CLAUDE.md` from `~/.oven/` and the project root are
   injected into the system prompt.
-- Skills live in `SKILL.md` directories under `~/.local/share/oven/skills/`
+- Skills live in `SKILL.md` directories under `~/.oven/skills/`
   and `.oven/skills/` (project wins).
-- Sessions are JSONL files under `~/.local/share/oven/sessions/`.
+- Sessions are JSONL files under `~/.oven/sessions/`.
 
 ## Interactive mode
 

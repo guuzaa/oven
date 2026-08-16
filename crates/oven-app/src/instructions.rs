@@ -30,13 +30,6 @@ pub struct InstructionDoc {
     pub content: String,
 }
 
-/// Default user-level instruction dir: `$XDG_CONFIG_HOME/oven`.
-pub fn default_config_home() -> Option<PathBuf> {
-    cross_xdg::BaseDirs::with_prefix("oven")
-        .ok()
-        .map(|d| d.config_home().to_path_buf())
-}
-
 /// Load every existing, non-empty instruction document in discovery order:
 /// user config dir first, then the workspace root; within a dir `AGENTS.md`
 /// before `CLAUDE.md`. Missing or unreadable files are skipped silently.
