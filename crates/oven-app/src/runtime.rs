@@ -7,16 +7,15 @@ use oven_agent::{
     Agent, AgentEvent, AgentMode, CancellationToken, LiveHandle, Record, TodoList, restore_todos,
 };
 use oven_llm::{
-    ContentBlock, Message, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Role,
-    Usage,
+    ContentBlock, Message, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Usage,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::AppError;
 use crate::config::{AppConfig, ProviderConfig};
 use crate::session::{Session, canonical_root, record_recent};
 use crate::slash::{CommandOutcome, SlashRegistry};
-use crate::{App, AppError};
 
 /// Id for one long-lived oven-app instance inside a TUI process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -251,163 +250,22 @@ impl AppHandle {
     }
 }
 
-impl App {
-    /// Spawn a long-lived app task with no session persistence.
-    pub async fn spawn(&self) -> Result<AppHandle, AppError> {
-        let agent = self.build_agent().await?;
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            None,
-            self.config.provider.effective_model(),
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
-    }
-
-    /// Spawn with a persisted session under the platform data dir. `Some(id)`
-    /// resumes that session when its file exists; otherwise (or for `None`) a
-    /// new session is started with an auto-generated uuid v7 id that the
-    /// caller never has to provide.
-    pub async fn spawn_session(&self, session_id: Option<&str>) -> Result<AppHandle, AppError> {
-        let Some(dir) = crate::session::default_sessions_dir() else {
-            let agent = self.build_interactive_agent().await?;
-            return Ok(spawn_runtime(
-                AppId::next(),
-                agent,
-                None,
-                self.config.provider.effective_model(),
-                self.root.clone(),
-                self.config.clone(),
-                AppConfig::default_user_config_path(),
-            ));
-        };
-        self.spawn_session_in(&dir, session_id).await
-    }
-
-    /// Same as [`App::spawn_session`] with an explicit sessions directory.
-    pub async fn spawn_session_in(
-        &self,
-        sessions_dir: &Path,
-        session_id: Option<&str>,
-    ) -> Result<AppHandle, AppError> {
-        let session = resolve_session(sessions_dir, session_id)?;
-        let prior = session.load_records()?;
-        let mut agent = self.build_interactive_agent().await?;
-        let records: Vec<_> = prior
-            .iter()
-            .filter(
-                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
-            )
-            .cloned()
-            .collect();
-        agent.restore_history(records);
-        hydrate_session(&mut agent, &prior);
-        agent.ensure_session_meta(canonical_root(&self.root));
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            Some(session),
-            self.config.provider.effective_model(),
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
-    }
-
-    /// Test/custom wiring variant of [`App::spawn_session_in`] with an
-    /// explicit provider.
-    pub async fn spawn_session_with_provider_in(
-        &self,
-        sessions_dir: &Path,
-        provider: Box<dyn Provider>,
-        session_id: Option<&str>,
-    ) -> Result<AppHandle, AppError> {
-        let session = resolve_session(sessions_dir, session_id)?;
-        let prior = session.load_records()?;
-        let mut agent = self.build_agent_with_provider(provider).await?;
-        let records: Vec<_> = prior
-            .iter()
-            .filter(
-                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
-            )
-            .cloned()
-            .collect();
-        agent.restore_history(records);
-        hydrate_session(&mut agent, &prior);
-        agent.ensure_session_meta(canonical_root(&self.root));
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            Some(session),
-            self.config.provider.effective_model(),
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
-    }
-
-    /// Spawn with an explicit provider (tests / custom wiring).
-    pub async fn spawn_with_provider(
-        &self,
-        provider: Box<dyn Provider>,
-    ) -> Result<AppHandle, AppError> {
-        let agent = self.build_agent_with_provider(provider).await?;
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            None,
-            self.config.provider.effective_model(),
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
-    }
-
-    /// Spawn with provider + session store (tests).
-    pub async fn spawn_with_provider_session(
-        &self,
-        provider: Box<dyn Provider>,
-        session: Session,
-    ) -> Result<AppHandle, AppError> {
-        let prior = session.load_records()?;
-        let mut agent = self.build_agent_with_provider(provider).await?;
-        let records: Vec<_> = prior
-            .iter()
-            .filter(
-                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
-            )
-            .cloned()
-            .collect();
-        agent.restore_history(records);
-        hydrate_session(&mut agent, &prior);
-        agent.ensure_session_meta(canonical_root(&self.root));
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            Some(session),
-            self.config.provider.effective_model(),
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
-    }
-}
-
-fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
+pub(crate) fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
     agent.set_todos(restore_todos(prior, agent.history()));
 }
 
 impl AppId {
-    fn next() -> Self {
+    pub(crate) fn next() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 }
 
-fn resolve_session(sessions_dir: &Path, session_id: Option<&str>) -> Result<Session, AppError> {
+pub(crate) fn resolve_session(
+    sessions_dir: &Path,
+    session_id: Option<&str>,
+) -> Result<Session, AppError> {
     let session = match session_id {
         Some(id) => {
             let candidate = Session::open(sessions_dir, id)?;
@@ -426,7 +284,7 @@ fn resolve_session(sessions_dir: &Path, session_id: Option<&str>) -> Result<Sess
     Ok(session)
 }
 
-fn spawn_runtime(
+pub(crate) fn spawn_runtime(
     app_id: AppId,
     agent: Agent,
     session: Option<Session>,
@@ -1094,6 +952,7 @@ async fn runtime_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::App;
     use std::sync::Mutex;
 
     use async_trait::async_trait;
