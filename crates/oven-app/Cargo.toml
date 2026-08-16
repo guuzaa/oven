@@ -21,6 +21,7 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 async-trait = { workspace = true }
+futures = { workspace = true }
 uuid = { workspace = true }
 rmcp = { workspace = true }
 http = { workspace = true }

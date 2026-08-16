@@ -108,6 +108,7 @@ impl Component for StatusBar {
                 state.busy = false;
             }
             AppEvent::ModelsUpdated { .. } => {}
+            AppEvent::ProviderUpdated { .. } => {}
             AppEvent::Error { .. } => {}
             AppEvent::Exit { .. } => {}
             AppEvent::Rewound { usage, .. } => {

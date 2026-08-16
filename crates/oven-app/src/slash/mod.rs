@@ -1,14 +1,17 @@
 mod clear;
 mod exit;
 mod model;
+mod setup;
 
 use oven_agent::Agent;
 
 use crate::AppError;
+use crate::config::ProviderConfig;
 
 pub use clear::Clear;
 pub use exit::Exit;
 pub use model::Model;
+pub use setup::Setup;
 
 #[derive(Debug, Clone)]
 pub enum CommandOutcome {
@@ -18,6 +21,9 @@ pub enum CommandOutcome {
     ModelChanged {
         model: String,
         reasoning_effort: Option<oven_llm::ReasoningEffort>,
+    },
+    ProviderChanged {
+        provider: ProviderConfig,
     },
     Passthrough,
 }
@@ -44,6 +50,7 @@ impl SlashRegistry {
         r.register(Box::new(Clear));
         r.register(Box::new(Exit));
         r.register(Box::new(Model));
+        r.register(Box::new(Setup));
         r
     }
 
@@ -153,10 +160,11 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds.len(), 4);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
         assert!(cmds.iter().any(|(n, d)| n == "model" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, d)| n == "setup" && !d.is_empty()));
     }
 
     #[test]

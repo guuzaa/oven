@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-use oven_agent::{Agent, AgentError, RetryingProvider, SkillReadTool, Tool};
-use oven_llm::{Provider, ProviderBuilder, ProviderName};
+use oven_agent::{Agent, AgentError, SkillReadTool, Tool};
+use oven_llm::Provider;
 use thiserror::Error;
 
 use crate::config::{AppConfig, ConfigError};
@@ -16,6 +15,7 @@ use crate::skill::skill_dirs;
 pub mod config;
 mod instructions;
 pub mod mcp;
+mod provider;
 pub mod runtime;
 pub mod session;
 pub mod skill;
@@ -155,51 +155,7 @@ impl App {
     }
 
     fn build_provider(&self, model: &str) -> Result<Box<dyn Provider>, AppError> {
-        let provider = &self.config.provider;
-        let provider_name = provider.effective_provider_name(model);
-        let api_key = provider.effective_api_key();
-        let base_url = provider.effective_base_url();
-
-        // Anthropic and unknown models have no chat-completions preset; without
-        // an explicit OpenAI-compatible base URL there is no endpoint to hit.
-        if base_url.is_none() {
-            match &provider_name {
-                ProviderName::Anthropic => {
-                    return Err(AppError::Provider(format!(
-                        "model '{model}' needs an OpenAI-compatible proxy; set OVEN_BASE_URL or provider.base_url"
-                    )));
-                }
-                ProviderName::Custom(_) => {
-                    return Err(AppError::Provider(format!(
-                        "unknown provider for model '{model}'; set provider.base_url or OVEN_BASE_URL to use an OpenAI-compatible endpoint"
-                    )));
-                }
-                _ => {}
-            }
-        }
-        if base_url.is_none() && api_key.is_empty() {
-            return Err(AppError::Provider(format!(
-                "no API key for model '{model}'; set the matching API key env var or provider.api_key"
-            )));
-        }
-
-        let builder = ProviderBuilder::new(provider.effective_kind())
-            .provider_name(provider_name)
-            .api_key(api_key);
-        let provider = match &base_url {
-            Some(u) => builder.base_url(u),
-            None => builder,
-        };
-
-        let retrying = RetryingProvider::new(provider.build()?)
-            .with_timeout(self.config.request_timeout())
-            .with_retries(self.config.max_retries)
-            .with_base_backoff(self.config.base_backoff());
-        Ok(Box::new(retrying))
-    }
-
-    fn model_list_timeout(&self) -> Duration {
-        self.config.request_timeout().min(Duration::from_secs(5))
+        crate::provider::build_provider(&self.config, model)
     }
 
     fn build_system_prompt(&self) -> String {
@@ -223,6 +179,17 @@ impl App {
         let model = self.config.provider.effective_model();
         let agent = self
             .build_agent_with_provider(self.build_provider(&model)?)
+            .await?;
+        Ok(agent.with_model(model))
+    }
+
+    pub(crate) async fn build_interactive_agent(&self) -> Result<Agent, AppError> {
+        let model = self.config.provider.effective_model();
+        let agent = self
+            .build_agent_with_provider(crate::provider::build_interactive_provider(
+                &self.config,
+                &model,
+            )?)
             .await?;
         Ok(agent.with_model(model))
     }

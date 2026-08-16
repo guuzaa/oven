@@ -2,6 +2,7 @@ mod component;
 mod input;
 mod model_picker;
 mod queue;
+mod setup_wizard;
 mod slash_command_popup;
 mod status;
 mod theme;
@@ -11,8 +12,8 @@ use std::io::{self, Stdout};
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEvent,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -26,7 +27,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use tokio::sync::mpsc;
 
 use component::{Action, Component, KeyResult, State};
-use input::InputView;
+use input::{InputView, display_user_input};
 use queue::QueueWidget;
 use status::StatusBar;
 use transcript::Transcript;
@@ -63,11 +64,16 @@ impl Ui {
         let events = handle.subscribe();
         let slash_commands = handle.slash_commands().to_vec();
         let model = handle.model().to_string();
+        let provider = handle.provider_config().clone();
         let root = handle
             .root()
             .canonicalize()
             .unwrap_or_else(|_| handle.root().to_owned());
         let total_usage = handle.total_usage();
+        let mut input = InputView::new(slash_commands, provider.clone());
+        if provider.needs_setup() {
+            input.open_setup();
+        }
         Self {
             handle,
             events,
@@ -76,7 +82,7 @@ impl Ui {
             rewinding: false,
             transcript: Transcript::new(),
             status: StatusBar::new(model, &root, total_usage),
-            input: InputView::new(slash_commands),
+            input,
             queue: QueueWidget::new(),
             spin: 0,
         }
@@ -119,6 +125,9 @@ impl Ui {
                             if self.handle_key(key) {
                                 break;
                             }
+                        }
+                        Event::Paste(text) => {
+                            self.input.paste(&text);
                         }
                         Event::Mouse(mouse) => {
                             self.handle_mouse(mouse);
@@ -244,11 +253,11 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::Queue(text)) => {
-                self.transcript.push_user_queued(&text);
+                self.transcript.push_user_queued(&display_user_input(&text));
                 false
             }
             KeyResult::Action(Action::Submit(text)) => {
-                self.transcript.push_user(&text);
+                self.transcript.push_user(&display_user_input(&text));
                 self.input.clear();
                 self.state.busy = true;
                 if self.handle.send(AppCmd::UserInput(text)).is_err() {
@@ -266,10 +275,17 @@ impl Ui {
             .queue
             .height(self.input.pending())
             .min(avail.saturating_sub(4 + input_h));
+        let setup_h = self.input.setup_height(&self.state);
         let picker_h = self.input.model_picker_height(&self.state);
         let slash_h = self.input.slash_command_height(&self.state);
-        let popup_h = if picker_h > 0 { picker_h } else { slash_h }
-            .min(avail.saturating_sub(4 + input_h + queue_h));
+        let popup_h = if setup_h > 0 {
+            setup_h
+        } else if picker_h > 0 {
+            picker_h
+        } else {
+            slash_h
+        }
+        .min(avail.saturating_sub(4 + input_h + queue_h));
         let mut constraints = vec![Constraint::Min(3)];
         if queue_h > 0 {
             constraints.push(Constraint::Length(queue_h));
@@ -293,7 +309,10 @@ impl Ui {
         }
         self.input.draw(f, chunks[next], &self.state);
         next += 1;
-        if picker_h > 0 {
+        if setup_h > 0 {
+            self.input.draw_setup(f, chunks[next], &self.state);
+            next += 1;
+        } else if picker_h > 0 {
             self.input.draw_model_picker(f, chunks[next], &self.state);
             next += 1;
         } else if slash_h > 0 {
@@ -355,7 +374,12 @@ fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<Stri
 fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
@@ -364,6 +388,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Re
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;

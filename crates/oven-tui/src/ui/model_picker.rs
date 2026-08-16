@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -140,9 +140,25 @@ impl ModelPicker {
         }
     }
 
+    pub(crate) fn paste(&mut self, text: &str) {
+        if self.stage != Stage::Models {
+            return;
+        }
+        let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        if cleaned.is_empty() {
+            return;
+        }
+        self.filter.push_str(&cleaned.to_lowercase());
+        self.selected = 0;
+    }
+
     fn handle_models_key(&mut self, key: KeyEvent) -> ModelPickerAction {
         match key.code {
-            KeyCode::Char(ch) if key.modifiers.is_empty() => {
+            KeyCode::Char(ch)
+                if !key.modifiers.intersects(
+                    KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                ) =>
+            {
                 self.filter.push(ch);
                 self.selected = 0;
                 ModelPickerAction::Handled

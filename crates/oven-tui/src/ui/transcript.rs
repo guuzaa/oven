@@ -439,6 +439,7 @@ impl Component for Transcript {
                 AgentEvent::ModelChanged { .. } => {}
             },
             AppEvent::ModelsUpdated { .. } => {}
+            AppEvent::ProviderUpdated { .. } => {}
             AppEvent::Exit { .. } => {}
             AppEvent::Rewound { messages, .. } => self.replace_from(messages),
             AppEvent::Idle { .. } => {

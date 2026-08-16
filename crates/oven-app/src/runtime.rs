@@ -4,10 +4,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use oven_agent::{Agent, AgentEvent, CancellationToken, Record};
-use oven_llm::{ContentBlock, Message, ModelInfo, Provider, ProviderName, Role, Usage};
+use oven_llm::{
+    ContentBlock, Message, ModelInfo, Provider, ProviderError, ProviderName, Role, Usage,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::config::{AppConfig, ProviderConfig};
 use crate::session::{Session, canonical_root, record_recent};
 use crate::slash::{CommandOutcome, SlashRegistry};
 use crate::{App, AppError};
@@ -63,6 +66,11 @@ pub enum AppEvent {
     Exit {
         app_id: AppId,
     },
+    /// `/setup` applied a new provider config. `api_key` is never included.
+    ProviderUpdated {
+        app_id: AppId,
+        provider: ProviderConfig,
+    },
 }
 
 /// Snapshot of the current persisted session, shared between the runtime
@@ -116,6 +124,7 @@ pub struct AppHandle {
     join: JoinHandle<()>,
     slash_commands: Vec<(String, String)>,
     model: String,
+    provider: ProviderConfig,
     root: PathBuf,
     /// Cumulative token usage at spawn time: the restored usage of a resumed
     /// session, or zero for a fresh one. Startup snapshot, updated afterwards
@@ -154,6 +163,11 @@ impl AppHandle {
     /// Model name in effect for this runtime.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Provider config snapshot taken at spawn time.
+    pub fn provider_config(&self) -> &ProviderConfig {
+        &self.provider
     }
 
     /// Workspace root the runtime was started with.
@@ -223,7 +237,8 @@ impl App {
             None,
             self.config.provider.effective_model(),
             self.root.clone(),
-            self.model_list_timeout(),
+            self.config.clone(),
+            AppConfig::default_user_config_path(),
         ))
     }
 
@@ -233,7 +248,16 @@ impl App {
     /// caller never has to provide.
     pub async fn spawn_session(&self, session_id: Option<&str>) -> Result<AppHandle, AppError> {
         let Some(dir) = crate::session::default_sessions_dir() else {
-            return self.spawn().await;
+            let agent = self.build_interactive_agent().await?;
+            return Ok(spawn_runtime(
+                AppId::next(),
+                agent,
+                None,
+                self.config.provider.effective_model(),
+                self.root.clone(),
+                self.config.clone(),
+                AppConfig::default_user_config_path(),
+            ));
         };
         self.spawn_session_in(&dir, session_id).await
     }
@@ -246,7 +270,7 @@ impl App {
     ) -> Result<AppHandle, AppError> {
         let session = resolve_session(sessions_dir, session_id)?;
         let prior = session.load_records()?;
-        let mut agent = self.build_agent().await?;
+        let mut agent = self.build_interactive_agent().await?;
         let records: Vec<_> = prior
             .into_iter()
             .filter(
@@ -261,7 +285,8 @@ impl App {
             Some(session),
             self.config.provider.effective_model(),
             self.root.clone(),
-            self.model_list_timeout(),
+            self.config.clone(),
+            AppConfig::default_user_config_path(),
         ))
     }
 
@@ -290,7 +315,8 @@ impl App {
             Some(session),
             self.config.provider.effective_model(),
             self.root.clone(),
-            self.model_list_timeout(),
+            self.config.clone(),
+            AppConfig::default_user_config_path(),
         ))
     }
 
@@ -306,7 +332,8 @@ impl App {
             None,
             self.config.provider.effective_model(),
             self.root.clone(),
-            self.model_list_timeout(),
+            self.config.clone(),
+            AppConfig::default_user_config_path(),
         ))
     }
 
@@ -332,7 +359,8 @@ impl App {
             Some(session),
             self.config.provider.effective_model(),
             self.root.clone(),
-            self.model_list_timeout(),
+            self.config.clone(),
+            AppConfig::default_user_config_path(),
         ))
     }
 }
@@ -370,7 +398,8 @@ fn spawn_runtime(
     session: Option<Session>,
     model: String,
     root: PathBuf,
-    model_list_timeout: Duration,
+    config: AppConfig,
+    user_config_path: Option<PathBuf>,
 ) -> AppHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
@@ -378,6 +407,7 @@ fn spawn_runtime(
     let slash_commands = SlashRegistry::with_builtin().commands();
     let history: Vec<Message> = agent.history().cloned().collect();
     let total_usage = *agent.total_usage();
+    let provider = config.provider.clone();
     let (session_store, shared_session) = match session {
         Some(s) => {
             let shared = Arc::new(Mutex::new(SharedSession {
@@ -405,7 +435,8 @@ fn spawn_runtime(
             cmd_rx,
             subscribers_task,
             task_model,
-            model_list_timeout,
+            config,
+            user_config_path,
         )
         .await;
     });
@@ -416,6 +447,7 @@ fn spawn_runtime(
         join,
         slash_commands,
         model,
+        provider,
         root,
         total_usage,
         history,
@@ -444,7 +476,8 @@ fn emit_done(subs: &Subscribers, app_id: AppId, agent: &Agent, text: String) {
     );
 }
 
-fn apply_slash(
+#[allow(clippy::too_many_arguments)]
+async fn apply_slash(
     outcome: CommandOutcome,
     app_id: AppId,
     agent: &mut Agent,
@@ -452,6 +485,8 @@ fn apply_slash(
     persisted_prefix: &mut usize,
     persisted_rev: &mut u64,
     subs: &Subscribers,
+    config: &mut AppConfig,
+    user_config_path: Option<&Path>,
 ) {
     match outcome {
         CommandOutcome::Passthrough => {}
@@ -499,8 +534,125 @@ fn apply_slash(
             };
             emit_done(subs, app_id, agent, text);
         }
+        CommandOutcome::ProviderChanged { provider } => {
+            apply_provider_change(provider, app_id, agent, config, user_config_path, subs).await;
+        }
     }
     emit(subs, AppEvent::Idle { app_id });
+}
+
+async fn apply_provider_change(
+    mut overlay: ProviderConfig,
+    app_id: AppId,
+    agent: &mut Agent,
+    config: &mut AppConfig,
+    user_config_path: Option<&Path>,
+    subs: &Subscribers,
+) {
+    overlay.apply_name_presets();
+    let mut next = config.clone();
+    next.merge(AppConfig {
+        provider: overlay.clone(),
+        ..AppConfig::default()
+    });
+    let model = next.provider.effective_model();
+    match crate::provider::build_provider(&next, &model) {
+        Ok(built) => {
+            *config = next;
+            agent.set_provider(built);
+            agent.set_model(model.clone());
+            let saved = match user_config_path {
+                Some(path) => match AppConfig::save_provider_at(path, &overlay) {
+                    Ok(()) => Some(path.to_path_buf()),
+                    Err(e) => {
+                        emit(
+                            subs,
+                            AppEvent::Error {
+                                app_id,
+                                message: e.to_string(),
+                            },
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+            emit(
+                subs,
+                AppEvent::ProviderUpdated {
+                    app_id,
+                    provider: ProviderConfig {
+                        api_key: None,
+                        ..config.provider.clone()
+                    },
+                },
+            );
+            emit_agent(
+                subs,
+                app_id,
+                AgentEvent::ModelChanged {
+                    agent_id: agent.id(),
+                    model: model.clone(),
+                    reasoning_effort: agent.reasoning_effort(),
+                },
+            );
+            let (models, auth_error) =
+                refresh_model_choices(agent.provider(), &model, config).await;
+            emit(subs, AppEvent::ModelsUpdated { app_id, models });
+            emit_done(
+                subs,
+                app_id,
+                agent,
+                summarize_setup(&overlay, saved.as_deref()),
+            );
+            if let Some(body) = auth_error {
+                emit(
+                    subs,
+                    AppEvent::Error {
+                        app_id,
+                        message: format!("API key rejected: {body}"),
+                    },
+                );
+            }
+        }
+        Err(e) => {
+            emit(
+                subs,
+                AppEvent::Error {
+                    app_id,
+                    message: e.to_string(),
+                },
+            );
+        }
+    }
+}
+
+fn summarize_setup(overlay: &ProviderConfig, saved: Option<&Path>) -> String {
+    let mut parts = Vec::new();
+    if let Some(n) = &overlay.name {
+        parts.push(format!("name={n}"));
+    }
+    if let Some(k) = overlay.kind {
+        parts.push(format!("kind={k}"));
+    }
+    if let Some(m) = &overlay.model {
+        parts.push(format!("model={m}"));
+    }
+    if let Some(u) = &overlay.base_url {
+        parts.push(format!("base_url={u}"));
+    }
+    if overlay.api_key.is_some() {
+        parts.push("api_key=(set)".into());
+    }
+    let mut text = if parts.is_empty() {
+        "provider unchanged".into()
+    } else {
+        format!("provider updated ({})", parts.join(" "))
+    };
+    if let Some(path) = saved {
+        text.push_str(&format!("\nsaved to {}", path.display()));
+    }
+    text
 }
 
 fn switch_session(store: &mut Option<SessionStore>, subs: &Subscribers, app_id: AppId) {
@@ -527,14 +679,19 @@ fn switch_session(store: &mut Option<SessionStore>, subs: &Subscribers, app_id: 
 async fn refresh_model_choices(
     provider: &dyn Provider,
     current_model: &str,
-    timeout: Duration,
-) -> Vec<(String, String)> {
+    config: &AppConfig,
+) -> (Vec<(String, String)>, Option<String>) {
+    let timeout = config.request_timeout().min(Duration::from_secs(5));
     let known = provider.known_models();
-    let dynamic = match tokio::time::timeout(timeout, provider.list_models()).await {
-        Ok(Ok(list)) => list,
-        _ => Vec::new(),
+    let (dynamic, auth_error) = match tokio::time::timeout(timeout, provider.list_models()).await {
+        Ok(Ok(list)) => (list, None),
+        Ok(Err(ProviderError::Auth(body))) => (Vec::new(), Some(body)),
+        _ => (Vec::new(), None),
     };
-    merge_model_choices(known, dynamic, current_model, &provider.provider_name())
+    (
+        merge_model_choices(known, dynamic, current_model, &provider.provider_name()),
+        auth_error,
+    )
 }
 
 fn merge_model_choices(
@@ -577,6 +734,7 @@ fn user_message_text(m: &Message) -> String {
         .join("\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn runtime_loop(
     app_id: AppId,
     mut agent: Agent,
@@ -584,7 +742,8 @@ async fn runtime_loop(
     mut cmd_rx: mpsc::UnboundedReceiver<AppCmd>,
     subscribers: Subscribers,
     model: String,
-    model_list_timeout: Duration,
+    mut config: AppConfig,
+    user_config_path: Option<PathBuf>,
 ) {
     let slash = SlashRegistry::with_builtin();
     // Leading in-memory messages already written to the store. On `/clear`
@@ -599,7 +758,7 @@ async fn runtime_loop(
     let mut persisted_rev = agent.history_revision();
 
     // Publish the initial model list for the `/model` popup completion.
-    let models = refresh_model_choices(agent.provider(), &model, model_list_timeout).await;
+    let (models, _) = refresh_model_choices(agent.provider(), &model, &config).await;
     emit(&subscribers, AppEvent::ModelsUpdated { app_id, models });
 
     // Commands received while a turn is in flight are buffered here and run
@@ -670,7 +829,10 @@ async fn runtime_loop(
                             &mut persisted_prefix,
                             &mut persisted_rev,
                             &subscribers,
-                        );
+                            &mut config,
+                            user_config_path.as_deref(),
+                        )
+                        .await;
                         continue;
                     }
                     Err(e) => {
@@ -803,7 +965,6 @@ mod tests {
     };
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::time::Duration;
 
     fn text_response(text: &str) -> Response {
         Response {
@@ -955,7 +1116,7 @@ mod tests {
             .iter()
             .map(|(n, _)| n.as_str())
             .collect();
-        assert_eq!(names, ["clear", "exit", "model"]);
+        assert_eq!(names, ["clear", "exit", "model", "setup"]);
         assert!(handle.slash_commands().iter().all(|(_, d)| !d.is_empty()));
 
         handle.shutdown().await;
@@ -972,7 +1133,8 @@ mod tests {
             None,
             "gpt-4o".into(),
             PathBuf::from("/tmp"),
-            Duration::from_secs(1),
+            AppConfig::default(),
+            None,
         );
 
         let out = handle.prompt("/model gpt-4o-turbo low").await.unwrap();
@@ -1073,12 +1235,104 @@ mod tests {
             None,
             "gpt-4o".into(),
             PathBuf::from("/tmp"),
-            Duration::from_secs(1),
+            AppConfig::default(),
+            None,
         );
 
         let out = handle.prompt("/model gpt-4o-turbo").await.unwrap();
         assert_eq!(out, "model switched to gpt-4o-turbo (effort: low)");
         assert_eq!(handle.prompt("hello").await.unwrap(), "echo:gpt-4o-turbo");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn setup_slash_persists_and_rebuilds_provider() {
+        let tmp = tempdir::TempDir::new("app-runtime-setup").unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new());
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "default".into(),
+            tmp.path().to_path_buf(),
+            AppConfig::default(),
+            Some(cfg_path.clone()),
+        );
+
+        let mut rx = handle.subscribe();
+        handle
+            .send(AppCmd::UserInput(
+                "/setup name=deepseek kind=completions api_key=sk-test".into(),
+            ))
+            .unwrap();
+        let mut out = String::new();
+        loop {
+            match rx.recv().await {
+                Some(AppEvent::Agent {
+                    event: AgentEvent::Done { text, .. },
+                    ..
+                }) => out = text,
+                Some(AppEvent::Idle { .. }) => break,
+                Some(_) => {}
+                None => panic!("channel closed before idle"),
+            }
+        }
+        assert!(out.contains("provider updated"));
+        assert!(out.contains("name=deepseek"));
+        assert!(out.contains("kind=completions"));
+        assert!(out.contains("model=deepseek-v4-flash"));
+        assert!(out.contains("base_url=https://api.deepseek.com"));
+        assert!(out.contains("api_key=(set)"));
+        assert!(!out.contains("sk-test"));
+        assert!(out.contains(cfg_path.to_str().unwrap()));
+
+        let saved = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(saved.contains("name = \"deepseek\""));
+        assert!(saved.contains("kind = \"completions\""));
+        assert!(saved.contains("model = \"deepseek-v4-flash\""));
+        assert!(saved.contains("base_url = \"https://api.deepseek.com\""));
+        assert!(saved.contains("api_key = \"sk-test\""));
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_session_without_api_key_starts() {
+        let tmp = tempdir::TempDir::new("app-first-run").unwrap();
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let app = App::new(tmp.path());
+        let handle = app.spawn_session_in(&dir, None).await.unwrap();
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn spawn_without_api_key_still_errors() {
+        let tmp = tempdir::TempDir::new("app-headless-no-key").unwrap();
+        let app = App::new(tmp.path());
+        if !app.config().provider.needs_setup() {
+            return;
+        }
+        let err = match app.spawn().await {
+            Ok(_) => panic!("headless spawn should fail without an API key"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("no API key"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_slash_rejects_invalid_kind() {
+        let tmp = tempdir::TempDir::new("app-runtime-setup-bad").unwrap();
+        let app = App::new(tmp.path());
+        let handle = app
+            .spawn_with_provider(Box::new(MockProvider::new(vec![])))
+            .await
+            .unwrap();
+        let err = handle.prompt("/setup kind=chat").await.unwrap_err();
+        assert!(err.to_string().contains("invalid kind"));
         handle.shutdown().await;
     }
 

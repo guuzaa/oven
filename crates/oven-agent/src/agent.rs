@@ -73,6 +73,10 @@ impl Agent {
         self.model = model.into();
     }
 
+    pub fn set_provider(&mut self, provider: Box<dyn Provider>) {
+        self.provider = provider;
+    }
+
     pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
         self.reasoning_effort = effort;
     }
@@ -177,7 +181,11 @@ impl Agent {
             messages,
             tools,
             tool_choice: ToolChoice::Auto,
-            sampling: SamplingParams::default(),
+            sampling: SamplingParams {
+                temperature: Some(1.0),
+                max_tokens: Some(4096),
+                ..Default::default()
+            },
             thinking: Some(
                 if self
                     .reasoning_effort

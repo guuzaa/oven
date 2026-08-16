@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use oven_app::AppEvent;
+use oven_app::config::ProviderConfig;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -11,6 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::component::{Action, Component, KeyResult, State};
 use super::model_picker::{ModelPicker, ModelPickerAction};
+use super::setup_wizard::{SetupWizard, SetupWizardAction};
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
 use super::theme;
 
@@ -18,16 +20,18 @@ pub struct InputView {
     textarea: TextArea<'static>,
     slash_command: SlashCommandPopup,
     model_picker: ModelPicker,
+    setup: SetupWizard,
     /// Messages accepted while the app is busy, flushed once it idles again.
     pending: Vec<String>,
 }
 
 impl InputView {
-    pub fn new(commands: Vec<(String, String)>) -> Self {
+    pub fn new(commands: Vec<(String, String)>, provider: ProviderConfig) -> Self {
         Self {
             textarea: new_textarea(),
             slash_command: SlashCommandPopup::new(commands),
             model_picker: ModelPicker::new(Vec::new()),
+            setup: SetupWizard::new(provider),
             pending: Vec::new(),
         }
     }
@@ -40,6 +44,7 @@ impl InputView {
         self.textarea = new_textarea();
         self.slash_command.close();
         self.model_picker.close();
+        self.setup.close();
     }
 
     /// Height of the command popup below the input, or 0 when hidden.
@@ -58,6 +63,32 @@ impl InputView {
 
     pub fn draw_model_picker(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
         self.model_picker.draw(f, area, state);
+    }
+
+    pub fn setup_height(&self, state: &State) -> u16 {
+        self.setup.height(state)
+    }
+
+    pub(crate) fn open_setup(&mut self) {
+        self.setup.open();
+        self.fill_command("/setup ");
+    }
+
+    pub fn draw_setup(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
+        self.setup.draw(f, area, state);
+    }
+
+    pub(crate) fn paste(&mut self, text: &str) {
+        if self.setup.is_open() {
+            self.setup.paste(text);
+            return;
+        }
+        if self.model_picker.is_open() {
+            self.model_picker.paste(text);
+            return;
+        }
+        self.textarea.insert_str(text);
+        self.slash_command.refresh(&self.text());
     }
 
     /// Number of messages waiting to be flushed to the app.
@@ -98,7 +129,7 @@ impl InputView {
 
     /// Whether the slash-command popup or the model picker is currently open.
     pub(crate) fn slash_open(&self) -> bool {
-        self.slash_command.is_open() || self.model_picker.is_open()
+        self.slash_command.is_open() || self.model_picker.is_open() || self.setup.is_open()
     }
 
     fn text(&self) -> String {
@@ -118,6 +149,9 @@ impl Component for InputView {
             AppEvent::ModelsUpdated { models, .. } => {
                 self.model_picker.update_models(models.clone());
             }
+            AppEvent::ProviderUpdated { provider, .. } => {
+                self.setup.set_current(provider.clone());
+            }
             AppEvent::Rewound {
                 text: Some(text), ..
             } => {
@@ -131,6 +165,20 @@ impl Component for InputView {
     fn handle_key(&mut self, key: KeyEvent, state: &State) -> KeyResult {
         let text = self.text();
         self.slash_command.refresh(&text);
+
+        if self.setup.is_open() {
+            return match self.setup.handle_key(key) {
+                SetupWizardAction::Handled => KeyResult::Handled,
+                SetupWizardAction::Submit(text) => {
+                    self.clear();
+                    KeyResult::Action(Action::Submit(text))
+                }
+                SetupWizardAction::Close => {
+                    self.fill_command("/setup");
+                    KeyResult::Handled
+                }
+            };
+        }
 
         if self.model_picker.is_open() {
             return match self.model_picker.handle_key(key) {
@@ -156,6 +204,11 @@ impl Component for InputView {
                     KeyResult::Handled
                 }
                 SlashCommandPopupAction::Submit(text) => {
+                    if setup_opens(&text) {
+                        self.setup.open();
+                        self.fill_command("/setup ");
+                        return KeyResult::Handled;
+                    }
                     // `/model` (with at most one fragment) opens the picker
                     // instead of submitting; two or more args keep the manual
                     // fast path.
@@ -205,6 +258,10 @@ impl Component for InputView {
             Paragraph::new(Span::styled(prompt, theme::user())),
             chunks[0],
         );
+        if self.setup.is_open() {
+            draw_setup_prompt(f, chunks[1], &self.setup);
+            return;
+        }
         self.textarea.set_style(Style::default());
         self.textarea
             .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -216,6 +273,44 @@ impl Component for InputView {
 /// If `text` is a `/model` command with at most one argument (`/model` or
 /// `/model <fragment>`), return the fragment to seed the picker filter with.
 /// Two or more arguments return `None` so the line submits directly.
+fn setup_opens(text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some(body) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    let mut words = body.split_whitespace();
+    matches!(words.next(), Some(cmd) if cmd.eq_ignore_ascii_case("setup")) && words.next().is_none()
+}
+
+pub(crate) fn display_user_input(text: &str) -> String {
+    if !text.trim_start().starts_with("/setup") {
+        return text.to_string();
+    }
+    text.split(' ')
+        .map(|token| {
+            token
+                .strip_prefix("api_key=")
+                .filter(|v| !v.is_empty())
+                .map(|_| "api_key=***")
+                .unwrap_or(token)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn draw_setup_prompt(f: &mut Frame<'_>, area: Rect, setup: &SetupWizard) {
+    if let Some(mask) = setup.prompt_mask() {
+        f.render_widget(Paragraph::new(Span::raw(mask.clone())), area);
+        let col = (mask.chars().count() as u16).min(area.width.saturating_sub(1));
+        f.set_cursor_position((area.x.saturating_add(col), area.y));
+        return;
+    }
+    f.render_widget(
+        Paragraph::new(Span::styled(setup.prompt_hint(), theme::dim())),
+        area,
+    );
+}
+
 fn model_filter_from(text: &str) -> Option<String> {
     let trimmed = text.trim();
     let body = trimmed.strip_prefix('/')?;
@@ -247,6 +342,7 @@ mod tests {
             ("clear".into(), "Clear conversation history.".into()),
             ("exit".into(), "End the session.".into()),
             ("model".into(), "Switch model and reasoning effort.".into()),
+            ("setup".into(), "Configure provider.".into()),
         ]
     }
 
@@ -259,7 +355,7 @@ mod tests {
     }
 
     fn view() -> InputView {
-        let mut view = InputView::new(commands());
+        let mut view = InputView::new(commands(), ProviderConfig::default());
         view.model_picker.update_models(models());
         view
     }
@@ -279,7 +375,7 @@ mod tests {
         let mut view = view();
         type_text(&mut view, "/");
         assert!(view.slash_command.is_open());
-        assert_eq!(view.slash_command_height(&State::new()), 3);
+        assert_eq!(view.slash_command_height(&State::new()), 4);
     }
 
     #[test]
@@ -371,6 +467,8 @@ mod tests {
         assert_eq!(view.slash_command.selected_command(), Some(1));
         view.handle_key(key(KeyCode::Down), &State::new());
         assert_eq!(view.slash_command.selected_command(), Some(2));
+        view.handle_key(key(KeyCode::Down), &State::new());
+        assert_eq!(view.slash_command.selected_command(), Some(3));
         view.handle_key(key(KeyCode::Down), &State::new());
         assert_eq!(view.slash_command.selected_command(), Some(0));
     }
@@ -605,7 +703,7 @@ mod tests {
 
     #[test]
     fn update_models_refreshes_picker() {
-        let mut view = InputView::new(commands());
+        let mut view = InputView::new(commands(), ProviderConfig::default());
         let ev = AppEvent::ModelsUpdated {
             app_id: oven_app::AppId(1),
             models: vec![("kimi-k2".into(), "Moonshot".into())],
@@ -655,5 +753,56 @@ mod tests {
         };
         view.on_event(&ev, &mut State::new());
         assert_eq!(view.textarea.lines()[0], "restored");
+    }
+
+    #[test]
+    fn setup_wizard_opens_on_enter() {
+        let mut view = view();
+        type_text(&mut view, "/setup");
+        view.handle_key(key(KeyCode::Enter), &State::new());
+        assert!(view.setup.is_open());
+        assert_eq!(view.textarea.lines()[0], "/setup ");
+    }
+
+    #[test]
+    fn open_setup_opens_wizard() {
+        let mut view = view();
+        view.open_setup();
+        assert!(view.setup.is_open());
+        assert_eq!(view.textarea.lines()[0], "/setup ");
+    }
+
+    #[test]
+    fn setup_with_args_submits_without_wizard() {
+        let mut view = view();
+        type_text(&mut view, "/setup kind=completions");
+        let result = view.handle_key(key(KeyCode::Enter), &State::new());
+        match result {
+            KeyResult::Action(Action::Submit(text)) => {
+                assert_eq!(text, "/setup kind=completions");
+            }
+            _ => panic!("expected submit"),
+        }
+        assert!(!view.setup.is_open());
+    }
+
+    #[test]
+    fn setup_esc_closes_and_restores_input() {
+        let mut view = view();
+        type_text(&mut view, "/setup");
+        view.handle_key(key(KeyCode::Enter), &State::new());
+        let result = view.handle_key(key(KeyCode::Esc), &State::new());
+        assert!(matches!(result, KeyResult::Handled));
+        assert!(!view.setup.is_open());
+        assert_eq!(view.textarea.lines()[0], "/setup");
+    }
+
+    #[test]
+    fn display_user_input_redacts_api_key() {
+        assert_eq!(
+            display_user_input("/setup name=deepseek api_key=sk-secret"),
+            "/setup name=deepseek api_key=***"
+        );
+        assert_eq!(display_user_input("hello"), "hello");
     }
 }
