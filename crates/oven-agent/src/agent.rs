@@ -13,7 +13,7 @@ use crate::event::{AgentEvent, AgentId};
 use crate::history::{History, Record};
 use crate::live::{AgentLive, LiveHandle};
 use crate::mode::AgentMode;
-use crate::todo::TodoList;
+use crate::todo::{self, TodoList};
 use crate::tools::Tool;
 
 /// The conversation driver. Holds tools and dispatches tool calls returned by
@@ -31,6 +31,7 @@ pub struct Agent {
     /// under it before each provider call.
     budget: usize,
     todo_written_this_turn: bool,
+    todo_dirty: bool,
 }
 
 impl Agent {
@@ -54,6 +55,7 @@ impl Agent {
             max_iters: 100,
             budget: 128_000,
             todo_written_this_turn: false,
+            todo_dirty: false,
         }
     }
 
@@ -216,12 +218,10 @@ impl Agent {
 
     fn build_request(&self) -> Request {
         let tools = self.llm_tools();
-        let mut system = self
-            .live
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .base_system
-            .clone();
+        let (mut system, todos, mode) = {
+            let g = self.live.lock().unwrap_or_else(|e| e.into_inner());
+            (g.base_system.clone(), g.todos.clone(), g.mode)
+        };
         let mut messages = Vec::with_capacity(self.history.len());
         for m in self.history.messages() {
             if m.role == Role::System {
@@ -231,6 +231,24 @@ impl Agent {
             } else {
                 messages.push(m.clone());
             }
+        }
+        system = todo::compose_system(system.as_deref(), mode);
+        if !todos.is_empty() {
+            match system.as_mut() {
+                Some(s) => {
+                    s.push_str("\n\n");
+                    s.push_str(&todos.render_prompt_block());
+                }
+                None => system = Some(todos.render_prompt_block()),
+            }
+        }
+        if let Some(s) = system.as_mut()
+            && mode == AgentMode::Plan
+            && self.todo_dirty
+            && !todos.is_empty()
+        {
+            s.push_str("\n\n");
+            s.push_str(todo::PLAN_REMINDER);
         }
         Request {
             model: self.model.clone(),
@@ -372,6 +390,7 @@ impl Agent {
             self.history.record_usage(usage);
         }
 
+        let mut wrote_todo = false;
         for block in response.tool_uses() {
             let ContentBlock::ToolUse { id, name, input } = block else {
                 continue;
@@ -391,6 +410,7 @@ impl Agent {
             };
             if ok && name == "todo_write" {
                 self.todo_written_this_turn = true;
+                wrote_todo = true;
                 Self::emit(
                     tx,
                     AgentEvent::TodoUpdated {
@@ -412,6 +432,7 @@ impl Agent {
             self.history
                 .push(Message::tool_result(id.clone(), summary, !ok));
         }
+        self.todo_dirty = !wrote_todo;
         Ok(None)
     }
 
@@ -944,5 +965,229 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::TodoUpdated { .. }))
         );
+    }
+
+    struct CaptureRequests {
+        seen: Arc<Mutex<Vec<Request>>>,
+        responses: Mutex<VecDeque<Response>>,
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    impl CaptureRequests {
+        fn new(responses: Vec<Response>) -> (Self, Arc<Mutex<Vec<Request>>>) {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    seen: Arc::clone(&seen),
+                    responses: Mutex::new(responses.into()),
+                    entered: Mutex::new(None),
+                    release: Mutex::new(None),
+                },
+                seen,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CaptureRequests {
+        async fn complete(&self, req: &Request) -> LlmResult<Response> {
+            self.seen.lock().unwrap().push(req.clone());
+            if let Some(tx) = self.entered.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let rx = self.release.lock().unwrap().take();
+            if let Some(rx) = rx {
+                let _ = rx.await;
+            }
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| ProviderError::Api {
+                    status: 500,
+                    body: "no more mock responses".into(),
+                })
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "stream disabled in mock".into(),
+            })
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("capture-requests".into())
+        }
+    }
+
+    fn system_of(req: &Request) -> &str {
+        req.system.as_deref().unwrap_or("")
+    }
+
+    fn tool_names(req: &Request) -> Vec<&str> {
+        req.tools.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    fn pending_item() -> crate::todo::TodoItem {
+        crate::todo::TodoItem {
+            id: "a".into(),
+            content: "one".into(),
+            status: crate::todo::TodoStatus::Pending,
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_first_request_has_plan_prompt_and_todo_write() {
+        let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
+        let mut agent = agent_with_todo_write(Box::new(mock));
+        agent.set_system("base");
+        agent.set_mode(AgentMode::Plan);
+        agent.run("hi").await.unwrap();
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 1);
+        assert!(system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(system_of(&reqs[0]).contains("base"));
+        assert!(!system_of(&reqs[0]).contains("## Current TODO list"));
+        assert!(tool_names(&reqs[0]).contains(&"todo_write"));
+    }
+
+    #[tokio::test]
+    async fn default_request_omits_plan_section_and_todo_write() {
+        let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
+        let mut agent = agent_with_todo_write(Box::new(mock));
+        agent.set_system("base");
+        agent.run("hi").await.unwrap();
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 1);
+        assert!(!system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
+        assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
+    }
+
+    #[tokio::test]
+    async fn default_still_injects_nonempty_list() {
+        let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
+        let mut agent = agent_with_todo_write(Box::new(mock));
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![pending_item()],
+        });
+        agent.run("hi").await.unwrap();
+        let reqs = seen.lock().unwrap().clone();
+        assert!(system_of(&reqs[0]).contains("## Current TODO list"));
+        assert!(!system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
+        assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
+    }
+
+    #[tokio::test]
+    async fn in_flight_set_mode_applies_to_next_step() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (mock, seen) = CaptureRequests::new(vec![
+            tool_response("c1", "file_read", json!({"path": "note.txt"})),
+            text_response("done"),
+        ]);
+        *mock.entered.lock().unwrap() = Some(entered_tx);
+        *mock.release.lock().unwrap() = Some(release_rx);
+
+        let live = Arc::new(Mutex::new(AgentLive::new(None)));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(FileReadTool::new(tmp.path())),
+            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
+        ];
+        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        assert_eq!(agent.mode(), AgentMode::Default);
+        let live = agent.live_handle();
+
+        let run = agent.run("read it");
+        tokio::pin!(run);
+        tokio::select! {
+            biased;
+            _ = entered_rx => {}
+            _ = &mut run => panic!("turn finished before first complete awaited"),
+        }
+        live.lock().unwrap_or_else(|e| e.into_inner()).mode = AgentMode::Plan;
+        drop(release_tx);
+        assert_eq!(run.await.unwrap(), "done");
+
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 2);
+        assert!(!system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
+        assert!(system_of(&reqs[1]).contains("## Plan Mode"));
+        assert!(tool_names(&reqs[1]).contains(&"todo_write"));
+    }
+
+    #[tokio::test]
+    async fn plan_tool_without_todo_write_injects_reminder() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+
+        let (mock, seen) = CaptureRequests::new(vec![
+            tool_response("c1", "file_read", json!({"path": "note.txt"})),
+            text_response("done"),
+        ]);
+        let live = Arc::new(Mutex::new(AgentLive::new(None)));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(FileReadTool::new(tmp.path())),
+            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
+        ];
+        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        agent.set_mode(AgentMode::Plan);
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![pending_item()],
+        });
+        agent.run("read it").await.unwrap();
+
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 2);
+        assert!(system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
+        assert!(system_of(&reqs[1]).contains("## Plan reminder"));
+        assert!(system_of(&reqs[1]).contains("## Current TODO list"));
+        assert!(!agent.history().any(|m| content_has(m, "## Plan reminder")));
+    }
+
+    #[tokio::test]
+    async fn reminder_clears_after_successful_todo_write() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+
+        let todos = json!({"todos":[{"id":"a","content":"one","status":"completed"}]});
+        let (mock, seen) = CaptureRequests::new(vec![
+            tool_response("c1", "file_read", json!({"path": "note.txt"})),
+            tool_response("c2", "todo_write", todos),
+            text_response("done"),
+        ]);
+        let live = Arc::new(Mutex::new(AgentLive::new(None)));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(FileReadTool::new(tmp.path())),
+            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
+        ];
+        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(6);
+        agent.set_mode(AgentMode::Plan);
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![pending_item()],
+        });
+        agent.run("do it").await.unwrap();
+
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 3);
+        assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
+        assert!(system_of(&reqs[1]).contains("## Plan reminder"));
+        assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
+        assert!(system_of(&reqs[2]).contains("## Current TODO list"));
     }
 }

@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use oven_app::{AgentEvent, AppEvent};
+use oven_app::{AgentEvent, AppEvent, TodoList};
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -899,6 +899,11 @@ fn tool_display(name: &str, input: &serde_json::Value) -> String {
             return command.to_string();
         }
     }
+    if name == "todo_write"
+        && let Ok(list) = TodoList::parse(input)
+    {
+        return format!("todo_write · {}", list.summary());
+    }
     name.to_string()
 }
 
@@ -957,6 +962,25 @@ mod tests {
     fn assistant_gutter_is_bullet() {
         let lines = format_lines(LineKind::Text, "hi");
         assert_eq!(lines[0].spans[0].content.as_ref(), "• ");
+    }
+
+    #[test]
+    fn tool_display_todo_write_uses_summary() {
+        let input = serde_json::json!({
+            "todos": [{"id": "a", "content": "one", "status": "pending"}]
+        });
+        assert_eq!(
+            tool_display("todo_write", &input),
+            "todo_write · 1 todos (0 in_progress, 0 completed)"
+        );
+    }
+
+    #[test]
+    fn tool_display_todo_write_invalid_falls_back_to_name() {
+        assert_eq!(
+            tool_display("todo_write", &serde_json::json!({})),
+            "todo_write"
+        );
     }
 
     #[test]

@@ -617,6 +617,10 @@ async fn apply_slash(
         CommandOutcome::ProviderChanged { provider } => {
             apply_provider_change(provider, app_id, agent, config, user_config_path, subs).await;
         }
+        CommandOutcome::ModeChanged { mode } => {
+            agent.set_mode(mode);
+            emit(subs, AppEvent::ModeChanged { app_id, mode });
+        }
     }
     emit(subs, AppEvent::Idle { app_id });
 }
@@ -1251,8 +1255,41 @@ mod tests {
             .iter()
             .map(|(n, _)| n.as_str())
             .collect();
-        assert_eq!(names, ["clear", "exit", "model", "setup"]);
+        assert_eq!(names, ["clear", "exit", "model", "setup", "plan"]);
         assert!(handle.slash_commands().iter().all(|(_, d)| !d.is_empty()));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn plan_slash_on_idle_switches() {
+        let tmp = tempdir::TempDir::new("app-runtime-plan").unwrap();
+        let app = App::new(tmp.path());
+        let mock = MockProvider::new(vec![]);
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
+
+        let mut rx = handle.subscribe();
+        let status = handle.prompt("/plan").await.unwrap();
+        assert!(status.contains("current mode: agent"));
+        assert!(status.contains("0 todos"));
+
+        let _ = handle.prompt("/plan on").await.unwrap();
+        let mut saw_plan = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(
+                ev,
+                AppEvent::ModeChanged {
+                    mode: AgentMode::Plan,
+                    ..
+                }
+            ) {
+                saw_plan = true;
+            }
+        }
+        assert!(saw_plan, "idle /plan on must emit ModeChanged(Plan)");
+
+        let status = handle.prompt("/plan").await.unwrap();
+        assert!(status.contains("current mode: plan"));
 
         handle.shutdown().await;
     }
