@@ -52,23 +52,19 @@ impl Tool for FileReadTool {
             .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))?;
 
         let offset = args.get("offset").and_then(|v| v.as_i64()).unwrap_or(1);
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(i64::MAX);
+        let limit = args.get("limit").and_then(|v| v.as_i64());
 
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
-        let total = lines.len() as i64;
-        let start = (offset.max(1) - 1).min(total);
-        let end = if limit <= 0 {
-            total
-        } else {
-            (start + limit).min(total)
+        let total = lines.len();
+        let start = (offset.max(1) as usize).saturating_sub(1).min(total);
+        let end = match limit {
+            Some(n) if n > 0 => start.saturating_add(n as usize).min(total),
+            _ => total,
         };
         if start >= total {
             return Ok(String::new());
         }
-        Ok(lines[start as usize..end as usize].concat())
+        Ok(lines[start..end].concat())
     }
 }
 
@@ -126,5 +122,18 @@ mod tests {
         let read = FileReadTool::new(tmp.path());
         let out = read.run(&json!({"path": "r.txt"}), None).await.unwrap();
         assert_eq!(out, "one\ntwo");
+    }
+
+    #[tokio::test]
+    async fn offset_without_limit_reads_to_end() {
+        let tmp = tmp_dir();
+        let path = tmp.path().join("r.txt");
+        std::fs::write(&path, "l1\nl2\nl3\nl4\n").unwrap();
+        let read = FileReadTool::new(tmp.path());
+        let out = read
+            .run(&json!({"path": "r.txt", "offset": 2}), None)
+            .await
+            .unwrap();
+        assert_eq!(out, "l2\nl3\nl4\n");
     }
 }
