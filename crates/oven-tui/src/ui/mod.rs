@@ -202,7 +202,14 @@ impl Ui {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        let _ = self.transcript.handle_mouse(mouse, &self.state);
+        if let KeyResult::Action(Action::Notify(text)) =
+            self.transcript.handle_mouse(mouse, &self.state)
+        {
+            self.apply_event(AppEvent::Notify {
+                app_id: self.handle.id(),
+                text,
+            });
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -271,6 +278,13 @@ impl Ui {
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
                 let _ = self.handle.send(AppCmd::UserInput(text));
+                false
+            }
+            KeyResult::Action(Action::Notify(text)) => {
+                self.apply_event(AppEvent::Notify {
+                    app_id: self.handle.id(),
+                    text,
+                });
                 false
             }
         }

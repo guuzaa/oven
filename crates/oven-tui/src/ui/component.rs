@@ -20,6 +20,8 @@ pub enum Action {
     Queue(String),
     /// Run a slash command without touching the transcript or input.
     QuietSubmit(String),
+    /// Show a transient status-bar notify (same path as [`AppEvent::Notify`]).
+    Notify(String),
 }
 
 pub enum KeyResult {

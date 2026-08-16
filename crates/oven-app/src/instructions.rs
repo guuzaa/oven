@@ -54,6 +54,9 @@ fn load_from_dir(dir: &Path, scope: InstructionScope) -> Vec<InstructionDoc> {
         .into_iter()
         .filter_map(|name| {
             let path = dir.join(name);
+            if !path.is_file() {
+                return None;
+            }
             let content = std::fs::read_to_string(&path).ok()?;
             if content.trim().is_empty() {
                 return None;

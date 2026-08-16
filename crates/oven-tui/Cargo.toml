@@ -12,6 +12,7 @@ path = "src/bin/oven-cli.rs"
 [dependencies]
 oven-llm = { workspace = true }
 oven-app = { workspace = true }
+arboard = { workspace = true }
 clap = { workspace = true }
 crossterm = { workspace = true }
 ratatui = { workspace = true }

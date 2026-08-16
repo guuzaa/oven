@@ -163,7 +163,7 @@ impl Component for StatusBar {
             AppEvent::ProviderUpdated { .. } => {}
             AppEvent::Error { .. } => {}
             AppEvent::Exit { .. } => {}
-            AppEvent::Reply { text, .. } => {
+            AppEvent::Notify { text, .. } => {
                 self.set_reply(text.clone());
             }
             AppEvent::Rewound { usage, .. } => {
@@ -430,7 +430,7 @@ mod tests {
         let mut state = State::new();
         assert_eq!(bar.reply_height(80), 0);
         bar.on_event(
-            &AppEvent::Reply {
+            &AppEvent::Notify {
                 app_id: AppId(1),
                 text: "current model: gpt-4o".into(),
             },
@@ -493,7 +493,7 @@ mod tests {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         let mut state = State::new();
         bar.on_event(
-            &AppEvent::Reply {
+            &AppEvent::Notify {
                 app_id: AppId(1),
                 text: "current model: gpt-4o".into(),
             },

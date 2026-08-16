@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{AgentEvent, AppEvent};
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::component::{Component, KeyResult, State};
+use super::component::{Action, Component, KeyResult, State};
 use super::theme;
 use super::tool_display;
 
@@ -60,6 +60,12 @@ struct Row {
     text: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct SelPos {
+    line: usize,
+    col: usize,
+}
+
 pub struct Transcript {
     rows: Vec<Row>,
     wrapped: Vec<Line<'static>>,
@@ -81,6 +87,9 @@ pub struct Transcript {
     /// Viewport height from the last draw, used by scroll commands.
     view_height: usize,
     area: Rect,
+    select_anchor: Option<SelPos>,
+    select_head: Option<SelPos>,
+    dragging: bool,
 }
 
 impl Transcript {
@@ -98,6 +107,9 @@ impl Transcript {
             top: 0,
             view_height: 0,
             area: Rect::default(),
+            select_anchor: None,
+            select_head: None,
+            dragging: false,
         }
     }
 
@@ -136,6 +148,7 @@ impl Transcript {
         self.clear_stream();
         self.pinned = true;
         self.top = 0;
+        self.clear_selection();
         self.seed(messages);
     }
 
@@ -258,6 +271,7 @@ impl Transcript {
         self.pending_user.clear();
         self.pinned = true;
         self.top = 0;
+        self.clear_selection();
     }
 
     fn push_row(&mut self, kind: LineKind, text: &str) {
@@ -349,6 +363,111 @@ impl Transcript {
         self.wrapped.clear();
         self.wrap_rows_from(0);
         self.rewrap_stream();
+        self.clear_selection();
+    }
+
+    fn clear_selection(&mut self) {
+        self.select_anchor = None;
+        self.select_head = None;
+        self.dragging = false;
+    }
+
+    fn begin_selection(&mut self, column: u16, row: u16) {
+        if self.total_lines() == 0 {
+            self.clear_selection();
+            return;
+        }
+        let pos = self.pos_at(column, row);
+        self.select_anchor = Some(pos);
+        self.select_head = Some(pos);
+        self.dragging = true;
+    }
+
+    fn update_selection(&mut self, column: u16, row: u16) {
+        if self.total_lines() == 0 {
+            return;
+        }
+        self.select_head = Some(self.pos_at(column, row));
+    }
+
+    fn end_selection(&mut self) -> bool {
+        self.dragging = false;
+        match self.selected_text() {
+            Some(text) if !text.is_empty() && copy_to_clipboard(&text) => true,
+            _ => {
+                self.clear_selection();
+                false
+            }
+        }
+    }
+
+    fn pos_at(&self, column: u16, row: u16) -> SelPos {
+        let total = self.total_lines();
+        if total == 0 {
+            return SelPos::default();
+        }
+        let top = self.current_top();
+        let height = self.area.height.max(1);
+        let rel_y = if row <= self.area.y {
+            0
+        } else {
+            usize::from(row.saturating_sub(self.area.y)).min(usize::from(height - 1))
+        };
+        let raw_line = top.saturating_add(rel_y);
+        let last = total - 1;
+        let line = raw_line.min(last);
+        let width = self.line_at(line).map(line_display_width).unwrap_or(0);
+        let rel_x = if column <= self.area.x {
+            0
+        } else {
+            usize::from(column.saturating_sub(self.area.x))
+        };
+        let col = if raw_line > last {
+            width
+        } else {
+            rel_x.min(width)
+        };
+        SelPos { line, col }
+    }
+
+    fn line_at(&self, idx: usize) -> Option<&Line<'static>> {
+        if idx < self.wrapped.len() {
+            Some(&self.wrapped[idx])
+        } else {
+            self.wrapped_stream.get(idx - self.wrapped.len())
+        }
+    }
+
+    fn normalized_sel(&self) -> Option<(SelPos, SelPos)> {
+        let a = self.select_anchor?;
+        let b = self.select_head?;
+        let (start, end) = if a <= b { (a, b) } else { (b, a) };
+        if start == end {
+            None
+        } else {
+            Some((start, end))
+        }
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.normalized_sel()?;
+        let mut out = String::new();
+        for idx in start.line..=end.line {
+            let Some(line) = self.line_at(idx) else {
+                break;
+            };
+            let from = if idx == start.line { start.col } else { 0 };
+            let to = if idx == end.line {
+                end.col
+            } else {
+                line_display_width(line)
+            };
+            if idx > start.line {
+                out.push('\n');
+            }
+            out.push_str(&extract_line_range(line, from, to));
+        }
+        if out.is_empty() { None } else { Some(out) }
     }
 }
 
@@ -368,20 +487,34 @@ impl Component for Transcript {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
-        if !self.area.contains(ratatui::layout::Position {
+        let in_area = self.area.contains(ratatui::layout::Position {
             x: mouse.column,
             y: mouse.row,
-        }) {
-            return KeyResult::Ignored;
-        }
+        });
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
+            MouseEventKind::ScrollUp if in_area => {
                 self.scroll_up(MOUSE_SCROLL_STEP);
                 KeyResult::Handled
             }
-            MouseEventKind::ScrollDown => {
+            MouseEventKind::ScrollDown if in_area => {
                 self.scroll_down(MOUSE_SCROLL_STEP);
                 KeyResult::Handled
+            }
+            MouseEventKind::Down(MouseButton::Left) if in_area => {
+                self.begin_selection(mouse.column, mouse.row);
+                KeyResult::Handled
+            }
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved if self.dragging => {
+                self.update_selection(mouse.column, mouse.row);
+                KeyResult::Handled
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.dragging => {
+                self.update_selection(mouse.column, mouse.row);
+                if self.end_selection() {
+                    KeyResult::Action(Action::Notify("Copied!".into()))
+                } else {
+                    KeyResult::Handled
+                }
             }
             _ => KeyResult::Ignored,
         }
@@ -441,7 +574,7 @@ impl Component for Transcript {
             AppEvent::ModelsUpdated { .. } => {}
             AppEvent::ProviderUpdated { .. } => {}
             AppEvent::Exit { .. } => {}
-            AppEvent::Reply { .. } => {}
+            AppEvent::Notify { .. } => {}
             AppEvent::Rewound { messages, .. } => self.replace_from(messages),
             AppEvent::Idle { .. } => {
                 self.flush_streaming();
@@ -476,7 +609,27 @@ impl Component for Transcript {
         }
         let start = if self.pinned { max_top } else { self.top };
         let end = start.saturating_add(height).min(total);
-        let visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
+        let mut visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
+        if let Some((sel_start, sel_end)) = self.normalized_sel() {
+            for (i, line) in visible.iter_mut().enumerate() {
+                let idx = start + i;
+                if idx < sel_start.line || idx > sel_end.line {
+                    continue;
+                }
+                let width = line_display_width(line);
+                let from = if idx == sel_start.line {
+                    sel_start.col
+                } else {
+                    0
+                };
+                let to = if idx == sel_end.line {
+                    sel_end.col
+                } else {
+                    width
+                };
+                *line = highlight_line(line, from, to);
+            }
+        }
         f.render_widget(Paragraph::new(visible), area);
     }
 }
@@ -619,6 +772,143 @@ fn split_at_width(s: &str, max_width: usize) -> (&str, &str) {
         width += cw;
     }
     (s, "")
+}
+
+fn line_display_width(line: &Line<'_>) -> usize {
+    line.spans.iter().map(|s| s.content.width()).sum()
+}
+
+fn line_prefix_width(line: &Line<'_>) -> usize {
+    match line.spans.as_slice() {
+        [head, rest @ ..] if !rest.is_empty() && head.content.width() == LINE_PREFIX_WIDTH => {
+            LINE_PREFIX_WIDTH
+        }
+        _ => 0,
+    }
+}
+
+fn line_body(line: &Line<'_>) -> String {
+    match line.spans.as_slice() {
+        [head, rest @ ..] if head.content.width() == LINE_PREFIX_WIDTH => {
+            rest.iter().map(|s| s.content.as_ref()).collect()
+        }
+        spans => spans.iter().map(|s| s.content.as_ref()).collect(),
+    }
+}
+
+fn extract_line_range(line: &Line<'_>, from_col: usize, to_col: usize) -> String {
+    let prefix = line_prefix_width(line);
+    let body = line_body(line);
+    let from = from_col.saturating_sub(prefix).min(body.width());
+    let to = to_col.saturating_sub(prefix).min(body.width());
+    slice_cols(&body, from, to)
+}
+
+fn skip_width(s: &str, n: usize) -> &str {
+    let mut width = 0;
+    for (i, ch) in s.char_indices() {
+        if width >= n {
+            return &s[i..];
+        }
+        width += ch.width().unwrap_or(0);
+    }
+    ""
+}
+
+fn slice_cols(s: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+    let rest = skip_width(s, start);
+    split_at_width(rest, end - start).0.to_string()
+}
+
+fn highlight_line(line: &Line<'static>, from_col: usize, to_col: usize) -> Line<'static> {
+    if from_col >= to_col {
+        return line.clone();
+    }
+    let style = theme::selection();
+    let mut col = 0;
+    let mut spans = Vec::new();
+    for span in &line.spans {
+        let text = span.content.as_ref();
+        let w = text.width();
+        let span_start = col;
+        let span_end = col + w;
+        col = span_end;
+        if w == 0 || span_end <= from_col || span_start >= to_col {
+            spans.push(span.clone());
+            continue;
+        }
+        let local_from = from_col.saturating_sub(span_start);
+        let local_to = to_col.min(span_end).saturating_sub(span_start);
+        let before = slice_cols(text, 0, local_from);
+        let mid = slice_cols(text, local_from, local_to);
+        let after = slice_cols(text, local_to, w);
+        if !before.is_empty() {
+            spans.push(Span::styled(before, span.style));
+        }
+        if !mid.is_empty() {
+            spans.push(Span::styled(mid, style));
+        }
+        if !after.is_empty() {
+            spans.push(Span::styled(after, span.style));
+        }
+    }
+    Line::from(spans)
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    #[cfg(test)]
+    {
+        true
+    }
+    #[cfg(not(test))]
+    {
+        arboard::Clipboard::new()
+            .and_then(|mut c| c.set_text(text))
+            .is_ok()
+            || osc52_copy(text)
+    }
+}
+
+#[cfg(not(test))]
+fn osc52_copy(text: &str) -> bool {
+    use std::io::{self, Write};
+    let encoded = base64_encode(text.as_bytes());
+    write!(io::stdout(), "\x1b]52;c;{encoded}\x07")
+        .and_then(|_| io::stdout().flush())
+        .is_ok()
+}
+
+#[cfg(not(test))]
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = match *chunk {
+            [a, b, c] => u32::from_be_bytes([0, a, b, c]),
+            [a, b] => u32::from_be_bytes([0, a, b, 0]),
+            [a] => u32::from_be_bytes([0, a, 0, 0]),
+            _ => 0,
+        };
+        out.push(T[((n >> 18) & 63) as usize] as char);
+        out.push(T[((n >> 12) & 63) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(T[((n >> 6) & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(T[(n & 63) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -889,7 +1179,7 @@ mod tests {
         t.push_user("/model");
         let n = t.rows.len();
         t.on_event(
-            &AppEvent::Reply {
+            &AppEvent::Notify {
                 app_id: AppId(1),
                 text: "current model: gpt-4o".into(),
             },
@@ -946,5 +1236,218 @@ mod tests {
         t.replace_from(&[Message::user_text("resumed")]);
         assert_eq!(t.rows[0].text, "resumed");
         assert_eq!(t.pending_user, vec!["queued".to_string()]);
+    }
+
+    fn ready(t: &mut Transcript, area: Rect) {
+        t.area = area;
+        t.width = area.width as usize;
+        t.view_height = area.height as usize;
+        t.rewrap_all();
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn slice_cols_by_display_width() {
+        assert_eq!(slice_cols("hello", 1, 4), "ell");
+        assert_eq!(slice_cols("你好", 0, 2), "你");
+        assert_eq!(slice_cols("你好", 2, 4), "好");
+        assert_eq!(slice_cols("hello", 3, 3), "");
+    }
+
+    #[test]
+    fn extract_skips_gutter() {
+        let line = format_lines(LineKind::Text, "hello").pop().unwrap();
+        assert_eq!(extract_line_range(&line, 0, 7), "hello");
+        assert_eq!(extract_line_range(&line, 2, 7), "hello");
+        assert_eq!(extract_line_range(&line, 2, 5), "hel");
+        assert_eq!(extract_line_range(&line, 0, 2), "");
+    }
+
+    #[test]
+    fn mouse_drag_selects_body_without_gutter() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "hello");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            &State::new(),
+        );
+        t.handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 7, 0),
+            &State::new(),
+        );
+        assert_eq!(t.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn mouse_drag_reverse_selects_same_text() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "hello");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 7, 0),
+            &State::new(),
+        );
+        t.handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 2, 0),
+            &State::new(),
+        );
+        assert_eq!(t.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn mouse_drag_selects_across_rows() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "hello");
+        t.push_row(LineKind::Text, "world");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            &State::new(),
+        );
+        t.handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 7, 2),
+            &State::new(),
+        );
+        assert_eq!(t.selected_text().as_deref(), Some("hello\n\nworld"));
+    }
+
+    #[test]
+    fn mouse_click_without_drag_is_empty() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "hello");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
+            &State::new(),
+        );
+        assert_eq!(t.selected_text(), None);
+        let up = t.handle_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 3, 0),
+            &State::new(),
+        );
+        assert!(matches!(up, KeyResult::Handled));
+        assert!(t.select_anchor.is_none());
+        assert!(!t.dragging);
+    }
+
+    #[test]
+    fn mouse_up_after_selection_emits_copied_reply() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "hello");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            &State::new(),
+        );
+        t.handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 7, 0),
+            &State::new(),
+        );
+        let up = t.handle_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 7, 0),
+            &State::new(),
+        );
+        assert!(matches!(up, KeyResult::Action(Action::Notify(text)) if text == "Copied!"));
+        assert_eq!(t.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn mouse_selects_wide_chars() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "你好");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            &State::new(),
+        );
+        t.handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 4, 0),
+            &State::new(),
+        );
+        assert_eq!(t.selected_text().as_deref(), Some("你"));
+    }
+
+    #[test]
+    fn mouse_selects_wrapped_lines() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "abcdefgh");
+        ready(&mut t, Rect::new(0, 0, 6, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            &State::new(),
+        );
+        t.handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 6, 1),
+            &State::new(),
+        );
+        assert_eq!(t.selected_text().as_deref(), Some("abcd\nefgh"));
+    }
+
+    #[test]
+    fn mouse_down_outside_is_ignored() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "hello");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        let r = t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, 20),
+            &State::new(),
+        );
+        assert!(matches!(r, KeyResult::Ignored));
+        assert!(t.select_anchor.is_none());
+    }
+
+    #[test]
+    fn mouse_drag_outside_extends_to_end() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "hello");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            &State::new(),
+        );
+        let r = t.handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 0, 20),
+            &State::new(),
+        );
+        assert!(matches!(r, KeyResult::Handled));
+        assert_eq!(t.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn highlight_line_marks_range() {
+        let line = format_lines(LineKind::Text, "hello").pop().unwrap();
+        let hi = highlight_line(&line, 2, 7);
+        assert_eq!(hi.spans.len(), 2);
+        assert_eq!(hi.spans[0].content.as_ref(), "• ");
+        assert_eq!(hi.spans[1].content.as_ref(), "hello");
+        assert_eq!(hi.spans[1].style, theme::selection());
+    }
+
+    #[test]
+    fn replace_from_clears_selection() {
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "hello");
+        ready(&mut t, Rect::new(0, 0, 80, 5));
+        t.handle_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+            &State::new(),
+        );
+        t.handle_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 7, 0),
+            &State::new(),
+        );
+        assert!(t.selected_text().is_some());
+        t.replace_from(&[Message::user_text("resumed")]);
+        assert!(t.select_anchor.is_none());
+        assert!(!t.dragging);
     }
 }

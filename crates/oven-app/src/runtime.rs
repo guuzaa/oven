@@ -71,9 +71,9 @@ pub enum AppEvent {
         app_id: AppId,
         provider: ProviderConfig,
     },
-    /// Slash-command informational reply. Shown below the status bar, not
+    /// Slash-command informational notify. Shown below the status bar, not
     /// appended to the transcript.
-    Reply {
+    Notify {
         app_id: AppId,
         text: String,
     },
@@ -217,7 +217,7 @@ impl AppHandle {
                     event: AgentEvent::Done { text: t, .. },
                     ..
                 }) => text = t,
-                Some(AppEvent::Reply { text: t, .. }) => text = t,
+                Some(AppEvent::Notify { text: t, .. }) => text = t,
                 Some(AppEvent::Idle { .. }) => return Ok(text),
                 Some(AppEvent::Error { message, .. }) => {
                     return Err(AppError::Runtime(message));
@@ -499,7 +499,7 @@ async fn apply_slash(
     match outcome {
         CommandOutcome::Passthrough => {}
         CommandOutcome::Reply(text) => {
-            emit(subs, AppEvent::Reply { app_id, text });
+            emit(subs, AppEvent::Notify { app_id, text });
         }
         CommandOutcome::Cleared => {
             emit_done(subs, app_id, agent, "history cleared".to_string());
@@ -540,7 +540,7 @@ async fn apply_slash(
                 Some(e) => format!("model switched to {model} (effort: {e})"),
                 None => format!("model switched to {model}"),
             };
-            emit(subs, AppEvent::Reply { app_id, text });
+            emit(subs, AppEvent::Notify { app_id, text });
         }
         CommandOutcome::ProviderChanged { provider } => {
             apply_provider_change(provider, app_id, agent, config, user_config_path, subs).await;
@@ -609,7 +609,7 @@ async fn apply_provider_change(
             emit(subs, AppEvent::ModelsUpdated { app_id, models });
             emit(
                 subs,
-                AppEvent::Reply {
+                AppEvent::Notify {
                     app_id,
                     text: summarize_setup(&overlay, saved.as_deref()),
                 },
@@ -1153,7 +1153,7 @@ mod tests {
         let mut saw_done = false;
         while let Ok(ev) = rx.try_recv() {
             match ev {
-                AppEvent::Reply { text, .. }
+                AppEvent::Notify { text, .. }
                     if text == "model switched to gpt-4o-turbo (effort: low)" =>
                 {
                     saw_reply = true;
@@ -1188,7 +1188,7 @@ mod tests {
         let mut saw_done = false;
         while let Ok(ev) = rx.try_recv() {
             match ev {
-                AppEvent::Reply { text, .. } if text.contains("current model") => {
+                AppEvent::Notify { text, .. } if text.contains("current model") => {
                     saw_reply = true;
                 }
                 AppEvent::Agent {
@@ -1331,7 +1331,7 @@ mod tests {
                     event: AgentEvent::Done { text, .. },
                     ..
                 }) => out = text,
-                Some(AppEvent::Reply { text, .. }) => out = text,
+                Some(AppEvent::Notify { text, .. }) => out = text,
                 Some(AppEvent::Idle { .. }) => break,
                 Some(_) => {}
                 None => panic!("channel closed before idle"),

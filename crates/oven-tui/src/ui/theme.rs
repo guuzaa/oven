@@ -53,3 +53,7 @@ pub fn effort() -> Style {
 pub fn reply() -> Style {
     Style::default().fg(Color::Rgb(255, 140, 0))
 }
+
+pub fn selection() -> Style {
+    Style::default().add_modifier(Modifier::REVERSED)
+}
