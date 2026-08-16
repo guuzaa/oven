@@ -163,6 +163,9 @@ impl Ui {
         if matches!(ev, AppEvent::Idle { .. }) {
             self.state.busy = false;
         }
+        if let AppEvent::ModeChanged { mode, .. } = &ev {
+            self.state.mode = *mode;
+        }
         self.transcript.on_event(&ev);
         self.status.on_event(&ev);
         self.input.on_event(&ev);
@@ -213,6 +216,11 @@ impl Ui {
         let result = match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 KeyResult::Action(Action::Quit)
+            }
+            _ if is_mode_toggle(key) => {
+                self.state.mode = self.state.mode.toggle();
+                let _ = self.handle.send(AppCmd::SetMode(self.state.mode));
+                KeyResult::Handled
             }
             KeyCode::Esc if self.input.overlay() == Overlay::None => match EscAction::new(
                 self.pending.pop(),
@@ -312,6 +320,11 @@ impl Ui {
             self.status.draw_reply(f, reply);
         }
     }
+}
+
+fn is_mode_toggle(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::BackTab)
+        || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
 fn status_hint(overlay: Overlay, busy: bool) -> StatusHint {
@@ -428,5 +441,20 @@ mod tests {
         assert_eq!(status_hint(Overlay::Model, false), StatusHint::Modal);
         assert_eq!(status_hint(Overlay::None, true), StatusHint::Busy);
         assert_eq!(status_hint(Overlay::None, false), StatusHint::Idle);
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn is_mode_toggle_backtab_and_shift_tab() {
+        assert!(is_mode_toggle(key(KeyCode::BackTab, KeyModifiers::NONE)));
+        assert!(is_mode_toggle(key(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert!(!is_mode_toggle(key(KeyCode::Tab, KeyModifiers::NONE)));
+        assert!(!is_mode_toggle(key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
     }
 }

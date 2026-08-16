@@ -1,15 +1,17 @@
 use crossterm::event::{KeyEvent, MouseEvent};
-use oven_app::AppEvent;
+use oven_app::{AgentMode, AppEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
+#[derive(Default)]
 pub struct State {
     pub busy: bool,
+    pub mode: AgentMode,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self { busy: false }
+        Self::default()
     }
 }
 
