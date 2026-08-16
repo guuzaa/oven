@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use oven_agent::{Agent, AgentEvent, CancellationToken, Record};
+use oven_agent::{
+    Agent, AgentEvent, AgentMode, CancellationToken, LiveHandle, Record, TodoList, restore_todos,
+};
 use oven_llm::{
     ContentBlock, Message, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Role,
     Usage,
@@ -34,6 +36,7 @@ pub enum AppCmd {
     /// the persisted session file) so its message can be edited and resent.
     Rewind,
     Shutdown,
+    SetMode(AgentMode),
 }
 
 /// Events emitted by an app task (agent events plus app lifecycle).
@@ -77,6 +80,10 @@ pub enum AppEvent {
     Notify {
         app_id: AppId,
         text: String,
+    },
+    ModeChanged {
+        app_id: AppId,
+        mode: AgentMode,
     },
 }
 
@@ -139,6 +146,8 @@ pub struct AppHandle {
     total_usage: Usage,
     /// Conversation history snapshot taken when the runtime was spawned.
     history: Vec<Message>,
+    /// TODO list snapshot taken when the runtime was spawned.
+    todos: TodoList,
     /// Current persisted session snapshot, `None` when this runtime has no
     /// session persistence. Updated live when `/clear` switches sessions.
     session: Option<Arc<Mutex<SharedSession>>>,
@@ -186,6 +195,12 @@ impl AppHandle {
     /// startup snapshot, not a live view of the in-flight conversation.
     pub fn history(&self) -> &[Message] {
         &self.history
+    }
+
+    /// TODO list loaded at spawn time (empty for a fresh session). This is a
+    /// startup snapshot; later changes arrive as `AgentEvent::TodoUpdated`.
+    pub fn todos(&self) -> &TodoList {
+        &self.todos
     }
 
     /// Token usage loaded at spawn time (zero for a fresh session). This is a
@@ -281,12 +296,14 @@ impl App {
         let prior = session.load_records()?;
         let mut agent = self.build_interactive_agent().await?;
         let records: Vec<_> = prior
-            .into_iter()
+            .iter()
             .filter(
                 |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
             )
+            .cloned()
             .collect();
         agent.restore_history(records);
+        hydrate_session(&mut agent, &prior);
         agent.ensure_session_meta(canonical_root(&self.root));
         Ok(spawn_runtime(
             AppId::next(),
@@ -311,12 +328,14 @@ impl App {
         let prior = session.load_records()?;
         let mut agent = self.build_agent_with_provider(provider).await?;
         let records: Vec<_> = prior
-            .into_iter()
+            .iter()
             .filter(
                 |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
             )
+            .cloned()
             .collect();
         agent.restore_history(records);
+        hydrate_session(&mut agent, &prior);
         agent.ensure_session_meta(canonical_root(&self.root));
         Ok(spawn_runtime(
             AppId::next(),
@@ -355,12 +374,14 @@ impl App {
         let prior = session.load_records()?;
         let mut agent = self.build_agent_with_provider(provider).await?;
         let records: Vec<_> = prior
-            .into_iter()
+            .iter()
             .filter(
                 |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
             )
+            .cloned()
             .collect();
         agent.restore_history(records);
+        hydrate_session(&mut agent, &prior);
         agent.ensure_session_meta(canonical_root(&self.root));
         Ok(spawn_runtime(
             AppId::next(),
@@ -372,6 +393,10 @@ impl App {
             AppConfig::default_user_config_path(),
         ))
     }
+}
+
+fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
+    agent.set_todos(restore_todos(prior, agent.history()));
 }
 
 impl AppId {
@@ -415,6 +440,7 @@ fn spawn_runtime(
     let subscribers_task = Arc::clone(&subscribers);
     let slash_commands = SlashRegistry::with_builtin().commands();
     let history: Vec<Message> = agent.history().cloned().collect();
+    let todos = agent.todos();
     let total_usage = *agent.total_usage();
     let provider = config.provider.clone();
     let (session_store, shared_session) = match session {
@@ -460,8 +486,34 @@ fn spawn_runtime(
         root,
         total_usage,
         history,
+        todos,
         session: shared_session,
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn persist_todo_snapshot(
+    store: &SessionStore,
+    todos: &TodoList,
+) -> Result<(), crate::session::SessionError> {
+    store.current().append_records(&[Record::TodoList {
+        timestamp: now_ms(),
+        items: todos.items.clone(),
+    }])
+}
+
+fn should_persist_todos(todos: &TodoList, written_this_turn: bool) -> bool {
+    written_this_turn || !todos.is_empty()
+}
+
+fn apply_mode(live: &LiveHandle, mode: AgentMode) {
+    live.lock().unwrap_or_else(|e| e.into_inner()).mode = mode;
 }
 
 fn emit(subs: &Subscribers, event: AppEvent) {
@@ -511,6 +563,14 @@ async fn apply_slash(
                     agent_id: agent.id(),
                 },
             );
+            emit_agent(
+                subs,
+                app_id,
+                AgentEvent::TodoUpdated {
+                    agent_id: agent.id(),
+                    items: Vec::new(),
+                },
+            );
             switch_session(session_store, subs, app_id);
             if let Some(store) = session_store {
                 agent.ensure_session_meta(store.root.clone());
@@ -556,6 +616,10 @@ async fn apply_slash(
         }
         CommandOutcome::ProviderChanged { provider } => {
             apply_provider_change(provider, app_id, agent, config, user_config_path, subs).await;
+        }
+        CommandOutcome::ModeChanged { mode } => {
+            agent.set_mode(mode);
+            emit(subs, AppEvent::ModeChanged { app_id, mode });
         }
     }
     emit(subs, AppEvent::Idle { app_id });
@@ -780,6 +844,7 @@ async fn runtime_loop(
     mut config: AppConfig,
     user_config_path: Option<PathBuf>,
 ) {
+    let live = agent.live_handle();
     let slash = SlashRegistry::with_builtin();
     // Leading in-memory messages already written to the store. On `/clear`
     // the in-memory history is replaced, so this resets to 0 while the store
@@ -813,13 +878,26 @@ async fn runtime_loop(
             AppCmd::Cancel => {
                 // no in-flight turn
             }
+            AppCmd::SetMode(mode) => {
+                apply_mode(&live, mode);
+                emit(&subscribers, AppEvent::ModeChanged { app_id, mode });
+            }
             AppCmd::Rewind => {
                 let removed = agent.rewind_last_turn();
                 let text = removed.map(|m| user_message_text(&m));
+                let found = TodoList::from_history(agent.history());
+                let restored = found.clone().unwrap_or_default();
+                agent.set_todos(restored.clone());
                 let store_ok = match &session_store {
                     Some(store) => {
-                        let records = agent.history_records();
-                        match store.current().overwrite(&records) {
+                        let mut recs = agent.history_records();
+                        if found.is_some() {
+                            recs.push(Record::TodoList {
+                                timestamp: now_ms(),
+                                items: restored.items.clone(),
+                            });
+                        }
+                        match store.current().overwrite(&recs) {
                             Ok(()) => {
                                 store.mark_content(agent.history().len() != 0);
                                 true
@@ -842,6 +920,14 @@ async fn runtime_loop(
                     persisted_prefix = agent.history_records().len();
                 }
                 persisted_rev = agent.history_revision();
+                emit_agent(
+                    &subscribers,
+                    app_id,
+                    AgentEvent::TodoUpdated {
+                        agent_id: agent.id(),
+                        items: restored.items,
+                    },
+                );
                 emit(
                     &subscribers,
                     AppEvent::Rewound {
@@ -901,6 +987,13 @@ async fn runtime_loop(
                                         return;
                                     }
                                     Some(AppCmd::Cancel) => cancel.cancel(),
+                                    Some(AppCmd::SetMode(mode)) => {
+                                        apply_mode(&live, mode);
+                                        emit(
+                                            &subscribers,
+                                            AppEvent::ModeChanged { app_id, mode },
+                                        );
+                                    }
                                     Some(AppCmd::UserInput(input)) => {
                                         pending_cmds.push_back(AppCmd::UserInput(input));
                                     }
@@ -966,6 +1059,17 @@ async fn runtime_loop(
                                         );
                                     }
                                 }
+                            }
+                            if should_persist_todos(&agent.todos(), agent.todo_written_this_turn())
+                                && let Err(e) = persist_todo_snapshot(store, &agent.todos())
+                            {
+                                emit(
+                                    &subscribers,
+                                    AppEvent::Error {
+                                        app_id,
+                                        message: e.to_string(),
+                                    },
+                                );
                             }
                         }
                     }
@@ -1151,8 +1255,41 @@ mod tests {
             .iter()
             .map(|(n, _)| n.as_str())
             .collect();
-        assert_eq!(names, ["clear", "exit", "model", "setup"]);
+        assert_eq!(names, ["clear", "exit", "model", "setup", "plan"]);
         assert!(handle.slash_commands().iter().all(|(_, d)| !d.is_empty()));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn plan_slash_on_idle_switches() {
+        let tmp = tempdir::TempDir::new("app-runtime-plan").unwrap();
+        let app = App::new(tmp.path());
+        let mock = MockProvider::new(vec![]);
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
+
+        let mut rx = handle.subscribe();
+        let status = handle.prompt("/plan").await.unwrap();
+        assert!(status.contains("current mode: agent"));
+        assert!(status.contains("0 todos"));
+
+        let _ = handle.prompt("/plan on").await.unwrap();
+        let mut saw_plan = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(
+                ev,
+                AppEvent::ModeChanged {
+                    mode: AgentMode::Plan,
+                    ..
+                }
+            ) {
+                saw_plan = true;
+            }
+        }
+        assert!(saw_plan, "idle /plan on must emit ModeChanged(Plan)");
+
+        let status = handle.prompt("/plan").await.unwrap();
+        assert!(status.contains("current mode: plan"));
 
         handle.shutdown().await;
     }
@@ -1276,6 +1413,7 @@ mod tests {
         assert_eq!(out, "history cleared");
 
         let mut saw_cleared = false;
+        let mut saw_todos_cleared = false;
         let mut done_usage = None;
         while let Ok(ev) = rx.try_recv() {
             match ev {
@@ -1284,6 +1422,10 @@ mod tests {
                     ..
                 } => saw_cleared = true,
                 AppEvent::Agent {
+                    event: AgentEvent::TodoUpdated { items, .. },
+                    ..
+                } if items.is_empty() => saw_todos_cleared = true,
+                AppEvent::Agent {
                     event: AgentEvent::Done { usage, text, .. },
                     ..
                 } if text == "history cleared" => done_usage = Some(usage),
@@ -1291,6 +1433,7 @@ mod tests {
             }
         }
         assert!(saw_cleared);
+        assert!(saw_todos_cleared);
         let usage = done_usage.expect("done after /clear");
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
@@ -2303,5 +2446,456 @@ mod tests {
         assert!(messages.is_empty(), "the whole exchange is rolled back");
         assert_eq!(usage, Usage::default());
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn set_mode_applies_during_in_flight_turn() {
+        use tokio::sync::oneshot;
+
+        struct AwaitProvider {
+            entered: Mutex<Option<oneshot::Sender<()>>>,
+            release: Mutex<Option<oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl Provider for AwaitProvider {
+            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+                if let Some(tx) = self.entered.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                let rx = self.release.lock().unwrap().take();
+                if let Some(rx) = rx {
+                    let _ = rx.await;
+                }
+                Ok(text_response("late"))
+            }
+
+            async fn stream(
+                &self,
+                _req: &Request,
+            ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
+            {
+                Err(ProviderError::Api {
+                    status: 500,
+                    body: "no stream".into(),
+                })
+            }
+
+            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+                None
+            }
+
+            fn provider_name(&self) -> ProviderName {
+                ProviderName::Custom("await-mode".into())
+            }
+        }
+
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let provider = AwaitProvider {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+        };
+
+        let agent = Agent::new(Box::new(provider), Vec::new());
+        assert_eq!(agent.mode(), AgentMode::Default);
+        let live = agent.live_handle();
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "default".into(),
+            PathBuf::from("/tmp"),
+            AppConfig::default(),
+            None,
+        );
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::UserInput("block".into())).unwrap();
+        entered_rx.await.expect("turn entered complete");
+        handle.send(AppCmd::SetMode(AgentMode::Plan)).unwrap();
+
+        let mut saw_mode = false;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+                Ok(Some(AppEvent::ModeChanged { mode, .. })) => {
+                    assert_eq!(mode, AgentMode::Plan);
+                    saw_mode = true;
+                    break;
+                }
+                Ok(Some(AppEvent::Idle { .. })) => {
+                    panic!("Idle arrived before ModeChanged; SetMode was queued")
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => panic!("timeout waiting for ModeChanged"),
+            }
+        }
+        assert!(saw_mode);
+        assert_eq!(
+            live.lock().unwrap_or_else(|e| e.into_inner()).mode,
+            AgentMode::Plan
+        );
+        drop(release_tx);
+        handle.shutdown().await;
+    }
+
+    fn tool_response(id: &str, name: &str, input: serde_json::Value) -> Response {
+        Response {
+            id: "resp".into(),
+            model: "mock".into(),
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: name.into(),
+                input,
+            }],
+            stop_reason: Some(StopReason::ToolUse),
+            usage: Some(Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                reasoning_tokens: 0,
+            }),
+        }
+    }
+
+    fn last_jsonl_line(path: &Path) -> String {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn never_todo_write_session_has_no_todo_list_line() {
+        let tmp = tempdir::TempDir::new("app-runtime-no-todo").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mock = MockProvider::new(vec![text_response("one"), text_response("two")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+        assert_eq!(handle.prompt("second").await.unwrap(), "two");
+        handle.shutdown().await;
+
+        let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
+        assert!(
+            !records.iter().any(|r| matches!(r, Record::TodoList { .. })),
+            "never-write sessions must not grow a todo_list line"
+        );
+    }
+
+    #[tokio::test]
+    async fn todo_write_appends_snapshot_without_advancing_prefix() {
+        let tmp = tempdir::TempDir::new("app-runtime-todo-snap").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mock = MockProvider::new(vec![
+            tool_response("c1", "todo_write", serde_json::json!({"todos": []})),
+            text_response("cleared"),
+            text_response("next"),
+        ]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let path = session.path().to_path_buf();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("clear list").await.unwrap(), "cleared");
+        let last = last_jsonl_line(&path);
+        assert!(
+            last.contains("\"type\":\"todo_list\""),
+            "last line after write must be snapshot: {last}"
+        );
+        assert!(last.contains("\"items\":[]"), "{last}");
+
+        assert_eq!(handle.prompt("second").await.unwrap(), "next");
+        handle.shutdown().await;
+
+        let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+        assert_eq!(user_texts(&loaded), vec!["clear list", "second"]);
+    }
+
+    #[tokio::test]
+    async fn cancel_does_not_roll_back_todos() {
+        use tokio::sync::oneshot;
+
+        struct WriteThenBlock {
+            release: Mutex<Option<oneshot::Receiver<()>>>,
+            step: Mutex<u8>,
+        }
+
+        #[async_trait]
+        impl Provider for WriteThenBlock {
+            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+                let n = {
+                    let mut step = self.step.lock().unwrap();
+                    let n = *step;
+                    *step += 1;
+                    n
+                };
+                if n == 0 {
+                    return Ok(tool_response(
+                        "c1",
+                        "todo_write",
+                        serde_json::json!({
+                            "todos":[{"id":"a","content":"one","status":"in_progress"}]
+                        }),
+                    ));
+                }
+                let rx = self.release.lock().unwrap().take();
+                if let Some(rx) = rx {
+                    let _ = rx.await;
+                }
+                Ok(text_response("late"))
+            }
+
+            async fn stream(
+                &self,
+                _req: &Request,
+            ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
+            {
+                Err(ProviderError::Api {
+                    status: 500,
+                    body: "no stream".into(),
+                })
+            }
+
+            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+                None
+            }
+
+            fn provider_name(&self) -> ProviderName {
+                ProviderName::Custom("todo-cancel".into())
+            }
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let provider = WriteThenBlock {
+            release: Mutex::new(Some(rx)),
+            step: Mutex::new(0),
+        };
+        let tmp = tempdir::TempDir::new("app-runtime-todo-cancel").unwrap();
+        let app = App::new(tmp.path());
+        let agent = app
+            .build_agent_with_provider(Box::new(provider))
+            .await
+            .unwrap();
+        let live = agent.live_handle();
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "default".into(),
+            tmp.path().to_path_buf(),
+            AppConfig::default(),
+            None,
+        );
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::UserInput("plan".into())).unwrap();
+
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+                Ok(Some(AppEvent::Agent {
+                    event: AgentEvent::TodoUpdated { items, .. },
+                    ..
+                })) if !items.is_empty() => break,
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("channel closed before TodoUpdated"),
+                Err(_) => panic!("timeout waiting for TodoUpdated"),
+            }
+        }
+        handle.send(AppCmd::Cancel).unwrap();
+        drop(tx);
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+                Ok(Some(AppEvent::Idle { .. })) => break,
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("channel closed before Idle"),
+                Err(_) => panic!("timeout waiting for Idle after cancel"),
+            }
+        }
+        assert_eq!(
+            live.lock().unwrap_or_else(|e| e.into_inner()).todos.items[0].id,
+            "a"
+        );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rewind_restores_previous_todo_list() {
+        let tmp = tempdir::TempDir::new("app-runtime-todo-rewind").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mock = MockProvider::new(vec![
+            tool_response(
+                "c1",
+                "todo_write",
+                serde_json::json!({
+                    "todos":[{"id":"a","content":"one","status":"pending"}]
+                }),
+            ),
+            text_response("first"),
+            tool_response(
+                "c2",
+                "todo_write",
+                serde_json::json!({
+                    "todos":[{"id":"b","content":"two","status":"in_progress"}]
+                }),
+            ),
+            text_response("second"),
+        ]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let agent = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+        let live = agent.live_handle();
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            Some(session),
+            "default".into(),
+            tmp.path().to_path_buf(),
+            AppConfig::default(),
+            None,
+        );
+        assert_eq!(handle.prompt("t1").await.unwrap(), "first");
+        assert_eq!(handle.prompt("t2").await.unwrap(), "second");
+        assert_eq!(
+            live.lock().unwrap_or_else(|e| e.into_inner()).todos.items[0].id,
+            "b"
+        );
+
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::Rewind).unwrap();
+        let mut saw_todo = false;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+                Ok(Some(AppEvent::Agent {
+                    event: AgentEvent::TodoUpdated { items, .. },
+                    ..
+                })) => {
+                    assert_eq!(items[0].id, "a");
+                    saw_todo = true;
+                }
+                Ok(Some(AppEvent::Rewound { .. })) => {
+                    assert!(saw_todo, "TodoUpdated must precede Rewound");
+                    break;
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("channel closed before Rewound"),
+                Err(_) => panic!("timeout waiting for rewind"),
+            }
+        }
+        assert_eq!(
+            live.lock().unwrap_or_else(|e| e.into_inner()).todos.items[0].id,
+            "a"
+        );
+        handle.shutdown().await;
+
+        let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
+        let last_list = records.iter().rev().find_map(|r| match r {
+            Record::TodoList { items, .. } => Some(items.as_slice()),
+            _ => None,
+        });
+        assert_eq!(last_list.unwrap()[0].id, "a");
+    }
+
+    #[tokio::test]
+    async fn resume_hydrates_todos_from_snapshot() {
+        let tmp = tempdir::TempDir::new("app-runtime-todo-hydrate").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mock1 = MockProvider::new(vec![
+            tool_response(
+                "c1",
+                "todo_write",
+                serde_json::json!({
+                    "todos":[{"id":"keep","content":"stay","status":"pending"}]
+                }),
+            ),
+            text_response("one"),
+        ]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock1), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+        handle.shutdown().await;
+
+        let mock2 = MockProvider::new(vec![text_response("two")]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let handle = app
+            .spawn_with_provider_session(Box::new(mock2), session)
+            .await
+            .unwrap();
+        assert_eq!(handle.todos().items.len(), 1);
+        assert_eq!(handle.todos().items[0].id, "keep");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn slash_clear_does_not_copy_todos_to_new_session() {
+        let tmp = tempdir::TempDir::new("app-runtime-clear-todos").unwrap();
+        let app = App::new(tmp.path());
+        let dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mock = MockProvider::new(vec![
+            tool_response(
+                "c1",
+                "todo_write",
+                serde_json::json!({
+                    "todos":[{"id":"old","content":"gone","status":"pending"}]
+                }),
+            ),
+            text_response("one"),
+            text_response("fresh"),
+        ]);
+        let session = Session::open(&dir, "s1").unwrap();
+        let agent = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+        let live = agent.live_handle();
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            Some(session),
+            "default".into(),
+            tmp.path().to_path_buf(),
+            AppConfig::default(),
+            None,
+        );
+        assert_eq!(handle.prompt("first").await.unwrap(), "one");
+        assert!(
+            !live
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .todos
+                .is_empty()
+        );
+
+        handle.prompt("/clear").await.unwrap();
+        assert!(
+            live.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .todos
+                .is_empty()
+        );
+        assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
+        let sid = handle.session_id().expect("new session");
+        handle.shutdown().await;
+
+        let fresh = Session::open(&dir, &sid).unwrap().load_records().unwrap();
+        assert!(
+            !fresh.iter().any(|r| matches!(r, Record::TodoList { .. })),
+            "new session must not inherit the old todo_list"
+        );
     }
 }

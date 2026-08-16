@@ -499,7 +499,10 @@ mod tests {
     #[test]
     fn busy_allows_typing() {
         let mut view = view();
-        let state = State { busy: true };
+        let state = State {
+            busy: true,
+            ..State::new()
+        };
         let result = view.handle_key(key(KeyCode::Char('x')), &state);
         assert!(matches!(result, KeyResult::Handled));
         assert_eq!(view.textarea.lines()[0], "x");
@@ -509,7 +512,10 @@ mod tests {
     fn busy_enter_queues_text() {
         let mut view = view();
         type_text(&mut view, "hello");
-        let state = State { busy: true };
+        let state = State {
+            busy: true,
+            ..State::new()
+        };
         let result = view.handle_key(key(KeyCode::Enter), &state);
         match result {
             KeyResult::Action(Action::Queue(text)) => assert_eq!(text, "hello"),
@@ -521,7 +527,10 @@ mod tests {
     #[test]
     fn busy_enter_empty_does_not_queue() {
         let mut view = view();
-        let state = State { busy: true };
+        let state = State {
+            busy: true,
+            ..State::new()
+        };
         let result = view.handle_key(key(KeyCode::Enter), &state);
         assert!(matches!(result, KeyResult::Handled));
     }
@@ -530,7 +539,10 @@ mod tests {
     fn busy_alt_enter_inserts_newline() {
         let mut view = view();
         type_text(&mut view, "a");
-        let state = State { busy: true };
+        let state = State {
+            busy: true,
+            ..State::new()
+        };
         let result = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT), &state);
         assert!(matches!(result, KeyResult::Handled));
         assert_eq!(view.textarea.lines()[0], "a");
@@ -541,7 +553,10 @@ mod tests {
     fn busy_exact_slash_submits_immediately() {
         let mut view = view();
         type_text(&mut view, "/clear");
-        let state = State { busy: true };
+        let state = State {
+            busy: true,
+            ..State::new()
+        };
         let result = view.handle_key(key(KeyCode::Enter), &state);
         match result {
             KeyResult::Action(Action::Submit(text)) => assert_eq!(text, "/clear"),
@@ -792,7 +807,13 @@ mod tests {
     fn busy_model_submits_quietly_without_queue() {
         let mut view = view();
         type_text(&mut view, "/model gpt-4o high");
-        let result = view.handle_key(key(KeyCode::Enter), &State { busy: true });
+        let result = view.handle_key(
+            key(KeyCode::Enter),
+            &State {
+                busy: true,
+                ..State::new()
+            },
+        );
         match result {
             KeyResult::Action(Action::QuietSubmit(text)) => {
                 assert_eq!(text, "/model gpt-4o high");

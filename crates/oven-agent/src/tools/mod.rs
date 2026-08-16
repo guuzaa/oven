@@ -5,6 +5,7 @@ mod file_write;
 mod glob;
 mod grep;
 mod skill_read;
+mod todo_write;
 
 use std::path::{Component, Path, PathBuf};
 
@@ -21,6 +22,7 @@ pub use file_write::FileWriteTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use skill_read::SkillReadTool;
+pub use todo_write::TodoWriteTool;
 
 #[async_trait]
 pub trait Tool: Send + Sync {

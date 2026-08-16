@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
-use oven_app::{AgentEvent, AppEvent};
+use oven_app::{AgentEvent, AgentMode, AppEvent};
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -26,7 +26,7 @@ pub enum StatusHint {
     Modal,
 }
 
-/// Single status row below the input: model · root · token usage.
+/// Single status row below the input: model · mode · root · usage · effort.
 /// Optional slash-command reply is drawn on the row(s) beneath it.
 pub struct StatusBar {
     model: String,
@@ -134,6 +134,12 @@ impl StatusBar {
         }
         spans.push(Span::styled(self.model.clone(), theme::model()));
         spans.push(Span::styled(" · ", gray));
+        let mode_style = match state.mode {
+            AgentMode::Default => gray,
+            AgentMode::Plan => theme::mode(),
+        };
+        spans.push(Span::styled(state.mode.label(), mode_style));
+        spans.push(Span::styled(" · ", gray));
         spans.push(Span::styled(self.root.clone(), theme::path()));
         spans.extend(usage_spans(&self.total, gray));
         if let Some(effort) = self.effort {
@@ -143,8 +149,8 @@ impl StatusBar {
         let hint = match hint {
             StatusHint::Slash => "tab fill · enter · esc",
             StatusHint::Modal => "enter · esc",
-            StatusHint::Busy => "esc cancel · enter queue",
-            StatusHint::Idle => "enter send · alt-enter newline · esc undo",
+            StatusHint::Busy => "shift-tab mode · esc cancel · enter queue",
+            StatusHint::Idle => "shift-tab mode · enter send · alt-enter newline · esc undo",
         };
         let max = area.width as usize;
         let hint_w = hint.width();
@@ -541,6 +547,53 @@ mod tests {
             usage: Usage::default(),
         });
         assert!(bar.reply.is_none());
+    }
+
+    fn draw_status_bar_row(
+        bar: &mut StatusBar,
+        state: &State,
+    ) -> (String, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                bar.draw_bar(f, f.area(), state, StatusHint::Idle, 0);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row: String = (0..80).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        (row, buf)
+    }
+
+    #[test]
+    fn agent_mode_appears_on_the_status_bar() {
+        use ratatui::style::Color;
+
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        let state = State::new();
+        let (row, buf) = draw_status_bar_row(&mut bar, &state);
+        assert!(row.contains("agent"), "status bar was {row:?}");
+        let agent_at = row.find("agent").unwrap();
+        assert_eq!(buf[(agent_at as u16, 0)].style().fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn plan_mode_appears_on_the_status_bar() {
+        use ratatui::style::Color;
+
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        let mut state = State::new();
+        state.mode = AgentMode::Plan;
+        let (row, buf) = draw_status_bar_row(&mut bar, &state);
+        assert!(row.contains("plan"), "status bar was {row:?}");
+        let plan_at = row.find("plan").unwrap();
+        assert_eq!(
+            buf[(plan_at as u16, 0)].style().fg,
+            Some(Color::LightMagenta)
+        );
     }
 
     #[test]

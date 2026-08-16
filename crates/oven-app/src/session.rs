@@ -121,7 +121,9 @@ impl Session {
                 .into_iter()
                 .filter_map(|r| match r {
                     Record::Message { message, .. } => Some(message),
-                    Record::TokenUsage { .. } | Record::SessionMeta(_) => None,
+                    Record::TokenUsage { .. }
+                    | Record::SessionMeta(_)
+                    | Record::TodoList { .. } => None,
                 })
                 .collect()
         })
@@ -269,34 +271,42 @@ fn read_first_line(path: &Path) -> Result<Option<String>, SessionError> {
     }
 }
 
-/// Parse one JSONL line into records. Tries the current `Record` format, the
-/// legacy envelope (which can expand into a message plus a `TokenUsage`
-/// record), then a bare `Message`.
+/// Parse one JSONL line into records.
+///
+/// 1. Invalid JSON → Err.
+/// 2. Object with a known `type` tag → deserialize as `Record` (malformed = Err).
+/// 3. Object with an unknown `type` tag → skip.
+/// 4. No `type`: legacy envelope, then bare `Message`. Both fail → Err.
 fn parse_line(line: &str) -> Result<Vec<Record>, serde_json::Error> {
-    match serde_json::from_str::<Record>(line) {
-        Ok(record) => Ok(vec![record]),
-        Err(record_err) => match serde_json::from_str::<RecordLine>(line) {
-            Ok(envelope) => {
-                let mut out = vec![Record::Message {
-                    timestamp: 0,
-                    message: envelope.message,
-                }];
-                if envelope.usage != Usage::default() {
-                    out.push(Record::TokenUsage {
-                        timestamp: 0,
-                        usage: envelope.usage,
-                    });
-                }
-                Ok(out)
+    let value: serde_json::Value = serde_json::from_str(line)?;
+    if let Some(tag) = value.get("type").and_then(|t| t.as_str()) {
+        return match tag {
+            "message" | "token_usage" | "session_meta" | "todo_list" => {
+                serde_json::from_value(value).map(|r| vec![r])
             }
-            Err(_) => match serde_json::from_str::<Message>(line) {
-                Ok(message) => Ok(vec![Record::Message {
+            _ => Ok(vec![]),
+        };
+    }
+    match serde_json::from_value::<RecordLine>(value.clone()) {
+        Ok(envelope) => {
+            let mut out = vec![Record::Message {
+                timestamp: 0,
+                message: envelope.message,
+            }];
+            if envelope.usage != Usage::default() {
+                out.push(Record::TokenUsage {
                     timestamp: 0,
-                    message,
-                }]),
-                Err(_) => Err(record_err),
-            },
-        },
+                    usage: envelope.usage,
+                });
+            }
+            Ok(out)
+        }
+        Err(_) => serde_json::from_value::<Message>(value).map(|message| {
+            vec![Record::Message {
+                timestamp: 0,
+                message,
+            }]
+        }),
     }
 }
 
@@ -544,5 +554,87 @@ mod tests {
 
         assert!(tmp.path().join("cwd_latest.json").exists());
         assert!(!tmp.path().join("cwd_latest.json.tmp").exists());
+    }
+
+    #[test]
+    fn unknown_type_is_skipped_and_messages_still_load() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        writeln!(file, r#"{{"type":"future_widget","payload":1}}"#).unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&Record::Message {
+                timestamp: 1,
+                message: Message::user_text("kept"),
+            })
+            .unwrap()
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let loaded = session.load_records().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            matches!(&loaded[0], Record::Message { message, .. } if message.role == oven_llm::Role::User)
+        );
+        assert_eq!(session.load().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_envelope_still_loads_after_type_skip() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        writeln!(file, r#"{{"type":"future_widget","payload":1}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"message":{},"usage":{{"input_tokens":4,"output_tokens":1}}}}"#,
+            serde_json::to_string(&Message::user_text("old")).unwrap()
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let loaded = session.load_records().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(
+            matches!(&loaded[0], Record::Message { timestamp: 0, message } if message.role == oven_llm::Role::User)
+        );
+        assert!(matches!(
+            &loaded[1],
+            Record::TokenUsage { usage, .. } if usage.input_tokens == 4
+        ));
+    }
+
+    #[test]
+    fn load_drops_todo_list_records() {
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").unwrap();
+        session
+            .append_records(&[
+                message_record(1, Message::user_text("hello")),
+                Record::TodoList {
+                    timestamp: 2,
+                    items: vec![],
+                },
+                message_record(3, Message::assistant(vec![ContentBlock::text("hi")])),
+            ])
+            .unwrap();
+
+        let loaded = session.load_records().unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert!(matches!(&loaded[1], Record::TodoList { items, .. } if items.is_empty()));
+        assert_eq!(session.load().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn known_type_malformed_is_error() {
+        let err = parse_line(r#"{"type":"todo_list"}"#).unwrap_err();
+        assert!(!err.to_string().is_empty());
     }
 }

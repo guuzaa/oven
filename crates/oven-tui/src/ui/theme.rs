@@ -50,6 +50,10 @@ pub fn effort() -> Style {
     Style::default().fg(Color::LightBlue)
 }
 
+pub fn mode() -> Style {
+    Style::default().fg(Color::LightMagenta)
+}
+
 pub fn reply() -> Style {
     Style::default().fg(Color::Rgb(255, 140, 0))
 }

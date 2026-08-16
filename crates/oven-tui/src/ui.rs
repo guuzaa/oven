@@ -9,6 +9,7 @@ mod slash_command_popup;
 mod status;
 mod terminal;
 mod theme;
+mod todos;
 mod transcript;
 
 use std::io;
@@ -25,6 +26,7 @@ use component::{Action, Component, KeyResult, State};
 use input::{InputView, Overlay, display_user_input};
 use queue::QueueWidget;
 use status::{StatusBar, StatusHint};
+use todos::TodosWidget;
 use transcript::Transcript;
 
 pub struct Ui {
@@ -40,6 +42,7 @@ pub struct Ui {
     status: StatusBar,
     input: InputView,
     queue: QueueWidget,
+    todos: TodosWidget,
     spin: u8,
 }
 
@@ -54,6 +57,7 @@ impl Ui {
             .canonicalize()
             .unwrap_or_else(|_| handle.root().to_owned());
         let total_usage = handle.total_usage();
+        let todos = handle.todos().clone();
         let mut input = InputView::new(slash_commands, provider.clone());
         if provider.needs_setup() {
             input.open_setup();
@@ -70,6 +74,7 @@ impl Ui {
                 .with_effort(provider.reasoning_effort),
             input,
             queue: QueueWidget::new(),
+            todos: TodosWidget::new(todos),
             spin: 0,
         }
     }
@@ -163,9 +168,13 @@ impl Ui {
         if matches!(ev, AppEvent::Idle { .. }) {
             self.state.busy = false;
         }
+        if let AppEvent::ModeChanged { mode, .. } = &ev {
+            self.state.mode = *mode;
+        }
         self.transcript.on_event(&ev);
         self.status.on_event(&ev);
         self.input.on_event(&ev);
+        self.todos.on_event(&ev);
         if matches!(ev, AppEvent::Rewound { .. }) {
             self.rewinding = false;
         }
@@ -213,6 +222,11 @@ impl Ui {
         let result = match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 KeyResult::Action(Action::Quit)
+            }
+            _ if is_mode_toggle(key) => {
+                self.state.mode = self.state.mode.toggle();
+                let _ = self.handle.send(AppCmd::SetMode(self.state.mode));
+                KeyResult::Handled
             }
             KeyCode::Esc if self.input.overlay() == Overlay::None => match EscAction::new(
                 self.pending.pop(),
@@ -289,6 +303,7 @@ impl Ui {
             area,
             self.input.height(area.width),
             self.queue.height(&self.pending),
+            self.todos.height(),
             self.input.overlay_height(),
             self.status.reply_height(area.width),
         );
@@ -296,6 +311,9 @@ impl Ui {
         self.transcript.draw(f, regions.transcript, &self.state);
         if let Some(queue) = regions.queue {
             self.queue.draw(f, queue, &self.pending);
+        }
+        if let Some(todos) = regions.todos {
+            self.todos.draw(f, todos);
         }
         self.input.draw(f, regions.input, &self.state);
         if let Some(overlay) = regions.overlay {
@@ -312,6 +330,11 @@ impl Ui {
             self.status.draw_reply(f, reply);
         }
     }
+}
+
+fn is_mode_toggle(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::BackTab)
+        || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
 fn status_hint(overlay: Overlay, busy: bool) -> StatusHint {
@@ -428,5 +451,20 @@ mod tests {
         assert_eq!(status_hint(Overlay::Model, false), StatusHint::Modal);
         assert_eq!(status_hint(Overlay::None, true), StatusHint::Busy);
         assert_eq!(status_hint(Overlay::None, false), StatusHint::Idle);
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn is_mode_toggle_backtab_and_shift_tab() {
+        assert!(is_mode_toggle(key(KeyCode::BackTab, KeyModifiers::NONE)));
+        assert!(is_mode_toggle(key(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert!(!is_mode_toggle(key(KeyCode::Tab, KeyModifiers::NONE)));
+        assert!(!is_mode_toggle(key(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
     }
 }

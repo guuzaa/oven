@@ -1,9 +1,10 @@
 mod clear;
 mod exit;
 mod model;
+mod plan;
 mod setup;
 
-use oven_agent::Agent;
+use oven_agent::{Agent, AgentMode};
 
 use crate::AppError;
 use crate::config::ProviderConfig;
@@ -11,6 +12,7 @@ use crate::config::ProviderConfig;
 pub use clear::Clear;
 pub use exit::Exit;
 pub use model::Model;
+pub use plan::Plan;
 pub use setup::Setup;
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,9 @@ pub enum CommandOutcome {
     },
     ProviderChanged {
         provider: ProviderConfig,
+    },
+    ModeChanged {
+        mode: AgentMode,
     },
     Passthrough,
 }
@@ -51,6 +56,7 @@ impl SlashRegistry {
         r.register(Box::new(Exit));
         r.register(Box::new(Model));
         r.register(Box::new(Setup));
+        r.register(Box::new(Plan));
         r
     }
 
@@ -160,11 +166,12 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 4);
+        assert_eq!(cmds.len(), 5);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
         assert!(cmds.iter().any(|(n, d)| n == "model" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "setup" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, d)| n == "plan" && !d.is_empty()));
     }
 
     #[test]
@@ -172,9 +179,17 @@ mod tests {
         let reg = SlashRegistry::with_builtin();
         let mut agent = fresh_agent();
         agent.push_history(Message::user_text("hi"));
+        agent.set_todos(oven_agent::TodoList {
+            items: vec![oven_agent::TodoItem {
+                id: "a".into(),
+                content: "one".into(),
+                status: oven_agent::TodoStatus::Pending,
+            }],
+        });
         let outcome = reg.parse_and_run(&mut agent, "/clear").unwrap();
         assert!(matches!(outcome, CommandOutcome::Cleared));
         assert_eq!(agent.history().len(), 0);
+        assert!(agent.todos().is_empty());
     }
 
     #[test]
