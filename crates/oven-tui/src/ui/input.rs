@@ -171,7 +171,7 @@ impl Component for InputView {
                 SetupWizardAction::Handled => KeyResult::Handled,
                 SetupWizardAction::Submit(text) => {
                     self.clear();
-                    KeyResult::Action(Action::Submit(text))
+                    submit_command(text)
                 }
                 SetupWizardAction::Close => {
                     self.fill_command("/setup");
@@ -185,7 +185,7 @@ impl Component for InputView {
                 ModelPickerAction::Handled => KeyResult::Handled,
                 ModelPickerAction::Submit(text) => {
                     self.clear();
-                    KeyResult::Action(Action::Submit(text))
+                    submit_command(text)
                 }
                 ModelPickerAction::Close => {
                     self.fill_command("/model");
@@ -207,18 +207,23 @@ impl Component for InputView {
                     if setup_opens(&text) {
                         self.setup.open();
                         self.fill_command("/setup ");
-                        return KeyResult::Handled;
+                        return KeyResult::Action(Action::QuietSubmit(text));
                     }
                     // `/model` (with at most one fragment) opens the picker
                     // instead of submitting; two or more args keep the manual
-                    // fast path.
+                    // fast path. Bare `/model` still runs so the Reply
+                    // (current model) can show below the status bar.
                     if let Some(filter) = model_filter_from(&text) {
                         self.model_picker.open(&filter);
                         self.fill_command("/model ");
-                        return KeyResult::Handled;
+                        return if filter.is_empty() {
+                            KeyResult::Action(Action::QuietSubmit(text))
+                        } else {
+                            KeyResult::Handled
+                        };
                     }
                     self.clear();
-                    KeyResult::Action(Action::Submit(text))
+                    submit_command(text)
                 }
             };
         }
@@ -232,12 +237,17 @@ impl Component for InputView {
                 if text.is_empty() {
                     KeyResult::Handled
                 } else if state.busy {
-                    self.pending.push(text.clone());
-                    self.clear();
-                    KeyResult::Action(Action::Queue(text))
+                    if is_model_or_setup(&text) {
+                        self.clear();
+                        submit_command(text)
+                    } else {
+                        self.pending.push(text.clone());
+                        self.clear();
+                        KeyResult::Action(Action::Queue(text))
+                    }
                 } else {
                     self.clear();
-                    KeyResult::Action(Action::Submit(text))
+                    submit_command(text)
                 }
             }
             _ => {
@@ -273,6 +283,25 @@ impl Component for InputView {
 /// If `text` is a `/model` command with at most one argument (`/model` or
 /// `/model <fragment>`), return the fragment to seed the picker filter with.
 /// Two or more arguments return `None` so the line submits directly.
+fn is_model_or_setup(text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some(body) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    matches!(
+        body.split_whitespace().next(),
+        Some(cmd) if cmd.eq_ignore_ascii_case("model") || cmd.eq_ignore_ascii_case("setup")
+    )
+}
+
+fn submit_command(text: String) -> KeyResult {
+    if is_model_or_setup(&text) {
+        KeyResult::Action(Action::QuietSubmit(text))
+    } else {
+        KeyResult::Action(Action::Submit(text))
+    }
+}
+
 fn setup_opens(text: &str) -> bool {
     let trimmed = text.trim();
     let Some(body) = trimmed.strip_prefix('/') else {
@@ -577,7 +606,11 @@ mod tests {
         type_text(&mut view, "/model");
         assert!(!view.model_picker.is_open());
 
-        view.handle_key(key(KeyCode::Enter), &State::new());
+        let result = view.handle_key(key(KeyCode::Enter), &State::new());
+        match result {
+            KeyResult::Action(Action::QuietSubmit(text)) => assert_eq!(text, "/model"),
+            _ => panic!("expected QuietSubmit /model"),
+        }
         assert!(view.model_picker.is_open());
         assert_eq!(view.textarea.lines()[0], "/model ");
         assert_eq!(view.model_picker.matches(), vec![0, 1, 2]);
@@ -627,10 +660,10 @@ mod tests {
         // Second Enter picks the first effort (none).
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         match result {
-            KeyResult::Action(Action::Submit(text)) => {
+            KeyResult::Action(Action::QuietSubmit(text)) => {
                 assert_eq!(text, "/model deepseek-chat none");
             }
-            _ => panic!("expected submit"),
+            _ => panic!("expected QuietSubmit"),
         }
         assert!(!view.model_picker.is_open());
     }
@@ -644,10 +677,10 @@ mod tests {
         view.handle_key(key(KeyCode::Down), &State::new());
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         match result {
-            KeyResult::Action(Action::Submit(text)) => {
+            KeyResult::Action(Action::QuietSubmit(text)) => {
                 assert_eq!(text, "/model deepseek-chat low");
             }
-            _ => panic!("expected submit"),
+            _ => panic!("expected QuietSubmit"),
         }
     }
 
@@ -661,8 +694,8 @@ mod tests {
         }
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         match result {
-            KeyResult::Action(Action::Submit(text)) => assert_eq!(text, "/model gpt-4o"),
-            _ => panic!("expected submit"),
+            KeyResult::Action(Action::QuietSubmit(text)) => assert_eq!(text, "/model gpt-4o"),
+            _ => panic!("expected QuietSubmit"),
         }
     }
 
@@ -693,10 +726,10 @@ mod tests {
         type_text(&mut view, "/model gpt-4o high");
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         match result {
-            KeyResult::Action(Action::Submit(text)) => {
+            KeyResult::Action(Action::QuietSubmit(text)) => {
                 assert_eq!(text, "/model gpt-4o high");
             }
-            _ => panic!("expected submit"),
+            _ => panic!("expected QuietSubmit"),
         }
         assert!(!view.model_picker.is_open());
     }
@@ -759,7 +792,11 @@ mod tests {
     fn setup_wizard_opens_on_enter() {
         let mut view = view();
         type_text(&mut view, "/setup");
-        view.handle_key(key(KeyCode::Enter), &State::new());
+        let result = view.handle_key(key(KeyCode::Enter), &State::new());
+        match result {
+            KeyResult::Action(Action::QuietSubmit(text)) => assert_eq!(text, "/setup"),
+            _ => panic!("expected QuietSubmit /setup"),
+        }
         assert!(view.setup.is_open());
         assert_eq!(view.textarea.lines()[0], "/setup ");
     }
@@ -778,10 +815,10 @@ mod tests {
         type_text(&mut view, "/setup kind=completions");
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         match result {
-            KeyResult::Action(Action::Submit(text)) => {
+            KeyResult::Action(Action::QuietSubmit(text)) => {
                 assert_eq!(text, "/setup kind=completions");
             }
-            _ => panic!("expected submit"),
+            _ => panic!("expected QuietSubmit"),
         }
         assert!(!view.setup.is_open());
     }
@@ -795,6 +832,29 @@ mod tests {
         assert!(matches!(result, KeyResult::Handled));
         assert!(!view.setup.is_open());
         assert_eq!(view.textarea.lines()[0], "/setup");
+    }
+
+    #[test]
+    fn model_and_setup_are_silent_slash_commands() {
+        assert!(is_model_or_setup("/model"));
+        assert!(is_model_or_setup("/MODEL gpt-4o"));
+        assert!(is_model_or_setup("/setup name=x"));
+        assert!(!is_model_or_setup("/clear"));
+        assert!(!is_model_or_setup("hello"));
+    }
+
+    #[test]
+    fn busy_model_submits_quietly_without_queue() {
+        let mut view = view();
+        type_text(&mut view, "/model gpt-4o high");
+        let result = view.handle_key(key(KeyCode::Enter), &State { busy: true });
+        match result {
+            KeyResult::Action(Action::QuietSubmit(text)) => {
+                assert_eq!(text, "/model gpt-4o high");
+            }
+            _ => panic!("expected QuietSubmit"),
+        }
+        assert_eq!(view.queue_len(), 0);
     }
 
     #[test]

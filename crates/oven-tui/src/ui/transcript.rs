@@ -441,6 +441,7 @@ impl Component for Transcript {
             AppEvent::ModelsUpdated { .. } => {}
             AppEvent::ProviderUpdated { .. } => {}
             AppEvent::Exit { .. } => {}
+            AppEvent::Reply { .. } => {}
             AppEvent::Rewound { messages, .. } => self.replace_from(messages),
             AppEvent::Idle { .. } => {
                 self.flush_streaming();
@@ -880,6 +881,21 @@ mod tests {
         let mut t = Transcript::new();
         t.seed(&[]);
         assert!(t.rows.is_empty());
+    }
+
+    #[test]
+    fn reply_event_does_not_append_to_transcript() {
+        let mut t = Transcript::new();
+        t.push_user("/model");
+        let n = t.rows.len();
+        t.on_event(
+            &AppEvent::Reply {
+                app_id: AppId(1),
+                text: "current model: gpt-4o".into(),
+            },
+            &mut State::new(),
+        );
+        assert_eq!(t.rows.len(), n);
     }
 
     #[test]

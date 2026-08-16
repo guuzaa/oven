@@ -71,6 +71,12 @@ pub enum AppEvent {
         app_id: AppId,
         provider: ProviderConfig,
     },
+    /// Slash-command informational reply. Shown below the status bar, not
+    /// appended to the transcript.
+    Reply {
+        app_id: AppId,
+        text: String,
+    },
 }
 
 /// Snapshot of the current persisted session, shared between the runtime
@@ -198,7 +204,8 @@ impl AppHandle {
     }
 
     /// Send one user turn and wait until the app returns to [`AppEvent::Idle`].
-    /// Returns the final assistant text from [`AgentEvent::Done`] when present.
+    /// Returns the final assistant text from [`AgentEvent::Done`] or a slash
+    /// [`AppEvent::Reply`] when present.
     pub async fn prompt(&self, input: impl Into<String>) -> Result<String, AppError> {
         let mut rx = self.subscribe();
         self.send(AppCmd::UserInput(input.into()))?;
@@ -210,6 +217,7 @@ impl AppHandle {
                     event: AgentEvent::Done { text: t, .. },
                     ..
                 }) => text = t,
+                Some(AppEvent::Reply { text: t, .. }) => text = t,
                 Some(AppEvent::Idle { .. }) => return Ok(text),
                 Some(AppEvent::Error { message, .. }) => {
                     return Err(AppError::Runtime(message));
@@ -491,7 +499,7 @@ async fn apply_slash(
     match outcome {
         CommandOutcome::Passthrough => {}
         CommandOutcome::Reply(text) => {
-            emit_done(subs, app_id, agent, text);
+            emit(subs, AppEvent::Reply { app_id, text });
         }
         CommandOutcome::Cleared => {
             emit_done(subs, app_id, agent, "history cleared".to_string());
@@ -532,7 +540,7 @@ async fn apply_slash(
                 Some(e) => format!("model switched to {model} (effort: {e})"),
                 None => format!("model switched to {model}"),
             };
-            emit_done(subs, app_id, agent, text);
+            emit(subs, AppEvent::Reply { app_id, text });
         }
         CommandOutcome::ProviderChanged { provider } => {
             apply_provider_change(provider, app_id, agent, config, user_config_path, subs).await;
@@ -599,11 +607,12 @@ async fn apply_provider_change(
             let (models, auth_error) =
                 refresh_model_choices(agent.provider(), &model, config).await;
             emit(subs, AppEvent::ModelsUpdated { app_id, models });
-            emit_done(
+            emit(
                 subs,
-                app_id,
-                agent,
-                summarize_setup(&overlay, saved.as_deref()),
+                AppEvent::Reply {
+                    app_id,
+                    text: summarize_setup(&overlay, saved.as_deref()),
+                },
             );
             if let Some(body) = auth_error {
                 emit(
@@ -1137,11 +1146,60 @@ mod tests {
             None,
         );
 
+        let mut rx = handle.subscribe();
         let out = handle.prompt("/model gpt-4o-turbo low").await.unwrap();
         assert_eq!(out, "model switched to gpt-4o-turbo (effort: low)");
+        let mut saw_reply = false;
+        let mut saw_done = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::Reply { text, .. }
+                    if text == "model switched to gpt-4o-turbo (effort: low)" =>
+                {
+                    saw_reply = true;
+                }
+                AppEvent::Agent {
+                    event: AgentEvent::Done { .. },
+                    ..
+                } => saw_done = true,
+                _ => {}
+            }
+        }
+        assert!(saw_reply);
+        assert!(!saw_done);
         // The switch only changes the model carried by subsequent requests;
         // the provider object is never rebuilt or replaced.
         assert_eq!(handle.prompt("hello").await.unwrap(), "echo:gpt-4o-turbo");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn slash_reply_emits_reply_not_done() {
+        let tmp = tempdir::TempDir::new("app-runtime-slash-reply").unwrap();
+        let app = App::new(tmp.path());
+        let mock = MockProvider::new(vec![]);
+        let handle = app.spawn_with_provider(Box::new(mock)).await.unwrap();
+
+        let mut rx = handle.subscribe();
+        let out = handle.prompt("/model").await.unwrap();
+        assert!(out.contains("current model"));
+
+        let mut saw_reply = false;
+        let mut saw_done = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                AppEvent::Reply { text, .. } if text.contains("current model") => {
+                    saw_reply = true;
+                }
+                AppEvent::Agent {
+                    event: AgentEvent::Done { .. },
+                    ..
+                } => saw_done = true,
+                _ => {}
+            }
+        }
+        assert!(saw_reply);
+        assert!(!saw_done);
         handle.shutdown().await;
     }
 
@@ -1273,6 +1331,7 @@ mod tests {
                     event: AgentEvent::Done { text, .. },
                     ..
                 }) => out = text,
+                Some(AppEvent::Reply { text, .. }) => out = text,
                 Some(AppEvent::Idle { .. }) => break,
                 Some(_) => {}
                 None => panic!("channel closed before idle"),

@@ -18,6 +18,8 @@ pub enum Action {
     Cancel,
     Submit(String),
     Queue(String),
+    /// Run a slash command without touching the transcript or input.
+    QuietSubmit(String),
 }
 
 pub enum KeyResult {

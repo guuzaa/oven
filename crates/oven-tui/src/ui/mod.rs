@@ -116,8 +116,11 @@ impl Ui {
         terminal.draw(|f| self.draw(f))?;
         loop {
             tokio::select! {
-                _ = tick.tick(), if self.state.busy => {
-                    self.spin = self.spin.wrapping_add(1);
+                _ = tick.tick(), if self.state.busy || self.status.has_reply() => {
+                    if self.state.busy {
+                        self.spin = self.spin.wrapping_add(1);
+                    }
+                    self.status.expire_reply();
                 }
                 Some(ev) = term_events.next() => {
                     match ev? {
@@ -258,6 +261,7 @@ impl Ui {
             }
             KeyResult::Action(Action::Submit(text)) => {
                 self.transcript.push_user(&display_user_input(&text));
+                self.status.clear_reply();
                 self.input.clear();
                 self.state.busy = true;
                 if self.handle.send(AppCmd::UserInput(text)).is_err() {
@@ -265,16 +269,25 @@ impl Ui {
                 }
                 false
             }
+            KeyResult::Action(Action::QuietSubmit(text)) => {
+                let _ = self.handle.send(AppCmd::UserInput(text));
+                false
+            }
         }
     }
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
         let avail = f.area().height;
-        let input_h = self.input.height().min(avail.saturating_sub(4));
+        let reply_h = self
+            .status
+            .reply_height(f.area().width)
+            .min(avail.saturating_sub(4));
+        let chrome = 4 + reply_h;
+        let input_h = self.input.height().min(avail.saturating_sub(chrome));
         let queue_h = self
             .queue
             .height(self.input.pending())
-            .min(avail.saturating_sub(4 + input_h));
+            .min(avail.saturating_sub(chrome + input_h));
         let setup_h = self.input.setup_height(&self.state);
         let picker_h = self.input.model_picker_height(&self.state);
         let slash_h = self.input.slash_command_height(&self.state);
@@ -285,7 +298,7 @@ impl Ui {
         } else {
             slash_h
         }
-        .min(avail.saturating_sub(4 + input_h + queue_h));
+        .min(avail.saturating_sub(chrome + input_h + queue_h));
         let mut constraints = vec![Constraint::Min(3)];
         if queue_h > 0 {
             constraints.push(Constraint::Length(queue_h));
@@ -295,6 +308,9 @@ impl Ui {
             constraints.push(Constraint::Length(popup_h));
         }
         constraints.push(Constraint::Length(1));
+        if reply_h > 0 {
+            constraints.push(Constraint::Length(reply_h));
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints(constraints)
@@ -326,6 +342,10 @@ impl Ui {
             self.input.slash_open(),
             self.spin,
         );
+        if reply_h > 0 {
+            next += 1;
+            self.status.draw_reply(f, chunks[next]);
+        }
     }
 }
 

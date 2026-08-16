@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
 use oven_app::{AgentEvent, AppEvent};
@@ -14,13 +15,17 @@ use super::component::{Component, KeyResult, State};
 use super::theme;
 
 const SPIN_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const REPLY_TTL: Duration = Duration::from_secs(3);
 
 /// Single status row below the input: model · root · token usage.
+/// Optional slash-command reply is drawn on the row(s) beneath it.
 pub struct StatusBar {
     model: String,
     effort: Option<ReasoningEffort>,
     root: String,
     total: Usage,
+    reply: Option<String>,
+    reply_until: Option<Instant>,
 }
 
 impl StatusBar {
@@ -30,7 +35,53 @@ impl StatusBar {
             effort: None,
             root: display_path(root),
             total,
+            reply: None,
+            reply_until: None,
         }
+    }
+
+    pub fn has_reply(&self) -> bool {
+        self.reply.as_ref().is_some_and(|t| !t.is_empty())
+    }
+
+    pub fn expire_reply(&mut self) -> bool {
+        match self.reply_until {
+            Some(until) if Instant::now() >= until => {
+                self.clear_reply();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn reply_height(&self, width: u16) -> u16 {
+        match self.reply.as_deref() {
+            Some(text) if !text.is_empty() && width > 0 => {
+                wrap_text(text, width as usize).len() as u16
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn draw_reply(&self, f: &mut Frame<'_>, area: Rect) {
+        let Some(text) = self.reply.as_deref() else {
+            return;
+        };
+        let lines: Vec<Line> = wrap_text(text, area.width as usize)
+            .into_iter()
+            .map(|s| Line::from(Span::styled(s, theme::reply())))
+            .collect();
+        f.render_widget(Paragraph::new(lines), area);
+    }
+
+    pub fn clear_reply(&mut self) {
+        self.reply = None;
+        self.reply_until = None;
+    }
+
+    fn set_reply(&mut self, text: String) {
+        self.reply = Some(text);
+        self.reply_until = Some(Instant::now() + REPLY_TTL);
     }
 
     pub fn draw_bar(
@@ -93,6 +144,7 @@ impl Component for StatusBar {
                 }
                 AgentEvent::HistoryCleared { .. } => {
                     self.total = Usage::default();
+                    self.clear_reply();
                 }
                 AgentEvent::ModelChanged {
                     model,
@@ -111,8 +163,12 @@ impl Component for StatusBar {
             AppEvent::ProviderUpdated { .. } => {}
             AppEvent::Error { .. } => {}
             AppEvent::Exit { .. } => {}
+            AppEvent::Reply { text, .. } => {
+                self.set_reply(text.clone());
+            }
             AppEvent::Rewound { usage, .. } => {
                 self.total = *usage;
+                self.clear_reply();
             }
         }
     }
@@ -193,6 +249,32 @@ fn truncate_line<'a>(line: Line<'a>, max_width: usize) -> Line<'a> {
         }
     }
     Line::from(spans)
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    for raw in text.lines() {
+        if raw.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_w = 0;
+        for ch in raw.chars() {
+            let cw = ch.width().unwrap_or(0);
+            if current_w + cw > width && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_w = 0;
+            }
+            current.push(ch);
+            current_w += cw;
+        }
+        lines.push(current);
+    }
+    lines
 }
 
 /// Absolute path with `~` in place of the home directory, if it lives there.
@@ -340,6 +422,111 @@ mod tests {
         };
         let bar = StatusBar::new("m", Path::new("/tmp"), usage);
         assert_eq!(bar.total, usage);
+    }
+
+    #[test]
+    fn reply_event_sets_reply_and_height() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        let mut state = State::new();
+        assert_eq!(bar.reply_height(80), 0);
+        bar.on_event(
+            &AppEvent::Reply {
+                app_id: AppId(1),
+                text: "current model: gpt-4o".into(),
+            },
+            &mut state,
+        );
+        assert_eq!(bar.reply.as_deref(), Some("current model: gpt-4o"));
+        assert_eq!(bar.reply_height(80), 1);
+        assert_eq!(bar.reply_height(8), 3);
+        assert!(bar.has_reply());
+        assert!(!bar.expire_reply());
+    }
+
+    #[test]
+    fn reply_expires_once_ttl_elapses() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        bar.reply = Some("hi".into());
+        bar.reply_until = Some(Instant::now() + Duration::from_secs(3));
+        assert!(!bar.expire_reply());
+        assert_eq!(bar.reply.as_deref(), Some("hi"));
+
+        bar.reply_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(bar.expire_reply());
+        assert!(bar.reply.is_none());
+        assert!(!bar.has_reply());
+    }
+
+    #[test]
+    fn history_cleared_and_rewound_drop_reply() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        let mut state = State::new();
+        bar.reply = Some("hi".into());
+        bar.on_event(
+            &agent_event(AgentEvent::HistoryCleared {
+                agent_id: AgentId(1),
+            }),
+            &mut state,
+        );
+        assert!(bar.reply.is_none());
+
+        bar.reply = Some("hi".into());
+        bar.on_event(
+            &AppEvent::Rewound {
+                app_id: AppId(1),
+                text: None,
+                messages: Vec::new(),
+                usage: Usage::default(),
+            },
+            &mut state,
+        );
+        assert!(bar.reply.is_none());
+    }
+
+    #[test]
+    fn reply_paints_orange_on_the_row_below_status() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::{Constraint, Direction, Layout};
+        use ratatui::style::Color;
+
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        let mut state = State::new();
+        bar.on_event(
+            &AppEvent::Reply {
+                app_id: AppId(1),
+                text: "current model: gpt-4o".into(),
+            },
+            &mut state,
+        );
+
+        let backend = TestBackend::new(40, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Length(1)])
+                    .split(f.area());
+                bar.draw_bar(f, chunks[0], &state, false, 0);
+                bar.draw_reply(f, chunks[1]);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row: String = (0..40).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        assert!(
+            row.contains("current model: gpt-4o"),
+            "reply row was {row:?}"
+        );
+        assert_eq!(buf[(0, 1)].style().fg, Some(Color::Rgb(255, 140, 0)));
+    }
+
+    #[test]
+    fn wrap_text_splits_on_width_and_newlines() {
+        assert!(wrap_text("", 10).is_empty());
+        assert_eq!(wrap_text("abcd", 2), vec!["ab", "cd"]);
+        assert_eq!(wrap_text("a\nb", 10), vec!["a", "b"]);
     }
 
     #[test]

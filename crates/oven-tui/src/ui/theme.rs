@@ -49,3 +49,7 @@ pub fn path() -> Style {
 pub fn effort() -> Style {
     Style::default().fg(Color::LightBlue)
 }
+
+pub fn reply() -> Style {
+    Style::default().fg(Color::Rgb(255, 140, 0))
+}
