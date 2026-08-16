@@ -3,6 +3,56 @@
 A terminal coding agent. Oven connects to an LLM, reads and writes files in
 your project, runs shell commands, and helps you get things done.
 
+## Install
+
+Prebuilt binaries are attached to every release tag. Grab the installer for
+your platform — it downloads the matching archive, puts `oven` in
+`~/.oven/bin` (`%USERPROFILE%\.oven\bin` on Windows), and adds that directory
+to your `PATH`.
+
+Linux / macOS — one-liner (latest release):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.sh | bash
+```
+
+Or pin a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.sh | bash -s v0.1.0
+```
+
+Or run the installer from a checkout:
+
+```bash
+./scripts/install.sh            # latest release
+./scripts/install.sh v0.1.0     # or a specific tag
+```
+
+Windows (x86_64) — PowerShell one-liner (latest release):
+
+```powershell
+irm https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.ps1 | iex
+```
+
+Pin a specific version:
+
+```powershell
+$env:OVEN_VERSION='v0.1.0'; irm https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.ps1 | iex
+```
+
+Or run the installer from a checkout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1 v0.1.0
+```
+
+The installer defaults to the latest release; pass a tag argument or set the
+`OVEN_VERSION` environment variable to pin one (the `v` prefix is optional).
+Restart your terminal after installing, then verify with `oven --help`.
+Prebuilt binaries cover Linux x86_64/arm64 (musl), macOS x86_64/arm64, and
+Windows x86_64.
+
 ## Usage
 
 ```bash
