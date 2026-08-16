@@ -158,6 +158,22 @@ mod tests {
     }
 
     #[test]
+    fn todo_updated_replaces_list() {
+        let mut widget = TodosWidget::new(sample());
+        widget.on_event(&agent_event(AgentEvent::TodoUpdated {
+            agent_id: AgentId(1),
+            items: vec![item("n", "next task", TodoStatus::InProgress)],
+        }));
+        assert_eq!(widget.height(), 1);
+        let row = render(&widget);
+        assert!(row.contains("[~]"), "{row:?}");
+        assert!(row.contains("next task"), "{row:?}");
+        assert!(!row.contains("pending task"), "{row:?}");
+        assert!(!row.contains("[ ]"), "{row:?}");
+        assert!(!row.contains("[x]"), "{row:?}");
+    }
+
+    #[test]
     fn history_cleared_hides_widget() {
         let mut widget = TodosWidget::new(sample());
         widget.on_event(&agent_event(AgentEvent::HistoryCleared {
