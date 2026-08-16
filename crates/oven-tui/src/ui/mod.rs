@@ -297,7 +297,10 @@ impl Ui {
             .reply_height(f.area().width)
             .min(avail.saturating_sub(4));
         let chrome = 4 + reply_h;
-        let input_h = self.input.height().min(avail.saturating_sub(chrome));
+        let input_h = self
+            .input
+            .height(f.area().width)
+            .min(avail.saturating_sub(chrome));
         let queue_h = self
             .queue
             .height(self.input.pending())

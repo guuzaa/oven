@@ -7,8 +7,11 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
-use tui_textarea::TextArea;
+use tui_textarea::{TextArea, WrapMode};
 use unicode_width::UnicodeWidthStr;
+
+const PROMPT_COLS: u16 = 2;
+const MAX_INPUT_ROWS: u16 = 8;
 
 use super::component::{Action, Component, KeyResult, State};
 use super::model_picker::{ModelPicker, ModelPickerAction};
@@ -36,8 +39,9 @@ impl InputView {
         }
     }
 
-    pub fn height(&self) -> u16 {
-        (self.textarea.lines().len() as u16).clamp(1, 8)
+    pub fn height(&mut self, area_width: u16) -> u16 {
+        let text_width = area_width.saturating_sub(PROMPT_COLS);
+        self.textarea.measure(text_width).preferred_rows
     }
 
     pub fn clear(&mut self) {
@@ -261,7 +265,7 @@ impl Component for InputView {
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(2), Constraint::Min(1)])
+            .constraints([Constraint::Length(PROMPT_COLS), Constraint::Min(1)])
             .split(area);
         let prompt = if state.busy { "· " } else { "› " };
         f.render_widget(
@@ -358,6 +362,9 @@ fn new_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_cursor_line_style(Style::default());
     ta.set_placeholder_text("message…");
+    ta.set_wrap_mode(WrapMode::WordOrGlyph);
+    ta.set_min_rows(1);
+    ta.set_max_rows(MAX_INPUT_ROWS);
     ta
 }
 
@@ -864,5 +871,46 @@ mod tests {
             "/setup name=deepseek api_key=***"
         );
         assert_eq!(display_user_input("hello"), "hello");
+    }
+
+    #[test]
+    fn height_is_one_when_empty() {
+        let mut view = view();
+        assert_eq!(view.height(80), 1);
+    }
+
+    #[test]
+    fn height_grows_when_line_wraps() {
+        let mut view = view();
+        type_text(&mut view, &"x".repeat(20));
+        assert_eq!(view.height(12), 2);
+        assert_eq!(view.height(22), 1);
+    }
+
+    #[test]
+    fn height_counts_hard_newlines() {
+        let mut view = view();
+        view.set_text("a\nb\nc");
+        assert_eq!(view.height(80), 3);
+    }
+
+    #[test]
+    fn height_clamps_to_max_rows() {
+        let mut view = view();
+        view.set_text(
+            &(0..20)
+                .map(|i| format!("line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        assert_eq!(view.height(80), MAX_INPUT_ROWS);
+    }
+
+    #[test]
+    fn height_wraps_wide_chars() {
+        let mut view = view();
+        type_text(&mut view, &"你".repeat(10));
+        assert_eq!(view.height(12), 2);
+        assert_eq!(view.height(22), 1);
     }
 }
