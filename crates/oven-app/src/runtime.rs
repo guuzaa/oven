@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use oven_agent::{Agent, AgentEvent, CancellationToken, Record};
+use oven_agent::{Agent, AgentEvent, AgentMode, CancellationToken, LiveHandle, Record};
 use oven_llm::{
     ContentBlock, Message, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Role,
     Usage,
@@ -34,6 +34,7 @@ pub enum AppCmd {
     /// the persisted session file) so its message can be edited and resent.
     Rewind,
     Shutdown,
+    SetMode(AgentMode),
 }
 
 /// Events emitted by an app task (agent events plus app lifecycle).
@@ -77,6 +78,10 @@ pub enum AppEvent {
     Notify {
         app_id: AppId,
         text: String,
+    },
+    ModeChanged {
+        app_id: AppId,
+        mode: AgentMode,
     },
 }
 
@@ -464,6 +469,10 @@ fn spawn_runtime(
     }
 }
 
+fn apply_mode(live: &LiveHandle, mode: AgentMode) {
+    live.lock().unwrap_or_else(|e| e.into_inner()).mode = mode;
+}
+
 fn emit(subs: &Subscribers, event: AppEvent) {
     let mut subs = subs.lock().unwrap_or_else(|e| e.into_inner());
     subs.retain(|tx| tx.send(event.clone()).is_ok());
@@ -780,6 +789,7 @@ async fn runtime_loop(
     mut config: AppConfig,
     user_config_path: Option<PathBuf>,
 ) {
+    let live = agent.live_handle();
     let slash = SlashRegistry::with_builtin();
     // Leading in-memory messages already written to the store. On `/clear`
     // the in-memory history is replaced, so this resets to 0 while the store
@@ -812,6 +822,10 @@ async fn runtime_loop(
             AppCmd::Shutdown => break,
             AppCmd::Cancel => {
                 // no in-flight turn
+            }
+            AppCmd::SetMode(mode) => {
+                apply_mode(&live, mode);
+                emit(&subscribers, AppEvent::ModeChanged { app_id, mode });
             }
             AppCmd::Rewind => {
                 let removed = agent.rewind_last_turn();
@@ -901,6 +915,13 @@ async fn runtime_loop(
                                         return;
                                     }
                                     Some(AppCmd::Cancel) => cancel.cancel(),
+                                    Some(AppCmd::SetMode(mode)) => {
+                                        apply_mode(&live, mode);
+                                        emit(
+                                            &subscribers,
+                                            AppEvent::ModeChanged { app_id, mode },
+                                        );
+                                    }
                                     Some(AppCmd::UserInput(input)) => {
                                         pending_cmds.push_back(AppCmd::UserInput(input));
                                     }
@@ -2302,6 +2323,97 @@ mod tests {
         assert_eq!(text.as_deref(), Some("block"));
         assert!(messages.is_empty(), "the whole exchange is rolled back");
         assert_eq!(usage, Usage::default());
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn set_mode_applies_during_in_flight_turn() {
+        use tokio::sync::oneshot;
+
+        struct AwaitProvider {
+            entered: Mutex<Option<oneshot::Sender<()>>>,
+            release: Mutex<Option<oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait]
+        impl Provider for AwaitProvider {
+            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+                if let Some(tx) = self.entered.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                let rx = self.release.lock().unwrap().take();
+                if let Some(rx) = rx {
+                    let _ = rx.await;
+                }
+                Ok(text_response("late"))
+            }
+
+            async fn stream(
+                &self,
+                _req: &Request,
+            ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
+            {
+                Err(ProviderError::Api {
+                    status: 500,
+                    body: "no stream".into(),
+                })
+            }
+
+            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+                None
+            }
+
+            fn provider_name(&self) -> ProviderName {
+                ProviderName::Custom("await-mode".into())
+            }
+        }
+
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let provider = AwaitProvider {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+        };
+
+        let agent = Agent::new(Box::new(provider), Vec::new());
+        assert_eq!(agent.mode(), AgentMode::Default);
+        let live = agent.live_handle();
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "default".into(),
+            PathBuf::from("/tmp"),
+            AppConfig::default(),
+            None,
+        );
+        let mut sub = handle.subscribe();
+        handle.send(AppCmd::UserInput("block".into())).unwrap();
+        entered_rx.await.expect("turn entered complete");
+        handle.send(AppCmd::SetMode(AgentMode::Plan)).unwrap();
+
+        let mut saw_mode = false;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+                Ok(Some(AppEvent::ModeChanged { mode, .. })) => {
+                    assert_eq!(mode, AgentMode::Plan);
+                    saw_mode = true;
+                    break;
+                }
+                Ok(Some(AppEvent::Idle { .. })) => {
+                    panic!("Idle arrived before ModeChanged; SetMode was queued")
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(_) => panic!("timeout waiting for ModeChanged"),
+            }
+        }
+        assert!(saw_mode);
+        assert_eq!(
+            live.lock().unwrap_or_else(|e| e.into_inner()).mode,
+            AgentMode::Plan
+        );
+        drop(release_tx);
         handle.shutdown().await;
     }
 }

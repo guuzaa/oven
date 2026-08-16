@@ -23,7 +23,7 @@ mod slash;
 pub mod tools;
 
 pub use mcp::McpServerConfig;
-pub use oven_agent::{AgentEvent, AgentId, CancellationToken, Skill, SkillRegistry};
+pub use oven_agent::{AgentEvent, AgentId, AgentMode, CancellationToken, Skill, SkillRegistry};
 pub use runtime::{AppCmd, AppEvent, AppHandle, AppId};
 pub use tools::ToolRegistry;
 
