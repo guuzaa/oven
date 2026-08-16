@@ -3,6 +3,9 @@
 A terminal coding agent. Oven connects to an LLM, reads and writes files in
 your project, runs shell commands, and helps you get things done.
 
+> [!WARNING]
+> **Status: not production-ready.**
+
 ## Install
 
 Prebuilt binaries are attached to every release tag. Grab the installer for
@@ -19,14 +22,14 @@ curl -fsSL https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.
 Or pin a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.sh | bash -s v0.1.0
+curl -fsSL https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.sh | bash -s v0.0.1
 ```
 
 Or run the installer from a checkout:
 
 ```bash
 ./scripts/install.sh            # latest release
-./scripts/install.sh v0.1.0     # or a specific tag
+./scripts/install.sh v0.0.1     # or a specific tag
 ```
 
 Windows (x86_64) — PowerShell one-liner (latest release):
@@ -38,13 +41,13 @@ irm https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.ps1 | i
 Pin a specific version:
 
 ```powershell
-$env:OVEN_VERSION='v0.1.0'; irm https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.ps1 | iex
+$env:OVEN_VERSION='v0.0.1'; irm https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.ps1 | iex
 ```
 
 Or run the installer from a checkout:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1 v0.1.0
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1 v0.0.1
 ```
 
 The installer defaults to the latest release; pass a tag argument or set the

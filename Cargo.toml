@@ -3,7 +3,7 @@ members = ["crates/oven-agent", "crates/oven-app", "crates/oven-tui"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.92"
 description = "A toy coding agent for joy only."
@@ -18,7 +18,7 @@ oven-llm = "0.3.1"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 arboard = { version = "3", default-features = false }
-base64 = "0.22"
+base64 = "0.23"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
 async-stream = "0.3"
