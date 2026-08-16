@@ -165,6 +165,7 @@ impl Agent {
 
     pub fn clear_history(&mut self) {
         self.history.clear();
+        self.todo_dirty = false;
     }
 
     /// Replace the entire history with records loaded from a persisted
@@ -200,7 +201,11 @@ impl Agent {
     /// The removed turn's cumulative token usage is rolled back out of the
     /// running total.
     pub fn rewind_last_turn(&mut self) -> Option<Message> {
-        self.history.rewind_last_turn()
+        let removed = self.history.rewind_last_turn();
+        if removed.is_some() {
+            self.todo_dirty = false;
+        }
+        removed
     }
 
     fn llm_tools(&self) -> Vec<oven_llm::Tool> {
@@ -1189,5 +1194,117 @@ mod tests {
         assert!(system_of(&reqs[1]).contains("## Plan reminder"));
         assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
         assert!(system_of(&reqs[2]).contains("## Current TODO list"));
+    }
+
+    #[tokio::test]
+    async fn plan_uses_history_system_when_no_base_system() {
+        let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
+        let mut agent = agent_with_todo_write(Box::new(mock));
+        agent.push_history(Message::system("from history"));
+        agent.set_mode(AgentMode::Plan);
+        agent.run("hi").await.unwrap();
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 1);
+        assert!(system_of(&reqs[0]).contains("from history"));
+        assert!(system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(tool_names(&reqs[0]).contains(&"todo_write"));
+    }
+
+    #[tokio::test]
+    async fn leaving_plan_keeps_list_drops_prompt_and_reminder() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+
+        let (mock, seen) = CaptureRequests::new(vec![
+            tool_response("c1", "file_read", json!({"path": "note.txt"})),
+            text_response("done"),
+            text_response("later"),
+        ]);
+        let live = Arc::new(Mutex::new(AgentLive::new(None)));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(FileReadTool::new(tmp.path())),
+            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
+        ];
+        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        agent.set_mode(AgentMode::Plan);
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![pending_item()],
+        });
+        agent.run("read it").await.unwrap();
+        agent.set_mode(AgentMode::Default);
+        agent.run("next").await.unwrap();
+
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 3);
+        assert!(system_of(&reqs[1]).contains("## Plan reminder"));
+        assert!(system_of(&reqs[2]).contains("## Current TODO list"));
+        assert!(!system_of(&reqs[2]).contains("## Plan Mode"));
+        assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
+        assert!(!tool_names(&reqs[2]).contains(&"todo_write"));
+    }
+
+    #[tokio::test]
+    async fn rewind_clears_todo_dirty_reminder() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+
+        let (mock, seen) = CaptureRequests::new(vec![
+            tool_response("c1", "file_read", json!({"path": "note.txt"})),
+            text_response("done"),
+            text_response("again"),
+        ]);
+        let live = Arc::new(Mutex::new(AgentLive::new(None)));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(FileReadTool::new(tmp.path())),
+            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
+        ];
+        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        agent.set_mode(AgentMode::Plan);
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![pending_item()],
+        });
+        agent.run("read it").await.unwrap();
+        assert!(agent.rewind_last_turn().is_some());
+        agent.run("again").await.unwrap();
+
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 3);
+        assert!(system_of(&reqs[1]).contains("## Plan reminder"));
+        assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
+        assert!(system_of(&reqs[2]).contains("## Current TODO list"));
+        assert!(system_of(&reqs[2]).contains("## Plan Mode"));
+    }
+
+    #[tokio::test]
+    async fn clear_history_clears_todo_dirty() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+
+        let (mock, seen) = CaptureRequests::new(vec![
+            tool_response("c1", "file_read", json!({"path": "note.txt"})),
+            text_response("done"),
+            text_response("fresh"),
+        ]);
+        let live = Arc::new(Mutex::new(AgentLive::new(None)));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(FileReadTool::new(tmp.path())),
+            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
+        ];
+        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        agent.set_mode(AgentMode::Plan);
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![pending_item()],
+        });
+        agent.run("read it").await.unwrap();
+        agent.clear_history();
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![pending_item()],
+        });
+        agent.run("fresh").await.unwrap();
+
+        let reqs = seen.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 3);
+        assert!(system_of(&reqs[1]).contains("## Plan reminder"));
+        assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
     }
 }
