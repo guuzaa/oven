@@ -4,10 +4,8 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::component::State;
+use super::list::{self, MAX_LIST_ROWS};
 use super::theme;
-
-const MAX_MODEL_ROWS: usize = 6;
 
 /// Reasoning-effort choices shown in the second stage. `keep current` submits
 /// the command without an effort argument.
@@ -40,7 +38,7 @@ enum Stage {
 /// at `/model ` and is restored to `/model` when cancelled.
 pub(crate) struct ModelPicker {
     models: Vec<(String, String)>,
-    pub(crate) filter: String,
+    filter: String,
     stage: Stage,
     selected: usize,
     model: Option<String>,
@@ -107,21 +105,25 @@ impl ModelPicker {
         self.matches().get(self.selected).copied()
     }
 
-    /// Height of the widget, or 0 when hidden.
-    pub(crate) fn height(&self, _state: &State) -> u16 {
+    #[cfg(test)]
+    pub(crate) fn filter(&self) -> &str {
+        &self.filter
+    }
+
+    pub(crate) fn height(&self) -> u16 {
         if !self.open {
             return 0;
         }
         match self.stage {
             Stage::Models => {
-                let rows = self.matches().len().clamp(1, MAX_MODEL_ROWS);
+                let rows = self.matches().len().clamp(1, MAX_LIST_ROWS);
                 (rows as u16).saturating_add(1)
             }
             Stage::Effort => EFFORT_ITEMS.len() as u16,
         }
     }
 
-    pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect, _state: &State) {
+    pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect) {
         if !self.open {
             return;
         }
@@ -170,13 +172,7 @@ impl ModelPicker {
             }
             KeyCode::Up | KeyCode::Down => {
                 let n = self.matches().len();
-                if n > 0 {
-                    self.selected = if key.code == KeyCode::Up {
-                        (self.selected + n - 1) % n
-                    } else {
-                        (self.selected + 1) % n
-                    };
-                }
+                list::cycle_selected(&mut self.selected, n, key.code == KeyCode::Up);
                 ModelPickerAction::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
@@ -198,12 +194,11 @@ impl ModelPicker {
     fn handle_effort_key(&mut self, key: KeyEvent) -> ModelPickerAction {
         match key.code {
             KeyCode::Up | KeyCode::Down => {
-                let n = EFFORT_ITEMS.len();
-                self.selected = if key.code == KeyCode::Up {
-                    (self.selected + n - 1) % n
-                } else {
-                    (self.selected + 1) % n
-                };
+                list::cycle_selected(
+                    &mut self.selected,
+                    EFFORT_ITEMS.len(),
+                    key.code == KeyCode::Up,
+                );
                 ModelPickerAction::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
@@ -236,43 +231,40 @@ impl ModelPicker {
     }
 
     fn draw_models(&self, f: &mut Frame<'_>, area: Rect) {
-        let mut lines = Vec::new();
-        lines.push(Line::from(vec![
-            Span::styled("filter: ", theme::dim()),
-            Span::raw(self.filter.clone()),
-        ]));
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(0),
+            ])
+            .split(area);
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("filter: ", theme::dim()),
+                Span::raw(self.filter.clone()),
+            ])),
+            chunks[0],
+        );
         let indices = self.matches();
-        for (row, &idx) in indices.iter().take(MAX_MODEL_ROWS).enumerate() {
-            let (id, provider) = &self.models[idx];
-            let name_style = if row == self.selected {
-                theme::accent()
-            } else {
-                ratatui::style::Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(id.clone(), name_style),
-                Span::styled(format!("  {provider}"), theme::dim()),
-            ]));
-        }
         if indices.is_empty() {
-            lines.push(Line::from(Span::styled("no matching models", theme::dim())));
+            f.render_widget(
+                Paragraph::new(Span::styled("no matching models", theme::dim())),
+                chunks[1],
+            );
+            return;
         }
-        f.render_widget(Paragraph::new(lines), area);
+        list::draw_choice_list(
+            f,
+            chunks[1],
+            indices.iter().take(MAX_LIST_ROWS).map(|&idx| {
+                let (id, provider) = &self.models[idx];
+                (id.as_str(), provider.as_str())
+            }),
+            self.selected,
+        );
     }
 
     fn draw_effort(&self, f: &mut Frame<'_>, area: Rect) {
-        let mut lines = Vec::with_capacity(EFFORT_ITEMS.len());
-        for (row, (name, desc)) in EFFORT_ITEMS.iter().enumerate() {
-            let name_style = if row == self.selected {
-                theme::accent()
-            } else {
-                ratatui::style::Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(*name, name_style),
-                Span::styled(format!("  {desc}"), theme::dim()),
-            ]));
-        }
-        f.render_widget(Paragraph::new(lines), area);
+        list::draw_choice_list(f, area, EFFORT_ITEMS, self.selected);
     }
 }

@@ -35,6 +35,6 @@ pub trait Component {
     fn handle_mouse(&mut self, _mouse: MouseEvent, _state: &State) -> KeyResult {
         KeyResult::Ignored
     }
-    fn on_event(&mut self, _ev: &AppEvent, _state: &mut State) {}
+    fn on_event(&mut self, _ev: &AppEvent) {}
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State);
 }

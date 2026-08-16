@@ -1,57 +1,41 @@
 mod component;
 mod input;
+mod layout;
+mod list;
 mod model_picker;
 mod queue;
 mod setup_wizard;
 mod slash_command_popup;
 mod status;
+mod terminal;
 mod theme;
 mod transcript;
 
-use std::io::{self, Stdout};
+use std::io;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
 use futures::StreamExt;
 use oven_app::{AppCmd, AppEvent, AppHandle};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
 use tokio::sync::mpsc;
 
 use component::{Action, Component, KeyResult, State};
-use input::{InputView, display_user_input};
+use input::{InputView, Overlay, display_user_input};
 use queue::QueueWidget;
-use status::StatusBar;
+use status::{StatusBar, StatusHint};
 use transcript::Transcript;
-
-fn tool_display(name: &str, input: &serde_json::Value) -> String {
-    if name == "bash"
-        && let Some(command) = input.get("command").and_then(|v| v.as_str())
-    {
-        let command = command.trim();
-        if !command.is_empty() {
-            return command.to_string();
-        }
-    }
-    name.to_string()
-}
 
 pub struct Ui {
     handle: AppHandle,
     events: mpsc::UnboundedReceiver<AppEvent>,
     state: State,
     quit: bool,
-    /// A rewind is in flight: Esc is ignored until `Rewound` arrives so a
-    /// second fallback cannot desync the transcript from the backend.
+    /// Esc is ignored until `Rewound` arrives so a second rewind cannot
+    /// desync the transcript from the backend.
     rewinding: bool,
+    pending: Vec<String>,
     transcript: Transcript,
     status: StatusBar,
     input: InputView,
@@ -80,6 +64,7 @@ impl Ui {
             state: State::new(),
             quit: false,
             rewinding: false,
+            pending: Vec::new(),
             transcript: Transcript::new(),
             status: StatusBar::new(model, &root, total_usage),
             input,
@@ -95,9 +80,9 @@ impl Ui {
 
     pub async fn run(mut self) -> io::Result<()> {
         self.load_transcript();
-        let mut terminal = setup_terminal()?;
+        let mut terminal = terminal::setup()?;
         let result = self.event_loop(&mut terminal).await;
-        restore_terminal(&mut terminal)?;
+        terminal::restore(&mut terminal)?;
         let session_id = self.handle.session_id();
         self.handle.shutdown().await;
         if let Some(id) = session_id {
@@ -108,7 +93,7 @@ impl Ui {
 
     async fn event_loop(
         &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     ) -> io::Result<()> {
         let mut term_events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(80));
@@ -174,29 +159,40 @@ impl Ui {
         if matches!(ev, AppEvent::Exit { .. }) {
             self.quit = true;
         }
-        self.transcript.on_event(&ev, &mut self.state);
-        self.status.on_event(&ev, &mut self.state);
-        self.input.on_event(&ev, &mut self.state);
+        if matches!(ev, AppEvent::Idle { .. }) {
+            self.state.busy = false;
+        }
+        self.transcript.on_event(&ev);
+        self.status.on_event(&ev);
+        self.input.on_event(&ev);
         if matches!(ev, AppEvent::Rewound { .. }) {
             self.rewinding = false;
         }
         self.maybe_flush();
     }
 
-    /// Send each queued message to the app as its own turn once it is idle.
     fn maybe_flush(&mut self) {
-        if self.state.busy || self.input.queue_len() == 0 {
+        if self.state.busy || self.pending.is_empty() {
             return;
         }
-        let texts = self.input.drain_pending();
+        let texts = std::mem::take(&mut self.pending);
         self.state.busy = true;
         let remaining = send_each(texts, |text| {
-            self.handle
+            if self
+                .handle
                 .send(AppCmd::UserInput(text.to_string()))
                 .is_ok()
+            {
+                self.transcript.push_user(&display_user_input(text));
+                true
+            } else {
+                false
+            }
         });
         if !remaining.is_empty() {
-            self.input.restore_pending(remaining);
+            let mut rest = remaining;
+            rest.append(&mut self.pending);
+            self.pending = rest;
             self.state.busy = false;
         }
     }
@@ -217,14 +213,13 @@ impl Ui {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 KeyResult::Action(Action::Quit)
             }
-            KeyCode::Esc if !self.input.slash_open() => match EscAction::new(
-                self.input.pop_pending(),
+            KeyCode::Esc if self.input.overlay() == Overlay::None => match EscAction::new(
+                self.pending.pop(),
                 self.state.busy,
                 self.rewinding,
                 self.transcript.last_user_text(),
             ) {
                 EscAction::PopQueue(text) => {
-                    self.transcript.pop_pending_user();
                     self.input.set_text(&text);
                     KeyResult::Handled
                 }
@@ -239,10 +234,7 @@ impl Ui {
                 }
                 EscAction::Ignore => KeyResult::Handled,
             },
-            // While a rewind is in flight (idle, a few ms), plain Enter would
-            // submit before the backend truncates history, letting the
-            // Rewound event clobber the fresh submission. Block it until the
-            // rewind completes; Alt-Enter newline still edits normally.
+            // Plain Enter during rewind would submit before history is truncated.
             KeyCode::Enter if self.rewinding && key.modifiers.is_empty() => KeyResult::Handled,
             _ => match self.transcript.handle_key(key, &self.state) {
                 KeyResult::Ignored => self.input.handle_key(key, &self.state),
@@ -263,7 +255,7 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::Queue(text)) => {
-                self.transcript.push_user_queued(&display_user_input(&text));
+                self.pending.push(text);
                 false
             }
             KeyResult::Action(Action::Submit(text)) => {
@@ -291,83 +283,45 @@ impl Ui {
     }
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
-        let avail = f.area().height;
-        let reply_h = self
-            .status
-            .reply_height(f.area().width)
-            .min(avail.saturating_sub(4));
-        let chrome = 4 + reply_h;
-        let input_h = self
-            .input
-            .height(f.area().width)
-            .min(avail.saturating_sub(chrome));
-        let queue_h = self
-            .queue
-            .height(self.input.pending())
-            .min(avail.saturating_sub(chrome + input_h));
-        let setup_h = self.input.setup_height(&self.state);
-        let picker_h = self.input.model_picker_height(&self.state);
-        let slash_h = self.input.slash_command_height(&self.state);
-        let popup_h = if setup_h > 0 {
-            setup_h
-        } else if picker_h > 0 {
-            picker_h
-        } else {
-            slash_h
-        }
-        .min(avail.saturating_sub(chrome + input_h + queue_h));
-        let mut constraints = vec![Constraint::Min(3)];
-        if queue_h > 0 {
-            constraints.push(Constraint::Length(queue_h));
-        }
-        constraints.push(Constraint::Length(input_h));
-        if popup_h > 0 {
-            constraints.push(Constraint::Length(popup_h));
-        }
-        constraints.push(Constraint::Length(1));
-        if reply_h > 0 {
-            constraints.push(Constraint::Length(reply_h));
-        }
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(constraints)
-            .split(f.area());
+        let area = f.area();
+        let regions = layout::split(
+            area,
+            self.input.height(area.width),
+            self.queue.height(&self.pending),
+            self.input.overlay_height(),
+            self.status.reply_height(area.width),
+        );
 
-        let mut next = 0;
-        self.transcript.draw(f, chunks[next], &self.state);
-        next += 1;
-        if queue_h > 0 {
-            self.queue.draw(f, chunks[next], self.input.pending());
-            next += 1;
+        self.transcript.draw(f, regions.transcript, &self.state);
+        if let Some(queue) = regions.queue {
+            self.queue.draw(f, queue, &self.pending);
         }
-        self.input.draw(f, chunks[next], &self.state);
-        next += 1;
-        if setup_h > 0 {
-            self.input.draw_setup(f, chunks[next], &self.state);
-            next += 1;
-        } else if picker_h > 0 {
-            self.input.draw_model_picker(f, chunks[next], &self.state);
-            next += 1;
-        } else if slash_h > 0 {
-            self.input.draw_slash_command(f, chunks[next], &self.state);
-            next += 1;
+        self.input.draw(f, regions.input, &self.state);
+        if let Some(overlay) = regions.overlay {
+            self.input.draw_overlay(f, overlay);
         }
         self.status.draw_bar(
             f,
-            chunks[next],
+            regions.status,
             &self.state,
-            self.input.slash_open(),
+            status_hint(self.input.overlay(), self.state.busy),
             self.spin,
         );
-        if reply_h > 0 {
-            next += 1;
-            self.status.draw_reply(f, chunks[next]);
+        if let Some(reply) = regions.reply {
+            self.status.draw_reply(f, reply);
         }
     }
 }
 
-/// What pressing Esc should do, in priority order: pop a queued message,
-/// interrupt an in-flight turn, or rewind the last finished exchange.
+fn status_hint(overlay: Overlay, busy: bool) -> StatusHint {
+    match overlay {
+        Overlay::Slash => StatusHint::Slash,
+        Overlay::Model | Overlay::Setup => StatusHint::Modal,
+        Overlay::None if busy => StatusHint::Busy,
+        Overlay::None => StatusHint::Idle,
+    }
+}
+
 enum EscAction {
     PopQueue(String),
     Cancel,
@@ -393,8 +347,6 @@ impl EscAction {
     }
 }
 
-/// Send each message as its own `UserInput`, in order. Returns the messages
-/// that were not sent: the first failed one and everything after it.
 fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<String> {
     let mut iter = texts.into_iter();
     let mut remaining = Vec::new();
@@ -408,38 +360,12 @@ fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<Stri
     remaining
 }
 
-fn setup_terminal() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
-    let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend)
-}
-
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableBracketedPaste,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn esc_action_priority_queue_then_cancel_then_rewind() {
-        // Queued message wins over everything else.
         assert!(matches!(
             EscAction::new(Some("q".into()), true, false, Some("u".into())),
             EscAction::PopQueue(t) if t == "q"
@@ -448,22 +374,18 @@ mod tests {
             EscAction::new(Some("q".into()), true, true, None),
             EscAction::PopQueue(t) if t == "q"
         ));
-        // Empty queue + busy means interrupt, not fallback.
         assert!(matches!(
             EscAction::new(None, true, false, Some("u".into())),
             EscAction::Cancel
         ));
-        // A rewind already in flight is ignored until it completes.
         assert!(matches!(
             EscAction::new(None, false, true, Some("u".into())),
             EscAction::Ignore
         ));
-        // Idle with a previous user message rewinds it.
         assert!(matches!(
             EscAction::new(None, false, false, Some("u".into())),
             EscAction::Rewind(t) if t == "u"
         ));
-        // Idle with nothing to fall back to is a no-op.
         assert!(matches!(
             EscAction::new(None, false, false, None),
             EscAction::Ignore
@@ -496,5 +418,14 @@ mod tests {
         );
         assert_eq!(calls, vec!["one", "two"]);
         assert_eq!(remaining, vec!["two", "three"]);
+    }
+
+    #[test]
+    fn status_hint_follows_overlay_then_busy() {
+        assert_eq!(status_hint(Overlay::Slash, true), StatusHint::Slash);
+        assert_eq!(status_hint(Overlay::Setup, false), StatusHint::Modal);
+        assert_eq!(status_hint(Overlay::Model, false), StatusHint::Modal);
+        assert_eq!(status_hint(Overlay::None, true), StatusHint::Busy);
+        assert_eq!(status_hint(Overlay::None, false), StatusHint::Idle);
     }
 }

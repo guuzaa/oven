@@ -18,6 +18,14 @@ const SPIN_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', 
 const REPLY_TTL: Duration = Duration::from_secs(3);
 const REPLY_FLASH: Duration = Duration::from_millis(150);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusHint {
+    Idle,
+    Busy,
+    Slash,
+    Modal,
+}
+
 /// Single status row below the input: model · root · token usage.
 /// Optional slash-command reply is drawn on the row(s) beneath it.
 pub struct StatusBar {
@@ -109,7 +117,7 @@ impl StatusBar {
         f: &mut Frame<'_>,
         area: Rect,
         state: &State,
-        popup: bool,
+        hint: StatusHint,
         spin: u8,
     ) {
         let gray = theme::dim();
@@ -127,12 +135,11 @@ impl StatusBar {
             spans.push(Span::styled(" · ", gray));
             spans.push(Span::styled(format!("effort {effort}"), theme::effort()));
         }
-        let hint = if popup {
-            "tab fill · enter · esc"
-        } else if state.busy {
-            "esc cancel · enter queue"
-        } else {
-            "enter send · alt-enter newline · esc undo"
+        let hint = match hint {
+            StatusHint::Slash => "tab fill · enter · esc",
+            StatusHint::Modal => "enter · esc",
+            StatusHint::Busy => "esc cancel · enter queue",
+            StatusHint::Idle => "enter send · alt-enter newline · esc undo",
         };
         let max = area.width as usize;
         let hint_w = hint.width();
@@ -156,7 +163,7 @@ impl Component for StatusBar {
         KeyResult::Ignored
     }
 
-    fn on_event(&mut self, ev: &AppEvent, state: &mut State) {
+    fn on_event(&mut self, ev: &AppEvent) {
         match ev {
             AppEvent::Agent { event, .. } => match event {
                 AgentEvent::Done { usage, .. } => {
@@ -176,13 +183,6 @@ impl Component for StatusBar {
                 }
                 _ => {}
             },
-            AppEvent::Idle { .. } => {
-                state.busy = false;
-            }
-            AppEvent::ModelsUpdated { .. } => {}
-            AppEvent::ProviderUpdated { .. } => {}
-            AppEvent::Error { .. } => {}
-            AppEvent::Exit { .. } => {}
             AppEvent::Notify { text, .. } => {
                 self.set_reply(text.clone());
             }
@@ -190,11 +190,17 @@ impl Component for StatusBar {
                 self.total = *usage;
                 self.clear_reply();
             }
+            _ => {}
         }
     }
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        self.draw_bar(f, area, state, false, 0);
+        let hint = if state.busy {
+            StatusHint::Busy
+        } else {
+            StatusHint::Idle
+        };
+        self.draw_bar(f, area, state, hint, 0);
     }
 }
 
@@ -330,57 +336,40 @@ mod tests {
     }
 
     #[test]
-    fn idle_clears_busy() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State { busy: true };
-        bar.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut state);
-        assert!(!state.busy);
-    }
-
-    #[test]
     fn history_cleared_resets_usage() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
         bar.total = Usage {
             input_tokens: 1000,
             output_tokens: 2000,
             cache_read_tokens: 0,
             reasoning_tokens: 0,
         };
-        bar.on_event(
-            &agent_event(AgentEvent::HistoryCleared {
-                agent_id: AgentId(1),
-            }),
-            &mut state,
-        );
+        bar.on_event(&agent_event(AgentEvent::HistoryCleared {
+            agent_id: AgentId(1),
+        }));
         assert_eq!(bar.total, Usage::default());
     }
 
     #[test]
     fn done_updates_token_usage() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
         let usage = Usage {
             input_tokens: 1234,
             output_tokens: 56,
             cache_read_tokens: 789,
             reasoning_tokens: 10,
         };
-        bar.on_event(
-            &agent_event(AgentEvent::Done {
-                agent_id: AgentId(1),
-                text: "done".into(),
-                usage,
-            }),
-            &mut state,
-        );
+        bar.on_event(&agent_event(AgentEvent::Done {
+            agent_id: AgentId(1),
+            text: "done".into(),
+            usage,
+        }));
         assert_eq!(bar.total, usage);
     }
 
     #[test]
     fn rewound_syncs_token_usage() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
         bar.total = Usage {
             input_tokens: 1000,
             output_tokens: 2000,
@@ -393,41 +382,31 @@ mod tests {
             cache_read_tokens: 0,
             reasoning_tokens: 0,
         };
-        bar.on_event(
-            &AppEvent::Rewound {
-                app_id: AppId(1),
-                text: Some("restored".into()),
-                messages: Vec::new(),
-                usage,
-            },
-            &mut state,
-        );
+        bar.on_event(&AppEvent::Rewound {
+            app_id: AppId(1),
+            text: Some("restored".into()),
+            messages: Vec::new(),
+            usage,
+        });
         assert_eq!(bar.total, usage);
     }
 
     #[test]
     fn model_changed_updates_model_and_effort() {
         let mut bar = StatusBar::new("gpt-4o", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
-        bar.on_event(
-            &agent_event(AgentEvent::ModelChanged {
-                agent_id: AgentId(1),
-                model: "deepseek-chat".into(),
-                reasoning_effort: Some(ReasoningEffort::High),
-            }),
-            &mut state,
-        );
+        bar.on_event(&agent_event(AgentEvent::ModelChanged {
+            agent_id: AgentId(1),
+            model: "deepseek-chat".into(),
+            reasoning_effort: Some(ReasoningEffort::High),
+        }));
         assert_eq!(bar.model, "deepseek-chat");
         assert_eq!(bar.effort, Some(ReasoningEffort::High));
 
-        bar.on_event(
-            &agent_event(AgentEvent::ModelChanged {
-                agent_id: AgentId(1),
-                model: "gpt-4o".into(),
-                reasoning_effort: None,
-            }),
-            &mut state,
-        );
+        bar.on_event(&agent_event(AgentEvent::ModelChanged {
+            agent_id: AgentId(1),
+            model: "gpt-4o".into(),
+            reasoning_effort: None,
+        }));
         assert_eq!(bar.model, "gpt-4o");
         assert_eq!(bar.effort, None);
     }
@@ -447,15 +426,11 @@ mod tests {
     #[test]
     fn reply_event_sets_reply_and_height() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
         assert_eq!(bar.reply_height(80), 0);
-        bar.on_event(
-            &AppEvent::Notify {
-                app_id: AppId(1),
-                text: "current model: gpt-4o".into(),
-            },
-            &mut state,
-        );
+        bar.on_event(&AppEvent::Notify {
+            app_id: AppId(1),
+            text: "current model: gpt-4o".into(),
+        });
         assert_eq!(bar.reply.as_deref(), Some("current model: gpt-4o"));
         assert_eq!(bar.reply_height(80), 1);
         assert_eq!(bar.reply_height(8), 3);
@@ -494,8 +469,7 @@ mod tests {
     #[test]
     fn first_notify_does_not_flash() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
-        bar.on_event(&notify("Copied!"), &mut state);
+        bar.on_event(&notify("Copied!"));
         assert!(!bar.is_flashing());
         assert!(bar.has_reply());
         let (row, _) = draw_reply_row(&bar);
@@ -505,9 +479,8 @@ mod tests {
     #[test]
     fn repeat_notify_flashes_then_restores() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
-        bar.on_event(&notify("Copied!"), &mut state);
-        bar.on_event(&notify("Copied!"), &mut state);
+        bar.on_event(&notify("Copied!"));
+        bar.on_event(&notify("Copied!"));
         assert!(bar.is_flashing());
         assert!(bar.has_reply());
         assert_eq!(bar.reply_height(80), 1);
@@ -542,26 +515,19 @@ mod tests {
     #[test]
     fn history_cleared_and_rewound_drop_reply() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
         bar.reply = Some("hi".into());
-        bar.on_event(
-            &agent_event(AgentEvent::HistoryCleared {
-                agent_id: AgentId(1),
-            }),
-            &mut state,
-        );
+        bar.on_event(&agent_event(AgentEvent::HistoryCleared {
+            agent_id: AgentId(1),
+        }));
         assert!(bar.reply.is_none());
 
         bar.reply = Some("hi".into());
-        bar.on_event(
-            &AppEvent::Rewound {
-                app_id: AppId(1),
-                text: None,
-                messages: Vec::new(),
-                usage: Usage::default(),
-            },
-            &mut state,
-        );
+        bar.on_event(&AppEvent::Rewound {
+            app_id: AppId(1),
+            text: None,
+            messages: Vec::new(),
+            usage: Usage::default(),
+        });
         assert!(bar.reply.is_none());
     }
 
@@ -573,14 +539,11 @@ mod tests {
         use ratatui::style::Color;
 
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
-        bar.on_event(
-            &AppEvent::Notify {
-                app_id: AppId(1),
-                text: "current model: gpt-4o".into(),
-            },
-            &mut state,
-        );
+        let state = State::new();
+        bar.on_event(&AppEvent::Notify {
+            app_id: AppId(1),
+            text: "current model: gpt-4o".into(),
+        });
 
         let backend = TestBackend::new(40, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -590,7 +553,7 @@ mod tests {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(1), Constraint::Length(1)])
                     .split(f.area());
-                bar.draw_bar(f, chunks[0], &state, false, 0);
+                bar.draw_bar(f, chunks[0], &state, StatusHint::Idle, 0);
                 bar.draw_reply(f, chunks[1]);
             })
             .unwrap();

@@ -1,13 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
+use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
-use super::component::State;
+use super::list::{self, MAX_LIST_ROWS};
 use super::theme;
-
-const MAX_COMMAND_ROWS: usize = 6;
 
 /// Result of a key consumed by the slash-command popup.
 pub(crate) enum SlashCommandPopupAction {
@@ -86,39 +84,34 @@ impl SlashCommandPopup {
             .collect()
     }
 
-    /// Height of the popup, or 0 when hidden.
-    pub(crate) fn height(&self, _state: &State) -> u16 {
+    pub(crate) fn height(&self) -> u16 {
         if !self.open {
             return 0;
         }
-        self.matches().len().clamp(1, MAX_COMMAND_ROWS) as u16
+        self.matches().len().clamp(1, MAX_LIST_ROWS) as u16
     }
 
-    pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect, _state: &State) {
+    pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect) {
         if !self.open {
             return;
         }
         let indices = self.matches();
-        let mut lines = Vec::with_capacity(indices.len());
-        for (row, &idx) in indices.iter().take(MAX_COMMAND_ROWS).enumerate() {
-            let (name, desc) = &self.commands[idx];
-            let name_style = if row == self.selected {
-                theme::accent()
-            } else {
-                ratatui::style::Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("/{name}"), name_style),
-                Span::styled(format!("  {desc}"), theme::dim()),
-            ]));
+        if indices.is_empty() {
+            f.render_widget(
+                Paragraph::new(Span::styled("no matching command", theme::dim())),
+                area,
+            );
+            return;
         }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "no matching command",
-                theme::dim(),
-            )));
-        }
-        f.render_widget(Paragraph::new(lines), area);
+        list::draw_choice_list(
+            f,
+            area,
+            indices.iter().take(MAX_LIST_ROWS).map(|&idx| {
+                let (name, desc) = &self.commands[idx];
+                (format!("/{name}"), desc.clone())
+            }),
+            self.selected,
+        );
     }
 
     /// Handle keys while the popup is open.
@@ -130,18 +123,9 @@ impl SlashCommandPopup {
                 self.close();
                 Some(SlashCommandPopupAction::Handled)
             }
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Down => {
                 let n = self.matches().len();
-                if n > 0 {
-                    self.selected = (self.selected + n - 1) % n;
-                }
-                Some(SlashCommandPopupAction::Handled)
-            }
-            KeyCode::Down => {
-                let n = self.matches().len();
-                if n > 0 {
-                    self.selected = (self.selected + 1) % n;
-                }
+                list::cycle_selected(&mut self.selected, n, key.code == KeyCode::Up);
                 Some(SlashCommandPopupAction::Handled)
             }
             KeyCode::Tab => {

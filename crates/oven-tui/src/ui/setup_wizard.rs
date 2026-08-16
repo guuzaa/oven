@@ -5,16 +5,16 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::component::State;
+use super::list;
 use super::theme;
 
 const KEEP: &str = "keep current";
 
-const NAME_ITEMS: [(&str, &str); 5] = [
+const NAME_ITEMS: [(&str, &str); 6] = [
     ("openai", "OpenAI"),
     ("deepseek", "DeepSeek"),
-    // ("moonshot", "Moonshot (Kimi)"),
     ("zhipu", "Zhipu"),
+    ("moonshot", "Moonshot (Kimi)"),
     ("grok", "Grok"),
     (KEEP, "Keep the current provider"),
 ];
@@ -80,7 +80,7 @@ impl SetupWizard {
         self.buffer.clear();
     }
 
-    pub(crate) fn height(&self, _state: &State) -> u16 {
+    pub(crate) fn height(&self) -> u16 {
         if !self.open {
             return 0;
         }
@@ -106,7 +106,7 @@ impl SetupWizard {
         Some("*".repeat(self.buffer.chars().count()))
     }
 
-    pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect, _state: &State) {
+    pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect) {
         if !self.open {
             return;
         }
@@ -157,7 +157,7 @@ impl SetupWizard {
     fn handle_name_key(&mut self, key: KeyEvent) -> SetupWizardAction {
         match key.code {
             KeyCode::Up | KeyCode::Down => {
-                cycle_selected(
+                list::cycle_selected(
                     &mut self.selected,
                     NAME_ITEMS.len(),
                     key.code == KeyCode::Up,
@@ -186,7 +186,7 @@ impl SetupWizard {
         let items = self.kind_items();
         match key.code {
             KeyCode::Up | KeyCode::Down => {
-                cycle_selected(&mut self.selected, items.len(), key.code == KeyCode::Up);
+                list::cycle_selected(&mut self.selected, items.len(), key.code == KeyCode::Up);
                 SetupWizardAction::Handled
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
@@ -268,19 +268,7 @@ impl SetupWizard {
     }
 
     fn draw_list(&self, f: &mut Frame<'_>, area: Rect, items: &[(&str, &str)]) {
-        let mut lines = Vec::with_capacity(items.len());
-        for (row, (name, desc)) in items.iter().enumerate() {
-            let name_style = if row == self.selected {
-                theme::accent()
-            } else {
-                ratatui::style::Style::default()
-            };
-            lines.push(Line::from(vec![
-                Span::styled(*name, name_style),
-                Span::styled(format!("  {desc}"), theme::dim()),
-            ]));
-        }
-        f.render_widget(Paragraph::new(lines), area);
+        list::draw_choice_list(f, area, items.iter().copied(), self.selected);
     }
 }
 
@@ -308,17 +296,6 @@ fn nonempty(value: &str) -> Option<String> {
     } else {
         Some(value.to_string())
     }
-}
-
-fn cycle_selected(selected: &mut usize, n: usize, up: bool) {
-    if n == 0 {
-        return;
-    }
-    *selected = if up {
-        (*selected + n - 1) % n
-    } else {
-        (*selected + 1) % n
-    };
 }
 
 fn kinds_for(name: Option<&str>) -> &'static [(&'static str, &'static str)] {

@@ -19,13 +19,19 @@ use super::setup_wizard::{SetupWizard, SetupWizardAction};
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
 use super::theme;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Overlay {
+    None,
+    Slash,
+    Model,
+    Setup,
+}
+
 pub struct InputView {
     textarea: TextArea<'static>,
     slash_command: SlashCommandPopup,
     model_picker: ModelPicker,
     setup: SetupWizard,
-    /// Messages accepted while the app is busy, flushed once it idles again.
-    pending: Vec<String>,
 }
 
 impl InputView {
@@ -35,7 +41,6 @@ impl InputView {
             slash_command: SlashCommandPopup::new(commands),
             model_picker: ModelPicker::new(Vec::new()),
             setup: SetupWizard::new(provider),
-            pending: Vec::new(),
         }
     }
 
@@ -51,35 +56,39 @@ impl InputView {
         self.setup.close();
     }
 
-    /// Height of the command popup below the input, or 0 when hidden.
-    pub fn slash_command_height(&self, state: &State) -> u16 {
-        self.slash_command.height(state)
+    pub fn overlay(&self) -> Overlay {
+        if self.setup.is_open() {
+            Overlay::Setup
+        } else if self.model_picker.is_open() {
+            Overlay::Model
+        } else if self.slash_command.is_open() {
+            Overlay::Slash
+        } else {
+            Overlay::None
+        }
     }
 
-    pub fn draw_slash_command(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        self.slash_command.draw(f, area, state);
+    pub fn overlay_height(&self) -> u16 {
+        match self.overlay() {
+            Overlay::None => 0,
+            Overlay::Setup => self.setup.height(),
+            Overlay::Model => self.model_picker.height(),
+            Overlay::Slash => self.slash_command.height(),
+        }
     }
 
-    /// Height of the model picker below the input, or 0 when hidden.
-    pub fn model_picker_height(&self, state: &State) -> u16 {
-        self.model_picker.height(state)
-    }
-
-    pub fn draw_model_picker(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        self.model_picker.draw(f, area, state);
-    }
-
-    pub fn setup_height(&self, state: &State) -> u16 {
-        self.setup.height(state)
+    pub fn draw_overlay(&mut self, f: &mut Frame<'_>, area: Rect) {
+        match self.overlay() {
+            Overlay::None => {}
+            Overlay::Setup => self.setup.draw(f, area),
+            Overlay::Model => self.model_picker.draw(f, area),
+            Overlay::Slash => self.slash_command.draw(f, area),
+        }
     }
 
     pub(crate) fn open_setup(&mut self) {
         self.setup.open();
         self.fill_command("/setup ");
-    }
-
-    pub fn draw_setup(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        self.setup.draw(f, area, state);
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
@@ -95,45 +104,12 @@ impl InputView {
         self.slash_command.refresh(&self.text());
     }
 
-    /// Number of messages waiting to be flushed to the app.
-    pub(crate) fn queue_len(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// Messages waiting to be flushed, in queue order.
-    pub(crate) fn pending(&self) -> &[String] {
-        &self.pending
-    }
-
-    /// Take all queued messages in order, clearing the queue.
-    pub(crate) fn drain_pending(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.pending)
-    }
-
-    /// Put messages back at the front of the queue (e.g. after a failed send).
-    pub(crate) fn restore_pending(&mut self, mut texts: Vec<String>) {
-        texts.append(&mut self.pending);
-        self.pending = texts;
-    }
-
-    /// Remove and return the most recently queued message, if any.
-    pub(crate) fn pop_pending(&mut self) -> Option<String> {
-        self.pending.pop()
-    }
-
-    /// Replace the input content with `text` (multi-line supported) and move
-    /// the cursor to the end.
     pub(crate) fn set_text(&mut self, text: &str) {
         let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
         let row = lines.len().saturating_sub(1);
         let col = lines.last().map(|l| l.width()).unwrap_or(0);
         self.textarea.set_lines(lines, (row, col));
         self.slash_command.refresh(&self.text());
-    }
-
-    /// Whether the slash-command popup or the model picker is currently open.
-    pub(crate) fn slash_open(&self) -> bool {
-        self.slash_command.is_open() || self.model_picker.is_open() || self.setup.is_open()
     }
 
     fn text(&self) -> String {
@@ -148,7 +124,7 @@ impl InputView {
 }
 
 impl Component for InputView {
-    fn on_event(&mut self, ev: &AppEvent, _state: &mut State) {
+    fn on_event(&mut self, ev: &AppEvent) {
         match ev {
             AppEvent::ModelsUpdated { models, .. } => {
                 self.model_picker.update_models(models.clone());
@@ -245,7 +221,6 @@ impl Component for InputView {
                         self.clear();
                         submit_command(text)
                     } else {
-                        self.pending.push(text.clone());
                         self.clear();
                         KeyResult::Action(Action::Queue(text))
                     }
@@ -411,7 +386,8 @@ mod tests {
         let mut view = view();
         type_text(&mut view, "/");
         assert!(view.slash_command.is_open());
-        assert_eq!(view.slash_command_height(&State::new()), 4);
+        assert_eq!(view.overlay_height(), 4);
+        assert_eq!(view.overlay(), Overlay::Slash);
     }
 
     #[test]
@@ -539,7 +515,6 @@ mod tests {
             KeyResult::Action(Action::Queue(text)) => assert_eq!(text, "hello"),
             _ => panic!("expected queue"),
         }
-        assert_eq!(view.queue_len(), 1);
         assert!(view.textarea.lines()[0].is_empty());
     }
 
@@ -549,7 +524,6 @@ mod tests {
         let state = State { busy: true };
         let result = view.handle_key(key(KeyCode::Enter), &state);
         assert!(matches!(result, KeyResult::Handled));
-        assert_eq!(view.queue_len(), 0);
     }
 
     #[test]
@@ -573,32 +547,6 @@ mod tests {
             KeyResult::Action(Action::Submit(text)) => assert_eq!(text, "/clear"),
             _ => panic!("expected submit"),
         }
-        assert_eq!(view.queue_len(), 0);
-    }
-
-    #[test]
-    fn drain_pending_returns_in_order() {
-        let mut view = view();
-        type_text(&mut view, "one");
-        view.handle_key(key(KeyCode::Enter), &State { busy: true });
-        type_text(&mut view, "two");
-        view.handle_key(key(KeyCode::Enter), &State { busy: true });
-        assert_eq!(view.queue_len(), 2);
-        assert_eq!(
-            view.drain_pending(),
-            vec!["one".to_string(), "two".to_string()]
-        );
-        assert_eq!(view.queue_len(), 0);
-    }
-
-    #[test]
-    fn pending_returns_queued_in_order() {
-        let mut view = view();
-        type_text(&mut view, "one");
-        view.handle_key(key(KeyCode::Enter), &State { busy: true });
-        type_text(&mut view, "two");
-        view.handle_key(key(KeyCode::Enter), &State { busy: true });
-        assert_eq!(view.pending(), &["one".to_string(), "two".to_string()]);
     }
 
     fn open_picker(view: &mut InputView) {
@@ -629,7 +577,7 @@ mod tests {
         type_text(&mut view, "/model g");
         view.handle_key(key(KeyCode::Enter), &State::new());
         assert!(view.model_picker.is_open());
-        assert_eq!(view.model_picker.filter, "g");
+        assert_eq!(view.model_picker.filter(), "g");
         assert_eq!(view.model_picker.matches(), vec![0, 1]);
     }
 
@@ -640,17 +588,17 @@ mod tests {
         for ch in ['d', 'e', 'e', 'p'] {
             view.handle_key(key(KeyCode::Char(ch)), &State::new());
         }
-        assert_eq!(view.model_picker.filter, "deep");
+        assert_eq!(view.model_picker.filter(), "deep");
         assert_eq!(view.model_picker.matches(), vec![2]);
 
         view.handle_key(key(KeyCode::Backspace), &State::new());
-        assert_eq!(view.model_picker.filter, "dee");
+        assert_eq!(view.model_picker.filter(), "dee");
         assert_eq!(view.model_picker.matches(), vec![2]);
 
         for _ in 0..3 {
             view.handle_key(key(KeyCode::Backspace), &State::new());
         }
-        assert_eq!(view.model_picker.filter, "");
+        assert_eq!(view.model_picker.filter(), "");
         assert_eq!(view.model_picker.matches(), vec![0, 1, 2]);
     }
 
@@ -748,20 +696,10 @@ mod tests {
             app_id: oven_app::AppId(1),
             models: vec![("kimi-k2".into(), "Moonshot".into())],
         };
-        view.on_event(&ev, &mut State::new());
+        view.on_event(&ev);
         type_text(&mut view, "/model");
         view.handle_key(key(KeyCode::Enter), &State::new());
         assert_eq!(view.model_picker.matches(), vec![0]);
-    }
-
-    #[test]
-    fn pop_pending_pops_most_recent() {
-        let mut view = view();
-        view.pending.push("a".into());
-        view.pending.push("b".into());
-        assert_eq!(view.pop_pending().as_deref(), Some("b"));
-        assert_eq!(view.pop_pending().as_deref(), Some("a"));
-        assert_eq!(view.pop_pending(), None);
     }
 
     #[test]
@@ -791,7 +729,7 @@ mod tests {
             messages: Vec::new(),
             usage: oven_llm::Usage::default(),
         };
-        view.on_event(&ev, &mut State::new());
+        view.on_event(&ev);
         assert_eq!(view.textarea.lines()[0], "restored");
     }
 
@@ -861,7 +799,6 @@ mod tests {
             }
             _ => panic!("expected QuietSubmit"),
         }
-        assert_eq!(view.queue_len(), 0);
     }
 
     #[test]

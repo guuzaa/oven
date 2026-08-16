@@ -10,7 +10,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::component::{Action, Component, KeyResult, State};
 use super::theme;
-use super::tool_display;
 
 const MOUSE_SCROLL_STEP: u16 = 3;
 const LINE_PREFIX_WIDTH: usize = 2;
@@ -76,9 +75,6 @@ pub struct Transcript {
     stream_kind: LineKind,
     wrapped_stream: Vec<Line<'static>>,
     stream_dirty: bool,
-    /// User messages queued while busy; rendered as `User` rows once the
-    /// in-flight answer finishes so they appear after it.
-    pending_user: Vec<String>,
     /// Content width (excluding borders) used by the cached wrap; 0 until
     /// the first draw.
     width: usize,
@@ -104,7 +100,6 @@ impl Transcript {
             stream_kind: LineKind::Text,
             wrapped_stream: Vec::new(),
             stream_dirty: false,
-            pending_user: Vec::new(),
             width: 0,
             pinned: true,
             top: 0,
@@ -120,14 +115,6 @@ impl Transcript {
         self.push_row(LineKind::User, text);
     }
 
-    /// Remember a user message accepted while the app was busy; it is shown
-    /// as a normal user row once the current answer finishes.
-    pub fn push_user_queued(&mut self, text: &str) {
-        self.pending_user.push(text.to_string());
-    }
-
-    /// Text of the most recent user message, or `None` when the transcript
-    /// has none (fresh session or everything already rewound).
     pub(crate) fn last_user_text(&self) -> Option<String> {
         self.rows
             .iter()
@@ -136,15 +123,6 @@ impl Transcript {
             .map(|r| r.text.clone())
     }
 
-    /// Drop the most recently queued user message; mirrors the input queue
-    /// so popped messages do not reappear once the turn ends.
-    pub(crate) fn pop_pending_user(&mut self) -> Option<String> {
-        self.pending_user.pop()
-    }
-
-    /// Rebuild the transcript from a message list (e.g. after a rewind).
-    /// Keeps queued user messages and returns the view to following the
-    /// newest content.
     pub(crate) fn replace_from(&mut self, messages: &[Message]) {
         self.rows.clear();
         self.wrapped.clear();
@@ -280,7 +258,6 @@ impl Transcript {
         self.rows.clear();
         self.wrapped.clear();
         self.clear_stream();
-        self.pending_user.clear();
         self.pinned = true;
         self.top = 0;
         self.clear_selection();
@@ -319,14 +296,6 @@ impl Transcript {
         if !body.is_empty() {
             self.push_row(self.stream_kind, &body);
         }
-    }
-
-    /// Place queued user messages at the end of the transcript, after the
-    /// current activity (tool result or final answer) is rendered.
-    fn flush_pending_user(&mut self) {
-        std::mem::take(&mut self.pending_user)
-            .into_iter()
-            .for_each(|text| self.push_row(LineKind::User, &text));
     }
 
     fn clear_stream(&mut self) {
@@ -488,11 +457,11 @@ impl Component for Transcript {
     fn handle_key(&mut self, key: KeyEvent, _state: &State) -> KeyResult {
         match key.code {
             KeyCode::PageUp => {
-                self.scroll_up(1);
+                self.scroll_up(self.view_height.max(1) as u16);
                 KeyResult::Handled
             }
             KeyCode::PageDown => {
-                self.scroll_down(1);
+                self.scroll_down(self.view_height.max(1) as u16);
                 KeyResult::Handled
             }
             _ => KeyResult::Ignored,
@@ -533,7 +502,7 @@ impl Component for Transcript {
         }
     }
 
-    fn on_event(&mut self, ev: &AppEvent, _state: &mut State) {
+    fn on_event(&mut self, ev: &AppEvent) {
         match ev {
             AppEvent::Agent { event, .. } => match event {
                 AgentEvent::ThinkingDelta { text, .. } => {
@@ -556,7 +525,6 @@ impl Component for Transcript {
                         };
                         self.push_row(LineKind::ToolResult(*ok), &body);
                     }
-                    self.flush_pending_user();
                 }
                 AgentEvent::Done { text, .. } => {
                     if self.stream_kind == LineKind::Text {
@@ -593,7 +561,6 @@ impl Component for Transcript {
             AppEvent::Rewound { messages, .. } => self.replace_from(messages),
             AppEvent::Idle { .. } => {
                 self.flush_streaming();
-                self.flush_pending_user();
             }
             AppEvent::Error { message, .. } => {
                 self.flush_streaming();
@@ -911,37 +878,26 @@ fn copy_to_clipboard(text: &str) -> bool {
 #[cfg(not(test))]
 fn osc52_copy(text: &str) -> bool {
     use std::io::{self, Write};
-    let encoded = base64_encode(text.as_bytes());
+
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    let encoded = STANDARD.encode(text.as_bytes());
     write!(io::stdout(), "\x1b]52;c;{encoded}\x07")
         .and_then(|_| io::stdout().flush())
         .is_ok()
 }
 
-#[cfg(not(test))]
-fn base64_encode(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let n = match *chunk {
-            [a, b, c] => u32::from_be_bytes([0, a, b, c]),
-            [a, b] => u32::from_be_bytes([0, a, b, 0]),
-            [a] => u32::from_be_bytes([0, a, 0, 0]),
-            _ => 0,
-        };
-        out.push(T[((n >> 18) & 63) as usize] as char);
-        out.push(T[((n >> 12) & 63) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(T[((n >> 6) & 63) as usize] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(T[(n & 63) as usize] as char);
-        } else {
-            out.push('=');
+fn tool_display(name: &str, input: &serde_json::Value) -> String {
+    if name == "bash"
+        && let Some(command) = input.get("command").and_then(|v| v.as_str())
+    {
+        let command = command.trim();
+        if !command.is_empty() {
+            return command.to_string();
         }
     }
-    out
+    name.to_string()
 }
 
 #[cfg(test)]
@@ -1063,7 +1019,7 @@ mod tests {
                 output: "boom\n".into(),
             },
         };
-        t.on_event(&ev, &mut State::new());
+        t.on_event(&ev);
         let row = t.rows.last().unwrap();
         assert_eq!(row.kind, LineKind::ToolResult(false));
         assert_eq!(row.text, "boom");
@@ -1082,73 +1038,8 @@ mod tests {
                 output: String::new(),
             },
         };
-        t.on_event(&ev, &mut State::new());
+        t.on_event(&ev);
         assert_eq!(t.rows.len(), n);
-    }
-
-    #[test]
-    fn push_user_queued_is_deferred_until_idle() {
-        let mut t = Transcript::new();
-        let n = t.rows.len();
-        t.push_user_queued("hello");
-        assert_eq!(t.rows.len(), n);
-        t.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut State::new());
-        assert_eq!(
-            t.rows.last().map(|r| (r.kind, r.text.as_str())),
-            Some((LineKind::User, "hello"))
-        );
-    }
-
-    #[test]
-    fn queued_user_renders_after_streamed_answer() {
-        let mut t = Transcript::new();
-        t.push_stream(LineKind::Text, "answer");
-        t.push_user_queued("hello");
-        t.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut State::new());
-        let kinds: Vec<LineKind> = t.rows.iter().map(|r| r.kind).collect();
-        assert_eq!(&kinds[kinds.len() - 2..], &[LineKind::Text, LineKind::User]);
-    }
-
-    #[test]
-    fn queued_user_renders_after_tool_end() {
-        let mut t = Transcript::new();
-        t.push_user_queued("hello");
-        let ev = AppEvent::Agent {
-            app_id: AppId(1),
-            event: AgentEvent::ToolEnd {
-                agent_id: AgentId(1),
-                call_id: "c1".into(),
-                ok: false,
-                output: "boom\n".into(),
-            },
-        };
-        t.on_event(&ev, &mut State::new());
-        let kinds: Vec<LineKind> = t.rows.iter().map(|r| r.kind).collect();
-        assert_eq!(
-            &kinds[kinds.len() - 2..],
-            &[LineKind::ToolResult(false), LineKind::User]
-        );
-        assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some("hello"));
-    }
-
-    #[test]
-    fn queued_user_renders_after_empty_tool_end() {
-        let mut t = Transcript::new();
-        t.push_user_queued("hello");
-        let ev = AppEvent::Agent {
-            app_id: AppId(1),
-            event: AgentEvent::ToolEnd {
-                agent_id: AgentId(1),
-                call_id: "c1".into(),
-                ok: true,
-                output: String::new(),
-            },
-        };
-        t.on_event(&ev, &mut State::new());
-        assert_eq!(
-            t.rows.last().map(|r| (r.kind, r.text.as_str())),
-            Some((LineKind::User, "hello"))
-        );
     }
 
     #[test]
@@ -1212,13 +1103,10 @@ mod tests {
         let mut t = Transcript::new();
         t.push_user("/model");
         let n = t.rows.len();
-        t.on_event(
-            &AppEvent::Notify {
-                app_id: AppId(1),
-                text: "current model: gpt-4o".into(),
-            },
-            &mut State::new(),
-        );
+        t.on_event(&AppEvent::Notify {
+            app_id: AppId(1),
+            text: "current model: gpt-4o".into(),
+        });
         assert_eq!(t.rows.len(), n);
     }
 
@@ -1259,7 +1147,7 @@ mod tests {
     fn done_appends_separator_after_answer() {
         let mut t = Transcript::new();
         t.push_user("q");
-        t.on_event(&done("a"), &mut State::new());
+        t.on_event(&done("a"));
         assert_eq!(
             kinds_of(&t),
             vec![LineKind::User, LineKind::Text, LineKind::Separator]
@@ -1270,24 +1158,18 @@ mod tests {
     fn tool_end_does_not_append_separator() {
         let mut t = Transcript::new();
         t.push_user("q");
-        t.on_event(
-            &agent(AgentEvent::ToolStart {
-                agent_id: AgentId(1),
-                call_id: "c1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({ "command": "ls" }),
-            }),
-            &mut State::new(),
-        );
-        t.on_event(
-            &agent(AgentEvent::ToolEnd {
-                agent_id: AgentId(1),
-                call_id: "c1".into(),
-                ok: true,
-                output: "done".into(),
-            }),
-            &mut State::new(),
-        );
+        t.on_event(&agent(AgentEvent::ToolStart {
+            agent_id: AgentId(1),
+            call_id: "c1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({ "command": "ls" }),
+        }));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c1".into(),
+            ok: true,
+            output: "done".into(),
+        }));
         assert_eq!(
             kinds_of(&t),
             vec![LineKind::User, LineKind::Tool, LineKind::ToolResult(true),]
@@ -1298,25 +1180,19 @@ mod tests {
     fn separator_comes_after_tool_followup_not_between() {
         let mut t = Transcript::new();
         t.push_user("q");
-        t.on_event(
-            &agent(AgentEvent::ToolStart {
-                agent_id: AgentId(1),
-                call_id: "c1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({ "command": "ls" }),
-            }),
-            &mut State::new(),
-        );
-        t.on_event(
-            &agent(AgentEvent::ToolEnd {
-                agent_id: AgentId(1),
-                call_id: "c1".into(),
-                ok: true,
-                output: "done".into(),
-            }),
-            &mut State::new(),
-        );
-        t.on_event(&done("ok"), &mut State::new());
+        t.on_event(&agent(AgentEvent::ToolStart {
+            agent_id: AgentId(1),
+            call_id: "c1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({ "command": "ls" }),
+        }));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c1".into(),
+            ok: true,
+            output: "done".into(),
+        }));
+        t.on_event(&done("ok"));
         assert_eq!(
             kinds_of(&t),
             vec![
@@ -1333,33 +1209,12 @@ mod tests {
     fn cancelled_appends_separator() {
         let mut t = Transcript::new();
         t.push_user("q");
-        t.on_event(
-            &agent(AgentEvent::Cancelled {
-                agent_id: AgentId(1),
-            }),
-            &mut State::new(),
-        );
+        t.on_event(&agent(AgentEvent::Cancelled {
+            agent_id: AgentId(1),
+        }));
         assert_eq!(
             kinds_of(&t),
             vec![LineKind::User, LineKind::System, LineKind::Separator]
-        );
-    }
-
-    #[test]
-    fn queued_user_lands_after_separator() {
-        let mut t = Transcript::new();
-        t.push_user("q");
-        t.push_user_queued("next");
-        t.on_event(&done("a"), &mut State::new());
-        t.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut State::new());
-        assert_eq!(
-            kinds_of(&t),
-            vec![
-                LineKind::User,
-                LineKind::Text,
-                LineKind::Separator,
-                LineKind::User,
-            ]
         );
     }
 
@@ -1408,7 +1263,7 @@ mod tests {
         let mut t = Transcript::new();
         wide(&mut t);
         t.push_user("q");
-        t.on_event(&done("a"), &mut State::new());
+        t.on_event(&done("a"));
         let last = t.wrapped.last().expect("wrapped separator");
         let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.chars().filter(|c| *c == '─').count(), 80);
@@ -1431,23 +1286,32 @@ mod tests {
     }
 
     #[test]
-    fn pop_pending_user_pops_last() {
+    fn replace_from_rebuilds_rows() {
         let mut t = Transcript::new();
-        t.push_user_queued("a");
-        t.push_user_queued("b");
-        assert_eq!(t.pop_pending_user().as_deref(), Some("b"));
-        assert_eq!(t.pop_pending_user().as_deref(), Some("a"));
-        assert_eq!(t.pop_pending_user(), None);
+        t.push_user("old");
+        t.replace_from(&[Message::user_text("resumed")]);
+        assert_eq!(t.rows[0].text, "resumed");
+        assert_eq!(t.rows.len(), 1);
     }
 
     #[test]
-    fn replace_from_rebuilds_rows_and_keeps_pending_user() {
+    fn page_keys_scroll_by_viewport() {
+        use crossterm::event::KeyModifiers;
+
         let mut t = Transcript::new();
-        t.push_user("old");
-        t.push_user_queued("queued");
-        t.replace_from(&[Message::user_text("resumed")]);
-        assert_eq!(t.rows[0].text, "resumed");
-        assert_eq!(t.pending_user, vec!["queued".to_string()]);
+        wide(&mut t);
+        t.view_height = 5;
+        fill(&mut t, 20);
+        let bottom = t.total_lines().saturating_sub(5);
+        let page = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        t.handle_key(page, &State::new());
+        assert!(!t.pinned);
+        assert_eq!(t.top, bottom.saturating_sub(5));
+        t.handle_key(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
+            &State::new(),
+        );
+        assert!(t.pinned);
     }
 
     fn ready(t: &mut Transcript, area: Rect) {
