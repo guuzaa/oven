@@ -1,0 +1,80 @@
+name: Release CI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: zijiren233/cargo-cross@v1
+        with:
+          toolchain: "1.92.0"
+          profile: release
+          targets: |
+            x86_64-unknown-linux-musl
+            aarch64-unknown-linux-musl
+            x86_64-pc-windows-gnu
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          targets="x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu aarch64-apple-darwin x86_64-apple-darwin"
+          for target in ${targets}; do
+            if [[ "${target}" == *windows* ]]; then
+              exe="oven.exe"
+            else
+              exe="oven"
+            fi
+            src="target/${target}/release/${exe}"
+            test -f "${src}"
+            mkdir -p "dist/oven-${target}"
+            cp "${src}" "dist/oven-${target}/${exe}"
+            if [[ "${target}" == *windows* ]]; then
+              python -c "import shutil; shutil.make_archive('oven-${{ github.ref_name }}-${target}', 'zip', 'dist', 'oven-${target}')"
+            else
+              tar -C dist -czf "oven-${{ github.ref_name }}-${target}.tar.gz" "oven-${target}"
+            fi
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oven-binaries
+          path: |
+            oven-*.tar.gz
+            oven-*.zip
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: oven-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
