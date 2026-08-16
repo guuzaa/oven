@@ -8,7 +8,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::component::{Component, KeyResult, State};
@@ -16,6 +16,7 @@ use super::theme;
 
 const SPIN_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const REPLY_TTL: Duration = Duration::from_secs(3);
+const REPLY_FLASH: Duration = Duration::from_millis(150);
 
 /// Single status row below the input: model · root · token usage.
 /// Optional slash-command reply is drawn on the row(s) beneath it.
@@ -26,6 +27,7 @@ pub struct StatusBar {
     total: Usage,
     reply: Option<String>,
     reply_until: Option<Instant>,
+    flash_until: Option<Instant>,
 }
 
 impl StatusBar {
@@ -37,6 +39,7 @@ impl StatusBar {
             total,
             reply: None,
             reply_until: None,
+            flash_until: None,
         }
     }
 
@@ -45,6 +48,12 @@ impl StatusBar {
     }
 
     pub fn expire_reply(&mut self) -> bool {
+        if self
+            .flash_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.flash_until = None;
+        }
         match self.reply_until {
             Some(until) if Instant::now() >= until => {
                 self.clear_reply();
@@ -64,6 +73,10 @@ impl StatusBar {
     }
 
     pub fn draw_reply(&self, f: &mut Frame<'_>, area: Rect) {
+        if self.is_flashing() {
+            f.render_widget(Clear, area);
+            return;
+        }
         let Some(text) = self.reply.as_deref() else {
             return;
         };
@@ -77,11 +90,18 @@ impl StatusBar {
     pub fn clear_reply(&mut self) {
         self.reply = None;
         self.reply_until = None;
+        self.flash_until = None;
     }
 
     fn set_reply(&mut self, text: String) {
+        let flash = self.has_reply();
         self.reply = Some(text);
         self.reply_until = Some(Instant::now() + REPLY_TTL);
+        self.flash_until = flash.then(|| Instant::now() + REPLY_FLASH);
+    }
+
+    fn is_flashing(&self) -> bool {
+        self.flash_until.is_some_and(|until| Instant::now() < until)
     }
 
     pub fn draw_bar(
@@ -441,6 +461,68 @@ mod tests {
         assert_eq!(bar.reply_height(8), 3);
         assert!(bar.has_reply());
         assert!(!bar.expire_reply());
+    }
+
+    fn notify(text: &str) -> AppEvent {
+        AppEvent::Notify {
+            app_id: AppId(1),
+            text: text.into(),
+        }
+    }
+
+    fn draw_reply_row(bar: &StatusBar) -> (String, Option<ratatui::style::Color>) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::{Constraint, Direction, Layout};
+
+        let backend = TestBackend::new(40, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(1), Constraint::Length(1)])
+                    .split(f.area());
+                bar.draw_reply(f, chunks[1]);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let row: String = (0..40).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        (row, buf[(0, 1)].style().fg)
+    }
+
+    #[test]
+    fn first_notify_does_not_flash() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        let mut state = State::new();
+        bar.on_event(&notify("Copied!"), &mut state);
+        assert!(!bar.is_flashing());
+        assert!(bar.has_reply());
+        let (row, _) = draw_reply_row(&bar);
+        assert!(row.contains("Copied!"), "reply row was {row:?}");
+    }
+
+    #[test]
+    fn repeat_notify_flashes_then_restores() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        let mut state = State::new();
+        bar.on_event(&notify("Copied!"), &mut state);
+        bar.on_event(&notify("Copied!"), &mut state);
+        assert!(bar.is_flashing());
+        assert!(bar.has_reply());
+        assert_eq!(bar.reply_height(80), 1);
+
+        let (row, _) = draw_reply_row(&bar);
+        assert!(
+            !row.contains("Copied!"),
+            "flash should hide the reply, got {row:?}"
+        );
+
+        bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(!bar.is_flashing());
+        let (row, fg) = draw_reply_row(&bar);
+        assert!(row.contains("Copied!"), "reply should return, got {row:?}");
+        assert_eq!(fg, Some(ratatui::style::Color::Rgb(255, 140, 0)));
     }
 
     #[test]

@@ -26,6 +26,7 @@ enum LineKind {
     ToolResult(bool),
     Error,
     System,
+    Separator,
 }
 
 impl LineKind {
@@ -38,7 +39,7 @@ impl LineKind {
             LineKind::ToolResult(true) => theme::ok(),
             LineKind::ToolResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
-            LineKind::System => theme::dim(),
+            LineKind::System | LineKind::Separator => theme::dim(),
         }
     }
 
@@ -48,7 +49,9 @@ impl LineKind {
             LineKind::Text => "• ",
             LineKind::Thinking => "· ",
             LineKind::Tool => "$ ",
-            LineKind::ToolResult(_) | LineKind::Error | LineKind::System => "  ",
+            LineKind::ToolResult(_) | LineKind::Error | LineKind::System | LineKind::Separator => {
+                "  "
+            }
         }
     }
 }
@@ -182,22 +185,31 @@ impl Transcript {
                     }
                 }
                 Role::Assistant => {
+                    let mut emitted = false;
+                    let mut has_tool = false;
                     for block in &m.content {
                         match block {
                             ContentBlock::Thinking { thinking } => {
                                 self.push_row(LineKind::Thinking, thinking);
+                                emitted = true;
                             }
                             ContentBlock::Text { text } => {
                                 let body = trim_message(text);
                                 if !body.is_empty() {
                                     self.push_row(LineKind::Text, &body);
+                                    emitted = true;
                                 }
                             }
                             ContentBlock::ToolUse { name, input, .. } => {
                                 self.push_row(LineKind::Tool, &tool_display(name, input));
+                                emitted = true;
+                                has_tool = true;
                             }
                             _ => {}
                         }
+                    }
+                    if emitted && !has_tool {
+                        self.push_separator();
                     }
                 }
                 Role::System => {}
@@ -278,20 +290,26 @@ impl Transcript {
         let text = match kind {
             LineKind::Thinking => collapse_thinking(text),
             LineKind::ToolResult(_) => truncate_result(text),
+            LineKind::Separator => String::new(),
             _ => text.to_string(),
         };
         let mut wrapped = Vec::new();
         if self.width > 0 {
-            if !self.wrapped.is_empty() {
-                wrapped.push(Line::from(""));
-            }
-            for line in format_lines(kind, &text) {
-                wrap_line_into(&mut wrapped, &line, self.width);
-            }
+            wrap_row_into(&mut wrapped, kind, &text, self.width);
         }
         self.rows.push(Row { kind, text });
         self.wrapped.extend(wrapped);
         self.keep_following();
+    }
+
+    fn push_separator(&mut self) {
+        if matches!(
+            self.rows.last().map(|r| r.kind),
+            Some(LineKind::Separator) | None
+        ) {
+            return;
+        }
+        self.push_row(LineKind::Separator, "");
     }
 
     fn flush_streaming(&mut self) {
@@ -336,12 +354,7 @@ impl Transcript {
             return;
         }
         for row in &self.rows[start..] {
-            if !self.wrapped.is_empty() {
-                self.wrapped.push(Line::from(""));
-            }
-            for line in format_lines(row.kind, &row.text) {
-                wrap_line_into(&mut self.wrapped, &line, width);
-            }
+            wrap_row_into(&mut self.wrapped, row.kind, &row.text, width);
         }
     }
 
@@ -555,6 +568,7 @@ impl Component for Transcript {
                     if !body.is_empty() {
                         self.push_row(LineKind::Text, &body);
                     }
+                    self.push_separator();
                 }
                 AgentEvent::Cancelled { .. } => {
                     if !self.streaming.is_empty() {
@@ -567,6 +581,7 @@ impl Component for Transcript {
                         }
                     }
                     self.push_row(LineKind::System, "cancelled");
+                    self.push_separator();
                 }
                 AgentEvent::HistoryCleared { .. } => self.reset(),
                 AgentEvent::ModelChanged { .. } => {}
@@ -583,6 +598,7 @@ impl Component for Transcript {
             AppEvent::Error { message, .. } => {
                 self.flush_streaming();
                 self.push_row(LineKind::Error, message);
+                self.push_separator();
             }
         }
     }
@@ -675,6 +691,23 @@ fn truncate_result(text: &str) -> String {
     let mut out = lines[..MAX_RESULT_LINES].join("\n");
     out.push_str(&format!("\n… {} more", lines.len() - MAX_RESULT_LINES));
     out
+}
+
+fn wrap_row_into(out: &mut Vec<Line<'static>>, kind: LineKind, text: &str, width: usize) {
+    if !out.is_empty() {
+        out.push(Line::from(""));
+    }
+    if kind == LineKind::Separator {
+        out.push(separator_line(width));
+        return;
+    }
+    for line in format_lines(kind, text) {
+        wrap_line_into(out, &line, width);
+    }
+}
+
+fn separator_line(width: usize) -> Line<'static> {
+    Line::from(Span::styled("─".repeat(width.max(1)), theme::dim()))
 }
 
 fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
@@ -955,6 +988,7 @@ mod tests {
             LineKind::ToolResult(false),
             LineKind::Error,
             LineKind::System,
+            LineKind::Separator,
         ];
         for kind in kinds {
             assert_eq!(kind.gutter().width(), LINE_PREFIX_WIDTH);
@@ -1200,6 +1234,184 @@ mod tests {
             t.rows.last().map(|r| (r.kind, r.text.as_str())),
             Some((LineKind::ToolResult(true), "(no output)"))
         );
+    }
+
+    fn agent(event: AgentEvent) -> AppEvent {
+        AppEvent::Agent {
+            app_id: AppId(1),
+            event,
+        }
+    }
+
+    fn done(text: &str) -> AppEvent {
+        agent(AgentEvent::Done {
+            agent_id: AgentId(1),
+            text: text.into(),
+            usage: oven_llm::Usage::default(),
+        })
+    }
+
+    fn kinds_of(t: &Transcript) -> Vec<LineKind> {
+        t.rows.iter().map(|r| r.kind).collect()
+    }
+
+    #[test]
+    fn done_appends_separator_after_answer() {
+        let mut t = Transcript::new();
+        t.push_user("q");
+        t.on_event(&done("a"), &mut State::new());
+        assert_eq!(
+            kinds_of(&t),
+            vec![LineKind::User, LineKind::Text, LineKind::Separator]
+        );
+    }
+
+    #[test]
+    fn tool_end_does_not_append_separator() {
+        let mut t = Transcript::new();
+        t.push_user("q");
+        t.on_event(
+            &agent(AgentEvent::ToolStart {
+                agent_id: AgentId(1),
+                call_id: "c1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({ "command": "ls" }),
+            }),
+            &mut State::new(),
+        );
+        t.on_event(
+            &agent(AgentEvent::ToolEnd {
+                agent_id: AgentId(1),
+                call_id: "c1".into(),
+                ok: true,
+                output: "done".into(),
+            }),
+            &mut State::new(),
+        );
+        assert_eq!(
+            kinds_of(&t),
+            vec![LineKind::User, LineKind::Tool, LineKind::ToolResult(true),]
+        );
+    }
+
+    #[test]
+    fn separator_comes_after_tool_followup_not_between() {
+        let mut t = Transcript::new();
+        t.push_user("q");
+        t.on_event(
+            &agent(AgentEvent::ToolStart {
+                agent_id: AgentId(1),
+                call_id: "c1".into(),
+                name: "bash".into(),
+                input: serde_json::json!({ "command": "ls" }),
+            }),
+            &mut State::new(),
+        );
+        t.on_event(
+            &agent(AgentEvent::ToolEnd {
+                agent_id: AgentId(1),
+                call_id: "c1".into(),
+                ok: true,
+                output: "done".into(),
+            }),
+            &mut State::new(),
+        );
+        t.on_event(&done("ok"), &mut State::new());
+        assert_eq!(
+            kinds_of(&t),
+            vec![
+                LineKind::User,
+                LineKind::Tool,
+                LineKind::ToolResult(true),
+                LineKind::Text,
+                LineKind::Separator,
+            ]
+        );
+    }
+
+    #[test]
+    fn cancelled_appends_separator() {
+        let mut t = Transcript::new();
+        t.push_user("q");
+        t.on_event(
+            &agent(AgentEvent::Cancelled {
+                agent_id: AgentId(1),
+            }),
+            &mut State::new(),
+        );
+        assert_eq!(
+            kinds_of(&t),
+            vec![LineKind::User, LineKind::System, LineKind::Separator]
+        );
+    }
+
+    #[test]
+    fn queued_user_lands_after_separator() {
+        let mut t = Transcript::new();
+        t.push_user("q");
+        t.push_user_queued("next");
+        t.on_event(&done("a"), &mut State::new());
+        t.on_event(&AppEvent::Idle { app_id: AppId(1) }, &mut State::new());
+        assert_eq!(
+            kinds_of(&t),
+            vec![
+                LineKind::User,
+                LineKind::Text,
+                LineKind::Separator,
+                LineKind::User,
+            ]
+        );
+    }
+
+    #[test]
+    fn seed_separates_complete_turns_not_tool_followup() {
+        let mut t = Transcript::new();
+        t.seed(&[
+            Message::user_text("one"),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "first".into(),
+            }]),
+            Message::user_text("two"),
+            Message::assistant(vec![
+                ContentBlock::Text {
+                    text: "checking".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": "ls" }),
+                },
+            ]),
+            Message::tool_result("c1", "out", false),
+            Message::assistant(vec![ContentBlock::Text {
+                text: "second".into(),
+            }]),
+        ]);
+        assert_eq!(
+            kinds_of(&t),
+            vec![
+                LineKind::User,
+                LineKind::Text,
+                LineKind::Separator,
+                LineKind::User,
+                LineKind::Text,
+                LineKind::Tool,
+                LineKind::ToolResult(false),
+                LineKind::Text,
+                LineKind::Separator,
+            ]
+        );
+    }
+
+    #[test]
+    fn separator_renders_full_width_rule() {
+        let mut t = Transcript::new();
+        wide(&mut t);
+        t.push_user("q");
+        t.on_event(&done("a"), &mut State::new());
+        let last = t.wrapped.last().expect("wrapped separator");
+        let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.chars().filter(|c| *c == '─').count(), 80);
     }
 
     #[test]
