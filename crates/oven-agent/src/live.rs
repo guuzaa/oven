@@ -4,7 +4,6 @@ use crate::mode::AgentMode;
 
 pub struct AgentLive {
     pub mode: AgentMode,
-    /// Spawn-time App::build_system_prompt(); no Plan/list/reminder suffix.
     pub base_system: Option<String>,
 }
 
