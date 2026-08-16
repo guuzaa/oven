@@ -11,6 +11,15 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-pc-windows-gnu
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
 
@@ -18,42 +27,37 @@ jobs:
         with:
           toolchain: "1.92.0"
           profile: release
-          targets: |
-            x86_64-unknown-linux-musl
-            aarch64-unknown-linux-musl
-            x86_64-pc-windows-gnu
-            aarch64-apple-darwin
-            x86_64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          targets="x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu aarch64-apple-darwin x86_64-apple-darwin"
-          for target in ${targets}; do
-            if [[ "${target}" == *windows* ]]; then
-              exe="oven.exe"
-            else
-              exe="oven"
-            fi
-            src="target/${target}/release/${exe}"
-            test -f "${src}"
-            mkdir -p "dist/oven-${target}"
-            cp "${src}" "dist/oven-${target}/${exe}"
-            if [[ "${target}" == *windows* ]]; then
-              python -c "import shutil; shutil.make_archive('oven-${{ github.ref_name }}-${target}', 'zip', 'dist', 'oven-${target}')"
-            else
-              tar -C dist -czf "oven-${{ github.ref_name }}-${target}.tar.gz" "oven-${target}"
-            fi
-          done
+          target="${{ matrix.target }}"
+          if [[ "${target}" == *windows* ]]; then
+            exe="oven.exe"
+          else
+            exe="oven"
+          fi
+          src="target/${target}/release/${exe}"
+          test -f "${src}"
+          mkdir -p "dist/oven-${target}"
+          cp "${src}" "dist/oven-${target}/${exe}"
+          if [[ "${target}" == *windows* ]]; then
+            python -c "import shutil; shutil.make_archive('oven-${{ github.ref_name }}-${target}', 'zip', 'dist', 'oven-${target}')"
+          else
+            tar -C dist -czf "oven-${{ github.ref_name }}-${target}.tar.gz" "oven-${target}"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: oven-binaries
+          name: oven-${{ matrix.target }}
           path: |
             oven-*.tar.gz
             oven-*.zip
