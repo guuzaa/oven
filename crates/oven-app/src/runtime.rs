@@ -737,7 +737,7 @@ async fn runtime_loop(
                 // no in-flight turn
             }
             AppCmd::SetMode(mode) => {
-                apply_mode(&live, mode);
+                agent.set_mode(mode);
                 emit(&subscribers, AppEvent::ModeChanged { app_id, mode });
             }
             AppCmd::Rewind => {

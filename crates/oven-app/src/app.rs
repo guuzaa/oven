@@ -13,7 +13,6 @@ use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::runtime::{AppHandle, AppId, hydrate_session, resolve_session, spawn_runtime};
 use crate::session::{Session, SessionError, canonical_root, default_sessions_dir};
-use crate::skill::skill_dirs;
 use crate::{SkillRegistry, ToolRegistry};
 
 #[derive(Debug, Error)]
@@ -125,7 +124,7 @@ impl App {
         self.tools = ToolRegistry::from_config(&self.root, &config.tools);
         self.mcps = McpRegistry::new();
         self.skills = SkillRegistry::new();
-        self.skills.load_from_dirs(&skill_dirs(&self.root));
+        self.skills.load_from_dirs(&dirs::skill_dirs(&self.root));
         self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root);
 
         for (id, server) in &config.mcps {

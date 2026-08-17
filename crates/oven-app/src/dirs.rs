@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn oven_home() -> Option<PathBuf> {
     std::env::home_dir().map(|h| h.join(".oven"))
@@ -22,8 +22,13 @@ pub fn sessions_dir() -> Option<PathBuf> {
     oven_home().map(|d| d.join("sessions"))
 }
 
-/// `~/.oven/skills`.
-#[inline]
-pub fn skills_dir() -> Option<PathBuf> {
-    oven_home().map(|d| d.join("skills"))
+/// Skill search paths: user-wide `~/.oven/skills` first, then the project's `.oven/skills`.
+/// Later paths override earlier skills with the same id.
+pub fn skill_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::with_capacity(2);
+    if let Some(d) = oven_home().map(|d| d.join("skills")) {
+        dirs.push(d);
+    }
+    dirs.push(root.join(".oven").join("skills"));
+    dirs
 }

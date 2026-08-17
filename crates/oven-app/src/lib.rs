@@ -6,7 +6,6 @@ pub mod mcp;
 mod provider;
 mod runtime;
 pub mod session;
-mod skill;
 mod slash;
 mod tools;
 

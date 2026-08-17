@@ -99,7 +99,7 @@ impl Agent {
     }
 
     pub fn live_handle(&self) -> LiveHandle {
-        Arc::clone(&self.live)
+        self.live.clone()
     }
 
     pub fn with_system(self, content: impl Into<String>) -> Self {
@@ -378,21 +378,16 @@ impl Agent {
         cancel: Option<&CancellationToken>,
     ) -> Result<Option<String>, AgentError> {
         let response = self.complete_response(tx).await?;
-        let text = response.text();
-        let has_tool_use = response.has_tool_use();
-
-        if !has_tool_use {
-            self.history.push(Message::assistant(response.content));
-            if let Some(usage) = &response.usage {
-                self.history.record_usage(usage);
-            }
-            return Ok(Some(text));
-        }
 
         self.history
             .push(Message::assistant(response.content.clone()));
         if let Some(usage) = &response.usage {
             self.history.record_usage(usage);
+        }
+
+        if !response.has_tool_use() {
+            let text = response.text();
+            return Ok(Some(text));
         }
 
         let mut wrote_todo = false;
@@ -424,7 +419,7 @@ impl Agent {
                     },
                 );
             }
-            let summary = truncate(&result, 2000);
+            let summary = truncate(&result, 1_500_000);
             Self::emit(
                 tx,
                 AgentEvent::ToolEnd {
