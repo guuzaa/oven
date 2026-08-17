@@ -242,7 +242,7 @@ impl Component for InputView {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(PROMPT_COLS), Constraint::Min(1)])
             .split(area);
-        let prompt = if state.busy { "· " } else { "› " };
+        let prompt = if state.busy { "⋅ " } else { "› " };
         f.render_widget(
             Paragraph::new(Span::styled(prompt, theme::user())),
             chunks[0],

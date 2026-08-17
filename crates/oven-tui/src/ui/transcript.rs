@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKin
 use oven_app::{AgentEvent, AppEvent, TodoList};
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -15,6 +16,7 @@ const MOUSE_SCROLL_STEP: u16 = 3;
 const LINE_PREFIX_WIDTH: usize = 2;
 const LINE_INDENT: &str = "  ";
 const MAX_RESULT_LINES: usize = 6;
+const SEPARATOR_GLYPH: char = '−';
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LineKind {
@@ -45,8 +47,8 @@ impl LineKind {
     fn gutter(self) -> &'static str {
         match self {
             LineKind::User => "› ",
-            LineKind::Text => "• ",
-            LineKind::Thinking => "· ",
+            LineKind::Text => "∙ ",
+            LineKind::Thinking => "⋅ ",
             LineKind::Tool => "$ ",
             LineKind::ToolResult(_) | LineKind::Error | LineKind::System | LineKind::Separator => {
                 "  "
@@ -615,7 +617,19 @@ impl Component for Transcript {
                 *line = highlight_line(line, from, to);
             }
         }
-        f.render_widget(Paragraph::new(visible), area);
+        paint_visible(f, area, visible);
+    }
+}
+
+fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
+    f.render_widget(Paragraph::new(lines), area);
+    // Wide CJK glyphs leave a stale trailing cell on Windows; force a full paint.
+    let buf = f.buffer_mut();
+    let area = area.intersection(*buf.area());
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)].set_diff_option(CellDiffOption::AlwaysUpdate);
+        }
     }
 }
 
@@ -676,7 +690,10 @@ fn wrap_row_into(out: &mut Vec<Line<'static>>, kind: LineKind, text: &str, width
 }
 
 fn separator_line(width: usize) -> Line<'static> {
-    Line::from(Span::styled("─".repeat(width.max(1)), theme::dim()))
+    Line::from(Span::styled(
+        SEPARATOR_GLYPH.to_string().repeat(width.max(1)),
+        theme::dim(),
+    ))
 }
 
 fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
@@ -955,13 +972,17 @@ mod tests {
         ];
         for kind in kinds {
             assert_eq!(kind.gutter().width(), LINE_PREFIX_WIDTH);
+            for ch in kind.gutter().chars() {
+                assert_eq!(ch.width().unwrap_or(0), 1, "{ch:?} must be single-width");
+            }
         }
+        assert_eq!(SEPARATOR_GLYPH.width().unwrap_or(0), 1);
     }
 
     #[test]
     fn assistant_gutter_is_bullet() {
         let lines = format_lines(LineKind::Text, "hi");
-        assert_eq!(lines[0].spans[0].content.as_ref(), "• ");
+        assert_eq!(lines[0].spans[0].content.as_ref(), LineKind::Text.gutter());
     }
 
     #[test]
@@ -1292,7 +1313,7 @@ mod tests {
         t.on_event(&done("a"));
         let last = t.wrapped.last().expect("wrapped separator");
         let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text.chars().filter(|c| *c == '─').count(), 80);
+        assert_eq!(text.chars().filter(|c| *c == SEPARATOR_GLYPH).count(), 80);
     }
 
     #[test]
@@ -1529,9 +1550,43 @@ mod tests {
         let line = format_lines(LineKind::Text, "hello").pop().unwrap();
         let hi = highlight_line(&line, 2, 7);
         assert_eq!(hi.spans.len(), 2);
-        assert_eq!(hi.spans[0].content.as_ref(), "• ");
+        assert_eq!(hi.spans[0].content.as_ref(), LineKind::Text.gutter());
         assert_eq!(hi.spans[1].content.as_ref(), "hello");
         assert_eq!(hi.spans[1].style, theme::selection());
+    }
+
+    #[test]
+    fn draw_repaints_every_cell_after_shorter_cjk_line() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut t = Transcript::new();
+        t.push_row(LineKind::Text, "你好世界你好世界");
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| t.draw(f, f.area(), &State::new()))
+            .unwrap();
+
+        t.reset();
+        t.push_row(LineKind::Text, "好");
+        let frame = terminal
+            .draw(|f| t.draw(f, f.area(), &State::new()))
+            .unwrap();
+        let row: String = (0..20).map(|x| frame.buffer[(x, 0)].symbol()).collect();
+        assert!(row.starts_with("∙ 好"), "{row:?}");
+        assert!(
+            row[row.find('好').unwrap() + '好'.len_utf8()..]
+                .chars()
+                .all(|c| c == ' '),
+            "shorter CJK line must not leave previous glyphs: {row:?}"
+        );
+        for x in 0..20 {
+            assert_eq!(
+                frame.buffer[(x, 0)].diff_option,
+                CellDiffOption::AlwaysUpdate
+            );
+        }
     }
 
     #[test]
