@@ -13,7 +13,7 @@ pub use app::{App, AppError};
 pub use mcp::McpServerConfig;
 pub use oven_agent::{
     AgentEvent, AgentId, AgentMode, CancellationToken, Skill, SkillRegistry, TodoItem, TodoList,
-    TodoStatus,
+    TodoStatus, ToolView, present_tool,
 };
 pub use runtime::{AppCmd, AppEvent, AppHandle, AppId};
 pub use tools::ToolRegistry;

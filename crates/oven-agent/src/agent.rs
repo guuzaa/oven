@@ -212,7 +212,7 @@ impl Agent {
         let mode = self.mode();
         self.tools
             .iter()
-            .filter(|t| mode == AgentMode::Plan || t.name() != "todo_write")
+            .filter(|t| !t.caps().plan_only || mode == AgentMode::Plan)
             .map(|t| oven_llm::Tool {
                 name: t.name().to_string(),
                 description: Some(t.description().to_string()),
@@ -395,6 +395,10 @@ impl Agent {
             let ContentBlock::ToolUse { id, name, input } = block else {
                 continue;
             };
+            let (view, writes_todos) = match self.tools.iter().find(|t| t.name() == name) {
+                Some(t) => (t.view(input), t.caps().writes_todos),
+                None => (crate::tools::present_tool(name, input), false),
+            };
             Self::emit(
                 tx,
                 AgentEvent::ToolStart {
@@ -402,13 +406,14 @@ impl Agent {
                     call_id: id.clone(),
                     name: name.clone(),
                     input: input.clone(),
+                    view,
                 },
             );
             let (ok, result) = match self.dispatch(name, input, cancel).await {
                 Ok(r) => (true, r),
                 Err(e) => (false, format!("error: {e}")),
             };
-            if ok && name == "todo_write" {
+            if ok && writes_todos {
                 self.todo_written_this_turn = true;
                 wrote_todo = true;
                 Self::emit(
@@ -688,10 +693,12 @@ mod tests {
                 agent_id: AgentId(7),
                 call_id,
                 name,
-                input
+                input,
+                view
             } if call_id == "call_1"
                 && name == "file_read"
                 && *input == json!({"path": "note.txt"})
+                && view.summary == "Read note.txt"
         )));
         assert!(events.iter().any(|e| matches!(
             e,

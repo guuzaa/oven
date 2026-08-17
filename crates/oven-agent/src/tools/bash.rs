@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, require_str};
+use super::{Tool, ToolView, labeled, require_str};
 use crate::error::AgentError;
 
 pub struct BashTool {
@@ -16,6 +16,12 @@ pub struct BashTool {
 }
 
 impl BashTool {
+    pub const NAME: &'static str = "bash";
+
+    pub fn view_input(input: &Value) -> ToolView {
+        labeled(Self::NAME, "Ran", input, "command")
+    }
+
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
@@ -33,7 +39,10 @@ impl BashTool {
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
-        "bash"
+        Self::NAME
+    }
+    fn view(&self, input: &Value) -> ToolView {
+        Self::view_input(input)
     }
     fn description(&self) -> &str {
         "Execute a shell command in the workspace root and return stdout/stderr. Use for running builds, tests, git, etc."
@@ -52,7 +61,7 @@ impl Tool for BashTool {
         args: &Value,
         cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
-        let command = require_str(args, "command", "bash")?;
+        let command = require_str(args, "command", Self::NAME)?;
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command).current_dir(&self.root);
         cmd.stdin(std::process::Stdio::null());

@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::Tool;
+use super::{Tool, ToolCaps, ToolView};
 use crate::error::AgentError;
 use crate::live::LiveHandle;
 use crate::todo::TodoList;
@@ -12,6 +12,19 @@ pub struct TodoWriteTool {
 }
 
 impl TodoWriteTool {
+    pub const NAME: &'static str = "todo_write";
+
+    pub fn view_input(input: &Value) -> ToolView {
+        let summary = match TodoList::parse(input) {
+            Ok(list) => format!("{} · {}", Self::NAME, list.summary()),
+            Err(_) => Self::NAME.to_string(),
+        };
+        ToolView {
+            summary,
+            collapse: false,
+        }
+    }
+
     pub fn new(live: LiveHandle) -> Self {
         Self { live }
     }
@@ -20,7 +33,18 @@ impl TodoWriteTool {
 #[async_trait]
 impl Tool for TodoWriteTool {
     fn name(&self) -> &str {
-        "todo_write"
+        Self::NAME
+    }
+
+    fn view(&self, input: &Value) -> ToolView {
+        Self::view_input(input)
+    }
+
+    fn caps(&self) -> ToolCaps {
+        ToolCaps {
+            plan_only: true,
+            writes_todos: true,
+        }
     }
 
     fn description(&self) -> &str {

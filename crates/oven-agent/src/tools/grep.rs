@@ -18,6 +18,8 @@ pub struct GrepTool {
 }
 
 impl GrepTool {
+    pub const NAME: &'static str = "grep";
+
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
@@ -30,7 +32,7 @@ impl GrepTool {
 #[async_trait]
 impl Tool for GrepTool {
     fn name(&self) -> &str {
-        "grep"
+        Self::NAME
     }
     fn description(&self) -> &str {
         "Search file contents with a regex. Returns matching lines as \
@@ -55,7 +57,7 @@ impl Tool for GrepTool {
         args: &Value,
         cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
-        let pattern = require_str(args, "pattern", "grep")?;
+        let pattern = require_str(args, "pattern", Self::NAME)?;
         let re = RegexBuilder::new(pattern)
             .case_insensitive(
                 args.get("case_insensitive")

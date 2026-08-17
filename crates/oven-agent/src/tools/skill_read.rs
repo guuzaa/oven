@@ -19,6 +19,8 @@ pub struct SkillReadTool {
 }
 
 impl SkillReadTool {
+    pub const NAME: &'static str = "skill_read";
+
     pub fn new(sources: Arc<BTreeMap<String, PathBuf>>) -> Self {
         Self { sources }
     }
@@ -27,7 +29,7 @@ impl SkillReadTool {
 #[async_trait]
 impl Tool for SkillReadTool {
     fn name(&self) -> &str {
-        "skill_read"
+        Self::NAME
     }
 
     fn description(&self) -> &str {

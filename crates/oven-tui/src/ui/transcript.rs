@@ -1,5 +1,7 @@
+use std::collections::{HashMap, HashSet};
+
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use oven_app::{AgentEvent, AppEvent, TodoList};
+use oven_app::{AgentEvent, AppEvent, ToolView, present_tool};
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
 use ratatui::buffer::CellDiffOption;
@@ -64,6 +66,30 @@ struct Row {
     text: String,
 }
 
+#[derive(Default)]
+struct ToolBurst {
+    pending: HashMap<String, String>,
+    entries: Vec<(String, usize, usize)>,
+    row_open: bool,
+    wrap_at: usize,
+}
+
+impl ToolBurst {
+    fn bump(&mut self, name: &str) {
+        if let Some(entry) = self.entries.iter_mut().find(|(n, _, _)| n == name) {
+            entry.1 += 1;
+        } else {
+            self.entries.push((name.to_string(), 1, 0));
+        }
+    }
+
+    fn bump_failed(&mut self, name: &str) {
+        if let Some(entry) = self.entries.iter_mut().find(|(n, _, _)| n == name) {
+            entry.2 += 1;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct SelPos {
     line: usize,
@@ -91,6 +117,8 @@ pub struct Transcript {
     select_anchor: Option<SelPos>,
     select_head: Option<SelPos>,
     dragging: bool,
+    tool_burst: ToolBurst,
+    detail_ids: HashSet<String>,
 }
 
 impl Transcript {
@@ -110,10 +138,13 @@ impl Transcript {
             select_anchor: None,
             select_head: None,
             dragging: false,
+            tool_burst: ToolBurst::default(),
+            detail_ids: HashSet::new(),
         }
     }
 
     pub fn push_user(&mut self, text: &str) {
+        self.close_tool_burst();
         self.push_row(LineKind::User, text);
     }
 
@@ -132,6 +163,8 @@ impl Transcript {
         self.pinned = true;
         self.top = 0;
         self.clear_selection();
+        self.close_tool_burst();
+        self.detail_ids.clear();
         self.seed(messages);
     }
 
@@ -145,11 +178,14 @@ impl Transcript {
                     for block in &m.content {
                         match block {
                             ContentBlock::Text { text } => {
+                                self.close_tool_burst();
                                 self.push_row(LineKind::User, text);
                             }
                             ContentBlock::ToolResult {
-                                content, is_error, ..
-                            } => self.push_tool_result(*is_error, content),
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } => self.note_seed_result(tool_use_id, *is_error, content),
                             _ => {}
                         }
                     }
@@ -157,10 +193,12 @@ impl Transcript {
                 Role::Tool => {
                     for block in &m.content {
                         if let ContentBlock::ToolResult {
-                            content, is_error, ..
+                            tool_use_id,
+                            content,
+                            is_error,
                         } = block
                         {
-                            self.push_tool_result(*is_error, content);
+                            self.note_seed_result(tool_use_id, *is_error, content);
                         }
                     }
                 }
@@ -170,18 +208,20 @@ impl Transcript {
                     for block in &m.content {
                         match block {
                             ContentBlock::Thinking { thinking } => {
+                                self.close_tool_burst();
                                 self.push_row(LineKind::Thinking, thinking);
                                 emitted = true;
                             }
                             ContentBlock::Text { text } => {
                                 let body = trim_message(text);
                                 if !body.is_empty() {
+                                    self.close_tool_burst();
                                     self.push_row(LineKind::Text, &body);
                                     emitted = true;
                                 }
                             }
-                            ContentBlock::ToolUse { name, input, .. } => {
-                                self.push_row(LineKind::Tool, &tool_display(name, input));
+                            ContentBlock::ToolUse { id, name, input } => {
+                                self.note_tool_start(id, &present_tool(name, input));
                                 emitted = true;
                                 has_tool = true;
                             }
@@ -195,6 +235,7 @@ impl Transcript {
                 Role::System => {}
             }
         }
+        self.close_tool_burst();
     }
 
     fn push_tool_result(&mut self, is_error: bool, content: &[ContentBlock]) {
@@ -263,6 +304,92 @@ impl Transcript {
         self.pinned = true;
         self.top = 0;
         self.clear_selection();
+        self.close_tool_burst();
+        self.detail_ids.clear();
+    }
+
+    fn close_tool_burst(&mut self) {
+        self.tool_burst = ToolBurst::default();
+    }
+
+    fn note_tool_start(&mut self, call_id: &str, view: &ToolView) {
+        if !view.collapse {
+            self.close_tool_burst();
+            self.detail_ids.insert(call_id.to_string());
+            self.push_row(LineKind::Tool, &view.summary);
+            return;
+        }
+        let label = compact_tool_arg(&view.summary);
+        self.tool_burst
+            .pending
+            .insert(call_id.to_string(), label.clone());
+        self.tool_burst.bump(&label);
+        self.upsert_tool_summary();
+    }
+
+    fn note_tool_end(&mut self, call_id: &str, ok: bool, output: &str) {
+        if self.detail_ids.remove(call_id) {
+            let body = trim_message(output);
+            if !ok || !body.is_empty() {
+                let body = if body.is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    body
+                };
+                self.push_row(LineKind::ToolResult(ok), &body);
+            }
+            return;
+        }
+        let Some(name) = self.tool_burst.pending.remove(call_id) else {
+            return;
+        };
+        if !ok {
+            self.tool_burst.bump_failed(&name);
+            self.upsert_tool_summary();
+        }
+    }
+
+    fn note_seed_result(&mut self, tool_use_id: &str, is_error: bool, content: &[ContentBlock]) {
+        if self.detail_ids.remove(tool_use_id) {
+            self.push_tool_result(is_error, content);
+            return;
+        }
+        let Some(name) = self.tool_burst.pending.remove(tool_use_id) else {
+            return;
+        };
+        if is_error {
+            self.tool_burst.bump_failed(&name);
+            self.upsert_tool_summary();
+        }
+    }
+
+    fn upsert_tool_summary(&mut self) {
+        let text = format_tool_summary(&self.tool_burst.entries);
+        if self.tool_burst.row_open {
+            self.replace_last_row(LineKind::Tool, &text);
+        } else {
+            self.tool_burst.wrap_at = self.wrapped.len();
+            self.push_row(LineKind::Tool, &text);
+            self.tool_burst.row_open = true;
+        }
+    }
+
+    fn replace_last_row(&mut self, kind: LineKind, text: &str) {
+        let text = match kind {
+            LineKind::Thinking => collapse_thinking(text),
+            LineKind::ToolResult(_) => truncate_result(text),
+            LineKind::Separator => String::new(),
+            _ => text.to_string(),
+        };
+        if let Some(last) = self.rows.last_mut() {
+            last.kind = kind;
+            last.text = text.clone();
+        }
+        self.wrapped.truncate(self.tool_burst.wrap_at);
+        if self.width > 0 {
+            wrap_row_into(&mut self.wrapped, kind, &text, self.width);
+        }
+        self.keep_following();
     }
 
     fn push_row(&mut self, kind: LineKind, text: &str) {
@@ -345,7 +472,22 @@ impl Transcript {
 
     fn rewrap_all(&mut self) {
         self.wrapped.clear();
-        self.wrap_rows_from(0);
+        if self.tool_burst.row_open && !self.rows.is_empty() {
+            let last = self.rows.len() - 1;
+            let width = self.width;
+            if width > 0 {
+                for row in &self.rows[..last] {
+                    wrap_row_into(&mut self.wrapped, row.kind, &row.text, width);
+                }
+            }
+            self.tool_burst.wrap_at = self.wrapped.len();
+            if width > 0 {
+                let last = &self.rows[last];
+                wrap_row_into(&mut self.wrapped, last.kind, &last.text, width);
+            }
+        } else {
+            self.wrap_rows_from(0);
+        }
         self.rewrap_stream();
         self.clear_selection();
     }
@@ -508,27 +650,27 @@ impl Component for Transcript {
         match ev {
             AppEvent::Agent { event, .. } => match event {
                 AgentEvent::ThinkingDelta { text, .. } => {
+                    self.close_tool_burst();
                     self.push_stream(LineKind::Thinking, text);
                 }
                 AgentEvent::TextDelta { text, .. } => {
+                    self.close_tool_burst();
                     self.push_stream(LineKind::Text, text);
                 }
-                AgentEvent::ToolStart { name, input, .. } => {
+                AgentEvent::ToolStart { call_id, view, .. } => {
                     self.flush_streaming();
-                    self.push_row(LineKind::Tool, &tool_display(name, input));
+                    self.note_tool_start(call_id, view);
                 }
-                AgentEvent::ToolEnd { ok, output, .. } => {
-                    let body = trim_message(output);
-                    if !*ok || !body.is_empty() {
-                        let body = if body.is_empty() {
-                            "(no output)".to_string()
-                        } else {
-                            body
-                        };
-                        self.push_row(LineKind::ToolResult(*ok), &body);
-                    }
+                AgentEvent::ToolEnd {
+                    call_id,
+                    ok,
+                    output,
+                    ..
+                } => {
+                    self.note_tool_end(call_id, *ok, output);
                 }
                 AgentEvent::Done { text, .. } => {
+                    self.close_tool_burst();
                     if self.stream_kind == LineKind::Text {
                         self.clear_stream();
                     } else {
@@ -541,6 +683,7 @@ impl Component for Transcript {
                     self.push_separator();
                 }
                 AgentEvent::Cancelled { .. } => {
+                    self.close_tool_burst();
                     if !self.streaming.is_empty() {
                         let kind = self.stream_kind;
                         let partial = trim_message(&std::mem::take(&mut self.streaming));
@@ -567,6 +710,7 @@ impl Component for Transcript {
                 self.flush_streaming();
             }
             AppEvent::Error { message, .. } => {
+                self.close_tool_burst();
                 self.flush_streaming();
                 self.push_row(LineKind::Error, message);
                 self.push_separator();
@@ -907,21 +1051,33 @@ fn osc52_copy(text: &str) -> bool {
         .is_ok()
 }
 
-fn tool_display(name: &str, input: &serde_json::Value) -> String {
-    if name == "bash"
-        && let Some(command) = input.get("command").and_then(|v| v.as_str())
-    {
-        let command = command.trim();
-        if !command.is_empty() {
-            return command.to_string();
-        }
+const MAX_TOOL_ARG: usize = 80;
+
+fn format_tool_summary(entries: &[(String, usize, usize)]) -> String {
+    let mut parts: Vec<String> = entries
+        .iter()
+        .map(|(name, total, _)| {
+            if *total > 1 {
+                format!("{name} ×{total}")
+            } else {
+                name.clone()
+            }
+        })
+        .collect();
+    let failed: usize = entries.iter().map(|(_, _, f)| *f).sum();
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
     }
-    if name == "todo_write"
-        && let Ok(list) = TodoList::parse(input)
-    {
-        return format!("todo_write · {}", list.summary());
+    parts.join(" · ")
+}
+
+fn compact_tool_arg(s: &str) -> String {
+    let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.width() <= MAX_TOOL_ARG {
+        return joined;
     }
-    name.to_string()
+    let (chunk, _) = split_at_width(&joined, MAX_TOOL_ARG.saturating_sub(1));
+    format!("{chunk}…")
 }
 
 #[cfg(test)]
@@ -986,22 +1142,17 @@ mod tests {
     }
 
     #[test]
-    fn tool_display_todo_write_uses_summary() {
-        let input = serde_json::json!({
-            "todos": [{"id": "a", "content": "one", "status": "pending"}]
-        });
+    fn format_tool_summary_counts_and_failures() {
+        assert_eq!(format_tool_summary(&[("Ran ls".into(), 1, 0)]), "Ran ls");
         assert_eq!(
-            tool_display("todo_write", &input),
-            "todo_write · 1 todos (0 in_progress, 0 completed)"
+            format_tool_summary(&[("Ran ls".into(), 2, 1), ("Read a".into(), 1, 0)]),
+            "Ran ls ×2 · Read a · 1 failed"
         );
     }
 
     #[test]
-    fn tool_display_todo_write_invalid_falls_back_to_name() {
-        assert_eq!(
-            tool_display("todo_write", &serde_json::json!({})),
-            "todo_write"
-        );
+    fn compact_tool_arg_joins_whitespace() {
+        assert_eq!(compact_tool_arg("Ran echo\n  hi"), "Ran echo hi");
     }
 
     #[test]
@@ -1055,21 +1206,23 @@ mod tests {
     }
 
     #[test]
-    fn tool_end_renders_result_row() {
+    fn tool_end_updates_summary_without_result_row() {
         let mut t = Transcript::new();
-        let ev = AppEvent::Agent {
-            app_id: AppId(1),
-            event: AgentEvent::ToolEnd {
-                agent_id: AgentId(1),
-                call_id: "c1".into(),
-                ok: false,
-                output: "boom\n".into(),
-            },
-        };
-        t.on_event(&ev);
+        t.on_event(&tool_start(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c1".into(),
+            ok: false,
+            output: "boom\n".into(),
+        }));
         let row = t.rows.last().unwrap();
-        assert_eq!(row.kind, LineKind::ToolResult(false));
-        assert_eq!(row.text, "boom");
+        assert_eq!(row.kind, LineKind::Tool);
+        assert_eq!(row.text, "Ran ls · 1 failed");
+        assert_eq!(t.rows.len(), 1);
     }
 
     #[test]
@@ -1129,13 +1282,11 @@ mod tests {
                 LineKind::Thinking,
                 LineKind::Text,
                 LineKind::Tool,
-                LineKind::ToolResult(false),
                 LineKind::User,
-                LineKind::ToolResult(true),
             ]
         );
         assert_eq!(t.rows[0].text, "hello");
-        assert_eq!(t.rows[3].text, "ls");
+        assert_eq!(t.rows[3].text, "Ran ls");
     }
 
     #[test]
@@ -1161,14 +1312,11 @@ mod tests {
     fn seed_mirrors_empty_tool_result_handling() {
         let mut t = Transcript::new();
         t.seed(&[Message::tool_result("c1", "", false)]);
-        assert!(t.rows.is_empty(), "empty ok output is skipped");
+        assert!(t.rows.is_empty(), "orphan ok result is dropped");
 
         let mut t = Transcript::new();
         t.seed(&[Message::tool_result("c1", "", true)]);
-        assert_eq!(
-            t.rows.last().map(|r| (r.kind, r.text.as_str())),
-            Some((LineKind::ToolResult(true), "(no output)"))
-        );
+        assert!(t.rows.is_empty(), "orphan error result is dropped");
     }
 
     fn agent(event: AgentEvent) -> AppEvent {
@@ -1176,6 +1324,16 @@ mod tests {
             app_id: AppId(1),
             event,
         }
+    }
+
+    fn tool_start(call_id: &str, name: &str, input: serde_json::Value) -> AppEvent {
+        agent(AgentEvent::ToolStart {
+            agent_id: AgentId(1),
+            call_id: call_id.into(),
+            name: name.into(),
+            input: input.clone(),
+            view: present_tool(name, &input),
+        })
     }
 
     fn done(text: &str) -> AppEvent {
@@ -1205,34 +1363,30 @@ mod tests {
     fn tool_end_does_not_append_separator() {
         let mut t = Transcript::new();
         t.push_user("q");
-        t.on_event(&agent(AgentEvent::ToolStart {
-            agent_id: AgentId(1),
-            call_id: "c1".into(),
-            name: "bash".into(),
-            input: serde_json::json!({ "command": "ls" }),
-        }));
+        t.on_event(&tool_start(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
         t.on_event(&agent(AgentEvent::ToolEnd {
             agent_id: AgentId(1),
             call_id: "c1".into(),
             ok: true,
             output: "done".into(),
         }));
-        assert_eq!(
-            kinds_of(&t),
-            vec![LineKind::User, LineKind::Tool, LineKind::ToolResult(true),]
-        );
+        assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::Tool,]);
+        assert_eq!(t.rows[1].text, "Ran ls");
     }
 
     #[test]
     fn separator_comes_after_tool_followup_not_between() {
         let mut t = Transcript::new();
         t.push_user("q");
-        t.on_event(&agent(AgentEvent::ToolStart {
-            agent_id: AgentId(1),
-            call_id: "c1".into(),
-            name: "bash".into(),
-            input: serde_json::json!({ "command": "ls" }),
-        }));
+        t.on_event(&tool_start(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
         t.on_event(&agent(AgentEvent::ToolEnd {
             agent_id: AgentId(1),
             call_id: "c1".into(),
@@ -1245,7 +1399,6 @@ mod tests {
             vec![
                 LineKind::User,
                 LineKind::Tool,
-                LineKind::ToolResult(true),
                 LineKind::Text,
                 LineKind::Separator,
             ]
@@ -1298,11 +1451,198 @@ mod tests {
                 LineKind::User,
                 LineKind::Text,
                 LineKind::Tool,
-                LineKind::ToolResult(false),
                 LineKind::Text,
                 LineKind::Separator,
             ]
         );
+    }
+
+    #[test]
+    fn live_tools_aggregate_counts_and_failures() {
+        let mut t = Transcript::new();
+        t.on_event(&tool_start(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c1".into(),
+            ok: true,
+            output: "ok".into(),
+        }));
+        t.on_event(&tool_start(
+            "c2",
+            "bash",
+            serde_json::json!({ "command": "pwd" }),
+        ));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c2".into(),
+            ok: false,
+            output: "boom".into(),
+        }));
+        t.on_event(&tool_start(
+            "c3",
+            "file_read",
+            serde_json::json!({ "path": "a" }),
+        ));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c3".into(),
+            ok: true,
+            output: "hi".into(),
+        }));
+        assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+        assert_eq!(t.rows[0].text, "Ran ls · Ran pwd · Read a · 1 failed");
+    }
+
+    #[test]
+    fn live_tool_end_rewrites_same_summary_row() {
+        let mut t = Transcript::new();
+        t.on_event(&tool_start(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(t.rows[0].text, "Ran ls");
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c1".into(),
+            ok: false,
+            output: "boom".into(),
+        }));
+        assert_eq!(t.rows.len(), 1);
+        assert_eq!(t.rows[0].kind, LineKind::Tool);
+        assert_eq!(t.rows[0].text, "Ran ls · 1 failed");
+    }
+
+    fn todo_input() -> serde_json::Value {
+        serde_json::json!({
+            "todos": [{"id": "a", "content": "one", "status": "pending"}]
+        })
+    }
+
+    #[test]
+    fn todo_write_keeps_detail_and_result() {
+        let mut t = Transcript::new();
+        t.on_event(&tool_start("t1", "todo_write", todo_input()));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "t1".into(),
+            ok: true,
+            output: "updated".into(),
+        }));
+        assert_eq!(
+            kinds_of(&t),
+            vec![LineKind::Tool, LineKind::ToolResult(true)]
+        );
+        assert_eq!(
+            t.rows[0].text,
+            "todo_write · 1 todos (0 in_progress, 0 completed)"
+        );
+        assert_eq!(t.rows[1].text, "updated");
+    }
+
+    #[test]
+    fn todo_write_splits_tool_bursts() {
+        let mut t = Transcript::new();
+        t.on_event(&tool_start(
+            "c1",
+            "bash",
+            serde_json::json!({ "command": "ls" }),
+        ));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c1".into(),
+            ok: true,
+            output: "ok".into(),
+        }));
+        t.on_event(&tool_start("t1", "todo_write", todo_input()));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "t1".into(),
+            ok: true,
+            output: "updated".into(),
+        }));
+        t.on_event(&tool_start(
+            "c2",
+            "bash",
+            serde_json::json!({ "command": "pwd" }),
+        ));
+        t.on_event(&agent(AgentEvent::ToolEnd {
+            agent_id: AgentId(1),
+            call_id: "c2".into(),
+            ok: true,
+            output: "ok".into(),
+        }));
+        assert_eq!(
+            kinds_of(&t),
+            vec![
+                LineKind::Tool,
+                LineKind::Tool,
+                LineKind::ToolResult(true),
+                LineKind::Tool,
+            ]
+        );
+        assert_eq!(t.rows[0].text, "Ran ls");
+        assert_eq!(
+            t.rows[1].text,
+            "todo_write · 1 todos (0 in_progress, 0 completed)"
+        );
+        assert_eq!(t.rows[3].text, "Ran pwd");
+    }
+
+    #[test]
+    fn seed_todo_write_keeps_result() {
+        let mut t = Transcript::new();
+        t.seed(&[
+            Message::assistant(vec![ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "todo_write".into(),
+                input: todo_input(),
+            }]),
+            Message::tool_result("t1", "updated", false),
+        ]);
+        assert_eq!(
+            kinds_of(&t),
+            vec![LineKind::Tool, LineKind::ToolResult(false)]
+        );
+        assert_eq!(
+            t.rows[0].text,
+            "todo_write · 1 todos (0 in_progress, 0 completed)"
+        );
+        assert_eq!(t.rows[1].text, "updated");
+    }
+
+    #[test]
+    fn seed_failed_tool_counts_without_result() {
+        let mut t = Transcript::new();
+        t.seed(&[
+            Message::assistant(vec![
+                ContentBlock::ToolUse {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": "ls" }),
+                },
+                ContentBlock::ToolUse {
+                    id: "c2".into(),
+                    name: "bash".into(),
+                    input: serde_json::json!({ "command": "pwd" }),
+                },
+                ContentBlock::ToolUse {
+                    id: "c3".into(),
+                    name: "file_read".into(),
+                    input: serde_json::json!({ "path": "a" }),
+                },
+            ]),
+            Message::tool_result("c1", "ok", false),
+            Message::tool_result("c2", "boom", true),
+            Message::tool_result("c3", "hi", false),
+        ]);
+        assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+        assert_eq!(t.rows[0].text, "Ran ls · Ran pwd · Read a · 1 failed");
     }
 
     #[test]

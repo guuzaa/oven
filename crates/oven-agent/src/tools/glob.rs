@@ -15,6 +15,8 @@ pub struct GlobTool {
 }
 
 impl GlobTool {
+    pub const NAME: &'static str = "glob";
+
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
@@ -26,7 +28,7 @@ impl GlobTool {
 #[async_trait]
 impl Tool for GlobTool {
     fn name(&self) -> &str {
-        "glob"
+        Self::NAME
     }
     fn description(&self) -> &str {
         "Find files by glob pattern. Patterns support `**` for recursive matches. \
@@ -49,7 +51,7 @@ impl Tool for GlobTool {
         args: &Value,
         cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
-        let pattern = require_str(args, "pattern", "glob")?;
+        let pattern = require_str(args, "pattern", Self::NAME)?;
         let matcher = Glob::new(pattern)
             .map_err(|e| AgentError::from(format!("glob: invalid pattern {:?}: {}", pattern, e)))?
             .compile_matcher();

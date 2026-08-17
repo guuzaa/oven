@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, require_str, resolve_within};
+use super::{Tool, ToolView, labeled, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileWriteTool {
@@ -13,6 +13,12 @@ pub struct FileWriteTool {
 }
 
 impl FileWriteTool {
+    pub const NAME: &'static str = "file_write";
+
+    pub fn view_input(input: &Value) -> ToolView {
+        labeled(Self::NAME, "Wrote", input, "path")
+    }
+
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -21,7 +27,10 @@ impl FileWriteTool {
 #[async_trait]
 impl Tool for FileWriteTool {
     fn name(&self) -> &str {
-        "file_write"
+        Self::NAME
+    }
+    fn view(&self, input: &Value) -> ToolView {
+        Self::view_input(input)
     }
     fn description(&self) -> &str {
         "Write text content to a file, creating parent directories as needed. Overwrites."
@@ -41,8 +50,8 @@ impl Tool for FileWriteTool {
         args: &Value,
         _cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
-        let path_str = require_str(args, "path", "file_write")?;
-        let content = require_str(args, "content", "file_write")?;
+        let path_str = require_str(args, "path", Self::NAME)?;
+        let content = require_str(args, "content", Self::NAME)?;
         let path = resolve_within(&self.root, path_str)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {

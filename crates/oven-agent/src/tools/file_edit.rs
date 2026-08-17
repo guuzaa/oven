@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, require_str, resolve_within};
+use super::{Tool, ToolView, labeled, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileEditTool {
@@ -13,6 +13,12 @@ pub struct FileEditTool {
 }
 
 impl FileEditTool {
+    pub const NAME: &'static str = "file_edit";
+
+    pub fn view_input(input: &Value) -> ToolView {
+        labeled(Self::NAME, "Edited", input, "path")
+    }
+
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -21,7 +27,10 @@ impl FileEditTool {
 #[async_trait]
 impl Tool for FileEditTool {
     fn name(&self) -> &str {
-        "file_edit"
+        Self::NAME
+    }
+    fn view(&self, input: &Value) -> ToolView {
+        Self::view_input(input)
     }
     fn description(&self) -> &str {
         "Edit a file by replacing text. Replaces the single exact occurrence of \
@@ -45,9 +54,9 @@ impl Tool for FileEditTool {
         args: &Value,
         _cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
-        let path_str = require_str(args, "path", "file_edit")?;
-        let old_string = require_str(args, "old_string", "file_edit")?;
-        let new_string = require_str(args, "new_string", "file_edit")?;
+        let path_str = require_str(args, "path", Self::NAME)?;
+        let old_string = require_str(args, "old_string", Self::NAME)?;
+        let new_string = require_str(args, "new_string", Self::NAME)?;
         let replace_all = args
             .get("replace_all")
             .and_then(|v| v.as_bool())

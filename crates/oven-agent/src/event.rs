@@ -1,6 +1,7 @@
 use oven_llm::{ReasoningEffort, Usage};
 
 use crate::todo::TodoItem;
+use crate::tools::ToolView;
 
 /// Stable id for an agent instance (main or sub-agent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -23,6 +24,7 @@ pub enum AgentEvent {
         call_id: String,
         name: String,
         input: serde_json::Value,
+        view: ToolView,
     },
     ToolEnd {
         agent_id: AgentId,

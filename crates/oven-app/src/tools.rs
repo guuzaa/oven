@@ -9,17 +9,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use oven_agent::{BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, Tool};
-
-/// Names of the built-in tools.
-pub const BUILTIN_TOOLS: [&str; 6] = [
-    "file_read",
-    "file_write",
-    "file_edit",
-    "bash",
-    "glob",
-    "grep",
-];
+use oven_agent::{BUILTIN_TOOLS, Tool};
 
 /// A factory producing one tool instance. Tools are rebuilt on every agent
 /// spawn, so the registry hands out fresh `Box<dyn Tool>`s on demand.
@@ -50,22 +40,19 @@ impl ToolRegistry {
     /// silently skipped.
     pub fn from_config(root: impl Into<PathBuf>, requested: &[String]) -> Self {
         let root = root.into();
-        let selected: Vec<String> = if requested.is_empty() {
-            BUILTIN_TOOLS.iter().map(|n| n.to_string()).collect()
+        let selected: Vec<&oven_agent::BuiltinTool> = if requested.is_empty() {
+            BUILTIN_TOOLS.iter().collect()
         } else {
-            requested
+            BUILTIN_TOOLS
                 .iter()
-                .filter(|n| BUILTIN_TOOLS.contains(&n.as_str()))
-                .cloned()
+                .filter(|t| requested.iter().any(|n| n == t.name))
                 .collect()
         };
         let mut registry = Self::new();
-        for name in selected {
+        for spec in selected {
             let r = root.clone();
-            let name_for_factory = name.clone();
-            registry.register(&name, move || {
-                builtin(&name_for_factory, r.clone()).expect("name filtered from BUILTIN_TOOLS")
-            });
+            let make = spec.make;
+            registry.register(spec.name, move || make(r.clone()));
         }
         registry
     }
@@ -93,18 +80,6 @@ impl ToolRegistry {
     }
 }
 
-fn builtin(name: &str, root: PathBuf) -> Option<Box<dyn Tool>> {
-    match name {
-        "file_read" => Some(Box::new(FileReadTool::new(root))),
-        "file_write" => Some(Box::new(FileWriteTool::new(root))),
-        "file_edit" => Some(Box::new(FileEditTool::new(root))),
-        "bash" => Some(Box::new(BashTool::new(root))),
-        "glob" => Some(Box::new(GlobTool::new(root))),
-        "grep" => Some(Box::new(GrepTool::new(root))),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,8 +89,8 @@ mod tests {
         let tmp = tempdir::TempDir::new("tools-default").unwrap();
         let reg = ToolRegistry::from_config(tmp.path(), &[]);
         assert_eq!(reg.len(), BUILTIN_TOOLS.len());
-        for name in BUILTIN_TOOLS {
-            assert!(reg.contains(name), "{name} missing");
+        for spec in BUILTIN_TOOLS {
+            assert!(reg.contains(spec.name), "{} missing", spec.name);
         }
     }
 
@@ -144,7 +119,7 @@ mod tests {
         let reg = ToolRegistry::from_config(tmp.path(), &[]);
         let tools = reg.merged_tools();
         let mut names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        let mut expected: Vec<&str> = BUILTIN_TOOLS.to_vec();
+        let mut expected: Vec<&str> = BUILTIN_TOOLS.iter().map(|t| t.name).collect();
         names.sort_unstable();
         expected.sort_unstable();
         assert_eq!(names, expected);

@@ -165,8 +165,7 @@ impl TodoList {
         let messages: Vec<_> = messages.collect();
         for m in messages.into_iter().rev() {
             for block in m.content.iter().rev() {
-                if let ContentBlock::ToolUse { name, input, .. } = block
-                    && name == "todo_write"
+                if let ContentBlock::ToolUse { input, .. } = block
                     && let Ok(list) = Self::parse(input)
                 {
                     return Some(list);

@@ -20,6 +20,6 @@ pub use skills::{Skill, SkillRegistry};
 pub use todo::{TodoItem, TodoList, TodoStatus, compose_system, restore_todos};
 pub use tokio_util::sync::CancellationToken;
 pub use tools::{
-    BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, SkillReadTool,
-    TodoWriteTool, Tool,
+    BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
+    GrepTool, SkillReadTool, TodoWriteTool, Tool, ToolCaps, ToolView, present_tool,
 };

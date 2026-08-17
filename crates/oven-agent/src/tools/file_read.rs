@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, require_str, resolve_within};
+use super::{Tool, ToolView, labeled, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileReadTool {
@@ -13,6 +13,12 @@ pub struct FileReadTool {
 }
 
 impl FileReadTool {
+    pub const NAME: &'static str = "file_read";
+
+    pub fn view_input(input: &Value) -> ToolView {
+        labeled(Self::NAME, "Read", input, "path")
+    }
+
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
@@ -21,7 +27,10 @@ impl FileReadTool {
 #[async_trait]
 impl Tool for FileReadTool {
     fn name(&self) -> &str {
-        "file_read"
+        Self::NAME
+    }
+    fn view(&self, input: &Value) -> ToolView {
+        Self::view_input(input)
     }
     fn description(&self) -> &str {
         "Read the contents of a UTF-8 text file as a string. Optionally restrict \
@@ -43,7 +52,7 @@ impl Tool for FileReadTool {
         args: &Value,
         _cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
-        let path_str = require_str(args, "path", "file_read")?;
+        let path_str = require_str(args, "path", Self::NAME)?;
         let path = resolve_within(&self.root, path_str)?;
         if !path.is_file() {
             return Err(AgentError::from(format!("not a file: {}", path.display())));
