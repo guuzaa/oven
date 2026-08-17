@@ -12,7 +12,6 @@ use crate::error::AgentError;
 pub struct BashTool {
     root: PathBuf,
     timeout: Duration,
-    max_output: usize,
 }
 
 impl BashTool {
@@ -26,7 +25,6 @@ impl BashTool {
         Self {
             root: root.into(),
             timeout: Duration::from_secs(300),
-            max_output: 4000,
         }
     }
 
@@ -118,11 +116,6 @@ impl Tool for BashTool {
                 "\n[exit code: {}]",
                 output.status.code().unwrap_or(-1)
             ));
-        }
-        if text.len() > self.max_output {
-            let end = text.floor_char_boundary(self.max_output);
-            text.truncate(end);
-            text.push_str("\n...[output truncated]");
         }
         if text.is_empty() {
             text.push_str("(no output)");
