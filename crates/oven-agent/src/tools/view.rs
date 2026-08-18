@@ -24,18 +24,13 @@ pub struct ToolCaps {
 }
 
 pub fn present_tool(name: &str, input: &Value) -> ToolView {
-    if name == BashTool::NAME {
-        BashTool::view_input(input)
-    } else if name == FileReadTool::NAME {
-        FileReadTool::view_input(input)
-    } else if name == FileEditTool::NAME {
-        FileEditTool::view_input(input)
-    } else if name == FileWriteTool::NAME {
-        FileWriteTool::view_input(input)
-    } else if name == TodoWriteTool::NAME {
-        TodoWriteTool::view_input(input)
-    } else {
-        ToolView::named(name)
+    match name {
+        BashTool::NAME => BashTool::view_input(input),
+        FileReadTool::NAME => FileReadTool::view_input(input),
+        FileEditTool::NAME => FileEditTool::view_input(input),
+        FileWriteTool::NAME => FileWriteTool::view_input(input),
+        TodoWriteTool::NAME => TodoWriteTool::view_input(input),
+        _ => ToolView::named(name),
     }
 }
 

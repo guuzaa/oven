@@ -510,12 +510,6 @@ impl Agent {
         self.run_with_emitter(input, None, None).await
     }
 
-    /// Last API-reported prompt-token count for the current conversation
-    /// (0 before the first call or after a trim).
-    pub fn prompt_tokens(&self) -> usize {
-        self.history.prompt_tokens()
-    }
-
     /// Cumulative token usage across all recorded responses.
     pub fn total_usage(&self) -> &Usage {
         self.history.total_usage()

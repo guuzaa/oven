@@ -79,7 +79,6 @@ pub struct History {
     messages: Vec<(Message, Timestamp)>,
     turn_usage: Vec<(Usage, Timestamp)>,
     total: Usage,
-    last_prompt_tokens: usize,
     revision: u64,
     meta: Option<SessionMeta>,
 }
@@ -90,7 +89,6 @@ impl History {
             messages: Vec::new(),
             turn_usage: Vec::new(),
             total: Usage::default(),
-            last_prompt_tokens: 0,
             revision: 0,
             meta: None,
         }
@@ -111,7 +109,6 @@ impl History {
         self.revision += 1;
         self.messages.clear();
         self.turn_usage.clear();
-        self.last_prompt_tokens = 0;
         self.total = Usage::default();
         self.meta = None;
     }
@@ -161,7 +158,6 @@ impl History {
             .turn_usage
             .iter()
             .fold(Usage::default(), |acc, (u, _)| acc + *u);
-        self.last_prompt_tokens = 0;
     }
 
     /// Remove the last user turn (the user message and everything after it),
@@ -178,7 +174,6 @@ impl History {
         if let Some((usage, _)) = self.turn_usage.pop() {
             self.total -= usage;
         }
-        self.last_prompt_tokens = 0;
         Some(removed)
     }
 
@@ -261,12 +256,6 @@ impl History {
         self.messages.is_empty()
     }
 
-    /// Last reported prompt-token count from the provider (0 before the
-    /// first call or after a trim).
-    pub fn prompt_tokens(&self) -> usize {
-        self.last_prompt_tokens
-    }
-
     /// Cumulative usage of the last response of each recorded turn.
     pub fn total_usage(&self) -> &Usage {
         &self.total
@@ -277,7 +266,6 @@ impl History {
     /// usage: only the last response of a turn counts, which is the value
     /// persisted as the turn's `TokenUsage` record.
     pub fn record_usage(&mut self, usage: &Usage) {
-        self.last_prompt_tokens = usage.input_tokens as usize;
         if self.turn_usage.is_empty() {
             self.turn_usage.push((Usage::default(), 0));
         }
@@ -295,7 +283,7 @@ impl History {
     /// buckets of turns whose user message was drained are dropped, keeping
     /// them aligned with the remaining messages.
     pub fn trim_to_budget(&mut self, budget: usize) {
-        if self.messages.is_empty() || self.last_prompt_tokens <= budget {
+        if self.messages.is_empty() || (self.total_usage().input_tokens as usize) < budget {
             return;
         }
         let starts = turn_starts(&self.messages);
@@ -322,7 +310,6 @@ impl History {
             let n = drained_users.min(self.turn_usage.len());
             self.turn_usage.drain(..n);
         }
-        self.last_prompt_tokens = 0;
     }
 }
 
@@ -464,13 +451,11 @@ mod tests {
         let mut h = History::new();
         h.push(Message::user_text("hi"));
         h.record_usage(&usage(100));
-        assert_eq!(h.prompt_tokens(), 100);
         assert_eq!(h.total_usage().input_tokens, 100);
         assert_eq!(h.total_usage().output_tokens, 10);
 
         // A second call within the same turn replaces, not accumulates.
         h.record_usage(&usage(150));
-        assert_eq!(h.prompt_tokens(), 150);
         assert_eq!(h.total_usage().input_tokens, 150);
         assert_eq!(h.total_usage().output_tokens, 10);
     }
@@ -500,7 +485,6 @@ mod tests {
         assert_eq!(h.messages().next().unwrap().role, Role::System);
         let remaining_user = h.iter().filter(|m| m.role == Role::User).count();
         assert!(remaining_user < 5);
-        assert_eq!(h.prompt_tokens(), 0);
     }
 
     #[test]
@@ -522,7 +506,6 @@ mod tests {
         let before = h.len();
         h.trim_to_budget(100);
         assert_eq!(h.len(), before);
-        assert_eq!(h.prompt_tokens(), 50);
     }
 
     #[test]
@@ -574,7 +557,6 @@ mod tests {
         let roles: Vec<Role> = h.iter().map(|m| m.role).collect();
         assert_eq!(roles, vec![Role::User, Role::Assistant]);
         assert!(matches!(&h[0].content[0], ContentBlock::Text { text } if text == "first"));
-        assert_eq!(h.prompt_tokens(), 0);
         assert_eq!(h.total_usage().input_tokens, 0);
         assert_eq!(h.total_usage().output_tokens, 0);
     }

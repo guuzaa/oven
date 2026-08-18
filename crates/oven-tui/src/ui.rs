@@ -1,17 +1,3 @@
-mod component;
-mod input;
-mod layout;
-mod list;
-mod model_picker;
-mod queue;
-mod setup_wizard;
-mod slash_command_popup;
-mod status;
-mod terminal;
-mod theme;
-mod todos;
-mod transcript;
-
 use std::io;
 use std::time::Duration;
 
@@ -22,12 +8,13 @@ use futures::StreamExt;
 use oven_app::{AppCmd, AppEvent, AppHandle};
 use tokio::sync::mpsc;
 
-use component::{Action, Component, KeyResult, State};
-use input::{InputView, Overlay, display_user_input};
-use queue::QueueWidget;
-use status::{StatusBar, StatusHint};
-use todos::TodosWidget;
-use transcript::Transcript;
+use crate::components::component::{Action, Component, KeyResult, State};
+use crate::components::input::{InputView, Overlay, display_user_input};
+use crate::components::queue::QueueWidget;
+use crate::components::status::{StatusBar, StatusHint};
+use crate::components::todos::TodosWidget;
+use crate::components::transcript::Transcript;
+use crate::components::{layout, terminal};
 
 pub struct Ui {
     handle: AppHandle,
