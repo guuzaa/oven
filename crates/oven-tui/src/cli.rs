@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use oven_app::App;
 
-use crate::ui;
+use crate::ui::Ui;
 
 #[derive(Debug, Parser)]
 #[command(name = "oven", version, about = "A toy coding agent for joy only.")]
@@ -95,7 +95,7 @@ async fn interactive(app: &App, session: Option<&str>) -> ExitCode {
         }
     };
 
-    match ui::Ui::new(handle).run().await {
+    match Ui::new(handle).run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err}");

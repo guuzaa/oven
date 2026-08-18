@@ -12,13 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = [
-    "macros",
-    "rt-multi-thread",
-    "rt",
-    "sync",
-    "time",
-] }
+tokio = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }

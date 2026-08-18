@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio::fs;
 use tokio_util::sync::CancellationToken;
 
 use crate::Tool;
@@ -60,7 +61,8 @@ impl Tool for SkillReadTool {
             .sources
             .get(id)
             .ok_or_else(|| AgentError::from(format!("unknown skill: {id}")))?;
-        std::fs::read_to_string(path)
+        fs::read_to_string(path)
+            .await
             .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))
     }
 }

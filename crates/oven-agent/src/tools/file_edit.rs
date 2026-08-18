@@ -1,5 +1,5 @@
-use std::fs;
 use std::path::PathBuf;
+use tokio::fs;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -67,6 +67,7 @@ impl Tool for FileEditTool {
             return Err(AgentError::from(format!("not a file: {}", path.display())));
         }
         let content = fs::read_to_string(&path)
+            .await
             .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))?;
 
         let matches = content.matches(old_string).count();
@@ -90,6 +91,7 @@ impl Tool for FileEditTool {
             content.replacen(old_string, new_string, 1)
         };
         fs::write(&path, &new_content)
+            .await
             .map_err(|e| AgentError::from(format!("write {}: {}", path.display(), e)))?;
         Ok(format!(
             "edited {}: replaced {} occurrence(s), {} bytes -> {} bytes",

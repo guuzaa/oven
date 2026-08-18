@@ -21,12 +21,7 @@ serde_json = { workspace = true }
 futures = { workspace = true }
 tui-textarea-2 = { workspace = true }
 unicode-width = { workspace = true }
-tokio = { workspace = true, features = [
-    "macros",
-    "rt-multi-thread",
-    "sync",
-    "time",
-] }
+tokio = { workspace = true }
 
 [dev-dependencies]
 mockall = { workspace = true }
