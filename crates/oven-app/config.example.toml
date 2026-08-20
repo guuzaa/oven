@@ -18,14 +18,16 @@ base_backoff_ms = 500
 
 # LLM provider settings.
 [provider]
-# Provider name
+# Canonical vendor slug. Aliases are accepted on read (`grok` → `xai`,
+# `kimi` → `moonshot`, `glm` → `zhipu`) and rewritten as the canonical name.
 # name = "deepseek"
-# Model name (provider inferred from prefix, e.g. "claude*" -> Anthropic, if not present).
+# Wire id only; oven joins it with `name` (e.g. deepseek/deepseek-v4-flash).
 # model = "deepseek-v4-flash"
-# Override the API endpoint. Useful for OpenAI/Anthropic-compatible proxies.
+# Override the API endpoint. Useful for OpenAI-compatible proxies.
 # base_url = "https://api.deepseek.com"
-# API entrypoint kind: "responses", "messages", or "completions". Defaults to "completions" when unset.
-# kind = "completions"
+# Wire protocol for unknown/custom vendors only. Known vendors ignore this;
+# they pick a protocol from the model catalog (or a `:responses` suffix).
+# protocol = "completions"
 # Explicit API key. If unset, the OVEN_API_KEY env var is used.
 # api_key = "sk-..."
 # Reasoning effort: "none", "low", "medium", or "high". Unset leaves thinking off

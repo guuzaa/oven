@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use oven_llm::ModelId;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -94,7 +95,7 @@ impl ModelPicker {
                 .models
                 .iter()
                 .enumerate()
-                .filter(|(_, (id, _))| id.to_lowercase().starts_with(&self.filter))
+                .filter(|(_, (id, _))| model_matches(id, &self.filter))
                 .map(|(i, _)| i)
                 .collect(),
             Stage::Effort => (0..EFFORT_ITEMS.len()).collect(),
@@ -258,7 +259,7 @@ impl ModelPicker {
             chunks[1],
             indices.iter().take(MAX_LIST_ROWS).map(|&idx| {
                 let (id, provider) = &self.models[idx];
-                (id.as_str(), provider.as_str())
+                (wire_id(id), provider.clone())
             }),
             self.selected,
         );
@@ -267,4 +268,22 @@ impl ModelPicker {
     fn draw_effort(&self, f: &mut Frame<'_>, area: Rect) {
         list::draw_choice_list(f, area, EFFORT_ITEMS, self.selected);
     }
+}
+
+fn wire_id(slug: &str) -> String {
+    ModelId::from(slug).wire_id().to_string()
+}
+
+fn model_matches(id: &str, filter: &str) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    let lower = id.to_lowercase();
+    if lower.starts_with(filter) {
+        return true;
+    }
+    ModelId::from(id)
+        .wire_id()
+        .to_lowercase()
+        .starts_with(filter)
 }

@@ -3,7 +3,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use oven_llm::{ProviderKind, ProviderName, ReasoningEffort};
+use oven_llm::{ModelId, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -28,59 +28,86 @@ pub struct ProviderConfig {
     pub name: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub kind: Option<ProviderKind>,
+    /// Wire protocol for unknown vendors only. Known vendors ignore this.
+    pub protocol: Option<ProviderKind>,
     pub api_key: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ProviderConfig {
-    /// The effective API kind, defaulting to chat completions.
-    pub fn effective_kind(&self) -> ProviderKind {
-        self.kind.unwrap_or(ProviderKind::Completions)
-    }
-
     /// Model used when neither `model` nor `OVEN_MODEL` is set.
     pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
-    /// The effective model: `model` config wins, then the `OVEN_MODEL` env
+    /// Canonicalize `name` aliases and store `model` as a wire id (no vendor).
+    pub fn normalize(&mut self) {
+        if let Some(name) = self.name.take() {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                self.name = None;
+            } else {
+                self.name = Some(canonical_vendor(trimmed));
+            }
+        }
+        if let Some(model) = self.model.take() {
+            self.model = Some(wire_model(&model));
+        }
+        if self.protocol.is_some() && !self.is_custom_vendor() {
+            self.protocol = None;
+        }
+    }
+
+    pub fn is_custom_vendor(&self) -> bool {
+        match self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(name) => matches!(ProviderName::from(name), ProviderName::Custom(_)),
+            None => true,
+        }
+    }
+
+    /// The effective model slug: `model` config wins, then the `OVEN_MODEL` env
     /// var, then the preset for `name`, then [`ProviderConfig::DEFAULT_MODEL`].
+    /// Wire ids are joined with `name` (or `deepseek` for the builtin default).
     pub fn effective_model(&self) -> String {
-        self.model
-            .clone()
-            .or_else(|| env::var("OVEN_MODEL").ok())
-            .or_else(|| {
-                self.name
-                    .as_deref()
-                    .and_then(Self::suggested_model)
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| Self::DEFAULT_MODEL.to_string())
+        if let Some(raw) = self.model.clone().or_else(|| env::var("OVEN_MODEL").ok()) {
+            return qualify_model(&raw, self.name.as_deref());
+        }
+        if let Some(name) = self.name.as_deref()
+            && let Some(suggested) = Self::suggested_model(name)
+        {
+            return qualify_model(suggested, Some(name));
+        }
+        qualify_model(Self::DEFAULT_MODEL, Some("deepseek"))
     }
 
     pub fn suggested_base_url(name: &str) -> Option<&'static str> {
-        match name.to_ascii_lowercase().as_str() {
+        match canonical_vendor(name).as_str() {
             "openai" => Some("https://api.openai.com/v1"),
             "deepseek" => Some("https://api.deepseek.com"),
-            "moonshot" | "kimi" => Some("https://api.moonshot.cn/v1"),
-            "zhipu" | "glm" => Some("https://open.bigmodel.cn/api/paas/v4"),
-            "grok" => Some("https://api.x.ai/v1"),
+            "moonshot" => Some("https://api.moonshot.cn/v1"),
+            "zhipu" => Some("https://open.bigmodel.cn/api/paas/v4"),
+            "xai" => Some("https://api.x.ai/v1"),
             _ => None,
         }
     }
 
     pub fn suggested_model(name: &str) -> Option<&'static str> {
-        match name.to_ascii_lowercase().as_str() {
+        match canonical_vendor(name).as_str() {
             "openai" => Some("gpt-5.6-terra"),
             "deepseek" => Some("deepseek-v4-flash"),
-            "moonshot" | "kimi" => Some("kimi-k3"),
-            "zhipu" | "glm" => Some("glm-5.3"),
-            "grok" => Some("grok-4.6"),
+            "moonshot" => Some("kimi-k3"),
+            "zhipu" => Some("glm-5.3"),
+            "xai" => Some("grok-4.6"),
             _ => None,
         }
     }
 
     /// Fill `base_url` and `model` from [`name`](Self::name) presets.
     pub fn apply_name_presets(&mut self) {
+        self.normalize();
         let Some(name) = self.name.clone() else {
             return;
         };
@@ -92,23 +119,23 @@ impl ProviderConfig {
         }
     }
 
-    /// Provider from an explicit `name` when set, otherwise inferred from the
-    /// model prefix. Unrecognized prefixes map to `Custom("unknown")`; callers
-    /// may still supply a `base_url` to make such models usable through an
-    /// OpenAI-compatible endpoint.
-    pub fn effective_provider_name(&self, model: &str) -> ProviderName {
-        match self
+    /// Provider from the canonical `name`, or the vendor segment of the model slug.
+    pub fn effective_provider_name(&self) -> ProviderName {
+        if let Some(name) = self
             .name
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            Some(name) => ProviderName::from(name),
-            None => Self::provider_name_for(model),
+            return ProviderName::from(name);
+        }
+        match ModelId::from(self.effective_model().as_str()).vendor() {
+            Some(vendor) => ProviderName::from(vendor),
+            None => ProviderName::Custom("unknown".into()),
         }
     }
 
-    pub fn parse_kind(raw: &str) -> Option<ProviderKind> {
+    pub fn parse_protocol(raw: &str) -> Option<ProviderKind> {
         match raw.to_ascii_lowercase().as_str() {
             "completions" => Some(ProviderKind::Completions),
             "responses" => Some(ProviderKind::Responses),
@@ -138,25 +165,24 @@ impl ProviderConfig {
     pub fn needs_setup(&self) -> bool {
         self.effective_api_key().is_empty()
     }
+}
 
-    /// Single source of truth for model-prefix → provider routing. Used by
-    /// [`ProviderConfig::effective_provider_name`] and the env-var lookups so
-    /// a model never resolves to two different providers.
-    fn provider_name_for(model: &str) -> ProviderName {
-        let lower = model.to_ascii_lowercase();
-        if lower.starts_with("claude") {
-            ProviderName::Anthropic
-        } else if lower.starts_with("gpt") {
-            ProviderName::OpenAI
-        } else if lower.starts_with("deepseek") {
-            ProviderName::DeepSeek
-        } else if lower.starts_with("kimi") {
-            ProviderName::Moonshot
-        } else if lower.starts_with("glm") {
-            ProviderName::Zhipu
-        } else {
-            ProviderName::Custom("unknown".into())
-        }
+fn qualify_model(raw: &str, name: Option<&str>) -> String {
+    let id = ModelId::from(raw);
+    if let Some(vendor) = id.vendor() {
+        id.qualify(vendor).to_string()
+    } else if let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) {
+        id.qualify(name).to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+fn wire_model(raw: &str) -> String {
+    let id = ModelId::from(raw);
+    match id.variant() {
+        Some(variant) => format!("{}:{variant}", id.wire_id()),
+        None => id.wire_id().to_string(),
     }
 }
 
@@ -222,8 +248,8 @@ impl AppConfig {
         if let Some(u) = overlay.provider.base_url {
             self.provider.base_url = Some(u);
         }
-        if let Some(e) = overlay.provider.kind {
-            self.provider.kind = Some(e);
+        if let Some(p) = overlay.provider.protocol {
+            self.provider.protocol = Some(p);
         }
         if let Some(k) = overlay.provider.api_key {
             self.provider.api_key = Some(k);
@@ -249,6 +275,7 @@ impl AppConfig {
         for (id, cfg) in overlay.mcps {
             self.mcps.insert(id, cfg);
         }
+        self.provider.normalize();
     }
 
     fn load_file(path: &Path) -> Result<Option<AppConfig>, ConfigError> {
@@ -280,6 +307,7 @@ impl AppConfig {
         {
             cfg.merge(loaded);
         }
+        cfg.provider.normalize();
         Ok(cfg)
     }
 
@@ -346,16 +374,16 @@ impl AppConfig {
         };
         hoist_root_keys(&mut provider, &mut root);
         if let Some(n) = &overlay.name {
-            provider.insert("name".into(), toml::Value::String(n.clone()));
+            provider.insert("name".into(), toml::Value::String(canonical_vendor(n)));
         }
         if let Some(m) = &overlay.model {
-            provider.insert("model".into(), toml::Value::String(m.clone()));
+            provider.insert("model".into(), toml::Value::String(wire_model(m)));
         }
         if let Some(u) = &overlay.base_url {
             provider.insert("base_url".into(), toml::Value::String(u.clone()));
         }
-        if let Some(k) = overlay.kind {
-            provider.insert("kind".into(), toml::Value::String(k.to_string()));
+        if let Some(p) = overlay.protocol {
+            provider.insert("protocol".into(), toml::Value::String(p.to_string()));
         }
         if let Some(k) = &overlay.api_key {
             provider.insert("api_key".into(), toml::Value::String(k.clone()));
@@ -442,51 +470,67 @@ mod tests {
     }
 
     #[test]
-    fn kind_defaults_to_completions_and_merges() {
-        let cfg: AppConfig = toml::from_str("[provider]\nmodel = \"m\"\n").unwrap();
-        assert_eq!(cfg.provider.effective_kind(), ProviderKind::Completions);
+    fn old_kind_field_is_ignored() {
+        let cfg: AppConfig = toml::from_str("[provider]\nkind = \"responses\"\n").unwrap();
+        assert!(cfg.provider.protocol.is_none());
 
-        let mut cfg: AppConfig = toml::from_str("[provider]\nkind = \"responses\"\n").unwrap();
-        assert_eq!(cfg.provider.effective_kind(), ProviderKind::Responses);
-
-        // An overlay without entrypoint must not override an explicit value.
-        cfg.merge(AppConfig::default());
-        assert_eq!(cfg.provider.effective_kind(), ProviderKind::Responses);
+        let cfg: AppConfig = toml::from_str("[provider]\nkind = \"chat\"\n").unwrap();
+        assert!(cfg.provider.protocol.is_none());
     }
 
     #[test]
-    fn kind_rejects_unknown_values() {
-        let err = toml::from_str::<AppConfig>("[provider]\nkind = \"chat\"\n").unwrap_err();
-        assert!(err.to_string().contains("unknown variant"));
+    fn old_grok_config_canonicalizes_name_and_qualifies_model() {
+        let tmp = tempdir::TempDir::new("oven-old-grok").unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[provider]\nname = \"grok\"\nmodel = \"xai/grok-4.6\"\nkind = \"responses\"\n",
+        )
+        .unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        assert_eq!(cfg.provider.name.as_deref(), Some("xai"));
+        assert_eq!(cfg.provider.model.as_deref(), Some("grok-4.6"));
+        assert_eq!(cfg.provider.effective_model(), "xai/grok-4.6");
+        assert!(cfg.provider.protocol.is_none());
     }
 
     #[test]
-    fn provider_name_routes_model_prefixes() {
-        let cfg = ProviderConfig::default();
-        let cases = [
-            ("gpt-4o", ProviderName::OpenAI),
-            ("gpt-o3-mini", ProviderName::OpenAI),
-            ("deepseek-chat", ProviderName::DeepSeek),
-            ("kimi-k3", ProviderName::Moonshot),
-            ("glm-4", ProviderName::Zhipu),
-            ("claude-3-5-haiku", ProviderName::Anthropic),
-            ("unknown-model", ProviderName::Custom("unknown".into())),
-        ];
-        for (model, expected) in cases {
-            assert_eq!(cfg.effective_provider_name(model), expected, "{model}");
-        }
+    fn effective_provider_name_uses_canonical_name() {
+        let cfg = ProviderConfig {
+            name: Some("grok".into()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_provider_name(), ProviderName::Grok);
+        assert_eq!(
+            ProviderConfig::default().effective_provider_name(),
+            ProviderName::DeepSeek
+        );
+        assert_eq!(
+            ProviderConfig {
+                model: Some("plain-id".into()),
+                ..Default::default()
+            }
+            .effective_provider_name(),
+            ProviderName::Custom("unknown".into())
+        );
+        assert_eq!(ProviderName::from("kimi"), ProviderName::Moonshot);
+        assert_eq!(
+            ProviderName::from("my-gateway"),
+            ProviderName::Custom("my-gateway".into())
+        );
     }
 
     #[test]
     fn effective_model_falls_back_to_default() {
         let cfg = ProviderConfig::default();
-        assert_eq!(cfg.effective_model(), ProviderConfig::DEFAULT_MODEL);
+        assert_eq!(cfg.effective_model(), "deepseek/deepseek-v4-flash");
 
         let cfg = ProviderConfig {
             model: Some("deepseek-v4-flash".into()),
+            name: Some("deepseek".into()),
             ..Default::default()
         };
-        assert_eq!(cfg.effective_model(), "deepseek-v4-flash");
+        assert_eq!(cfg.effective_model(), "deepseek/deepseek-v4-flash");
     }
 
     #[test]
@@ -513,6 +557,7 @@ mod tests {
         cfg.apply_name_presets();
         assert_eq!(cfg.base_url.as_deref(), Some("https://api.moonshot.cn/v1"));
         assert_eq!(cfg.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(cfg.effective_model(), "moonshot/kimi-k3");
         assert_eq!(ProviderConfig::suggested_model("grok"), Some("grok-4.6"));
         assert_eq!(
             ProviderConfig {
@@ -520,25 +565,16 @@ mod tests {
                 ..Default::default()
             }
             .effective_model(),
-            "glm-5.3"
+            "zhipu/glm-5.3"
         );
-    }
-
-    #[test]
-    fn explicit_name_wins_over_model_prefix() {
-        let cfg = ProviderConfig {
-            name: Some("openai".into()),
+        let mut grok = ProviderConfig {
+            name: Some("grok".into()),
             ..Default::default()
         };
-        assert_eq!(
-            cfg.effective_provider_name("claude-3-5-haiku"),
-            ProviderName::OpenAI
-        );
-        assert_eq!(ProviderName::from("kimi"), ProviderName::Moonshot);
-        assert_eq!(
-            ProviderName::from("my-gateway"),
-            ProviderName::Custom("my-gateway".into())
-        );
+        grok.apply_name_presets();
+        assert_eq!(grok.name.as_deref(), Some("xai"));
+        assert_eq!(grok.model.as_deref(), Some("grok-4.6"));
+        assert_eq!(grok.effective_model(), "xai/grok-4.6");
     }
 
     #[test]
@@ -550,7 +586,7 @@ mod tests {
         AppConfig::save_provider_at(
             &path,
             &ProviderConfig {
-                kind: Some(ProviderKind::Responses),
+                protocol: Some(ProviderKind::Responses),
                 base_url: Some("https://proxy.example".into()),
                 ..Default::default()
             },
@@ -560,7 +596,7 @@ mod tests {
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
         assert_eq!(cfg.max_retries, 9);
         assert_eq!(cfg.provider.model.as_deref(), Some("old"));
-        assert_eq!(cfg.provider.effective_kind(), ProviderKind::Responses);
+        assert_eq!(cfg.provider.protocol, Some(ProviderKind::Responses));
         assert_eq!(
             cfg.provider.base_url.as_deref(),
             Some("https://proxy.example")
@@ -599,6 +635,7 @@ mod tests {
         assert_eq!(cfg.max_retries, 9);
         assert_eq!(cfg.request_timeout_secs, 30);
         assert_eq!(cfg.provider.model.as_deref(), Some("old"));
+        assert_eq!(cfg.provider.effective_model(), "moonshot/old");
         assert_eq!(cfg.provider.name.as_deref(), Some("moonshot"));
         assert!(text.find("max_retries").unwrap() < text.find("[provider]").unwrap());
     }

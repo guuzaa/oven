@@ -772,11 +772,11 @@ mod tests {
     #[test]
     fn setup_with_args_submits_without_wizard() {
         let mut view = view();
-        type_text(&mut view, "/setup kind=completions");
+        type_text(&mut view, "/setup name=deepseek");
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         match result {
             KeyResult::Action(Action::QuietSubmit(text)) => {
-                assert_eq!(text, "/setup kind=completions");
+                assert_eq!(text, "/setup name=deepseek");
             }
             _ => panic!("expected QuietSubmit"),
         }

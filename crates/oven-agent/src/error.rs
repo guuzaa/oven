@@ -49,9 +49,14 @@ impl From<&str> for AgentError {
 
 impl From<ProviderError> for AgentError {
     fn from(err: ProviderError) -> Self {
-        Self {
-            message: format!("provider: {}", err),
-        }
+        let message = match &err {
+            ProviderError::UnknownModel(model) => {
+                format!("model '{model}' is not available; run /setup to configure that provider")
+            }
+            ProviderError::NoProviderRegistered => "no provider registered; run /setup".to_string(),
+            _ => format!("provider: {err}"),
+        };
+        Self { message }
     }
 }
 

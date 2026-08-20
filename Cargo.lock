@@ -1952,9 +1952,9 @@ dependencies = [
 
 [[package]]
 name = "oven-llm"
-version = "0.3.1"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d4cfc15e1b27faa860f1474d95cb1d1d2ee0dc853b911757b01ee6370709903"
+checksum = "e4a3261aabb40726c301602f76b4024dd3f6128c5403f99a516d9110afb1ddb3"
 dependencies = [
  "async-stream",
  "async-trait",

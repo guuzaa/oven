@@ -39,7 +39,7 @@ mod tests {
     use futures::stream::BoxStream;
     use oven_llm::{
         ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
-        Result as LlmResult, StreamEvent,
+        Result as LlmResult, Router, StreamEvent,
     };
 
     struct MockProvider;
@@ -73,7 +73,9 @@ mod tests {
     }
 
     fn fresh_agent() -> Agent {
-        Agent::new(Box::new(MockProvider), Vec::new())
+        let mut router = Router::new();
+        router.register(Box::new(MockProvider));
+        Agent::new(router, Vec::new())
     }
 
     fn run(args: &str) -> Result<CommandOutcome, AppError> {

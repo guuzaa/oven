@@ -1,4 +1,5 @@
 use oven_agent::Agent;
+use oven_llm::canonical_vendor;
 
 use super::{CommandOutcome, SlashCommand};
 use crate::AppError;
@@ -12,29 +13,38 @@ impl Setup {
         for token in args.split_whitespace() {
             let Some((key, value)) = token.split_once('=') else {
                 return Err(AppError::Runtime(format!(
-                    "invalid argument '{token}'; usage: /setup name=... kind=... api_key=..."
+                    "invalid argument '{token}'; usage: /setup name=... api_key=..."
                 )));
             };
             if value.is_empty() {
                 return Err(AppError::Runtime(format!("empty value for '{key}'")));
             }
             match key {
-                "name" => cfg.name = Some(value.to_string()),
+                "name" => cfg.name = Some(canonical_vendor(value)),
                 "api_key" => cfg.api_key = Some(value.to_string()),
+                "base_url" => cfg.base_url = Some(value.to_string()),
+                "protocol" => {
+                    cfg.protocol =
+                        Some(ProviderConfig::parse_protocol(value).ok_or_else(|| {
+                            AppError::Runtime(format!(
+                                "invalid protocol '{value}'; expected completions or responses"
+                            ))
+                        })?);
+                }
                 "kind" => {
-                    cfg.kind = Some(ProviderConfig::parse_kind(value).ok_or_else(|| {
-                        AppError::Runtime(format!(
-                            "invalid kind '{value}'; expected completions or responses"
-                        ))
-                    })?);
+                    return Err(AppError::Runtime(
+                        "kind is no longer used; known providers pick a protocol automatically"
+                            .into(),
+                    ));
                 }
                 _ => {
                     return Err(AppError::Runtime(format!(
-                        "unknown field '{key}'; expected name, kind, api_key"
+                        "unknown field '{key}'; expected name, api_key, base_url, protocol"
                     )));
                 }
             }
         }
+        cfg.normalize();
         Ok(cfg)
     }
 }
@@ -45,13 +55,13 @@ impl SlashCommand for Setup {
     }
 
     fn description(&self) -> &str {
-        "Configure provider: /setup name=... kind=... api_key=..."
+        "Configure provider: /setup name=... api_key=..."
     }
 
     fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
         if args.trim().is_empty() {
             return Ok(CommandOutcome::Reply(format!(
-                "current model: {}\nusage: /setup name=<provider> kind=<completions|responses> api_key=<key>",
+                "current model: {}\nusage: /setup name=<provider> api_key=<key>",
                 agent.model().as_str()
             )));
         }
@@ -68,7 +78,7 @@ mod tests {
     use futures::stream::BoxStream;
     use oven_llm::{
         ModelId, ModelInfo, Provider, ProviderError, ProviderKind, ProviderName, Request, Response,
-        Result as LlmResult, StreamEvent,
+        Result as LlmResult, Router, StreamEvent,
     };
 
     struct MockProvider;
@@ -102,7 +112,9 @@ mod tests {
     }
 
     fn fresh_agent() -> Agent {
-        Agent::new(Box::new(MockProvider), Vec::new())
+        let mut router = Router::new();
+        router.register(Box::new(MockProvider));
+        Agent::new(router, Vec::new())
     }
 
     fn run(args: &str) -> Result<CommandOutcome, AppError> {
@@ -117,15 +129,16 @@ mod tests {
         };
         assert!(text.contains("current model: default"));
         assert!(text.contains("usage: /setup"));
+        assert!(!text.contains("kind="));
     }
 
     #[test]
     fn parses_all_fields() {
-        let out = run("name=deepseek kind=responses api_key=sk-test").unwrap();
+        let out = run("name=deepseek api_key=sk-test").unwrap();
         match out {
             CommandOutcome::ProviderChanged { provider } => {
                 assert_eq!(provider.name.as_deref(), Some("deepseek"));
-                assert_eq!(provider.kind, Some(ProviderKind::Responses));
+                assert!(provider.protocol.is_none());
                 assert_eq!(provider.api_key.as_deref(), Some("sk-test"));
                 assert!(provider.model.is_none());
                 assert!(provider.base_url.is_none());
@@ -135,24 +148,32 @@ mod tests {
     }
 
     #[test]
-    fn partial_update_leaves_unset_fields() {
-        let out = run("kind=completions").unwrap();
+    fn grok_name_canonicalizes_to_xai() {
+        let out = run("name=grok api_key=xai-key").unwrap();
         match out {
             CommandOutcome::ProviderChanged { provider } => {
-                assert_eq!(provider.kind, Some(ProviderKind::Completions));
-                assert!(provider.name.is_none());
-                assert!(provider.model.is_none());
-                assert!(provider.base_url.is_none());
-                assert!(provider.api_key.is_none());
+                assert_eq!(provider.name.as_deref(), Some("xai"));
             }
             other => panic!("expected ProviderChanged, got {other:?}"),
         }
     }
 
     #[test]
-    fn invalid_kind_errors() {
+    fn custom_protocol_is_kept() {
+        let out = run("name=my-proxy protocol=responses api_key=sk").unwrap();
+        match out {
+            CommandOutcome::ProviderChanged { provider } => {
+                assert_eq!(provider.name.as_deref(), Some("my-proxy"));
+                assert_eq!(provider.protocol, Some(ProviderKind::Responses));
+            }
+            other => panic!("expected ProviderChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kind_is_rejected() {
         let err = run("kind=chat").unwrap_err();
-        assert!(err.to_string().contains("invalid kind"));
+        assert!(err.to_string().contains("kind is no longer used"));
     }
 
     #[test]

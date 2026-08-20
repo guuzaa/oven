@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use oven_agent::AgentError;
 use oven_agent::{Agent, AgentLive, LiveHandle, Record, Skill, SkillReadTool, TodoWriteTool, Tool};
-use oven_llm::{Provider, Role};
+use oven_llm::{Provider, Role, Router};
 use thiserror::Error;
 
 use crate::config::{AppConfig, ConfigError};
@@ -120,7 +120,8 @@ impl App {
         self
     }
 
-    fn apply_config(&mut self, config: AppConfig) {
+    fn apply_config(&mut self, mut config: AppConfig) {
+        config.provider.normalize();
         self.tools = ToolRegistry::from_config(&self.root, &config.tools);
         self.mcps = McpRegistry::new();
         self.skills = SkillRegistry::new();
@@ -142,8 +143,8 @@ impl App {
         self.config = config;
     }
 
-    fn build_provider(&self, model: &str) -> Result<Box<dyn Provider>, AppError> {
-        crate::provider::build_provider(&self.config, model)
+    fn build_router(&self) -> Result<Router, AppError> {
+        crate::provider::build_router(&self.config)
     }
 
     fn build_system_prompt(&self) -> String {
@@ -165,19 +166,14 @@ impl App {
 
     pub(crate) async fn build_agent(&self) -> Result<Agent, AppError> {
         let model = self.config.provider.effective_model();
-        let agent = self
-            .build_agent_with_provider(self.build_provider(&model)?)
-            .await?;
+        let agent = self.build_agent_with_router(self.build_router()?).await?;
         Ok(agent.with_model(model))
     }
 
     pub(crate) async fn build_interactive_agent(&self) -> Result<Agent, AppError> {
         let model = self.config.provider.effective_model();
         let agent = self
-            .build_agent_with_provider(crate::provider::build_interactive_provider(
-                &self.config,
-                &model,
-            )?)
+            .build_agent_with_router(crate::provider::build_interactive_router(&self.config)?)
             .await?;
         Ok(agent.with_model(model))
     }
@@ -186,6 +182,12 @@ impl App {
         &self,
         provider: Box<dyn Provider>,
     ) -> Result<Agent, AppError> {
+        let mut router = Router::new();
+        router.register(provider);
+        self.build_agent_with_router(router).await
+    }
+
+    pub(crate) async fn build_agent_with_router(&self, router: Router) -> Result<Agent, AppError> {
         let mut tools = self.tools.merged_tools();
         let mcp_tools = self
             .mcp_connector
@@ -196,7 +198,7 @@ impl App {
         let live: LiveHandle =
             Arc::new(Mutex::new(AgentLive::new(Some(self.build_system_prompt()))));
         tools.push(Box::new(TodoWriteTool::new(live.clone())));
-        let mut agent = Agent::new_with_live(provider, tools, live);
+        let mut agent = Agent::new_with_live(router, tools, live);
         if let Some(effort) = self.config.provider.reasoning_effort {
             agent.set_reasoning_effort(Some(effort));
         }

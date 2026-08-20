@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, Provider, ReasoningEffort, Request, Response, Role,
-    SamplingParams, StreamCollector, StreamEvent, ThinkingMode, ToolChoice, Usage,
+    Router, SamplingParams, StreamCollector, StreamEvent, ThinkingMode, ToolChoice, Usage,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -20,7 +20,7 @@ use crate::tools::Tool;
 /// the provider until the provider replies without tool calls.
 pub struct Agent {
     id: AgentId,
-    pub(crate) provider: Box<dyn Provider>,
+    pub(crate) router: Router,
     pub(crate) tools: Vec<Box<dyn Tool>>,
     pub(crate) history: History,
     model: ModelId,
@@ -35,18 +35,14 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(provider: Box<dyn Provider>, tools: Vec<Box<dyn Tool>>) -> Self {
-        Self::new_with_live(provider, tools, Arc::new(Mutex::new(AgentLive::new(None))))
+    pub fn new(router: Router, tools: Vec<Box<dyn Tool>>) -> Self {
+        Self::new_with_live(router, tools, Arc::new(Mutex::new(AgentLive::new(None))))
     }
 
-    pub fn new_with_live(
-        provider: Box<dyn Provider>,
-        tools: Vec<Box<dyn Tool>>,
-        live: LiveHandle,
-    ) -> Self {
+    pub fn new_with_live(router: Router, tools: Vec<Box<dyn Tool>>, live: LiveHandle) -> Self {
         Self {
             id: AgentId(0),
-            provider,
+            router,
             tools,
             history: History::new(),
             model: ModelId::new("default"),
@@ -81,17 +77,16 @@ impl Agent {
         self.reasoning_effort
     }
 
-    /// The provider in effect (used by the App layer for model listing).
-    pub fn provider(&self) -> &dyn Provider {
-        self.provider.as_ref()
+    pub fn router(&self) -> &Router {
+        &self.router
+    }
+
+    pub fn router_mut(&mut self) -> &mut Router {
+        &mut self.router
     }
 
     pub fn set_model(&mut self, model: impl Into<ModelId>) {
         self.model = model.into();
-    }
-
-    pub fn set_provider(&mut self, provider: Box<dyn Provider>) {
-        self.provider = provider;
     }
 
     pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
@@ -307,7 +302,7 @@ impl Agent {
     ) -> Result<Response, AgentError> {
         let req = self.build_request();
 
-        match self.provider.stream(&req).await {
+        match self.router.stream(&req).await {
             Ok(mut stream) => {
                 let mut collector = StreamCollector::new();
                 while let Some(event) = stream.next().await {
@@ -344,7 +339,7 @@ impl Agent {
                 Ok(collector.finish()?)
             }
             Err(_) => {
-                let response = self.provider.complete(&req).await?;
+                let response = Provider::complete(&self.router, &req).await?;
                 if !response.has_tool_use() {
                     let thinking = response.thinking();
                     if !thinking.is_empty() {
@@ -470,7 +465,7 @@ impl Agent {
         let turn = async {
             self.history.push(Message::user_text(input));
             self.budget = self
-                .provider
+                .router
                 .resolve_model(&self.model)
                 .map(|info| info.context_window as usize)
                 .unwrap_or(128_000);
@@ -536,6 +531,12 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc::unbounded_channel;
+
+    fn router_with(provider: Box<dyn Provider>) -> Router {
+        let mut router = Router::new();
+        router.register(provider);
+        router
+    }
 
     struct MockProvider {
         responses: Mutex<VecDeque<Response>>,
@@ -647,7 +648,7 @@ mod tests {
             Box::new(FileReadTool::new(root)),
             Box::new(FileWriteTool::new(root)),
         ];
-        let mut agent = Agent::new(Box::new(mock), tools).with_max_iters(4);
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools).with_max_iters(4);
         let result = agent.run("read note.txt").await.unwrap();
         assert_eq!(result, "done");
         assert!(agent.history.iter().any(|m| content_has(m, "hello world")));
@@ -665,7 +666,7 @@ mod tests {
         ]);
 
         let tools: Vec<Box<dyn Tool>> = vec![Box::new(FileReadTool::new(root))];
-        let mut agent = Agent::new(Box::new(mock), tools)
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools)
             .with_id(AgentId(7))
             .with_max_iters(4);
 
@@ -724,7 +725,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_before_run_emits_cancelled() {
         let mock = MockProvider::new(vec![]);
-        let mut agent = Agent::new(Box::new(mock), Vec::new()).with_id(AgentId(1));
+        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new()).with_id(AgentId(1));
         let cancel = CancellationToken::new();
         cancel.cancel();
         let (tx, mut rx) = unbounded_channel();
@@ -787,7 +788,7 @@ mod tests {
     #[tokio::test]
     async fn set_system_is_reflected_in_request() {
         let (mock, seen) = CaptureSystem::new();
-        let mut agent = Agent::new(Box::new(mock), Vec::new());
+        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         agent.set_system("hello system");
         let result = agent.run("hi").await.unwrap();
         assert_eq!(result, "ok");
@@ -800,7 +801,7 @@ mod tests {
     #[tokio::test]
     async fn history_system_used_when_no_base_system() {
         let (mock, seen) = CaptureSystem::new();
-        let mut agent = Agent::new(Box::new(mock), Vec::new());
+        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         agent.push_history(Message::system("from history"));
         let result = agent.run("hi").await.unwrap();
         assert_eq!(result, "ok");
@@ -859,7 +860,7 @@ mod tests {
         let live = Arc::new(Mutex::new(AgentLive::new(None)));
         let tools: Vec<Box<dyn Tool>> =
             vec![Box::new(crate::tools::TodoWriteTool::new(live.clone()))];
-        Agent::new_with_live(provider, tools, live)
+        Agent::new_with_live(router_with(provider), tools, live)
     }
 
     #[tokio::test]
@@ -1108,7 +1109,8 @@ mod tests {
             Box::new(FileReadTool::new(tmp.path())),
             Box::new(crate::tools::TodoWriteTool::new(live.clone())),
         ];
-        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        let mut agent =
+            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
         assert_eq!(agent.mode(), AgentMode::Default);
         let live = agent.live_handle();
 
@@ -1145,7 +1147,8 @@ mod tests {
             Box::new(FileReadTool::new(tmp.path())),
             Box::new(crate::tools::TodoWriteTool::new(live.clone())),
         ];
-        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        let mut agent =
+            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
@@ -1177,7 +1180,8 @@ mod tests {
             Box::new(FileReadTool::new(tmp.path())),
             Box::new(crate::tools::TodoWriteTool::new(live.clone())),
         ];
-        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(6);
+        let mut agent =
+            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(6);
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
@@ -1221,7 +1225,8 @@ mod tests {
             Box::new(FileReadTool::new(tmp.path())),
             Box::new(crate::tools::TodoWriteTool::new(live.clone())),
         ];
-        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        let mut agent =
+            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
@@ -1254,7 +1259,8 @@ mod tests {
             Box::new(FileReadTool::new(tmp.path())),
             Box::new(crate::tools::TodoWriteTool::new(live.clone())),
         ];
-        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        let mut agent =
+            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
@@ -1286,7 +1292,8 @@ mod tests {
             Box::new(FileReadTool::new(tmp.path())),
             Box::new(crate::tools::TodoWriteTool::new(live.clone())),
         ];
-        let mut agent = Agent::new_with_live(Box::new(mock), tools, live).with_max_iters(4);
+        let mut agent =
+            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],

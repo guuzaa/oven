@@ -96,6 +96,7 @@ Config lives in `.oven.toml` at the project root, or globally at
 tools = ["file_read", "file_write", "bash"]
 
 [provider]
+name = "deepseek"
 model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
 api_key = "sk-xxx"
@@ -127,7 +128,7 @@ exiting, the session id is printed so you can resume with `--session <id>`.
 | `/clear` | New chat (new session, old file kept) |
 | `/exit`  | Quit |
 | `/model` | Switch model: `/model <id> [none\|low\|medium\|high]` |
-| `/setup` | Configure provider: `/setup name=... kind=... api_key=...` |
+| `/setup` | Configure provider: `/setup name=... api_key=...` |
 | `/plan`  | Toggle plan mode: `/plan [on\|off]` |
 
 ## Build from source

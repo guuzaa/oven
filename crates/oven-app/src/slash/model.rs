@@ -1,5 +1,5 @@
 use oven_agent::Agent;
-use oven_llm::ReasoningEffort;
+use oven_llm::{ModelId, ReasoningEffort, RouterError};
 
 use super::{CommandOutcome, SlashCommand};
 use crate::AppError;
@@ -16,6 +16,24 @@ impl Model {
             _ => Err(AppError::Runtime(format!(
                 "invalid reasoning effort '{s}'; expected none, low, medium, or high"
             ))),
+        }
+    }
+
+    pub(crate) fn qualify(agent: &Agent, raw: &str) -> Result<String, AppError> {
+        let id = ModelId::from(raw);
+        let qualified = agent.router().qualify(&id);
+        if qualified.vendor().is_some() {
+            match agent.router().provider(&qualified) {
+                Ok(_) => Ok(qualified.to_string()),
+                Err(RouterError::UnknownModel(_)) | Err(RouterError::NoProviderRegistered) => {
+                    Err(AppError::Runtime(format!(
+                        "model '{qualified}' is not available; run /setup to configure that provider"
+                    )))
+                }
+                Err(e) => Err(AppError::Provider(e.to_string())),
+            }
+        } else {
+            Ok(qualified.to_string())
         }
     }
 }
@@ -43,11 +61,11 @@ impl SlashCommand for Model {
                 )))
             }
             [model] => Ok(CommandOutcome::ModelChanged {
-                model: (*model).to_string(),
+                model: Self::qualify(agent, model)?,
                 reasoning_effort: agent.reasoning_effort(),
             }),
             [model, effort] => Ok(CommandOutcome::ModelChanged {
-                model: (*model).to_string(),
+                model: Self::qualify(agent, model)?,
                 reasoning_effort: Some(Self::parse_effort(effort)?),
             }),
             _ => Err(AppError::Runtime(
@@ -63,8 +81,8 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_llm::{
-        ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
-        Result as LlmResult, StreamEvent,
+        ModelInfo, Provider, ProviderError, ProviderName, Request, Response, Result as LlmResult,
+        Router, StreamEvent,
     };
 
     struct MockProvider;
@@ -93,12 +111,14 @@ mod tests {
         }
 
         fn provider_name(&self) -> ProviderName {
-            ProviderName::Custom("mock".into())
+            ProviderName::DeepSeek
         }
     }
 
     fn fresh_agent() -> Agent {
-        Agent::new(Box::new(MockProvider), Vec::new())
+        let mut router = Router::new();
+        router.register(Box::new(MockProvider));
+        Agent::new(router, Vec::new())
     }
 
     fn run(args: &str) -> Result<CommandOutcome, AppError> {
@@ -125,8 +145,31 @@ mod tests {
             CommandOutcome::ModelChanged {
                 ref model,
                 reasoning_effort: Some(ReasoningEffort::High),
-            } if model == "deepseek-chat"
+            } if model == "deepseek/deepseek-chat"
         ));
+    }
+
+    #[test]
+    fn qualifies_bare_id_and_vendor_alias() {
+        let out = run("deepseek-v4-flash").unwrap();
+        assert!(matches!(
+            out,
+            CommandOutcome::ModelChanged { ref model, .. } if model == "deepseek/deepseek-v4-flash"
+        ));
+        let out = run("deepseek/deepseek-v4-flash:responses").unwrap();
+        assert!(matches!(
+            out,
+            CommandOutcome::ModelChanged { ref model, .. } if model == "deepseek/deepseek-v4-flash:responses"
+        ));
+    }
+
+    #[test]
+    fn cross_vendor_slug_errors() {
+        let err = run("xai/grok-4.6").unwrap_err();
+        assert!(err.to_string().contains("run /setup"));
+        let err = run("grok/grok-4.6").unwrap_err();
+        assert!(err.to_string().contains("xai/grok-4.6"));
+        assert!(err.to_string().contains("run /setup"));
     }
 
     #[test]
@@ -142,9 +185,9 @@ mod tests {
                 matches!(
                     out,
                     CommandOutcome::ModelChanged {
+                        ref model,
                         reasoning_effort: Some(e),
-                        ..
-                    } if e == expected
+                    } if e == expected && model == "deepseek/gpt-4o"
                 ),
                 "{raw}"
             );

@@ -7,7 +7,8 @@ use oven_agent::{
     Agent, AgentEvent, AgentMode, CancellationToken, LiveHandle, Record, TodoList, restore_todos,
 };
 use oven_llm::{
-    ContentBlock, Message, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Usage,
+    ContentBlock, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName,
+    ReasoningEffort, Usage,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -501,10 +502,12 @@ async fn apply_provider_change(
         ..AppConfig::default()
     });
     let model = next.provider.effective_model();
-    match crate::provider::build_provider(&next, &model) {
-        Ok(built) => {
+    match crate::provider::build_client(&next) {
+        Ok(client) => {
             *config = next;
-            agent.set_provider(built);
+            agent
+                .router_mut()
+                .upsert(crate::provider::retrying(config, client));
             agent.set_model(model.clone());
             agent.set_reasoning_effort(config.provider.reasoning_effort);
             let saved = save_provider_overlay(user_config_path, &overlay, app_id, subs);
@@ -527,8 +530,7 @@ async fn apply_provider_change(
                     reasoning_effort: agent.reasoning_effort(),
                 },
             );
-            let (models, auth_error) =
-                refresh_model_choices(agent.provider(), &model, config).await;
+            let (models, auth_error) = refresh_model_choices(agent.router(), &model, config).await;
             emit(subs, AppEvent::ModelsUpdated { app_id, models });
             emit(
                 subs,
@@ -564,8 +566,8 @@ fn summarize_setup(overlay: &ProviderConfig, saved: Option<&Path>) -> String {
     if let Some(n) = &overlay.name {
         parts.push(format!("name={n}"));
     }
-    if let Some(k) = overlay.kind {
-        parts.push(format!("kind={k}"));
+    if let Some(p) = overlay.protocol {
+        parts.push(format!("protocol={p}"));
     }
     if let Some(m) = &overlay.model {
         parts.push(format!("model={m}"));
@@ -660,22 +662,38 @@ fn merge_model_choices(
     use std::collections::HashSet;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    let choices = std::iter::once((current_model.to_string(), current_provider.clone()))
-        .chain(known.into_iter().map(|m| (m.id, m.provider)))
-        .chain(dynamic.into_iter().map(|m| (m.id, m.provider)));
+    let choices = std::iter::once((
+        slug_without_variant(current_model),
+        current_provider.clone(),
+    ))
+    .chain(
+        known
+            .into_iter()
+            .map(|m| (slug_without_variant(&m.id), m.provider)),
+    )
+    .chain(
+        dynamic
+            .into_iter()
+            .map(|m| (slug_without_variant(&m.id), m.provider)),
+    );
     for (id, provider) in choices {
-        if seen.insert(id.clone()) {
+        if !id.is_empty() && seen.insert(id.clone()) {
             out.push((id, provider_label(&provider)));
         }
     }
     out
 }
 
-fn provider_label(name: &ProviderName) -> String {
-    match name {
-        ProviderName::Custom(name) => format!("Custom({name})"),
-        other => format!("{other:?}"),
+fn slug_without_variant(raw: &str) -> String {
+    let id = ModelId::from(raw);
+    match id.vendor() {
+        Some(vendor) => format!("{}/{}", oven_llm::canonical_vendor(vendor), id.wire_id()),
+        None => id.wire_id().to_string(),
     }
+}
+
+fn provider_label(name: &ProviderName) -> String {
+    name.to_string()
 }
 
 /// Text of a user message: its text blocks joined with newlines. Empty when
@@ -716,7 +734,7 @@ async fn runtime_loop(
     let mut persisted_rev = agent.history_revision();
 
     // Publish the initial model list for the `/model` popup completion.
-    let (models, _) = refresh_model_choices(agent.provider(), &model, &config).await;
+    let (models, _) = refresh_model_choices(agent.router(), &model, &config).await;
     emit(&subscribers, AppEvent::ModelsUpdated { app_id, models });
 
     // Commands received while a turn is in flight are buffered here and run
@@ -959,10 +977,16 @@ mod tests {
     use futures::stream::BoxStream;
     use oven_llm::{
         ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
-        Role, StopReason, StreamEvent, Usage,
+        Role, Router, StopReason, StreamEvent, Usage,
     };
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    fn agent_from(provider: Box<dyn Provider>) -> Agent {
+        let mut router = Router::new();
+        router.register(provider);
+        Agent::new(router, Vec::new())
+    }
 
     fn text_response(text: &str) -> Response {
         Response {
@@ -1156,8 +1180,7 @@ mod tests {
     #[tokio::test]
     async fn model_slash_switch_uses_request_model() {
         let seen = recorder();
-        let agent = Agent::new(Box::new(RecordingProvider::new(seen.clone())), Vec::new())
-            .with_model("gpt-4o");
+        let agent = agent_from(Box::new(RecordingProvider::new(seen.clone()))).with_model("gpt-4o");
         let handle = spawn_runtime(
             AppId::next(),
             agent,
@@ -1170,13 +1193,13 @@ mod tests {
 
         let mut rx = handle.subscribe();
         let out = handle.prompt("/model gpt-4o-turbo low").await.unwrap();
-        assert_eq!(out, "model switched to gpt-4o-turbo (effort: low)");
+        assert_eq!(out, "model switched to mock/gpt-4o-turbo (effort: low)");
         let mut saw_reply = false;
         let mut saw_done = false;
         while let Ok(ev) = rx.try_recv() {
             match ev {
                 AppEvent::Notify { text, .. }
-                    if text == "model switched to gpt-4o-turbo (effort: low)" =>
+                    if text == "model switched to mock/gpt-4o-turbo (effort: low)" =>
                 {
                     saw_reply = true;
                 }
@@ -1191,7 +1214,10 @@ mod tests {
         assert!(!saw_done);
         // The switch only changes the model carried by subsequent requests;
         // the provider object is never rebuilt or replaced.
-        assert_eq!(handle.prompt("hello").await.unwrap(), "echo:gpt-4o-turbo");
+        assert_eq!(
+            handle.prompt("hello").await.unwrap(),
+            "echo:mock/gpt-4o-turbo"
+        );
         handle.shutdown().await;
     }
 
@@ -1312,7 +1338,7 @@ mod tests {
     #[tokio::test]
     async fn model_slash_model_only_keeps_effort() {
         let seen = recorder();
-        let agent = Agent::new(Box::new(RecordingProvider::new(seen.clone())), Vec::new())
+        let agent = agent_from(Box::new(RecordingProvider::new(seen.clone())))
             .with_model("gpt-4o")
             .with_reasoning_effort(oven_llm::ReasoningEffort::Low);
         let handle = spawn_runtime(
@@ -1326,16 +1352,19 @@ mod tests {
         );
 
         let out = handle.prompt("/model gpt-4o-turbo").await.unwrap();
-        assert_eq!(out, "model switched to gpt-4o-turbo (effort: low)");
-        assert_eq!(handle.prompt("hello").await.unwrap(), "echo:gpt-4o-turbo");
+        assert_eq!(out, "model switched to mock/gpt-4o-turbo (effort: low)");
+        assert_eq!(
+            handle.prompt("hello").await.unwrap(),
+            "echo:mock/gpt-4o-turbo"
+        );
         handle.shutdown().await;
     }
 
     #[tokio::test]
-    async fn setup_slash_persists_and_rebuilds_provider() {
+    async fn setup_slash_persists_and_registers_provider() {
         let tmp = tempdir::TempDir::new("app-runtime-setup").unwrap();
         let cfg_path = tmp.path().join("config.toml");
-        let agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new());
+        let agent = agent_from(Box::new(MockProvider::new(vec![])));
         let handle = spawn_runtime(
             AppId::next(),
             agent,
@@ -1349,7 +1378,7 @@ mod tests {
         let mut rx = handle.subscribe();
         handle
             .send(AppCmd::UserInput(
-                "/setup name=deepseek kind=completions api_key=sk-test".into(),
+                "/setup name=deepseek api_key=sk-test".into(),
             ))
             .unwrap();
         let mut out = String::new();
@@ -1367,7 +1396,7 @@ mod tests {
         }
         assert!(out.contains("provider updated"));
         assert!(out.contains("name=deepseek"));
-        assert!(out.contains("kind=completions"));
+        assert!(!out.contains("kind="));
         assert!(out.contains("model=deepseek-v4-flash"));
         assert!(out.contains("base_url=https://api.deepseek.com"));
         assert!(out.contains("api_key=(set)"));
@@ -1376,7 +1405,7 @@ mod tests {
 
         let saved = std::fs::read_to_string(&cfg_path).unwrap();
         assert!(saved.contains("name = \"deepseek\""));
-        assert!(saved.contains("kind = \"completions\""));
+        assert!(!saved.contains("kind"));
         assert!(saved.contains("model = \"deepseek-v4-flash\""));
         assert!(saved.contains("base_url = \"https://api.deepseek.com\""));
         assert!(saved.contains("api_key = \"sk-test\""));
@@ -1389,10 +1418,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn setup_registers_without_dropping_existing_vendor() {
+        let seen = recorder();
+        let tmp = tempdir::TempDir::new("app-runtime-setup-keep").unwrap();
+        let agent =
+            agent_from(Box::new(RecordingProvider::new(seen.clone()))).with_model("mock/echo");
+        let handle = spawn_runtime(
+            AppId::next(),
+            agent,
+            None,
+            "mock/echo".into(),
+            tmp.path().to_path_buf(),
+            AppConfig::default(),
+            None,
+        );
+
+        let mut rx = handle.subscribe();
+        handle
+            .send(AppCmd::UserInput(
+                "/setup name=deepseek api_key=sk-test".into(),
+            ))
+            .unwrap();
+        loop {
+            match rx.recv().await {
+                Some(AppEvent::Idle { .. }) => break,
+                Some(_) => {}
+                None => panic!("channel closed before idle"),
+            }
+        }
+        let switched = handle.prompt("/model mock/echo").await.unwrap();
+        assert!(
+            switched.contains("model switched to mock/echo"),
+            "{switched}"
+        );
+        assert_eq!(handle.prompt("hello").await.unwrap(), "echo:mock/echo");
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn model_slash_persists_model_and_effort() {
         let tmp = tempdir::TempDir::new("app-runtime-model-save").unwrap();
         let cfg_path = tmp.path().join("config.toml");
-        let agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new());
+        let agent = agent_from(Box::new(MockProvider::new(vec![])));
         let handle = spawn_runtime(
             AppId::next(),
             agent,
@@ -1404,7 +1471,7 @@ mod tests {
         );
 
         let out = handle.prompt("/model gpt-4o-turbo high").await.unwrap();
-        assert!(out.contains("model switched to gpt-4o-turbo (effort: high)"));
+        assert!(out.contains("model switched to mock/gpt-4o-turbo (effort: high)"));
         assert!(out.contains(cfg_path.to_str().unwrap()));
 
         let saved = std::fs::read_to_string(&cfg_path).unwrap();
@@ -1417,7 +1484,7 @@ mod tests {
     async fn setup_keeps_existing_reasoning_effort() {
         let tmp = tempdir::TempDir::new("app-runtime-setup-keep-effort").unwrap();
         let cfg_path = tmp.path().join("config.toml");
-        let agent = Agent::new(Box::new(MockProvider::new(vec![])), Vec::new())
+        let agent = agent_from(Box::new(MockProvider::new(vec![])))
             .with_reasoning_effort(oven_llm::ReasoningEffort::High);
         let handle = spawn_runtime(
             AppId::next(),
@@ -1438,7 +1505,7 @@ mod tests {
         let mut rx = handle.subscribe();
         handle
             .send(AppCmd::UserInput(
-                "/setup name=deepseek kind=completions api_key=sk-test".into(),
+                "/setup name=deepseek api_key=sk-test".into(),
             ))
             .unwrap();
         loop {
@@ -1483,7 +1550,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_slash_rejects_invalid_kind() {
+    async fn setup_slash_rejects_kind() {
         let tmp = tempdir::TempDir::new("app-runtime-setup-bad").unwrap();
         let app = App::new(tmp.path());
         let handle = app
@@ -1491,7 +1558,7 @@ mod tests {
             .await
             .unwrap();
         let err = handle.prompt("/setup kind=chat").await.unwrap_err();
-        assert!(err.to_string().contains("invalid kind"));
+        assert!(err.to_string().contains("kind is no longer used"));
         handle.shutdown().await;
     }
 
@@ -2356,7 +2423,7 @@ mod tests {
             release: Mutex::new(Some(release_rx)),
         };
 
-        let agent = Agent::new(Box::new(provider), Vec::new());
+        let agent = agent_from(Box::new(provider));
         assert_eq!(agent.mode(), AgentMode::Default);
         let live = agent.live_handle();
         let handle = spawn_runtime(

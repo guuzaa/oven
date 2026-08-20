@@ -1,37 +1,50 @@
-use async_trait::async_trait;
-use futures::stream::BoxStream;
 use oven_agent::RetryingProvider;
-use oven_llm::{
-    ModelId, ModelInfo, Provider, ProviderBuilder, ProviderError, ProviderName, Request, Response,
-    StreamEvent,
-};
+use oven_llm::{Provider, ProviderBuilder, ProviderKind, ProviderName, Router};
 
 use crate::AppError;
 use crate::config::AppConfig;
 
-pub(crate) fn build_provider(
-    config: &AppConfig,
-    model: &str,
-) -> Result<Box<dyn Provider>, AppError> {
+pub(crate) fn retrying(config: &AppConfig, client: Box<dyn Provider>) -> Box<dyn Provider> {
+    Box::new(
+        RetryingProvider::new(client)
+            .with_timeout(config.request_timeout())
+            .with_retries(config.max_retries)
+            .with_base_backoff(config.base_backoff()),
+    )
+}
+
+pub(crate) fn build_router(config: &AppConfig) -> Result<Router, AppError> {
+    let mut router = Router::new();
+    router.register(retrying(config, build_client(config)?));
+    Ok(router)
+}
+
+pub(crate) fn build_interactive_router(config: &AppConfig) -> Result<Router, AppError> {
+    if config.provider.needs_setup() {
+        return Ok(Router::new());
+    }
+    build_router(config)
+}
+
+pub(crate) fn build_client(config: &AppConfig) -> Result<Box<dyn Provider>, AppError> {
     let provider = &config.provider;
-    let provider_name = provider.effective_provider_name(model);
+    let provider_name = provider.effective_provider_name();
     let api_key = provider.effective_api_key();
     let base_url = provider.effective_base_url();
+    let model = provider.effective_model();
 
-    if base_url.is_none() {
-        match &provider_name {
-            ProviderName::Anthropic => {
-                return Err(AppError::Provider(format!(
-                    "model '{model}' needs an OpenAI-compatible proxy; set OVEN_BASE_URL or provider.base_url"
-                )));
-            }
-            ProviderName::Custom(_) => {
-                return Err(AppError::Provider(format!(
-                    "unknown provider for model '{model}'; set provider.base_url or OVEN_BASE_URL to use an OpenAI-compatible endpoint"
-                )));
-            }
-            _ => {}
+    match &provider_name {
+        ProviderName::Anthropic if base_url.is_none() => {
+            return Err(AppError::Provider(format!(
+                "model '{model}' needs an OpenAI-compatible proxy; set OVEN_BASE_URL or provider.base_url"
+            )));
         }
+        ProviderName::Custom(_) if base_url.is_none() => {
+            return Err(AppError::Provider(format!(
+                "unknown provider for model '{model}'; set provider.base_url or OVEN_BASE_URL to use an OpenAI-compatible endpoint"
+            )));
+        }
+        _ => {}
     }
     if base_url.is_none() && api_key.is_empty() {
         return Err(AppError::Provider(format!(
@@ -39,73 +52,38 @@ pub(crate) fn build_provider(
         )));
     }
 
-    let builder = ProviderBuilder::new(provider.effective_kind())
-        .provider_name(provider_name)
-        .api_key(api_key);
-    let provider = match &base_url {
-        Some(u) => builder.base_url(u),
-        None => builder,
+    let custom_protocol = match &provider_name {
+        ProviderName::Custom(_) | ProviderName::Anthropic => {
+            provider.protocol.or(Some(ProviderKind::Completions))
+        }
+        _ => None,
     };
-
-    let retrying = RetryingProvider::new(provider.build()?)
-        .with_timeout(config.request_timeout())
-        .with_retries(config.max_retries)
-        .with_base_backoff(config.base_backoff());
-    Ok(Box::new(retrying))
-}
-
-pub(crate) fn build_interactive_provider(
-    config: &AppConfig,
-    model: &str,
-) -> Result<Box<dyn Provider>, AppError> {
-    if config.provider.needs_setup() {
-        return Ok(Box::new(UnconfiguredProvider));
+    let mut builder = match custom_protocol {
+        Some(kind) => ProviderBuilder::new(kind),
+        None => ProviderBuilder::provider(),
+    };
+    builder = builder.provider_name(provider_name).api_key(api_key);
+    if let Some(u) = &base_url {
+        builder = builder.base_url(u);
     }
-    build_provider(config, model)
-}
-
-struct UnconfiguredProvider;
-
-#[async_trait]
-impl Provider for UnconfiguredProvider {
-    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
-        Err(ProviderError::Auth(
-            "run /setup to configure a provider".into(),
-        ))
-    }
-
-    async fn stream(
-        &self,
-        _req: &Request,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        Err(ProviderError::Auth(
-            "run /setup to configure a provider".into(),
-        ))
-    }
-
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
-    }
-
-    fn provider_name(&self) -> ProviderName {
-        ProviderName::Custom("unconfigured".into())
-    }
+    Ok(builder.build()?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oven_llm::{ModelId, RouterError};
 
     #[test]
-    fn interactive_provider_is_placeholder_without_key() {
+    fn interactive_router_is_empty_without_key() {
         let cfg = AppConfig::default();
         if !cfg.provider.needs_setup() {
             return;
         }
-        let provider = build_interactive_provider(&cfg, "deepseek-v4-flash").unwrap();
-        assert_eq!(
-            provider.provider_name(),
-            ProviderName::Custom("unconfigured".into())
-        );
+        let router = build_interactive_router(&cfg).unwrap();
+        assert!(matches!(
+            router.provider(&ModelId::from("anything")),
+            Err(RouterError::NoProviderRegistered)
+        ));
     }
 }
