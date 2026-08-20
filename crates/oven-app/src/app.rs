@@ -3,7 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use oven_agent::AgentError;
 use oven_agent::{Agent, AgentLive, LiveHandle, Record, Skill, SkillReadTool, TodoWriteTool, Tool};
-use oven_llm::{Provider, Role, Router};
+#[cfg(test)]
+use oven_llm::Provider;
+use oven_llm::{Role, Router};
 use thiserror::Error;
 
 use crate::config::{AppConfig, ConfigError};
@@ -12,7 +14,7 @@ use crate::instructions::{InstructionDoc, load_instructions};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::runtime::{AppHandle, AppId, hydrate_session, resolve_session, spawn_runtime};
-use crate::session::{Session, SessionError, canonical_root, default_sessions_dir};
+use crate::session::{SessionError, canonical_root, default_sessions_dir};
 use crate::{SkillRegistry, ToolRegistry};
 
 #[derive(Debug, Error)]
@@ -178,6 +180,7 @@ impl App {
         Ok(agent.with_model(model))
     }
 
+    #[cfg(test)]
     pub(crate) async fn build_agent_with_provider(
         &self,
         provider: Box<dyn Provider>,
@@ -281,7 +284,7 @@ impl App {
     }
 
     /// Same as [`App::spawn_session`] with an explicit sessions directory.
-    pub async fn spawn_session_in(
+    pub(crate) async fn spawn_session_in(
         &self,
         sessions_dir: &Path,
         session_id: Option<&str>,
@@ -307,84 +310,6 @@ impl App {
             self.root.clone(),
             self.config.clone(),
             AppConfig::default_user_config_path(),
-        ))
-    }
-
-    /// Test/custom wiring variant of [`App::spawn_session_in`] with an
-    /// explicit provider.
-    pub async fn spawn_session_with_provider_in(
-        &self,
-        sessions_dir: &Path,
-        provider: Box<dyn Provider>,
-        session_id: Option<&str>,
-    ) -> Result<AppHandle, AppError> {
-        let session = resolve_session(sessions_dir, session_id)?;
-        let prior = session.load_records()?;
-        let mut agent = self.build_agent_with_provider(provider).await?;
-        let records: Vec<_> = prior
-            .iter()
-            .filter(
-                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
-            )
-            .cloned()
-            .collect();
-        agent.restore_history(records);
-        hydrate_session(&mut agent, &prior);
-        agent.ensure_session_meta(canonical_root(&self.root));
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            Some(session),
-            self.config.provider.effective_model(),
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
-    }
-
-    /// Spawn with an explicit provider (tests / custom wiring).
-    pub async fn spawn_with_provider(
-        &self,
-        provider: Box<dyn Provider>,
-    ) -> Result<AppHandle, AppError> {
-        let agent = self.build_agent_with_provider(provider).await?;
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            None,
-            self.config.provider.effective_model(),
-            self.root.clone(),
-            self.config.clone(),
-            crate::dirs::user_config_path(),
-        ))
-    }
-
-    /// Spawn with provider + session store (tests).
-    pub async fn spawn_with_provider_session(
-        &self,
-        provider: Box<dyn Provider>,
-        session: Session,
-    ) -> Result<AppHandle, AppError> {
-        let prior = session.load_records()?;
-        let mut agent = self.build_agent_with_provider(provider).await?;
-        let records: Vec<_> = prior
-            .iter()
-            .filter(
-                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
-            )
-            .cloned()
-            .collect();
-        agent.restore_history(records);
-        hydrate_session(&mut agent, &prior);
-        agent.ensure_session_meta(canonical_root(&self.root));
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            Some(session),
-            self.config.provider.effective_model(),
-            self.root.clone(),
-            self.config.clone(),
-            crate::dirs::user_config_path(),
         ))
     }
 }

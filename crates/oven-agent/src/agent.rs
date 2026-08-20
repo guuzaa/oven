@@ -97,11 +97,6 @@ impl Agent {
         self.live.clone()
     }
 
-    pub fn with_system(self, content: impl Into<String>) -> Self {
-        self.set_system(content);
-        self
-    }
-
     pub fn set_system(&self, content: impl Into<String>) {
         self.live
             .lock()
@@ -258,7 +253,7 @@ impl Agent {
             tool_choice: ToolChoice::Auto,
             sampling: SamplingParams {
                 temperature: Some(1.0),
-                max_tokens: Some(4096),
+                max_tokens: None,
                 ..Default::default()
             },
             thinking: Some(

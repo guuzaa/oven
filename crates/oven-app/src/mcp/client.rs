@@ -306,39 +306,5 @@ fn format_result(result: &CallToolResult) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tool_name_sanitizes_server_id() {
-        assert_eq!(
-            mcp_tool_name("my.server", "read_file"),
-            "my_server_read_file"
-        );
-        assert_eq!(
-            mcp_tool_name("filesystem", "read_file"),
-            "filesystem_read_file"
-        );
-    }
-
-    #[test]
-    fn tool_name_is_capped() {
-        let long = "x".repeat(100);
-        let name = mcp_tool_name("server", &long);
-        assert_eq!(name.len(), MAX_TOOL_NAME);
-        assert!(name.starts_with("server_"));
-    }
-
-    #[test]
-    fn tool_name_keeps_multibyte_tool_names_valid() {
-        let name = mcp_tool_name("s", "工具");
-        assert_eq!(name, "s_工具");
-    }
-
-    #[test]
-    fn formats_error_results() {
-        let mut result = CallToolResult::success(vec![ContentBlock::text("boom")]);
-        result.is_error = Some(true);
-        assert_eq!(format_result(&result), "[mcp error] boom");
-    }
-}
+#[path = "client_test.rs"]
+mod tests;
