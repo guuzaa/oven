@@ -10,8 +10,9 @@ use oven_llm::{
 
 use crate::App;
 use crate::config::AppConfig;
+use crate::event::AppId;
 use crate::mcp::{McpRegistry, client::*};
-use crate::runtime::{AppId, spawn_runtime};
+use crate::runtime::spawn_runtime;
 
 #[test]
 fn tool_name_sanitizes_server_id() {
