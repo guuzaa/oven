@@ -13,6 +13,7 @@ Available skills are listed later in this prompt when any are installed. When a 
 - If something is blocked, say so instead of silently dropping it.
 
 # Tool usage policy
+
 - Explore with `glob`, `grep`, and `file_read` before changing code. Do not guess file paths or APIs.
 - Edit existing files with `file_edit`. Use `file_write` only for new files or full rewrites.
 - Run builds, tests, git, and other commands with `bash` in the workspace root.

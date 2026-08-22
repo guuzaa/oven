@@ -5,7 +5,7 @@ use crate::session::canonical_root;
 
 const BASE_PROMPT: &str = include_str!("system_prompt.md");
 
-pub(crate) fn build_system_prompt(
+pub(crate) fn system_prompt(
     root: &Path,
     instructions: &[InstructionDoc],
     skills: Option<String>,
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn system_prompt_includes_bundled_markdown() {
-        let prompt = build_system_prompt(Path::new("."), &[], None);
+        let prompt = system_prompt(Path::new("."), &[], None);
         assert!(prompt.starts_with(BASE_PROMPT.trim()));
     }
 
@@ -84,7 +84,7 @@ mod tests {
         std::fs::write(root.join("CLAUDE.md"), "project rules\n").unwrap();
 
         let docs = load_instructions(None, &root);
-        let prompt = build_system_prompt(&root, &docs, None);
+        let prompt = system_prompt(&root, &docs, None);
         assert!(prompt.contains("## Project Instructions"));
         assert!(prompt.contains("project rules"));
         assert!(prompt.contains("<env>"));
@@ -105,7 +105,7 @@ mod tests {
                 content: "project rules\n".into(),
             },
         ];
-        let prompt = build_system_prompt(Path::new("."), &docs, None);
+        let prompt = system_prompt(Path::new("."), &docs, None);
         assert!(prompt.contains("## Global Instructions (from /cfg/AGENTS.md)"));
         assert!(prompt.contains("## Project Instructions (from /ws/CLAUDE.md)"));
         assert!(prompt.find("global rules").unwrap() < prompt.find("project rules").unwrap());
@@ -113,8 +113,7 @@ mod tests {
 
     #[test]
     fn system_prompt_appends_skills() {
-        let prompt =
-            build_system_prompt(Path::new("."), &[], Some("- **files**: read files".into()));
+        let prompt = system_prompt(Path::new("."), &[], Some("- **files**: read files".into()));
         assert!(prompt.contains("## Available Skills"));
         assert!(prompt.contains("- **files**: read files"));
     }

@@ -182,7 +182,7 @@ impl App {
             .map_err(AppError::Mcp)?;
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
         let live: LiveHandle = Arc::new(Mutex::new(AgentLive::new(Some(
-            crate::system::build_system_prompt(
+            crate::system::system_prompt(
                 &self.root,
                 &self.instructions,
                 self.skills.merged_system_prompt(),
