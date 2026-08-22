@@ -46,10 +46,6 @@ pub fn path() -> Style {
     Style::default().fg(Color::LightGreen)
 }
 
-pub fn effort() -> Style {
-    Style::default().fg(Color::LightBlue)
-}
-
 pub fn mode() -> Style {
     Style::default().fg(Color::LightMagenta)
 }

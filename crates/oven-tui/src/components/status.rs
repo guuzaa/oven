@@ -26,7 +26,7 @@ pub enum StatusHint {
     Modal,
 }
 
-/// Single status row below the input: model · mode · root · usage · effort.
+/// Single status row below the input: model [effort] · mode · root · usage.
 /// Optional slash-command reply is drawn on the row(s) beneath it.
 pub struct StatusBar {
     model: String,
@@ -133,6 +133,9 @@ impl StatusBar {
             spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(self.model.clone(), theme::model()));
+        if let Some(effort) = self.effort {
+            spans.push(Span::styled(format!(" {effort}"), theme::model()));
+        }
         spans.push(Span::styled(" · ", gray));
         let mode_style = match state.mode {
             AgentMode::Default => gray,
@@ -142,10 +145,6 @@ impl StatusBar {
         spans.push(Span::styled(" · ", gray));
         spans.push(Span::styled(self.root.clone(), theme::path()));
         spans.extend(usage_spans(&self.total, gray));
-        if let Some(effort) = self.effort {
-            spans.push(Span::styled(" · ", gray));
-            spans.push(Span::styled(format!("effort {effort}"), theme::effort()));
-        }
         let hint = match hint {
             StatusHint::Slash => "tab fill · enter · esc",
             StatusHint::Modal => "enter · esc",
@@ -566,6 +565,29 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         let row: String = (0..80).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         (row, buf)
+    }
+
+    #[test]
+    fn effort_follows_model_with_space_and_matching_color() {
+        use ratatui::style::Color;
+
+        let mut bar = StatusBar::new("gpt-4o", Path::new("/tmp"), Usage::default())
+            .with_effort(Some(ReasoningEffort::High));
+        let state = State::new();
+        let (row, buf) = draw_status_bar_row(&mut bar, &state);
+        assert!(row.contains("gpt-4o high"), "status bar was {row:?}");
+        assert!(!row.contains("effort"), "status bar was {row:?}");
+        let model_at = row.find("gpt-4o").unwrap();
+        let effort_at = row.find("high").unwrap();
+        assert_eq!(effort_at, model_at + "gpt-4o ".len());
+        assert_eq!(
+            buf[(model_at as u16, 0)].style().fg,
+            Some(Color::LightYellow)
+        );
+        assert_eq!(
+            buf[(effort_at as u16, 0)].style().fg,
+            Some(Color::LightYellow)
+        );
     }
 
     #[test]
