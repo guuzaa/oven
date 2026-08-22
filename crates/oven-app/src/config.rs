@@ -300,14 +300,13 @@ impl AppConfig {
         if let Some(p) = user_config
             && let Some(loaded) = Self::load_file(p)?
         {
-            cfg = loaded;
+            cfg.merge(loaded);
         }
         if let Some(p) = project_config
             && let Some(loaded) = Self::load_file(p)?
         {
             cfg.merge(loaded);
         }
-        cfg.provider.normalize();
         Ok(cfg)
     }
 

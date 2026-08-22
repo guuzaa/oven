@@ -134,7 +134,6 @@ async fn spawn_app(app: &App, provider: Box<dyn Provider>) -> crate::AppHandle {
         AppId::next(),
         agent,
         None,
-        app.config().provider.effective_model(),
         app.root().to_path_buf(),
         app.config().clone(),
         None,

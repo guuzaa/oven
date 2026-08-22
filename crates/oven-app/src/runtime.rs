@@ -289,14 +289,13 @@ pub(crate) fn spawn_runtime(
     app_id: AppId,
     agent: Agent,
     session: Option<Session>,
-    model: String,
     root: PathBuf,
     config: AppConfig,
     user_config_path: Option<PathBuf>,
 ) -> AppHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
-    let subscribers_task = Arc::clone(&subscribers);
+    let subscribers_task = subscribers.clone();
     let slash_commands = SlashRegistry::with_builtin().commands();
     let history: Vec<Message> = agent.history().cloned().collect();
     let todos = agent.todos();
@@ -320,7 +319,7 @@ pub(crate) fn spawn_runtime(
         }
         None => (None, None),
     };
-    let task_model = model.clone();
+    let model = agent.model().to_string();
     let join = tokio::spawn(async move {
         runtime_loop(
             app_id,
@@ -328,7 +327,6 @@ pub(crate) fn spawn_runtime(
             session_store,
             cmd_rx,
             subscribers_task,
-            task_model,
             config,
             user_config_path,
         )
@@ -709,17 +707,16 @@ fn user_message_text(m: &Message) -> String {
         .join("\n")
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn runtime_loop(
     app_id: AppId,
     mut agent: Agent,
     mut session_store: Option<SessionStore>,
     mut cmd_rx: mpsc::UnboundedReceiver<AppCmd>,
     subscribers: Subscribers,
-    model: String,
     mut config: AppConfig,
     user_config_path: Option<PathBuf>,
 ) {
+    let model = agent.model().as_str();
     let live = agent.live_handle();
     let slash = SlashRegistry::with_builtin();
     // Leading in-memory messages already written to the store. On `/clear`
@@ -734,7 +731,7 @@ async fn runtime_loop(
     let mut persisted_rev = agent.history_revision();
 
     // Publish the initial model list for the `/model` popup completion.
-    let (models, _) = refresh_model_choices(agent.router(), &model, &config).await;
+    let (models, _) = refresh_model_choices(agent.router(), model, &config).await;
     emit(&subscribers, AppEvent::ModelsUpdated { app_id, models });
 
     // Commands received while a turn is in flight are buffered here and run
