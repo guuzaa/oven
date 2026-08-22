@@ -149,23 +149,6 @@ impl App {
         crate::provider::build_router(&self.config)
     }
 
-    fn build_system_prompt(&self) -> String {
-        let mut base =
-            String::from("You are a coding assistant working inside the user's repository.");
-        for doc in &self.instructions {
-            base.push_str(&format!(
-                "\n\n## {} Instructions (from {})\n\n{}\n\n",
-                doc.scope,
-                doc.path.display(),
-                doc.content
-            ));
-        }
-        if let Some(extra) = self.skills.merged_system_prompt() {
-            base.push_str(&format!("## Available Skills\n\n{}", extra));
-        }
-        base
-    }
-
     pub(crate) async fn build_agent(&self) -> Result<Agent, AppError> {
         let model = self.config.provider.effective_model();
         let agent = self.build_agent_with_router(self.build_router()?).await?;
@@ -198,8 +181,13 @@ impl App {
             .await
             .map_err(AppError::Mcp)?;
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
-        let live: LiveHandle =
-            Arc::new(Mutex::new(AgentLive::new(Some(self.build_system_prompt()))));
+        let live: LiveHandle = Arc::new(Mutex::new(AgentLive::new(Some(
+            crate::system::build_system_prompt(
+                &self.root,
+                &self.instructions,
+                self.skills.merged_system_prompt(),
+            ),
+        ))));
         tools.push(Box::new(TodoWriteTool::new(live.clone())));
         let mut agent = Agent::new_with_live(router, tools, live);
         if let Some(effort) = self.config.provider.reasoning_effort {
@@ -311,45 +299,5 @@ impl App {
             self.config.clone(),
             AppConfig::default_user_config_path(),
         ))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::instructions::InstructionScope;
-
-    #[test]
-    fn system_prompt_includes_instruction_docs() {
-        let tmp = tempdir::TempDir::new("app-instructions").unwrap();
-        let root = tmp.path().join("ws");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("CLAUDE.md"), "project rules\n").unwrap();
-
-        let app = App::new(&root).with_config(AppConfig::default());
-        let prompt = app.build_system_prompt();
-        assert!(prompt.contains("## Project Instructions"));
-        assert!(prompt.contains("project rules"));
-    }
-
-    #[test]
-    fn system_prompt_labels_user_and_project_docs() {
-        let mut app = App::new(".");
-        app.instructions = vec![
-            InstructionDoc {
-                scope: InstructionScope::Global,
-                path: PathBuf::from("/cfg/AGENTS.md"),
-                content: "global rules\n".into(),
-            },
-            InstructionDoc {
-                scope: InstructionScope::Project,
-                path: PathBuf::from("/ws/CLAUDE.md"),
-                content: "project rules\n".into(),
-            },
-        ];
-        let prompt = app.build_system_prompt();
-        assert!(prompt.contains("## Global Instructions (from /cfg/AGENTS.md)"));
-        assert!(prompt.contains("## Project Instructions (from /ws/CLAUDE.md)"));
-        assert!(prompt.find("global rules").unwrap() < prompt.find("project rules").unwrap());
     }
 }

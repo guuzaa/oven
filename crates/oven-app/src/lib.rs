@@ -7,6 +7,7 @@ mod provider;
 mod runtime;
 pub mod session;
 mod slash;
+mod system;
 mod tools;
 
 pub use app::{App, AppError};
