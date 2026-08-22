@@ -3,6 +3,7 @@ pub mod config;
 pub mod dirs;
 mod instructions;
 pub mod mcp;
+mod mention;
 mod provider;
 mod runtime;
 pub mod session;
@@ -12,6 +13,7 @@ mod tools;
 
 pub use app::{App, AppError};
 pub use mcp::McpServerConfig;
+pub use mention::FileMentions;
 pub use oven_agent::{
     AgentEvent, AgentId, AgentMode, CancellationToken, Skill, SkillRegistry, TodoItem, TodoList,
     TodoStatus, ToolView, present_tool,

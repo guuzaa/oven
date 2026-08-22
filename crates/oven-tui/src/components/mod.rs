@@ -1,4 +1,5 @@
 pub(super) mod component;
+pub(super) mod file_mention_popup;
 pub(super) mod input;
 pub(super) mod layout;
 pub(super) mod list;

@@ -1,5 +1,8 @@
+use std::path::{Path, PathBuf};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use oven_app::AppEvent;
+use oven_app::FileMentions;
 use oven_app::config::ProviderConfig;
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -8,12 +11,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use tui_textarea::{TextArea, WrapMode};
-use unicode_width::UnicodeWidthStr;
 
 const PROMPT_COLS: u16 = 2;
 const MAX_INPUT_ROWS: u16 = 8;
 
 use super::component::{Action, Component, KeyResult, State};
+use super::file_mention_popup::{FileMentionPopup, FileMentionPopupAction};
 use super::model_picker::{ModelPicker, ModelPickerAction};
 use super::setup_wizard::{SetupWizard, SetupWizardAction};
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
@@ -23,6 +26,7 @@ use super::theme;
 pub enum Overlay {
     None,
     Slash,
+    Mention,
     Model,
     Setup,
 }
@@ -30,8 +34,11 @@ pub enum Overlay {
 pub struct InputView {
     textarea: TextArea<'static>,
     slash_command: SlashCommandPopup,
+    file_mention: FileMentionPopup,
     model_picker: ModelPicker,
     setup: SetupWizard,
+    root: PathBuf,
+    mentions: Option<FileMentions>,
 }
 
 impl InputView {
@@ -39,9 +46,23 @@ impl InputView {
         Self {
             textarea: new_textarea(),
             slash_command: SlashCommandPopup::new(commands),
+            file_mention: FileMentionPopup::new(),
             model_picker: ModelPicker::new(Vec::new()),
             setup: SetupWizard::new(provider),
+            root: PathBuf::new(),
+            mentions: None,
         }
+    }
+
+    pub fn with_root(mut self, root: impl AsRef<Path>) -> Self {
+        self.root = root.as_ref().to_path_buf();
+        self
+    }
+
+    #[cfg(test)]
+    fn with_files(mut self, files: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.mentions = Some(FileMentions::from_files(files));
+        self
     }
 
     pub fn height(&mut self, area_width: u16) -> u16 {
@@ -52,6 +73,7 @@ impl InputView {
     pub fn clear(&mut self) {
         self.textarea = new_textarea();
         self.slash_command.close();
+        self.file_mention.close();
         self.model_picker.close();
         self.setup.close();
     }
@@ -63,6 +85,8 @@ impl InputView {
             Overlay::Model
         } else if self.slash_command.is_open() {
             Overlay::Slash
+        } else if self.file_mention.is_open() {
+            Overlay::Mention
         } else {
             Overlay::None
         }
@@ -74,6 +98,7 @@ impl InputView {
             Overlay::Setup => self.setup.height(),
             Overlay::Model => self.model_picker.height(),
             Overlay::Slash => self.slash_command.height(),
+            Overlay::Mention => self.file_mention.height(),
         }
     }
 
@@ -83,6 +108,7 @@ impl InputView {
             Overlay::Setup => self.setup.draw(f, area),
             Overlay::Model => self.model_picker.draw(f, area),
             Overlay::Slash => self.slash_command.draw(f, area),
+            Overlay::Mention => self.file_mention.draw(f, area),
         }
     }
 
@@ -101,15 +127,15 @@ impl InputView {
             return;
         }
         self.textarea.insert_str(text);
-        self.slash_command.refresh(&self.text());
+        self.refresh_popups();
     }
 
     pub(crate) fn set_text(&mut self, text: &str) {
         let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
         let row = lines.len().saturating_sub(1);
-        let col = lines.last().map(|l| l.width()).unwrap_or(0);
+        let col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
         self.textarea.set_lines(lines, (row, col));
-        self.slash_command.refresh(&self.text());
+        self.refresh_popups();
     }
 
     fn text(&self) -> String {
@@ -117,9 +143,34 @@ impl InputView {
     }
 
     fn fill_command(&mut self, text: &str) {
-        let col = text.width();
+        let col = text.chars().count();
         self.textarea.set_lines(vec![text.to_string()], (0, col));
-        self.slash_command.refresh(&self.text());
+        self.refresh_popups();
+    }
+
+    fn splice(&mut self, before: &str, insert: &str, after: &str) {
+        let text = format!("{before}{insert}{after}");
+        let prefix = format!("{before}{insert}");
+        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        let prefix_lines: Vec<&str> = prefix.split('\n').collect();
+        let row = prefix_lines.len().saturating_sub(1);
+        let col = prefix_lines.last().map(|l| l.chars().count()).unwrap_or(0);
+        self.textarea.set_lines(lines, (row, col));
+        self.refresh_popups();
+    }
+
+    fn refresh_popups(&mut self) {
+        let text = self.text();
+        self.slash_command.refresh(&text);
+        if self.slash_command.is_open() || self.setup.is_open() || self.model_picker.is_open() {
+            self.file_mention.close();
+            return;
+        }
+        let cursor = cursor_byte(&text, self.textarea.cursor());
+        let mentions = self
+            .mentions
+            .get_or_insert_with(|| FileMentions::open(&self.root));
+        self.file_mention.refresh(&text, cursor, mentions);
     }
 }
 
@@ -143,8 +194,7 @@ impl Component for InputView {
     }
 
     fn handle_key(&mut self, key: KeyEvent, state: &State) -> KeyResult {
-        let text = self.text();
-        self.slash_command.refresh(&text);
+        self.refresh_popups();
 
         if self.setup.is_open() {
             return match self.setup.handle_key(key) {
@@ -207,6 +257,22 @@ impl Component for InputView {
                 }
             };
         }
+
+        if self.file_mention.is_open()
+            && let Some(action) = self.file_mention.handle_key(key)
+        {
+            return match action {
+                FileMentionPopupAction::Handled => KeyResult::Handled,
+                FileMentionPopupAction::Fill {
+                    before,
+                    insert,
+                    after,
+                } => {
+                    self.splice(&before, &insert, &after);
+                    KeyResult::Handled
+                }
+            };
+        }
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.textarea.insert_newline();
@@ -231,7 +297,7 @@ impl Component for InputView {
             }
             _ => {
                 self.textarea.input(key);
-                self.slash_command.refresh(&self.text());
+                self.refresh_popups();
                 KeyResult::Handled
             }
         }
@@ -331,6 +397,24 @@ fn model_filter_from(text: &str) -> Option<String> {
         return None;
     }
     Some(fragment.to_string())
+}
+
+fn cursor_byte(text: &str, (row, col): (usize, usize)) -> usize {
+    let mut offset = 0;
+    for (i, line) in text.split('\n').enumerate() {
+        if i == row {
+            return offset + char_index_to_byte(line, col);
+        }
+        offset += line.len() + 1;
+    }
+    text.len()
+}
+
+fn char_index_to_byte(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len())
 }
 
 fn new_textarea() -> TextArea<'static> {
@@ -870,5 +954,161 @@ mod tests {
         type_text(&mut view, &"你".repeat(10));
         assert_eq!(view.height(12), 2);
         assert_eq!(view.height(22), 1);
+    }
+
+    fn mention_view() -> InputView {
+        view().with_files(["README.md", "src/app.rs", "src/lib.rs"])
+    }
+
+    #[test]
+    fn cursor_byte_uses_char_index_not_width() {
+        for (text, at_end) in [
+            ("hello", 5),
+            ("你好 @", 4),
+            ("こんにちは @", 7),
+            ("¿dónde está @", 13),
+        ] {
+            assert_eq!(cursor_byte(text, (0, at_end)), text.len(), "{text}");
+        }
+        assert_eq!(cursor_byte("你好 @", (0, 3)), "你好 ".len());
+        assert_eq!(cursor_byte("こんにちは @", (0, 6)), "こんにちは ".len());
+        assert_eq!(cursor_byte("niño @", (0, 5)), "niño ".len());
+    }
+
+    #[test]
+    fn mention_opens_on_at() {
+        let mut view = mention_view();
+        type_text(&mut view, "@");
+        assert!(view.file_mention.is_open());
+        assert_eq!(view.overlay(), Overlay::Mention);
+        assert_eq!(view.overlay_height(), 3);
+    }
+
+    #[test]
+    fn mention_opens_after_non_ascii_and_space() {
+        for typed in ["你好 @", "こんにちは @", "¿dónde está @"] {
+            let mut view = mention_view();
+            type_text(&mut view, typed);
+            assert!(view.file_mention.is_open(), "{typed}");
+            assert_eq!(view.overlay(), Overlay::Mention, "{typed}");
+            assert_eq!(
+                view.textarea.cursor(),
+                (0, typed.chars().count()),
+                "{typed}"
+            );
+        }
+    }
+
+    #[test]
+    fn mention_fill_keeps_non_ascii_prefix() {
+        for (typed, filled) in [
+            ("看看 @li", "看看 @src/lib.rs "),
+            ("見て @li", "見て @src/lib.rs "),
+            ("añade @li", "añade @src/lib.rs "),
+        ] {
+            let mut view = mention_view();
+            type_text(&mut view, typed);
+            view.handle_key(key(KeyCode::Tab), &State::new());
+            assert_eq!(view.textarea.lines()[0], filled, "{typed}");
+            assert_eq!(
+                view.textarea.cursor(),
+                (0, filled.chars().count()),
+                "{typed}"
+            );
+        }
+    }
+
+    #[test]
+    fn mention_filters_by_query() {
+        let mut view = mention_view();
+        type_text(&mut view, "@lib");
+        assert_eq!(view.file_mention.matches(), &["src/lib.rs"]);
+    }
+
+    #[test]
+    fn mention_tab_fills_selected() {
+        let mut view = mention_view();
+        type_text(&mut view, "see @li");
+        let result = view.handle_key(key(KeyCode::Tab), &State::new());
+        assert!(matches!(result, KeyResult::Handled));
+        assert_eq!(view.textarea.lines()[0], "see @src/lib.rs ");
+        assert!(!view.file_mention.is_open());
+    }
+
+    #[test]
+    fn mention_fill_keeps_trailing_text() {
+        let mut view = mention_view();
+        type_text(&mut view, "see @li please");
+        for _ in 0.." please".len() {
+            view.handle_key(key(KeyCode::Left), &State::new());
+        }
+        assert!(view.file_mention.is_open());
+        view.handle_key(key(KeyCode::Tab), &State::new());
+        assert_eq!(view.textarea.lines()[0], "see @src/lib.rs please");
+    }
+
+    #[test]
+    fn mention_esc_closes() {
+        let mut view = mention_view();
+        type_text(&mut view, "@");
+        let result = view.handle_key(key(KeyCode::Esc), &State::new());
+        assert!(matches!(result, KeyResult::Handled));
+        assert!(!view.file_mention.is_open());
+        assert_eq!(view.textarea.lines()[0], "@");
+    }
+
+    #[test]
+    fn mention_closes_when_at_deleted() {
+        let mut view = mention_view();
+        type_text(&mut view, "@l");
+        view.handle_key(key(KeyCode::Backspace), &State::new());
+        view.handle_key(key(KeyCode::Backspace), &State::new());
+        assert!(!view.file_mention.is_open());
+    }
+
+    #[test]
+    fn slash_takes_priority_over_mention() {
+        let mut view = mention_view();
+        type_text(&mut view, "/");
+        assert_eq!(view.overlay(), Overlay::Slash);
+        assert!(!view.file_mention.is_open());
+    }
+
+    #[test]
+    fn email_does_not_open_mention() {
+        let mut view = mention_view();
+        type_text(&mut view, "foo@bar");
+        assert!(!view.file_mention.is_open());
+        assert_eq!(view.overlay(), Overlay::None);
+    }
+
+    #[test]
+    fn mention_enter_prefix_fills() {
+        let mut view = mention_view();
+        type_text(&mut view, "@li");
+        let result = view.handle_key(key(KeyCode::Enter), &State::new());
+        assert!(matches!(result, KeyResult::Handled));
+        assert_eq!(view.textarea.lines()[0], "@src/lib.rs ");
+    }
+
+    #[test]
+    fn mention_enter_exact_submits() {
+        let mut view = mention_view();
+        type_text(&mut view, "@src/lib.rs");
+        let result = view.handle_key(key(KeyCode::Enter), &State::new());
+        match result {
+            KeyResult::Action(Action::Submit(text)) => assert_eq!(text, "@src/lib.rs"),
+            _ => panic!("expected submit"),
+        }
+    }
+
+    #[test]
+    fn mention_arrows_change_selection() {
+        let mut view = mention_view();
+        type_text(&mut view, "@");
+        assert_eq!(view.file_mention.matches()[0], "README.md");
+        view.handle_key(key(KeyCode::Down), &State::new());
+        view.handle_key(key(KeyCode::Tab), &State::new());
+        assert_eq!(view.textarea.lines()[0], "@src/app.rs ");
     }
 }

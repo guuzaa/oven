@@ -18,7 +18,10 @@ futures = { workspace = true }
 uuid = { workspace = true }
 rmcp = { workspace = true }
 http = { workspace = true }
-chrono ={ workspace = true }
+chrono = { workspace = true }
+ignore = { workspace = true }
+nucleo = { workspace = true }
+nucleo-matcher = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

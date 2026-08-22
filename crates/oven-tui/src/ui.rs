@@ -45,7 +45,7 @@ impl Ui {
             .unwrap_or_else(|_| handle.root().to_owned());
         let total_usage = handle.total_usage();
         let todos = handle.todos().clone();
-        let mut input = InputView::new(slash_commands, provider.clone());
+        let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
         if provider.needs_setup() {
             input.open_setup();
         }
@@ -326,7 +326,7 @@ fn is_mode_toggle(key: KeyEvent) -> bool {
 
 fn status_hint(overlay: Overlay, busy: bool) -> StatusHint {
     match overlay {
-        Overlay::Slash => StatusHint::Slash,
+        Overlay::Slash | Overlay::Mention => StatusHint::Slash,
         Overlay::Model | Overlay::Setup => StatusHint::Modal,
         Overlay::None if busy => StatusHint::Busy,
         Overlay::None => StatusHint::Idle,
