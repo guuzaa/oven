@@ -1,19 +1,22 @@
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use oven_app::AgentMode;
 use oven_app::AppEvent;
 use oven_app::FileMentions;
 use oven_app::config::ProviderConfig;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::Span;
-use ratatui::widgets::Paragraph;
-use tui_textarea::{TextArea, WrapMode};
+use ratatui::widgets::{Block, Paragraph};
+use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
 
 const PROMPT_COLS: u16 = 2;
 const MAX_INPUT_ROWS: u16 = 8;
+const BORDER_COLS: u16 = 2;
+const BORDER_ROWS: u16 = 2;
 
 use super::component::{Action, Component, KeyResult, State};
 use super::file_mention_popup::{FileMentionPopup, FileMentionPopupAction};
@@ -66,8 +69,19 @@ impl InputView {
     }
 
     pub fn height(&mut self, area_width: u16) -> u16 {
-        let text_width = area_width.saturating_sub(PROMPT_COLS);
-        self.textarea.measure(text_width).preferred_rows
+        let bordered = fits_border(Rect::new(0, 0, area_width, BORDER_ROWS + 1));
+        let inner_w = if bordered {
+            area_width.saturating_sub(BORDER_COLS)
+        } else {
+            area_width
+        };
+        let text_width = inner_w.saturating_sub(PROMPT_COLS);
+        let rows = self.textarea.measure(text_width).preferred_rows;
+        if bordered {
+            rows.saturating_add(BORDER_ROWS)
+        } else {
+            rows
+        }
     }
 
     pub fn clear(&mut self) {
@@ -171,6 +185,16 @@ impl InputView {
             .mentions
             .get_or_insert_with(|| FileMentions::open(&self.root));
         self.file_mention.refresh(&text, cursor, mentions);
+    }
+
+    fn border_style(&self, state: &State) -> Style {
+        if state.mode == AgentMode::Plan {
+            theme::mode()
+        } else if self.textarea.lines().iter().any(|line| !line.is_empty()) {
+            theme::border_active()
+        } else {
+            theme::border_idle()
+        }
     }
 }
 
@@ -304,10 +328,11 @@ impl Component for InputView {
     }
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
+        let inner = draw_composer_border(f, area, self.border_style(state));
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(PROMPT_COLS), Constraint::Min(1)])
-            .split(area);
+            .split(inner);
         let prompt = if state.busy { "⋅ " } else { "› " };
         f.render_widget(
             Paragraph::new(Span::styled(prompt, theme::user())),
@@ -318,10 +343,11 @@ impl Component for InputView {
             return;
         }
         self.textarea.set_style(Style::default());
-        self.textarea
-            .set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
         self.textarea.set_cursor_line_style(Style::default());
         f.render_widget(&self.textarea, chunks[1]);
+        if let Some(pos) = self.textarea.rendered_cursor_position() {
+            f.set_cursor_position(pos);
+        }
     }
 }
 
@@ -417,9 +443,26 @@ fn char_index_to_byte(line: &str, col: usize) -> usize {
         .unwrap_or(line.len())
 }
 
+fn fits_border(area: Rect) -> bool {
+    area.height > BORDER_ROWS && area.width > PROMPT_COLS + BORDER_COLS
+}
+
+fn draw_composer_border(f: &mut Frame<'_>, area: Rect, style: Style) -> Rect {
+    if !fits_border(area) {
+        return area;
+    }
+    let block = Block::bordered()
+        .border_type(theme::border_type())
+        .border_style(style);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    inner
+}
+
 fn new_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_cursor_line_style(Style::default());
+    ta.set_cursor_render_mode(CursorRenderMode::Hidden);
     ta.set_placeholder_text("message…");
     ta.set_wrap_mode(WrapMode::WordOrGlyph);
     ta.set_min_rows(1);
@@ -916,24 +959,25 @@ mod tests {
     }
 
     #[test]
-    fn height_is_one_when_empty() {
+    fn height_includes_border_when_empty() {
         let mut view = view();
-        assert_eq!(view.height(80), 1);
+        assert_eq!(view.height(80), 1 + BORDER_ROWS);
     }
 
     #[test]
     fn height_grows_when_line_wraps() {
         let mut view = view();
         type_text(&mut view, &"x".repeat(20));
-        assert_eq!(view.height(12), 2);
-        assert_eq!(view.height(22), 1);
+        assert_eq!(view.height(12), 3 + BORDER_ROWS);
+        assert_eq!(view.height(22), 2 + BORDER_ROWS);
+        assert_eq!(view.height(24), 1 + BORDER_ROWS);
     }
 
     #[test]
     fn height_counts_hard_newlines() {
         let mut view = view();
         view.set_text("a\nb\nc");
-        assert_eq!(view.height(80), 3);
+        assert_eq!(view.height(80), 3 + BORDER_ROWS);
     }
 
     #[test]
@@ -945,15 +989,22 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n"),
         );
-        assert_eq!(view.height(80), MAX_INPUT_ROWS);
+        assert_eq!(view.height(80), MAX_INPUT_ROWS + BORDER_ROWS);
     }
 
     #[test]
     fn height_wraps_wide_chars() {
         let mut view = view();
         type_text(&mut view, &"你".repeat(10));
-        assert_eq!(view.height(12), 2);
-        assert_eq!(view.height(22), 1);
+        assert_eq!(view.height(12), 3 + BORDER_ROWS);
+        assert_eq!(view.height(22), 2 + BORDER_ROWS);
+        assert_eq!(view.height(24), 1 + BORDER_ROWS);
+    }
+
+    #[test]
+    fn height_skips_border_when_too_narrow() {
+        let mut view = view();
+        assert_eq!(view.height(PROMPT_COLS + BORDER_COLS), 1);
     }
 
     fn mention_view() -> InputView {
@@ -1110,5 +1161,111 @@ mod tests {
         view.handle_key(key(KeyCode::Down), &State::new());
         view.handle_key(key(KeyCode::Tab), &State::new());
         assert_eq!(view.textarea.lines()[0], "@src/app.rs ");
+    }
+
+    fn render(
+        view: &mut InputView,
+        width: u16,
+        height: u16,
+        state: &State,
+    ) -> (String, ratatui::buffer::Buffer) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                view.draw(f, f.area(), state);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        (out, buf)
+    }
+
+    #[test]
+    fn draw_paints_rounded_border_around_prompt() {
+        let mut view = view();
+        let (out, buf) = render(&mut view, 40, 3, &State::new());
+        assert_eq!(buf[(0, 0)].symbol(), "╭", "{out}");
+        assert_eq!(buf[(39, 0)].symbol(), "╮", "{out}");
+        assert_eq!(buf[(0, 2)].symbol(), "╰", "{out}");
+        assert_eq!(buf[(39, 2)].symbol(), "╯", "{out}");
+        assert!(out.contains("›"), "{out}");
+        assert_eq!(buf[(0, 0)].style().fg, theme::border_idle().fg);
+    }
+
+    #[test]
+    fn draw_keeps_slash_completion_outside_the_box() {
+        let mut view = view();
+        type_text(&mut view, "/");
+        assert_eq!(view.overlay(), Overlay::Slash);
+        let (out, _) = render(&mut view, 40, 3, &State::new());
+        assert!(out.contains("/"), "{out}");
+        assert!(
+            !out.contains("exit") && !out.contains("End the session"),
+            "slash popup must not paint inside the input box: {out}"
+        );
+    }
+
+    #[test]
+    fn draw_drops_border_when_height_is_one() {
+        let mut view = view();
+        let (out, buf) = render(&mut view, 40, 1, &State::new());
+        assert_ne!(buf[(0, 0)].symbol(), "╭", "{out}");
+        assert!(out.contains("›"), "{out}");
+    }
+
+    #[test]
+    fn busy_does_not_change_empty_border() {
+        let mut view = view();
+        let busy = State {
+            busy: true,
+            frame: 0,
+            ..State::new()
+        };
+        let (_, buf) = render(&mut view, 40, 3, &busy);
+        assert_eq!(buf[(0, 0)].style().fg, theme::border_idle().fg);
+    }
+
+    #[test]
+    fn typed_text_keeps_active_border_while_busy() {
+        let mut view = view();
+        type_text(&mut view, "hello");
+        let busy = State {
+            busy: true,
+            ..State::new()
+        };
+        let (_, buf) = render(&mut view, 40, 3, &busy);
+        assert_eq!(buf[(0, 0)].style().fg, theme::border_active().fg);
+    }
+
+    #[test]
+    fn plan_mode_uses_mode_border_color() {
+        let mut view = view();
+        let (_, idle) = render(&mut view, 40, 3, &State::new());
+        assert_eq!(idle[(0, 0)].style().fg, theme::border_idle().fg);
+
+        let plan = State {
+            mode: AgentMode::Plan,
+            ..State::new()
+        };
+        let (_, buf) = render(&mut view, 40, 3, &plan);
+        assert_eq!(buf[(0, 0)].style().fg, theme::mode().fg);
+
+        let busy_plan = State {
+            busy: true,
+            mode: AgentMode::Plan,
+            ..State::new()
+        };
+        let (_, buf) = render(&mut view, 40, 3, &busy_plan);
+        assert_eq!(buf[(0, 0)].style().fg, theme::mode().fg);
     }
 }

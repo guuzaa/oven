@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 pub struct State {
     pub busy: bool,
     pub mode: AgentMode,
+    pub frame: u64,
 }
 
 impl State {

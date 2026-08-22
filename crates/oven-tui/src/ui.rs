@@ -30,7 +30,6 @@ pub struct Ui {
     input: InputView,
     queue: QueueWidget,
     todos: TodosWidget,
-    spin: u8,
 }
 
 impl Ui {
@@ -62,7 +61,6 @@ impl Ui {
             input,
             queue: QueueWidget::new(),
             todos: TodosWidget::new(todos),
-            spin: 0,
         }
     }
 
@@ -94,9 +92,9 @@ impl Ui {
         terminal.draw(|f| self.draw(f))?;
         loop {
             tokio::select! {
-                _ = tick.tick(), if self.state.busy || self.status.has_reply() => {
+                _ = tick.tick(), if self.wants_tick() => {
                     if self.state.busy {
-                        self.spin = self.spin.wrapping_add(1);
+                        self.state.frame = self.state.frame.wrapping_add(1);
                     }
                     self.status.expire_reply();
                 }
@@ -311,11 +309,14 @@ impl Ui {
             regions.status,
             &self.state,
             status_hint(self.input.overlay(), self.state.busy),
-            self.spin,
         );
         if let Some(reply) = regions.reply {
             self.status.draw_reply(f, reply);
         }
+    }
+
+    fn wants_tick(&self) -> bool {
+        self.state.busy || self.status.has_reply()
     }
 }
 

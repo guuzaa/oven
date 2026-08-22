@@ -7,6 +7,8 @@ use ratatui::widgets::Paragraph;
 use super::theme;
 
 pub const MAX_LIST_ROWS: usize = 6;
+const SELECTED_MARK: &str = "▸ ";
+const IDLE_MARK: &str = "  ";
 
 pub fn cycle_selected(selected: &mut usize, n: usize, up: bool) {
     if n == 0 {
@@ -35,7 +37,13 @@ pub fn draw_choice_list<N, D>(
         } else {
             Style::default()
         };
+        let mark = if row == selected {
+            SELECTED_MARK
+        } else {
+            IDLE_MARK
+        };
         lines.push(Line::from(vec![
+            Span::styled(mark.to_string(), name_style),
             Span::styled(name.into(), name_style),
             Span::styled(format!("  {}", desc.into()), theme::dim()),
         ]));
@@ -59,5 +67,25 @@ mod tests {
         assert_eq!(i, 2);
         cycle_selected(&mut i, 0, false);
         assert_eq!(i, 2);
+    }
+
+    #[test]
+    fn selected_row_uses_marker_prefix() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(24, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                draw_choice_list(f, f.area(), [("exit", "leave"), ("clear", "wipe")], 1);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let row0: String = (0..24).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        let row1: String = (0..24).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        assert!(row0.contains("  exit"), "{row0:?}");
+        assert!(row1.contains("▸ clear"), "{row1:?}");
+        assert!(!row0.contains("▸"), "{row0:?}");
     }
 }

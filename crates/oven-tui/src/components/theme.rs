@@ -1,4 +1,5 @@
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::BorderType;
 
 pub fn user() -> Style {
     Style::default()
@@ -56,4 +57,16 @@ pub fn reply() -> Style {
 
 pub fn selection() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
+}
+
+pub fn border_idle() -> Style {
+    dim()
+}
+
+pub fn border_active() -> Style {
+    accent()
+}
+
+pub fn border_type() -> BorderType {
+    BorderType::Rounded
 }

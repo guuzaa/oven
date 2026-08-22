@@ -890,6 +890,53 @@ fn highlight_line_marks_range() {
 }
 
 #[test]
+fn stream_text_caret_blinks() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut t = Transcript::new();
+    t.push_stream(LineKind::Text, "hello");
+    let mut state = State::new();
+    let backend = TestBackend::new(20, 2);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| t.draw(f, f.area(), &state)).unwrap();
+    let on: String = {
+        let buf = terminal.backend().buffer();
+        (0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect()
+    };
+    assert!(on.contains("hello"), "{on:?}");
+    assert!(on.contains("▊"), "caret on at frame 0: {on:?}");
+
+    state.frame = 5;
+    terminal.draw(|f| t.draw(f, f.area(), &state)).unwrap();
+    let off: String = {
+        let buf = terminal.backend().buffer();
+        (0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect()
+    };
+    assert!(off.contains("hello"), "{off:?}");
+    assert!(!off.contains("▊"), "caret off at frame 5: {off:?}");
+}
+
+#[test]
+fn thinking_stream_does_not_draw_text_caret() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut t = Transcript::new();
+    t.push_stream(LineKind::Thinking, THINKING_LABEL);
+    let backend = TestBackend::new(20, 2);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let row: String = {
+        let buf = terminal.backend().buffer();
+        (0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect()
+    };
+    assert!(!row.contains("▊"), "{row:?}");
+}
+
+#[test]
 fn draw_repaints_every_cell_after_shorter_cjk_line() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

@@ -5,9 +5,10 @@ use oven_app::{AgentEvent, AppEvent, ToolView, present_tool};
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 
 use super::super::component::{Action, Component, KeyResult, State};
+use super::super::theme;
 use super::kinds::{LineKind, Row, THINKING_LABEL, THOUGHT_LABEL};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::{ToolBurst, compact_tool_arg, format_tool_summary};
@@ -17,6 +18,8 @@ use super::wrap::{
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
+const STREAM_CARET: &str = "▊";
+const CARET_FRAMES: u64 = 5;
 
 pub struct Transcript {
     pub(super) rows: Vec<Row>,
@@ -506,6 +509,10 @@ impl Transcript {
         self.stream_kind == LineKind::Thinking && !self.streaming.is_empty()
     }
 
+    fn is_live_text(&self) -> bool {
+        self.stream_kind == LineKind::Text && !self.streaming.is_empty()
+    }
+
     pub(super) fn selected_text(&self) -> Option<String> {
         let (start, end) = self.normalized_sel()?;
         let mut out = String::new();
@@ -651,7 +658,7 @@ impl Component for Transcript {
         }
     }
 
-    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, _state: &State) {
+    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
         self.area = area;
         let width = area.width as usize;
         if width != self.width {
@@ -682,6 +689,13 @@ impl Component for Transcript {
                     *line = apply_thinking_shimmer(line, phase);
                 }
             }
+        }
+        if self.is_live_text()
+            && (state.frame / CARET_FRAMES).is_multiple_of(2)
+            && let Some(last) = visible.last_mut()
+        {
+            last.spans
+                .push(Span::styled(STREAM_CARET, theme::assistant()));
         }
         if let Some((sel_start, sel_end)) = self.normalized_sel() {
             for (i, line) in visible.iter_mut().enumerate() {

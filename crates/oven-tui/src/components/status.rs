@@ -117,18 +117,11 @@ impl StatusBar {
         self.flash_until.is_some_and(|until| Instant::now() < until)
     }
 
-    pub fn draw_bar(
-        &mut self,
-        f: &mut Frame<'_>,
-        area: Rect,
-        state: &State,
-        hint: StatusHint,
-        spin: u8,
-    ) {
+    pub fn draw_bar(&mut self, f: &mut Frame<'_>, area: Rect, state: &State, hint: StatusHint) {
         let gray = theme::dim();
         let mut spans = Vec::new();
         if state.busy {
-            let ch = SPIN_FRAMES[(spin as usize) % SPIN_FRAMES.len()];
+            let ch = SPIN_FRAMES[(state.frame as usize) % SPIN_FRAMES.len()];
             spans.push(Span::styled(ch.to_string(), theme::accent()));
             spans.push(Span::raw(" "));
         }
@@ -210,7 +203,7 @@ impl Component for StatusBar {
         } else {
             StatusHint::Idle
         };
-        self.draw_bar(f, area, state, hint, 0);
+        self.draw_bar(f, area, state, hint);
     }
 }
 
@@ -559,7 +552,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                bar.draw_bar(f, f.area(), state, StatusHint::Idle, 0);
+                bar.draw_bar(f, f.area(), state, StatusHint::Idle);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -640,7 +633,7 @@ mod tests {
                     .direction(Direction::Vertical)
                     .constraints([Constraint::Length(1), Constraint::Length(1)])
                     .split(f.area());
-                bar.draw_bar(f, chunks[0], &state, StatusHint::Idle, 0);
+                bar.draw_bar(f, chunks[0], &state, StatusHint::Idle);
                 bar.draw_reply(f, chunks[1]);
             })
             .unwrap();
