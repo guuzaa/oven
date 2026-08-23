@@ -1,13 +1,12 @@
 use oven_agent::{
-    AgentEvent, AgentEventEnvelope, CancellationToken, ChannelEventSink, LiveHandle, TodoList,
-    ToolEvent, TurnContext, TurnId,
+    AgentEvent, AgentEventEnvelope, CancellationToken, ChannelEventSink, TurnContext, TurnId,
 };
 use tokio::sync::mpsc;
 
 use crate::command::AppCommand;
 use crate::event::{AppEventKind, Subscribers};
 use crate::runtime::{
-    Control, Runtime, apply_mode, emit, emit_error, emit_state, persist_todo_snapshot, publish,
+    Control, Runtime, emit, emit_error, emit_state, persist_todo_snapshot, publish,
     record_recent_path, should_persist_todos,
 };
 use crate::slash::CommandOutcome;
@@ -38,15 +37,10 @@ impl Runtime {
         let cancel = CancellationToken::new();
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
         let mut sink = ChannelEventSink::new(agent_tx, self.agent.id(), turn_id);
-        let ctx = TurnContext {
-            turn_id,
-            cancellation: cancel.clone(),
-        };
-        let live = self.live.clone();
-        let mut last_todos = self.state.todos.clone();
+        let ctx = TurnContext::new(turn_id, cancel.clone(), self.agent.mode());
 
         let result = {
-            let turn = self.agent.run(input, ctx, &mut sink);
+            let turn = self.agent.run(input, &ctx, &mut sink);
             tokio::pin!(turn);
 
             loop {
@@ -66,7 +60,7 @@ impl Runtime {
                             }
                             Some(AppCommand::Cancel { .. }) => {}
                             Some(AppCommand::SetMode { mode }) => {
-                                apply_mode(&live, mode);
+                                ctx.set_mode(mode);
                                 self.state.mode = mode;
                                 publish(&self.state_tx, &self.state);
                                 emit_state(
@@ -83,8 +77,6 @@ impl Runtime {
                         match ev {
                             Some(event) => forward_agent_event(
                                 event,
-                                &live,
-                                &mut last_todos,
                                 &mut self.seq,
                                 &mut self.state_rev,
                                 &self.subscribers,
@@ -106,8 +98,6 @@ impl Runtime {
         while let Ok(event) = agent_rx.try_recv() {
             forward_agent_event(
                 event,
-                &live,
-                &mut last_todos,
                 &mut self.seq,
                 &mut self.state_rev,
                 &self.subscribers,
@@ -149,8 +139,8 @@ impl Runtime {
                 }
             }
         }
-        if should_persist_todos(&self.agent.todos(), self.agent.todo_written_this_turn())
-            && let Err(e) = persist_todo_snapshot(store, &self.agent.todos())
+        if should_persist_todos(self.agent.todos(), self.agent.todo_written_this_turn())
+            && let Err(e) = persist_todo_snapshot(store, self.agent.todos())
         {
             emit_error(&mut self.seq, &self.subscribers, e.to_string());
         }
@@ -170,25 +160,25 @@ fn cancel_turn(
     cancel.cancel();
 }
 
-#[allow(clippy::too_many_arguments)]
 fn forward_agent_event(
     event: AgentEventEnvelope,
-    live: &LiveHandle,
-    last_todos: &mut TodoList,
     seq: &mut u64,
     state_rev: &mut u64,
     subs: &Subscribers,
     state: &mut AppState,
     state_tx: &tokio::sync::watch::Sender<AppState>,
 ) {
-    if let AgentEvent::Tool(ToolEvent::Finished { .. }) = &event.event {
-        let todos = live.lock().unwrap_or_else(|e| e.into_inner()).todos.clone();
-        if todos != *last_todos {
-            *last_todos = todos.clone();
-            state.todos = todos.clone();
-            publish(state_tx, state);
-            emit_state(seq, state_rev, subs, StateChange::TodosChanged { todos });
-        }
+    if let AgentEvent::TodosChanged { todos } = &event.event {
+        state.todos = todos.clone();
+        publish(state_tx, state);
+        emit_state(
+            seq,
+            state_rev,
+            subs,
+            StateChange::TodosChanged {
+                todos: todos.clone(),
+            },
+        );
     }
     emit(seq, subs, AppEventKind::Agent(event));
 }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use oven_agent::{Agent, AgentMode, LiveHandle, Record, TodoList, restore_todos};
+use oven_agent::{Agent, AgentMode, Record, TodoList, restore_todos};
 use oven_llm::{
     Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort,
 };
@@ -33,7 +33,6 @@ pub(crate) struct Runtime {
     pub(crate) user_config_path: Option<PathBuf>,
     pub(crate) subscribers: Subscribers,
     pub(crate) slash: SlashRegistry,
-    pub(crate) live: LiveHandle,
     pub(crate) seq: u64,
     pub(crate) state_rev: u64,
     pub(crate) persisted_prefix: usize,
@@ -56,7 +55,6 @@ impl Runtime {
             _ => 0,
         };
         let persisted_rev = agent.history_revision();
-        let live = agent.live_handle();
         Self {
             agent,
             state,
@@ -66,7 +64,6 @@ impl Runtime {
             user_config_path,
             subscribers,
             slash: SlashRegistry::with_builtin(),
-            live,
             seq: 0,
             state_rev: 0,
             persisted_prefix,
@@ -169,7 +166,7 @@ impl Runtime {
         self.state.model = self.agent.model().to_string();
         self.state.reasoning_effort = self.agent.reasoning_effort();
         self.state.history = self.agent.history().cloned().collect();
-        self.state.todos = self.agent.todos();
+        self.state.todos = self.agent.todos().clone();
         self.state.usage = *self.agent.total_usage();
     }
 
@@ -420,7 +417,7 @@ pub(crate) fn spawn_runtime(
     let subscribers_task = subscribers.clone();
     let slash_commands = SlashRegistry::with_builtin().commands();
     let history: Vec<Message> = agent.history().cloned().collect();
-    let todos = agent.todos();
+    let todos = agent.todos().clone();
     let total_usage = *agent.total_usage();
     let provider = config.provider.clone();
     let mode = agent.mode();
@@ -504,10 +501,6 @@ pub(crate) fn emit_error(seq: &mut u64, subs: &Subscribers, message: impl Into<S
             message: message.into(),
         },
     );
-}
-
-pub(crate) fn apply_mode(live: &LiveHandle, mode: AgentMode) {
-    live.lock().unwrap_or_else(|e| e.into_inner()).mode = mode;
 }
 
 fn now_ms() -> u64 {

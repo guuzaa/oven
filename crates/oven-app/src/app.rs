@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use oven_agent::AgentError;
-use oven_agent::{Agent, AgentLive, LiveHandle, Record, Skill, SkillReadTool, TodoWriteTool, Tool};
+use oven_agent::{Agent, Record, Skill, SkillReadTool, TodoWriteTool, Tool};
 #[cfg(test)]
 use oven_llm::Provider;
 use oven_llm::{Role, Router};
@@ -183,15 +183,13 @@ impl App {
             .await
             .map_err(AppError::Mcp)?;
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
-        let live: LiveHandle = Arc::new(Mutex::new(AgentLive::new(Some(
-            crate::system::system_prompt(
-                &self.root,
-                &self.instructions,
-                self.skills.merged_system_prompt(),
-            ),
-        ))));
-        tools.push(Box::new(TodoWriteTool::new(live.clone())));
-        let mut agent = Agent::new_with_live(router, tools, live);
+        tools.push(Box::new(TodoWriteTool));
+        let mut agent = Agent::new(router, tools);
+        agent.set_system(crate::system::system_prompt(
+            &self.root,
+            &self.instructions,
+            self.skills.merged_system_prompt(),
+        ));
         if let Some(effort) = self.config.provider.reasoning_effort {
             agent.set_reasoning_effort(Some(effort));
         }

@@ -4,12 +4,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolCaps, ToolView};
 use crate::error::AgentError;
-use crate::live::LiveHandle;
 use crate::todo::TodoList;
 
-pub struct TodoWriteTool {
-    live: LiveHandle,
-}
+pub struct TodoWriteTool;
 
 impl TodoWriteTool {
     pub const NAME: &'static str = "todo_write";
@@ -23,10 +20,6 @@ impl TodoWriteTool {
             summary,
             collapse: false,
         }
-    }
-
-    pub fn new(live: LiveHandle) -> Self {
-        Self { live }
     }
 }
 
@@ -87,10 +80,6 @@ impl Tool for TodoWriteTool {
         _cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
         let next = TodoList::parse(args).map_err(AgentError::from)?;
-        {
-            let mut g = self.live.lock().unwrap_or_else(|e| e.into_inner());
-            g.todos = next.clone();
-        }
         Ok(next.summary())
     }
 }

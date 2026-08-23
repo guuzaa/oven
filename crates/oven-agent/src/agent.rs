@@ -1,18 +1,14 @@
-use std::sync::{Arc, Mutex};
-
 use futures::StreamExt;
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, Provider, ReasoningEffort, Request, Response, Role,
     Router, SamplingParams, StreamCollector, StreamEvent as LlmStreamEvent, ThinkingMode,
     ToolChoice, Usage,
 };
-use tokio_util::sync::CancellationToken;
 
 use crate::error::AgentError;
 use crate::event::{AgentEvent, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
 use crate::identity::{AgentId, ToolCallId};
-use crate::live::{AgentLive, LiveHandle};
 use crate::mode::AgentMode;
 use crate::sink::EventSink;
 use crate::todo::{self, TodoList};
@@ -27,7 +23,9 @@ pub struct Agent {
     pub(crate) tools: Vec<Box<dyn Tool>>,
     pub(crate) history: History,
     model: ModelId,
-    live: LiveHandle,
+    system: Option<String>,
+    mode: AgentMode,
+    todos: TodoList,
     reasoning_effort: Option<ReasoningEffort>,
     max_iters: usize,
     /// Soft budget on conversation tokens; oldest turns are dropped to stay
@@ -39,17 +37,15 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(router: Router, tools: Vec<Box<dyn Tool>>) -> Self {
-        Self::new_with_live(router, tools, Arc::new(Mutex::new(AgentLive::new(None))))
-    }
-
-    pub fn new_with_live(router: Router, tools: Vec<Box<dyn Tool>>, live: LiveHandle) -> Self {
         Self {
             id: AgentId::next(),
             router,
             tools,
             history: History::new(),
             model: ModelId::new("default"),
-            live,
+            system: None,
+            mode: AgentMode::Default,
+            todos: TodoList::default(),
             reasoning_effort: None,
             max_iters: 100,
             budget: 128_000,
@@ -96,35 +92,24 @@ impl Agent {
         self.reasoning_effort = effort;
     }
 
-    pub fn live_handle(&self) -> LiveHandle {
-        self.live.clone()
+    pub fn set_system(&mut self, content: impl Into<String>) {
+        self.system = Some(content.into());
     }
 
-    pub fn set_system(&self, content: impl Into<String>) {
-        self.live
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .base_system = Some(content.into());
-    }
-
-    pub fn set_mode(&self, mode: AgentMode) {
-        self.live.lock().unwrap_or_else(|e| e.into_inner()).mode = mode;
+    pub fn set_mode(&mut self, mode: AgentMode) {
+        self.mode = mode;
     }
 
     pub fn mode(&self) -> AgentMode {
-        self.live.lock().unwrap_or_else(|e| e.into_inner()).mode
+        self.mode
     }
 
-    pub fn set_todos(&self, todos: TodoList) {
-        self.live.lock().unwrap_or_else(|e| e.into_inner()).todos = todos;
+    pub fn set_todos(&mut self, todos: TodoList) {
+        self.todos = todos;
     }
 
-    pub fn todos(&self) -> TodoList {
-        self.live
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .todos
-            .clone()
+    pub fn todos(&self) -> &TodoList {
+        &self.todos
     }
 
     pub fn todo_written_this_turn(&self) -> bool {
@@ -202,7 +187,7 @@ impl Agent {
     }
 
     fn llm_tools(&self) -> Vec<oven_llm::Tool> {
-        let mode = self.mode();
+        let mode = self.mode;
         self.tools
             .iter()
             .filter(|t| !t.caps().plan_only || mode == AgentMode::Plan)
@@ -216,10 +201,9 @@ impl Agent {
 
     fn build_request(&self) -> Request {
         let tools = self.llm_tools();
-        let (mut system, todos, mode) = {
-            let g = self.live.lock().unwrap_or_else(|e| e.into_inner());
-            (g.base_system.clone(), g.todos.clone(), g.mode)
-        };
+        let mut system = self.system.clone();
+        let todos = &self.todos;
+        let mode = self.mode;
         let mut messages = Vec::with_capacity(self.history.len());
         for m in self.history.messages() {
             if m.role == Role::System {
@@ -278,14 +262,14 @@ impl Agent {
         &self,
         name: &str,
         args: &serde_json::Value,
-        cancel: Option<&CancellationToken>,
+        ctx: &TurnContext,
     ) -> Result<String, AgentError> {
         let tool = self
             .tools
             .iter()
             .find(|t| t.name() == name)
             .ok_or_else(|| AgentError::from(format!("unknown tool: {name}")))?;
-        tool.run(args, cancel).await
+        tool.run(args, Some(&ctx.cancellation)).await
     }
 
     async fn complete_response(
@@ -344,8 +328,9 @@ impl Agent {
     async fn step(
         &mut self,
         sink: &mut impl EventSink,
-        cancel: Option<&CancellationToken>,
+        ctx: &TurnContext,
     ) -> Result<Option<String>, AgentError> {
+        self.mode = ctx.mode();
         let response = self.complete_response(sink).await?;
 
         self.history
@@ -374,11 +359,13 @@ impl Agent {
                 name: name.clone(),
                 view,
             }));
-            let result = match self.dispatch(name, input, cancel).await {
+            let result = match self.dispatch(name, input, ctx).await {
                 Ok(r) => {
-                    if writes_todos {
+                    if writes_todos && let Ok(list) = TodoList::parse(input) {
+                        self.todos = list.clone();
                         self.todo_written_this_turn = true;
                         wrote_todo = true;
+                        sink.emit(AgentEvent::TodosChanged { todos: list });
                     }
                     ToolResult::Success {
                         output: truncate(&r, 1_500_000),
@@ -405,7 +392,7 @@ impl Agent {
     pub async fn run(
         &mut self,
         input: impl Into<String>,
-        ctx: TurnContext,
+        ctx: &TurnContext,
         sink: &mut impl EventSink,
     ) -> Result<TurnOutput, AgentError> {
         let input: String = input.into();
@@ -422,7 +409,7 @@ impl Agent {
 
             for _ in 0..self.max_iters {
                 self.history.trim_to_budget(self.budget);
-                match self.step(sink, Some(&ctx.cancellation)).await {
+                match self.step(sink, ctx).await {
                     Ok(Some(final_text)) => {
                         let usage = *self.total_usage();
                         sink.emit(AgentEvent::Turn(TurnEvent::Completed { usage }));
@@ -446,6 +433,7 @@ impl Agent {
                 res = &mut turn => res,
             }
         };
+        self.mode = ctx.mode();
 
         match &result {
             Ok(_) => {}
@@ -491,27 +479,22 @@ mod tests {
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
 
     fn turn_ctx() -> TurnContext {
-        TurnContext {
-            turn_id: TurnId::next(),
-            cancellation: CancellationToken::new(),
-        }
+        TurnContext::new(TurnId::next(), CancellationToken::new(), AgentMode::Default)
     }
 
     async fn run_text(agent: &mut Agent, input: &str) -> String {
         let mut sink = NullSink;
-        agent
-            .run(input, turn_ctx(), &mut sink)
-            .await
-            .unwrap()
-            .text()
+        let ctx = TurnContext::new(TurnId::next(), CancellationToken::new(), agent.mode());
+        agent.run(input, &ctx, &mut sink).await.unwrap().text()
     }
 
     async fn run_with(
         agent: &mut Agent,
         input: &str,
-        ctx: TurnContext,
+        ctx: &TurnContext,
         sink: &mut impl EventSink,
     ) -> Result<TurnOutput, AgentError> {
         agent.run(input, ctx, sink).await
@@ -704,7 +687,7 @@ mod tests {
             .with_max_iters(4);
 
         let mut sink = VecEventSink::default();
-        let result = run_with(&mut agent, "read it", turn_ctx(), &mut sink)
+        let result = run_with(&mut agent, "read it", &turn_ctx(), &mut sink)
             .await
             .unwrap();
         assert_eq!(result.text(), "all good");
@@ -757,10 +740,7 @@ mod tests {
         let err = agent
             .run(
                 "hi",
-                TurnContext {
-                    turn_id: TurnId::next(),
-                    cancellation: cancel,
-                },
+                &TurnContext::new(TurnId::next(), cancel, AgentMode::Default),
                 &mut sink,
             )
             .await
@@ -781,7 +761,7 @@ mod tests {
         let mock = MockProvider::new(vec![text_response("ok")]);
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         let mut sink = VecEventSink::default();
-        let out = run_with(&mut agent, "hi", turn_ctx(), &mut sink)
+        let out = run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
             .await
             .unwrap();
         assert_eq!(out.text(), "ok");
@@ -802,10 +782,7 @@ mod tests {
         let err = agent
             .run(
                 "hi",
-                TurnContext {
-                    turn_id: TurnId::next(),
-                    cancellation: cancel,
-                },
+                &TurnContext::new(TurnId::next(), cancel, AgentMode::Default),
                 &mut sink,
             )
             .await
@@ -823,7 +800,7 @@ mod tests {
         let mock = MockProvider::new(vec![]);
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         let mut sink = VecEventSink::default();
-        let err = run_with(&mut agent, "hi", turn_ctx(), &mut sink)
+        let err = run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
             .await
             .unwrap_err();
         assert!(!err.is_cancelled());
@@ -948,10 +925,21 @@ mod tests {
     }
 
     fn agent_with_todo_write(provider: Box<dyn Provider>) -> Agent {
-        let live = Arc::new(Mutex::new(AgentLive::new(None)));
-        let tools: Vec<Box<dyn Tool>> =
-            vec![Box::new(crate::tools::TodoWriteTool::new(live.clone()))];
-        Agent::new_with_live(router_with(provider), tools, live)
+        Agent::new(
+            router_with(provider),
+            vec![Box::new(crate::tools::TodoWriteTool)],
+        )
+    }
+
+    fn agent_with_file_and_todo(provider: Box<dyn Provider>, root: &std::path::Path) -> Agent {
+        Agent::new(
+            router_with(provider),
+            vec![
+                Box::new(FileReadTool::new(root)),
+                Box::new(crate::tools::TodoWriteTool),
+            ],
+        )
+        .with_max_iters(4)
     }
 
     #[tokio::test]
@@ -992,7 +980,7 @@ mod tests {
         ]);
         let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
         let mut sink = VecEventSink::default();
-        let result = run_with(&mut agent, "plan it", turn_ctx(), &mut sink)
+        let result = run_with(&mut agent, "plan it", &turn_ctx(), &mut sink)
             .await
             .unwrap();
         assert_eq!(result.text(), "done");
@@ -1001,6 +989,10 @@ mod tests {
         assert!(agent.todo_written_this_turn());
 
         let events = sink.events;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::TodosChanged { todos } if todos.items[0].id == "a"
+        )));
         assert!(events.iter().any(|e| matches!(
             e,
             AgentEvent::Tool(ToolEvent::Finished {
@@ -1032,7 +1024,7 @@ mod tests {
             }],
         });
         let mut sink = VecEventSink::default();
-        run_with(&mut agent, "bad write", turn_ctx(), &mut sink)
+        run_with(&mut agent, "bad write", &turn_ctx(), &mut sink)
             .await
             .unwrap();
         assert_eq!(agent.todos().items[0].id, "keep");
@@ -1183,25 +1175,19 @@ mod tests {
         *mock.entered.lock().unwrap() = Some(entered_tx);
         *mock.release.lock().unwrap() = Some(release_rx);
 
-        let live = Arc::new(Mutex::new(AgentLive::new(None)));
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(FileReadTool::new(tmp.path())),
-            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
-        ];
-        let mut agent =
-            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
+        let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         assert_eq!(agent.mode(), AgentMode::Default);
-        let live = agent.live_handle();
 
         let mut sink = NullSink;
-        let run = agent.run("read it", turn_ctx(), &mut sink);
+        let ctx = turn_ctx();
+        let run = agent.run("read it", &ctx, &mut sink);
         tokio::pin!(run);
         tokio::select! {
             biased;
             _ = entered_rx => {}
             _ = &mut run => panic!("turn finished before first complete awaited"),
         }
-        live.lock().unwrap_or_else(|e| e.into_inner()).mode = AgentMode::Plan;
+        ctx.set_mode(AgentMode::Plan);
         drop(release_tx);
         assert_eq!(run.await.unwrap().text(), "done");
 
@@ -1222,13 +1208,7 @@ mod tests {
             tool_response("c1", "file_read", json!({"path": "note.txt"})),
             text_response("done"),
         ]);
-        let live = Arc::new(Mutex::new(AgentLive::new(None)));
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(FileReadTool::new(tmp.path())),
-            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
-        ];
-        let mut agent =
-            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
+        let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
@@ -1255,13 +1235,7 @@ mod tests {
             tool_response("c2", "todo_write", todos),
             text_response("done"),
         ]);
-        let live = Arc::new(Mutex::new(AgentLive::new(None)));
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(FileReadTool::new(tmp.path())),
-            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
-        ];
-        let mut agent =
-            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(6);
+        let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path()).with_max_iters(6);
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
@@ -1300,13 +1274,7 @@ mod tests {
             text_response("done"),
             text_response("later"),
         ]);
-        let live = Arc::new(Mutex::new(AgentLive::new(None)));
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(FileReadTool::new(tmp.path())),
-            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
-        ];
-        let mut agent =
-            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
+        let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
@@ -1334,13 +1302,7 @@ mod tests {
             text_response("done"),
             text_response("again"),
         ]);
-        let live = Arc::new(Mutex::new(AgentLive::new(None)));
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(FileReadTool::new(tmp.path())),
-            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
-        ];
-        let mut agent =
-            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
+        let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
@@ -1367,13 +1329,7 @@ mod tests {
             text_response("done"),
             text_response("fresh"),
         ]);
-        let live = Arc::new(Mutex::new(AgentLive::new(None)));
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(FileReadTool::new(tmp.path())),
-            Box::new(crate::tools::TodoWriteTool::new(live.clone())),
-        ];
-        let mut agent =
-            Agent::new_with_live(router_with(Box::new(mock)), tools, live).with_max_iters(4);
+        let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],

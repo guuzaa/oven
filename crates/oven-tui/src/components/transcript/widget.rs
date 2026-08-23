@@ -634,6 +634,7 @@ impl Component for Transcript {
                     self.push_row(LineKind::Error, &error.message);
                     self.push_separator();
                 }
+                AgentEvent::TodosChanged { .. } => {}
             },
             AppEventKind::StateChanged(_) => {}
             AppEventKind::Exited => {}

@@ -3,7 +3,6 @@ mod error;
 mod event;
 mod history;
 mod identity;
-mod live;
 mod mode;
 mod retry;
 mod sink;
@@ -19,7 +18,6 @@ pub use event::{
 };
 pub use history::{History, Record, SessionMeta};
 pub use identity::{AgentId, ToolCallId, TurnId};
-pub use live::{AgentLive, LiveHandle};
 pub use mode::AgentMode;
 pub use retry::RetryingProvider;
 pub use sink::{ChannelEventSink, EventSink, NullSink, VecEventSink};

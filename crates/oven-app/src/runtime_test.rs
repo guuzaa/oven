@@ -1554,7 +1554,6 @@ async fn set_mode_applies_during_in_flight_turn() {
 
     let agent = agent_from(Box::new(provider));
     assert_eq!(agent.mode(), AgentMode::Default);
-    let live = agent.live_handle();
     let handle = spawn_runtime(
         AppId::next(),
         agent,
@@ -1592,10 +1591,7 @@ async fn set_mode_applies_during_in_flight_turn() {
         }
     }
     assert!(saw_mode);
-    assert_eq!(
-        live.lock().unwrap_or_else(|e| e.into_inner()).mode,
-        AgentMode::Plan
-    );
+    assert_eq!(handle.state().mode, AgentMode::Plan);
     drop(release_tx);
     handle.shutdown().await;
 }
@@ -1743,7 +1739,6 @@ async fn cancel_does_not_roll_back_todos() {
         .build_agent_with_provider(Box::new(provider))
         .await
         .unwrap();
-    let live = agent.live_handle();
     let handle = spawn_runtime(
         AppId::next(),
         agent,
@@ -1793,10 +1788,7 @@ async fn cancel_does_not_roll_back_todos() {
             Err(_) => panic!("timeout waiting for cancel"),
         }
     }
-    assert_eq!(
-        live.lock().unwrap_or_else(|e| e.into_inner()).todos.items[0].id,
-        "a"
-    );
+    assert_eq!(handle.todos().items[0].id, "a");
     handle.shutdown().await;
 }
 
@@ -1826,7 +1818,6 @@ async fn rewind_restores_previous_todo_list() {
     ]);
     let session = Session::open(&dir, "s1").unwrap();
     let agent = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
-    let live = agent.live_handle();
     let handle = spawn_runtime(
         AppId::next(),
         agent,
@@ -1837,10 +1828,7 @@ async fn rewind_restores_previous_todo_list() {
     );
     assert_eq!(handle.prompt("t1").await.unwrap(), "first");
     assert_eq!(handle.prompt("t2").await.unwrap(), "second");
-    assert_eq!(
-        live.lock().unwrap_or_else(|e| e.into_inner()).todos.items[0].id,
-        "b"
-    );
+    assert_eq!(handle.todos().items[0].id, "b");
 
     let mut sub = handle.subscribe();
     handle.send(AppCommand::Rewind).unwrap();
@@ -1867,10 +1855,7 @@ async fn rewind_restores_previous_todo_list() {
             Err(_) => panic!("timeout waiting for rewind"),
         }
     }
-    assert_eq!(
-        live.lock().unwrap_or_else(|e| e.into_inner()).todos.items[0].id,
-        "a"
-    );
+    assert_eq!(handle.todos().items[0].id, "a");
     handle.shutdown().await;
 
     let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
@@ -1929,7 +1914,6 @@ async fn slash_clear_does_not_copy_todos_to_new_session() {
     ]);
     let session = Session::open(&dir, "s1").unwrap();
     let agent = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
-    let live = agent.live_handle();
     let handle = spawn_runtime(
         AppId::next(),
         agent,
@@ -1939,21 +1923,10 @@ async fn slash_clear_does_not_copy_todos_to_new_session() {
         None,
     );
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
-    assert!(
-        !live
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .todos
-            .is_empty()
-    );
+    assert!(!handle.todos().is_empty());
 
     handle.prompt("/clear").await.unwrap();
-    assert!(
-        live.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .todos
-            .is_empty()
-    );
+    assert!(handle.todos().is_empty());
     assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
     let sid = handle.session_id().expect("new session");
     handle.shutdown().await;
