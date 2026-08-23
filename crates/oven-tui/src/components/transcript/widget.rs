@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use oven_app::{AgentEvent, AppEvent, ToolView, present_tool};
+use oven_app::{
+    AgentEvent, AppEvent, AppEventKind, StreamEvent, ToolEvent, ToolResult, ToolView, TurnEvent,
+    present_tool,
+};
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -82,14 +85,7 @@ impl Transcript {
     }
 
     pub(crate) fn replace_from(&mut self, messages: &[Message]) {
-        self.rows.clear();
-        self.wrapped.clear();
-        self.clear_stream();
-        self.pinned = true;
-        self.top = 0;
-        self.clear_selection();
-        self.close_tool_burst();
-        self.detail_ids.clear();
+        self.reset();
         self.seed(messages);
     }
 
@@ -585,44 +581,40 @@ impl Component for Transcript {
     }
 
     fn on_event(&mut self, ev: &AppEvent) {
-        match ev {
-            AppEvent::Agent { event, .. } => match event {
-                AgentEvent::ThinkingDelta { .. } => {
+        match &ev.kind {
+            AppEventKind::Agent(env) => match &env.event {
+                AgentEvent::Stream(StreamEvent::ThinkingDelta { .. }) => {
                     self.close_tool_burst();
                     if self.stream_kind != LineKind::Thinking || self.streaming.is_empty() {
                         self.push_stream(LineKind::Thinking, THINKING_LABEL);
                     }
                 }
-                AgentEvent::TextDelta { text, .. } => {
+                AgentEvent::Stream(StreamEvent::TextDelta { text }) => {
                     self.close_tool_burst();
                     self.push_stream(LineKind::Text, text);
                 }
-                AgentEvent::ToolStart { call_id, view, .. } => {
+                AgentEvent::Tool(ToolEvent::Started { call_id, view, .. }) => {
                     self.flush_streaming();
-                    self.note_tool_start(call_id, view);
+                    self.note_tool_start(&call_id.0.to_string(), view);
                 }
-                AgentEvent::ToolEnd {
-                    call_id,
-                    ok,
-                    output,
-                    ..
-                } => {
-                    self.note_tool_end(call_id, *ok, output);
+                AgentEvent::Tool(ToolEvent::Finished { call_id, result }) => {
+                    let (ok, output) = match result {
+                        ToolResult::Success { output } => (true, output.as_str()),
+                        ToolResult::Failed { output, error } => {
+                            (false, output.as_deref().unwrap_or(error))
+                        }
+                        ToolResult::Cancelled => (false, "cancelled"),
+                    };
+                    self.note_tool_end(&call_id.0.to_string(), ok, output);
                 }
-                AgentEvent::Done { text, .. } => {
+                AgentEvent::Tool(ToolEvent::OutputDelta { .. }) => {}
+                AgentEvent::Turn(TurnEvent::Started) => {}
+                AgentEvent::Turn(TurnEvent::Completed { .. }) => {
                     self.close_tool_burst();
-                    if self.stream_kind == LineKind::Text {
-                        self.clear_stream();
-                    } else {
-                        self.flush_streaming();
-                    }
-                    let body = trim_message(text);
-                    if !body.is_empty() {
-                        self.push_row(LineKind::Text, &body);
-                    }
+                    self.flush_streaming();
                     self.push_separator();
                 }
-                AgentEvent::Cancelled { .. } => {
+                AgentEvent::Turn(TurnEvent::Cancelled) => {
                     self.close_tool_burst();
                     if !self.streaming.is_empty() {
                         let kind = self.stream_kind;
@@ -636,20 +628,17 @@ impl Component for Transcript {
                     self.push_row(LineKind::System, "cancelled");
                     self.push_separator();
                 }
-                AgentEvent::HistoryCleared { .. } => self.reset(),
-                AgentEvent::ModelChanged { .. } => {}
-                AgentEvent::TodoUpdated { .. } => {}
+                AgentEvent::Turn(TurnEvent::Failed { error }) => {
+                    self.close_tool_burst();
+                    self.flush_streaming();
+                    self.push_row(LineKind::Error, &error.message);
+                    self.push_separator();
+                }
             },
-            AppEvent::ModelsUpdated { .. } => {}
-            AppEvent::ProviderUpdated { .. } => {}
-            AppEvent::Exit { .. } => {}
-            AppEvent::Notify { .. } => {}
-            AppEvent::ModeChanged { .. } => {}
-            AppEvent::Rewound { messages, .. } => self.replace_from(messages),
-            AppEvent::Idle { .. } => {
-                self.flush_streaming();
-            }
-            AppEvent::Error { message, .. } => {
+            AppEventKind::StateChanged(_) => {}
+            AppEventKind::Exited => {}
+            AppEventKind::Notification { .. } => {}
+            AppEventKind::Error { message } => {
                 self.close_tool_burst();
                 self.flush_streaming();
                 self.push_row(LineKind::Error, message);

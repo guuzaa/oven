@@ -2,7 +2,7 @@ use std::fmt;
 
 pub use oven_llm::ProviderError;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentError {
     pub message: String,
 }

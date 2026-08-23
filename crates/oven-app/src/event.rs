@@ -1,11 +1,11 @@
-use crate::config::ProviderConfig;
-use oven_agent::{AgentEvent, AgentMode};
-use oven_llm::{Message, Usage};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, TurnId};
 use tokio::sync::mpsc;
 
-/// Id for one long-lived oven-app instance inside a TUI process.
+use crate::state::StateEvent;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AppId(pub u64);
 
@@ -16,55 +16,59 @@ impl AppId {
     }
 }
 
-/// Events emitted by an app task (agent events plus app lifecycle).
 #[derive(Debug, Clone)]
-pub enum AppEvent {
-    Agent {
-        app_id: AppId,
-        event: AgentEvent,
-    },
-    ModelsUpdated {
-        app_id: AppId,
-        models: Vec<(String, String)>,
-    },
-    Idle {
-        app_id: AppId,
-    },
-    Error {
-        app_id: AppId,
-        message: String,
-    },
-    /// One exchange was rewound by the TUI: `text` is the removed user
-    /// message (joined text blocks), `messages` is the truncated history,
-    /// and `usage` is the cumulative token usage after the rollback.
-    Rewound {
-        app_id: AppId,
-        text: Option<String>,
-        messages: Vec<Message>,
-        usage: Usage,
-    },
-    /// `/exit` asked the process to quit.
-    Exit {
-        app_id: AppId,
-    },
-    /// `/setup` applied a new provider config. `api_key` is never included.
-    ProviderUpdated {
-        app_id: AppId,
-        provider: ProviderConfig,
-    },
-    /// Slash-command informational notify. Shown below the status bar, not
-    /// appended to the transcript.
-    Notify {
-        app_id: AppId,
-        text: String,
-    },
-    ModeChanged {
-        app_id: AppId,
-        mode: AgentMode,
-    },
+pub struct AppEvent {
+    pub seq: u64,
+    pub kind: AppEventKind,
 }
 
-/// Event fan-out for one runtime. Each subscriber gets its own lossless
-/// unbounded channel, so a slow UI never silently drops streaming chunks
-/// the way a broadcast receiver would when it lags.
+#[derive(Debug, Clone)]
+pub enum AppEventKind {
+    Agent(AgentEventEnvelope),
+    StateChanged(StateEvent),
+    Notification { text: String },
+    Error { message: String },
+    Exited,
+}
+
+impl AppEvent {
+    pub fn new(kind: AppEventKind) -> Self {
+        Self { seq: 0, kind }
+    }
+
+    pub fn notification(text: impl Into<String>) -> Self {
+        Self::new(AppEventKind::Notification { text: text.into() })
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(AppEventKind::Error {
+            message: message.into(),
+        })
+    }
+
+    pub fn exited() -> Self {
+        Self::new(AppEventKind::Exited)
+    }
+
+    pub fn state_changed(change: crate::state::StateChange) -> Self {
+        Self::new(AppEventKind::StateChanged(StateEvent {
+            revision: 0,
+            change,
+        }))
+    }
+
+    pub fn agent(event: AgentEvent) -> Self {
+        Self::agent_with(AgentId(1), TurnId(1), event)
+    }
+
+    pub fn agent_with(agent_id: AgentId, turn_id: TurnId, event: AgentEvent) -> Self {
+        Self::new(AppEventKind::Agent(AgentEventEnvelope {
+            seq: 0,
+            agent_id,
+            turn_id,
+            event,
+        }))
+    }
+}
+
 pub(crate) type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<AppEvent>>>>;

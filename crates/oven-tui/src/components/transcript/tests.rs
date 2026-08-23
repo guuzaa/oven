@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use oven_app::{AgentEvent, AgentId, AppEvent, AppId, present_tool};
+use oven_app::{
+    AgentEvent, AppEvent, StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, present_tool,
+};
 use oven_llm::{ContentBlock, Message};
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
@@ -162,16 +164,11 @@ fn scroll_down_returns_to_bottom() {
 fn tool_end_updates_summary_without_result_row() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(
-        "c1",
+        1,
         "bash",
         serde_json::json!({ "command": "ls" }),
     ));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c1".into(),
-        ok: false,
-        output: "boom\n".into(),
-    }));
+    t.on_event(&tool_end(1, false, "boom\n"));
     let row = t.rows.last().unwrap();
     assert_eq!(row.kind, LineKind::Tool);
     assert_eq!(row.text, "Ran ls · 1 failed");
@@ -182,16 +179,7 @@ fn tool_end_updates_summary_without_result_row() {
 fn empty_ok_tool_end_renders_nothing() {
     let mut t = Transcript::new();
     let n = t.rows.len();
-    let ev = AppEvent::Agent {
-        app_id: AppId(1),
-        event: AgentEvent::ToolEnd {
-            agent_id: AgentId(1),
-            call_id: "c1".into(),
-            ok: true,
-            output: String::new(),
-        },
-    };
-    t.on_event(&ev);
+    t.on_event(&tool_end(1, true, ""));
     assert_eq!(t.rows.len(), n);
 }
 
@@ -255,10 +243,7 @@ fn reply_event_does_not_append_to_transcript() {
     let mut t = Transcript::new();
     t.push_user("/model");
     let n = t.rows.len();
-    t.on_event(&AppEvent::Notify {
-        app_id: AppId(1),
-        text: "current model: gpt-4o".into(),
-    });
+    t.on_event(&AppEvent::notification("current model: gpt-4o"));
     assert_eq!(t.rows.len(), n);
 }
 
@@ -274,28 +259,53 @@ fn seed_mirrors_empty_tool_result_handling() {
 }
 
 fn agent(event: AgentEvent) -> AppEvent {
-    AppEvent::Agent {
-        app_id: AppId(1),
-        event,
-    }
+    AppEvent::agent(event)
 }
 
-fn tool_start(call_id: &str, name: &str, input: serde_json::Value) -> AppEvent {
-    agent(AgentEvent::ToolStart {
-        agent_id: AgentId(1),
-        call_id: call_id.into(),
+fn tool_start(call_id: u64, name: &str, input: serde_json::Value) -> AppEvent {
+    agent(AgentEvent::Tool(ToolEvent::Started {
+        call_id: ToolCallId(call_id),
         name: name.into(),
-        input: input.clone(),
         view: present_tool(name, &input),
-    })
+    }))
 }
 
-fn done(text: &str) -> AppEvent {
-    agent(AgentEvent::Done {
-        agent_id: AgentId(1),
+fn tool_end(call_id: u64, ok: bool, output: &str) -> AppEvent {
+    agent(AgentEvent::Tool(ToolEvent::Finished {
+        call_id: ToolCallId(call_id),
+        result: if ok {
+            ToolResult::Success {
+                output: output.into(),
+            }
+        } else {
+            ToolResult::Failed {
+                error: output.into(),
+                output: Some(output.into()),
+            }
+        },
+    }))
+}
+
+fn text_delta(text: &str) -> AppEvent {
+    agent(AgentEvent::Stream(StreamEvent::TextDelta {
         text: text.into(),
+    }))
+}
+
+fn thinking(text: &str) -> AppEvent {
+    agent(AgentEvent::Stream(StreamEvent::ThinkingDelta {
+        text: text.into(),
+    }))
+}
+
+fn completed() -> AppEvent {
+    agent(AgentEvent::Turn(TurnEvent::Completed {
         usage: oven_llm::Usage::default(),
-    })
+    }))
+}
+
+fn cancelled() -> AppEvent {
+    agent(AgentEvent::Turn(TurnEvent::Cancelled))
 }
 
 fn kinds_of(t: &Transcript) -> Vec<LineKind> {
@@ -306,7 +316,8 @@ fn kinds_of(t: &Transcript) -> Vec<LineKind> {
 fn done_appends_separator_after_answer() {
     let mut t = Transcript::new();
     t.push_user("q");
-    t.on_event(&done("a"));
+    t.on_event(&text_delta("a"));
+    t.on_event(&completed());
     assert_eq!(
         kinds_of(&t),
         vec![LineKind::User, LineKind::Text, LineKind::Separator]
@@ -318,16 +329,11 @@ fn tool_end_does_not_append_separator() {
     let mut t = Transcript::new();
     t.push_user("q");
     t.on_event(&tool_start(
-        "c1",
+        1,
         "bash",
         serde_json::json!({ "command": "ls" }),
     ));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c1".into(),
-        ok: true,
-        output: "done".into(),
-    }));
+    t.on_event(&tool_end(1, true, "done"));
     assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::Tool,]);
     assert_eq!(t.rows[1].text, "Ran ls");
 }
@@ -337,17 +343,13 @@ fn separator_comes_after_tool_followup_not_between() {
     let mut t = Transcript::new();
     t.push_user("q");
     t.on_event(&tool_start(
-        "c1",
+        1,
         "bash",
         serde_json::json!({ "command": "ls" }),
     ));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c1".into(),
-        ok: true,
-        output: "done".into(),
-    }));
-    t.on_event(&done("ok"));
+    t.on_event(&tool_end(1, true, "done"));
+    t.on_event(&text_delta("ok"));
+    t.on_event(&completed());
     assert_eq!(
         kinds_of(&t),
         vec![
@@ -363,9 +365,7 @@ fn separator_comes_after_tool_followup_not_between() {
 fn cancelled_appends_separator() {
     let mut t = Transcript::new();
     t.push_user("q");
-    t.on_event(&agent(AgentEvent::Cancelled {
-        agent_id: AgentId(1),
-    }));
+    t.on_event(&cancelled());
     assert_eq!(
         kinds_of(&t),
         vec![LineKind::User, LineKind::System, LineKind::Separator]
@@ -375,15 +375,10 @@ fn cancelled_appends_separator() {
 #[test]
 fn thinking_delta_shows_label_not_content() {
     let mut t = Transcript::new();
-    t.on_event(&agent(AgentEvent::ThinkingDelta {
-        agent_id: AgentId(1),
-        text: "secret chain of thought".into(),
-    }));
-    t.on_event(&agent(AgentEvent::ThinkingDelta {
-        agent_id: AgentId(1),
-        text: " more secrets".into(),
-    }));
-    t.on_event(&done("answer"));
+    t.on_event(&thinking("secret chain of thought"));
+    t.on_event(&thinking(" more secrets"));
+    t.on_event(&text_delta("answer"));
+    t.on_event(&completed());
     assert_eq!(
         kinds_of(&t),
         vec![LineKind::Thinking, LineKind::Text, LineKind::Separator]
@@ -455,38 +450,23 @@ fn seed_separates_complete_turns_not_tool_followup() {
 fn live_tools_aggregate_counts_and_failures() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(
-        "c1",
+        1,
         "bash",
         serde_json::json!({ "command": "ls" }),
     ));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c1".into(),
-        ok: true,
-        output: "ok".into(),
-    }));
+    t.on_event(&tool_end(1, true, "ok"));
     t.on_event(&tool_start(
-        "c2",
+        2,
         "bash",
         serde_json::json!({ "command": "pwd" }),
     ));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c2".into(),
-        ok: false,
-        output: "boom".into(),
-    }));
+    t.on_event(&tool_end(2, false, "boom"));
     t.on_event(&tool_start(
-        "c3",
+        3,
         "file_read",
         serde_json::json!({ "path": "a" }),
     ));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c3".into(),
-        ok: true,
-        output: "hi".into(),
-    }));
+    t.on_event(&tool_end(3, true, "hi"));
     assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
     assert_eq!(t.rows[0].text, "Ran ls · Ran pwd · Read a · 1 failed");
 }
@@ -495,18 +475,13 @@ fn live_tools_aggregate_counts_and_failures() {
 fn live_tool_end_rewrites_same_summary_row() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(
-        "c1",
+        1,
         "bash",
         serde_json::json!({ "command": "ls" }),
     ));
     assert_eq!(t.rows.len(), 1);
     assert_eq!(t.rows[0].text, "Ran ls");
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c1".into(),
-        ok: false,
-        output: "boom".into(),
-    }));
+    t.on_event(&tool_end(1, false, "boom"));
     assert_eq!(t.rows.len(), 1);
     assert_eq!(t.rows[0].kind, LineKind::Tool);
     assert_eq!(t.rows[0].text, "Ran ls · 1 failed");
@@ -521,13 +496,8 @@ fn todo_input() -> serde_json::Value {
 #[test]
 fn todo_write_keeps_detail_and_result() {
     let mut t = Transcript::new();
-    t.on_event(&tool_start("t1", "todo_write", todo_input()));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "t1".into(),
-        ok: true,
-        output: "updated".into(),
-    }));
+    t.on_event(&tool_start(10, "todo_write", todo_input()));
+    t.on_event(&tool_end(10, true, "updated"));
     assert_eq!(
         kinds_of(&t),
         vec![LineKind::Tool, LineKind::ToolResult(true)]
@@ -543,34 +513,19 @@ fn todo_write_keeps_detail_and_result() {
 fn todo_write_splits_tool_bursts() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(
-        "c1",
+        1,
         "bash",
         serde_json::json!({ "command": "ls" }),
     ));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c1".into(),
-        ok: true,
-        output: "ok".into(),
-    }));
-    t.on_event(&tool_start("t1", "todo_write", todo_input()));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "t1".into(),
-        ok: true,
-        output: "updated".into(),
-    }));
+    t.on_event(&tool_end(1, true, "ok"));
+    t.on_event(&tool_start(10, "todo_write", todo_input()));
+    t.on_event(&tool_end(10, true, "updated"));
     t.on_event(&tool_start(
-        "c2",
+        2,
         "bash",
         serde_json::json!({ "command": "pwd" }),
     ));
-    t.on_event(&agent(AgentEvent::ToolEnd {
-        agent_id: AgentId(1),
-        call_id: "c2".into(),
-        ok: true,
-        output: "ok".into(),
-    }));
+    t.on_event(&tool_end(2, true, "ok"));
     assert_eq!(
         kinds_of(&t),
         vec![
@@ -644,7 +599,8 @@ fn separator_renders_full_width_rule() {
     let mut t = Transcript::new();
     wide(&mut t);
     t.push_user("q");
-    t.on_event(&done("a"));
+    t.on_event(&text_delta("a"));
+    t.on_event(&completed());
     let last = t.wrapped.last().expect("wrapped separator");
     let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(text.chars().filter(|c| *c == SEPARATOR_GLYPH).count(), 80);

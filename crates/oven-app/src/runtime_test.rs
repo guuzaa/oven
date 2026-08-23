@@ -1,15 +1,23 @@
 use crate::App;
+use crate::command::AppCommand;
+use crate::config::{AppConfig, ProviderConfig};
+use crate::event::{AppEvent, AppEventKind, AppId};
+use crate::handle::AppHandle;
 use crate::runtime::*;
+use crate::session::{Session, canonical_root};
+use crate::state::{AppPhase, StateChange, StateEvent};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use oven_agent::{Agent, AgentEvent, AgentEventEnvelope, AgentMode, Record, TurnEvent, TurnId};
 use oven_llm::{
-    ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
-    Role, Router, StopReason, StreamEvent, Usage,
+    ContentBlock, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request,
+    Response, Role, Router, StopReason, StreamEvent, Usage,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 fn agent_from(provider: Box<dyn Provider>) -> Agent {
     let mut router = Router::new();
@@ -155,6 +163,102 @@ fn recorder() -> Arc<Mutex<Vec<String>>> {
     Arc::new(Mutex::new(Vec::new()))
 }
 
+fn is_turn_completed(ev: &AppEvent) -> bool {
+    matches!(
+        ev.kind,
+        AppEventKind::Agent(ref env) if matches!(env.event, AgentEvent::Turn(TurnEvent::Completed { .. }))
+    )
+}
+
+fn is_turn_cancelled(ev: &AppEvent) -> bool {
+    matches!(
+        ev.kind,
+        AppEventKind::Agent(ref env) if matches!(env.event, AgentEvent::Turn(TurnEvent::Cancelled))
+    )
+}
+
+fn is_exited(ev: &AppEvent) -> bool {
+    matches!(ev.kind, AppEventKind::Exited)
+}
+
+fn notification(ev: &AppEvent) -> Option<&str> {
+    match &ev.kind {
+        AppEventKind::Notification { text } => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+fn is_history_changed(ev: &AppEvent) -> bool {
+    matches!(
+        ev.kind,
+        AppEventKind::StateChanged(StateEvent {
+            change: StateChange::HistoryChanged { .. },
+            ..
+        })
+    )
+}
+
+fn is_mode_changed(ev: &AppEvent, want: oven_agent::AgentMode) -> bool {
+    matches!(
+        ev.kind,
+        AppEventKind::StateChanged(StateEvent {
+            change: StateChange::ModeChanged { mode },
+            ..
+        }) if mode == want
+    )
+}
+
+fn turn_id_of(ev: &AppEvent) -> Option<TurnId> {
+    match &ev.kind {
+        AppEventKind::Agent(env) => Some(env.turn_id),
+        _ => None,
+    }
+}
+
+async fn wait_turn_id(sub: &mut mpsc::UnboundedReceiver<AppEvent>) -> TurnId {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match sub.recv().await {
+                Some(ev) => {
+                    if let AppEventKind::Agent(env) = &ev.kind
+                        && matches!(env.event, AgentEvent::Turn(TurnEvent::Started))
+                    {
+                        return env.turn_id;
+                    }
+                }
+                None => panic!("channel closed before TurnStarted"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for TurnStarted")
+}
+
+async fn wait_settled(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match sub.recv().await {
+                Some(ev)
+                    if is_turn_completed(&ev)
+                        || is_turn_cancelled(&ev)
+                        || is_exited(&ev)
+                        || notification(&ev).is_some() =>
+                {
+                    return;
+                }
+                Some(AppEvent {
+                    kind: AppEventKind::Error { .. },
+                    ..
+                }) => return,
+                Some(_) => {}
+                None => panic!("channel closed before settle"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for command to settle");
+}
+
 #[tokio::test]
 async fn spawn_prompt_emits_done_and_idle() {
     let tmp = tempdir::TempDir::new("app-runtime").unwrap();
@@ -170,20 +274,14 @@ async fn spawn_prompt_emits_done_and_idle() {
     let text = handle.prompt("hi").await.unwrap();
     assert_eq!(text, "hello");
 
-    let mut saw_done = false;
-    let mut saw_idle = false;
+    let mut saw_completed = false;
     while let Ok(ev) = rx.try_recv() {
-        match ev {
-            AppEvent::Agent {
-                event: AgentEvent::Done { text, .. },
-                ..
-            } if text == "hello" => saw_done = true,
-            AppEvent::Idle { .. } => saw_idle = true,
-            _ => {}
+        if is_turn_completed(&ev) {
+            saw_completed = true;
         }
     }
-    assert!(saw_done);
-    assert!(saw_idle);
+    assert!(saw_completed);
+    assert!(matches!(handle.state().phase, AppPhase::Idle));
 
     handle.shutdown().await;
 }
@@ -221,13 +319,7 @@ async fn plan_slash_on_idle_switches() {
     let _ = handle.prompt("/plan on").await.unwrap();
     let mut saw_plan = false;
     while let Ok(ev) = rx.try_recv() {
-        if matches!(
-            ev,
-            AppEvent::ModeChanged {
-                mode: AgentMode::Plan,
-                ..
-            }
-        ) {
+        if is_mode_changed(&ev, AgentMode::Plan) {
             saw_plan = true;
         }
     }
@@ -258,16 +350,17 @@ async fn model_slash_switch_uses_request_model() {
     let mut saw_reply = false;
     let mut saw_done = false;
     while let Ok(ev) = rx.try_recv() {
-        match ev {
-            AppEvent::Notify { text, .. }
+        match &ev.kind {
+            AppEventKind::Notification { text }
                 if text == "model switched to mock/gpt-4o-turbo (effort: low)" =>
             {
                 saw_reply = true;
             }
-            AppEvent::Agent {
-                event: AgentEvent::Done { .. },
-                ..
-            } => saw_done = true,
+            AppEventKind::Agent(env)
+                if matches!(env.event, AgentEvent::Turn(TurnEvent::Completed { .. })) =>
+            {
+                saw_done = true;
+            }
             _ => {}
         }
     }
@@ -296,14 +389,15 @@ async fn slash_reply_emits_reply_not_done() {
     let mut saw_reply = false;
     let mut saw_done = false;
     while let Ok(ev) = rx.try_recv() {
-        match ev {
-            AppEvent::Notify { text, .. } if text.contains("current model") => {
+        match &ev.kind {
+            AppEventKind::Notification { text } if text.contains("current model") => {
                 saw_reply = true;
             }
-            AppEvent::Agent {
-                event: AgentEvent::Done { .. },
-                ..
-            } => saw_done = true,
+            AppEventKind::Agent(env)
+                if matches!(env.event, AgentEvent::Turn(TurnEvent::Completed { .. })) =>
+            {
+                saw_done = true;
+            }
             _ => {}
         }
     }
@@ -320,14 +414,16 @@ async fn slash_exit_emits_exit_event() {
     let handle = spawn_app(&app, Box::new(mock)).await;
 
     let mut rx = handle.subscribe();
-    handle.send(AppCmd::UserInput("/exit".into())).unwrap();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "/exit".into(),
+        })
+        .unwrap();
 
     let mut saw_exit = false;
     while let Some(ev) = rx.recv().await {
-        if let AppEvent::Exit { .. } = ev {
+        if is_exited(&ev) {
             saw_exit = true;
-        }
-        if let AppEvent::Idle { .. } = ev {
             break;
         }
     }
@@ -362,25 +458,25 @@ async fn slash_clear_emits_history_cleared_and_resets_usage() {
     let mut saw_todos_cleared = false;
     let mut done_usage = None;
     while let Ok(ev) = rx.try_recv() {
-        match ev {
-            AppEvent::Agent {
-                event: AgentEvent::HistoryCleared { .. },
+        match &ev.kind {
+            AppEventKind::StateChanged(StateEvent {
+                change: StateChange::HistoryChanged { .. },
                 ..
-            } => saw_cleared = true,
-            AppEvent::Agent {
-                event: AgentEvent::TodoUpdated { items, .. },
+            }) => saw_cleared = true,
+            AppEventKind::StateChanged(StateEvent {
+                change: StateChange::TodosChanged { todos },
                 ..
-            } if items.is_empty() => saw_todos_cleared = true,
-            AppEvent::Agent {
-                event: AgentEvent::Done { usage, text, .. },
+            }) if todos.is_empty() => saw_todos_cleared = true,
+            AppEventKind::StateChanged(StateEvent {
+                change: StateChange::UsageChanged { usage },
                 ..
-            } if text == "history cleared" => done_usage = Some(usage),
+            }) => done_usage = Some(*usage),
             _ => {}
         }
     }
     assert!(saw_cleared);
     assert!(saw_todos_cleared);
-    let usage = done_usage.expect("done after /clear");
+    let usage = done_usage.expect("usage after /clear");
     assert_eq!(usage.input_tokens, 0);
     assert_eq!(usage.output_tokens, 0);
     handle.shutdown().await;
@@ -436,21 +532,23 @@ async fn setup_slash_persists_and_registers_provider() {
 
     let mut rx = handle.subscribe();
     handle
-        .send(AppCmd::UserInput(
-            "/setup name=deepseek api_key=sk-test".into(),
-        ))
+        .send(AppCommand::StartTurn {
+            input: "/setup name=deepseek api_key=sk-test".into(),
+        })
         .unwrap();
     let mut out = String::new();
     loop {
         match rx.recv().await {
-            Some(AppEvent::Agent {
-                event: AgentEvent::Done { text, .. },
-                ..
-            }) => out = text,
-            Some(AppEvent::Notify { text, .. }) => out = text,
-            Some(AppEvent::Idle { .. }) => break,
-            Some(_) => {}
-            None => panic!("channel closed before idle"),
+            Some(ev) => {
+                if let Some(text) = notification(&ev) {
+                    out.push_str(text);
+                    break;
+                }
+                if matches!(ev.kind, AppEventKind::Error { .. }) {
+                    panic!("setup failed: {ev:?}");
+                }
+            }
+            None => panic!("channel closed before notify"),
         }
     }
     assert!(out.contains("provider updated"));
@@ -492,15 +590,19 @@ async fn setup_registers_without_dropping_existing_vendor() {
 
     let mut rx = handle.subscribe();
     handle
-        .send(AppCmd::UserInput(
-            "/setup name=deepseek api_key=sk-test".into(),
-        ))
+        .send(AppCommand::StartTurn {
+            input: "/setup name=deepseek api_key=sk-test".into(),
+        })
         .unwrap();
     loop {
         match rx.recv().await {
-            Some(AppEvent::Idle { .. }) => break,
+            Some(ev)
+                if notification(&ev).is_some() || matches!(ev.kind, AppEventKind::Error { .. }) =>
+            {
+                break;
+            }
             Some(_) => {}
-            None => panic!("channel closed before idle"),
+            None => panic!("channel closed before notify"),
         }
     }
     let switched = handle.prompt("/model mock/echo").await.unwrap();
@@ -559,15 +661,19 @@ async fn setup_keeps_existing_reasoning_effort() {
 
     let mut rx = handle.subscribe();
     handle
-        .send(AppCmd::UserInput(
-            "/setup name=deepseek api_key=sk-test".into(),
-        ))
+        .send(AppCommand::StartTurn {
+            input: "/setup name=deepseek api_key=sk-test".into(),
+        })
         .unwrap();
     loop {
         match rx.recv().await {
-            Some(AppEvent::Idle { .. }) => break,
+            Some(ev)
+                if notification(&ev).is_some() || matches!(ev.kind, AppEventKind::Error { .. }) =>
+            {
+                break;
+            }
             Some(_) => {}
-            None => panic!("channel closed before idle"),
+            None => panic!("channel closed before notify"),
         }
     }
     let current = handle.prompt("/model").await.unwrap();
@@ -709,18 +815,27 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
         (20, 10)
     );
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::Rewind).unwrap();
-    let (text, messages, usage) = wait_rewound(&mut sub).await;
-    assert_eq!(text.as_deref(), Some("second"));
-    assert_eq!(user_texts(&messages), vec!["first"]);
-    assert_eq!((usage.input_tokens, usage.output_tokens), (10, 5));
+    handle.send(AppCommand::Rewind).unwrap();
+    wait_rewound(&mut sub).await;
+    assert_eq!(user_texts(&handle.history()), vec!["first"]);
+    assert_eq!(
+        (
+            handle.total_usage().input_tokens,
+            handle.total_usage().output_tokens
+        ),
+        (10, 5)
+    );
 
-    // A fresh turn keeps counting from the restored cumulative total.
     assert_eq!(handle.prompt("third").await.unwrap(), "three");
-    handle.send(AppCmd::Rewind).unwrap();
-    let (text, _, usage) = wait_rewound(&mut sub).await;
-    assert_eq!(text.as_deref(), Some("third"));
-    assert_eq!((usage.input_tokens, usage.output_tokens), (10, 5));
+    handle.send(AppCommand::Rewind).unwrap();
+    wait_rewound(&mut sub).await;
+    assert_eq!(
+        (
+            handle.total_usage().input_tokens,
+            handle.total_usage().output_tokens
+        ),
+        (10, 5)
+    );
 
     handle.shutdown().await;
 }
@@ -740,12 +855,12 @@ async fn slash_clear_starts_new_session() {
 
     // `/clear` switches the runtime to a fresh uuid v7 session.
     let mut rx = handle.subscribe();
-    handle.send(AppCmd::UserInput("/clear".into())).unwrap();
-    while let Some(ev) = rx.recv().await {
-        if let AppEvent::Idle { .. } = ev {
-            break;
-        }
-    }
+    handle
+        .send(AppCommand::StartTurn {
+            input: "/clear".into(),
+        })
+        .unwrap();
+    wait_settled(&mut rx).await;
 
     // Turn 3 continues in the same handle and persists to the new session.
     assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
@@ -853,12 +968,12 @@ async fn clear_without_new_messages_has_no_id_and_no_file() {
 
     // `/clear` switches to a fresh empty session; nothing written after.
     let mut rx = handle.subscribe();
-    handle.send(AppCmd::UserInput("/clear".into())).unwrap();
-    while let Some(ev) = rx.recv().await {
-        if let AppEvent::Idle { .. } = ev {
-            break;
-        }
-    }
+    handle
+        .send(AppCommand::StartTurn {
+            input: "/clear".into(),
+        })
+        .unwrap();
+    wait_settled(&mut rx).await;
     assert!(
         handle.session_id().is_none(),
         "cleared session has no content yet"
@@ -992,28 +1107,32 @@ async fn cancel_during_turn_returns_idle() {
     let app = App::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::UserInput("block".into())).unwrap();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "block".into(),
+        })
+        .unwrap();
+    let turn_id = wait_turn_id(&mut sub).await;
+    handle.send(AppCommand::Cancel { turn_id }).unwrap();
 
-    // wait until the turn is in-flight, then cancel
-    tokio::task::yield_now().await;
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    handle.send(AppCmd::Cancel).unwrap();
-
-    let mut saw_idle = false;
+    let mut saw_cancelled = false;
     let mut saw_error = false;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent::Idle { .. })) => {
-                saw_idle = true;
+            Ok(Some(ev)) if is_turn_cancelled(&ev) => {
+                saw_cancelled = true;
                 break;
             }
-            Ok(Some(AppEvent::Error { .. })) => saw_error = true,
+            Ok(Some(AppEvent {
+                kind: AppEventKind::Error { .. },
+                ..
+            })) => saw_error = true,
             Ok(Some(_)) => {}
             Ok(None) => break,
-            Err(_) => panic!("timeout waiting for idle after cancel"),
+            Err(_) => panic!("timeout waiting for cancel"),
         }
     }
-    assert!(saw_idle);
+    assert!(saw_cancelled);
     assert!(!saw_error);
     drop(tx);
     handle.shutdown().await;
@@ -1068,34 +1187,36 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
 
-    handle.send(AppCmd::UserInput("first".into())).unwrap();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "first".into(),
+        })
+        .unwrap();
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    handle.send(AppCmd::UserInput("second".into())).unwrap();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "second".into(),
+        })
+        .unwrap();
 
     drop(tx);
 
-    let mut dones = 0usize;
-    let mut idles = 0usize;
+    let mut completed = 0usize;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent::Agent {
-                event: AgentEvent::Done { .. },
-                ..
-            })) => dones += 1,
-            Ok(Some(AppEvent::Idle { .. })) => {
-                idles += 1;
-                if idles == 2 {
+            Ok(Some(ev)) if is_turn_completed(&ev) => {
+                completed += 1;
+                if completed == 2 {
                     break;
                 }
             }
             Ok(Some(_)) => {}
             Ok(None) => break,
-            Err(_) => panic!("timeout waiting for two idle events"),
+            Err(_) => panic!("timeout waiting for two completed turns"),
         }
     }
-    assert_eq!(dones, 2);
-    assert_eq!(idles, 2);
+    assert_eq!(completed, 2);
     handle.shutdown().await;
 }
 
@@ -1147,12 +1268,12 @@ async fn clear_updates_recent_index_to_fresh_session() {
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
 
     let mut rx = handle.subscribe();
-    handle.send(AppCmd::UserInput("/clear".into())).unwrap();
-    while let Some(ev) = rx.recv().await {
-        if let AppEvent::Idle { .. } = ev {
-            break;
-        }
-    }
+    handle
+        .send(AppCommand::StartTurn {
+            input: "/clear".into(),
+        })
+        .unwrap();
+    wait_settled(&mut rx).await;
     assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
     let fresh = handle.session_id().expect("new session after /clear");
     handle.shutdown().await;
@@ -1175,25 +1296,18 @@ fn user_texts(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-async fn wait_rewound(
-    sub: &mut mpsc::UnboundedReceiver<AppEvent>,
-) -> (Option<String>, Vec<Message>, Usage) {
+async fn wait_rewound(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match sub.recv().await {
-                Some(AppEvent::Rewound {
-                    text,
-                    messages,
-                    usage,
-                    ..
-                }) => return (text, messages, usage),
+                Some(ev) if is_history_changed(&ev) => return,
                 Some(_) => {}
                 None => panic!("channel closed before rewind"),
             }
         }
     })
     .await
-    .expect("timeout waiting for Rewound")
+    .expect("timeout waiting for HistoryChanged")
 }
 
 #[tokio::test]
@@ -1211,21 +1325,28 @@ async fn rewind_while_idle_emits_rewound_and_drops_last_exchange() {
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
 
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::Rewind).unwrap();
-    let (text, messages, usage) = wait_rewound(&mut sub).await;
-    assert_eq!(text.as_deref(), Some("second"));
-    assert_eq!(user_texts(&messages), vec!["first"]);
-    // Each mocked response is 10 in / 5 out; after dropping the second
-    // exchange only the first one's usage remains.
-    assert_eq!((usage.input_tokens, usage.output_tokens), (10, 5));
+    handle.send(AppCommand::Rewind).unwrap();
+    wait_rewound(&mut sub).await;
+    assert_eq!(user_texts(&handle.history()), vec!["first"]);
+    assert_eq!(
+        (
+            handle.total_usage().input_tokens,
+            handle.total_usage().output_tokens
+        ),
+        (10, 5)
+    );
 
-    // A later turn runs without the rolled-back exchange in context.
     assert_eq!(handle.prompt("third").await.unwrap(), "three");
-    handle.send(AppCmd::Rewind).unwrap();
-    let (text, messages, usage) = wait_rewound(&mut sub).await;
-    assert_eq!(text.as_deref(), Some("third"));
-    assert_eq!(user_texts(&messages), vec!["first"]);
-    assert_eq!((usage.input_tokens, usage.output_tokens), (10, 5));
+    handle.send(AppCommand::Rewind).unwrap();
+    wait_rewound(&mut sub).await;
+    assert_eq!(user_texts(&handle.history()), vec!["first"]);
+    assert_eq!(
+        (
+            handle.total_usage().input_tokens,
+            handle.total_usage().output_tokens
+        ),
+        (10, 5)
+    );
 
     handle.shutdown().await;
 }
@@ -1238,11 +1359,10 @@ async fn rewind_with_nothing_to_remove_emits_none() {
     let handle = spawn_app(&app, Box::new(mock)).await;
 
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::Rewind).unwrap();
-    let (text, messages, usage) = wait_rewound(&mut sub).await;
-    assert!(text.is_none());
-    assert!(messages.is_empty());
-    assert_eq!(usage, Usage::default());
+    handle.send(AppCommand::Rewind).unwrap();
+    wait_rewound(&mut sub).await;
+    assert!(handle.history().is_empty());
+    assert_eq!(handle.total_usage(), Usage::default());
 
     handle.shutdown().await;
 }
@@ -1261,7 +1381,7 @@ async fn rewind_truncates_persisted_session_file() {
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
 
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::Rewind).unwrap();
+    handle.send(AppCommand::Rewind).unwrap();
     wait_rewound(&mut sub).await;
     assert_eq!(
         handle.session_id().as_deref(),
@@ -1288,7 +1408,7 @@ async fn rewind_all_turns_clears_session_content() {
     assert_eq!(handle.session_id().as_deref(), Some("s1"));
 
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::Rewind).unwrap();
+    handle.send(AppCommand::Rewind).unwrap();
     wait_rewound(&mut sub).await;
     assert!(
         handle.session_id().is_none(),
@@ -1347,24 +1467,23 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
 
-    handle.send(AppCmd::UserInput("block".into())).unwrap();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "block".into(),
+        })
+        .unwrap();
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    handle.send(AppCmd::Rewind).unwrap();
+    handle.send(AppCommand::Rewind).unwrap();
     drop(tx);
 
-    let mut saw_idle = false;
-    let mut rewound = None;
+    let mut saw_completed = false;
+    let mut rewound = false;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent::Idle { .. })) => saw_idle = true,
-            Ok(Some(AppEvent::Rewound {
-                text,
-                messages,
-                usage,
-                ..
-            })) => {
-                rewound = Some((text, messages, usage));
+            Ok(Some(ev)) if is_turn_completed(&ev) => saw_completed = true,
+            Ok(Some(ev)) if is_history_changed(&ev) => {
+                rewound = true;
                 break;
             }
             Ok(Some(_)) => {}
@@ -1372,11 +1491,16 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
             Err(_) => panic!("timeout waiting for rewind after turn"),
         }
     }
-    assert!(saw_idle, "Idle must arrive before the queued Rewind runs");
-    let (text, messages, usage) = rewound.expect("Rewound must be emitted");
-    assert_eq!(text.as_deref(), Some("block"));
-    assert!(messages.is_empty(), "the whole exchange is rolled back");
-    assert_eq!(usage, Usage::default());
+    assert!(
+        saw_completed,
+        "TurnCompleted must arrive before the queued Rewind runs"
+    );
+    assert!(rewound, "HistoryChanged must be emitted");
+    assert!(
+        handle.history().is_empty(),
+        "the whole exchange is rolled back"
+    );
+    assert_eq!(handle.total_usage(), Usage::default());
     handle.shutdown().await;
 }
 
@@ -1440,20 +1564,27 @@ async fn set_mode_applies_during_in_flight_turn() {
         None,
     );
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::UserInput("block".into())).unwrap();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "block".into(),
+        })
+        .unwrap();
     entered_rx.await.expect("turn entered complete");
-    handle.send(AppCmd::SetMode(AgentMode::Plan)).unwrap();
+    handle
+        .send(AppCommand::SetMode {
+            mode: AgentMode::Plan,
+        })
+        .unwrap();
 
     let mut saw_mode = false;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent::ModeChanged { mode, .. })) => {
-                assert_eq!(mode, AgentMode::Plan);
+            Ok(Some(ev)) if is_mode_changed(&ev, AgentMode::Plan) => {
                 saw_mode = true;
                 break;
             }
-            Ok(Some(AppEvent::Idle { .. })) => {
-                panic!("Idle arrived before ModeChanged; SetMode was queued")
+            Ok(Some(ev)) if is_turn_completed(&ev) => {
+                panic!("TurnCompleted arrived before ModeChanged; SetMode was queued")
             }
             Ok(Some(_)) => {}
             Ok(None) => break,
@@ -1622,27 +1753,44 @@ async fn cancel_does_not_roll_back_todos() {
         None,
     );
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::UserInput("plan".into())).unwrap();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "plan".into(),
+        })
+        .unwrap();
 
+    let mut turn_id = None;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent::Agent {
-                event: AgentEvent::TodoUpdated { items, .. },
+            Ok(Some(AppEvent {
+                kind:
+                    AppEventKind::StateChanged(StateEvent {
+                        change: StateChange::TodosChanged { todos },
+                        ..
+                    }),
                 ..
-            })) if !items.is_empty() => break,
-            Ok(Some(_)) => {}
-            Ok(None) => panic!("channel closed before TodoUpdated"),
-            Err(_) => panic!("timeout waiting for TodoUpdated"),
+            })) if !todos.is_empty() => break,
+            Ok(Some(ev)) => {
+                if turn_id.is_none() {
+                    turn_id = turn_id_of(&ev);
+                }
+            }
+            Ok(None) => panic!("channel closed before TodosChanged"),
+            Err(_) => panic!("timeout waiting for TodosChanged"),
         }
     }
-    handle.send(AppCmd::Cancel).unwrap();
+    let turn_id = turn_id.unwrap_or_else(|| match handle.state().phase {
+        AppPhase::Running { turn_id } | AppPhase::Cancelling { turn_id } => turn_id,
+        _ => panic!("expected a running turn"),
+    });
+    handle.send(AppCommand::Cancel { turn_id }).unwrap();
     drop(tx);
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent::Idle { .. })) => break,
+            Ok(Some(ev)) if is_turn_cancelled(&ev) => break,
             Ok(Some(_)) => {}
-            Ok(None) => panic!("channel closed before Idle"),
-            Err(_) => panic!("timeout waiting for Idle after cancel"),
+            Ok(None) => panic!("channel closed before TurnCancelled"),
+            Err(_) => panic!("timeout waiting for cancel"),
         }
     }
     assert_eq!(
@@ -1695,23 +1843,27 @@ async fn rewind_restores_previous_todo_list() {
     );
 
     let mut sub = handle.subscribe();
-    handle.send(AppCmd::Rewind).unwrap();
+    handle.send(AppCommand::Rewind).unwrap();
     let mut saw_todo = false;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent::Agent {
-                event: AgentEvent::TodoUpdated { items, .. },
+            Ok(Some(AppEvent {
+                kind:
+                    AppEventKind::StateChanged(StateEvent {
+                        change: StateChange::TodosChanged { todos },
+                        ..
+                    }),
                 ..
             })) => {
-                assert_eq!(items[0].id, "a");
+                assert_eq!(todos.items[0].id, "a");
                 saw_todo = true;
             }
-            Ok(Some(AppEvent::Rewound { .. })) => {
-                assert!(saw_todo, "TodoUpdated must precede Rewound");
+            Ok(Some(ev)) if is_history_changed(&ev) => {
+                assert!(saw_todo, "TodosChanged must precede HistoryChanged");
                 break;
             }
             Ok(Some(_)) => {}
-            Ok(None) => panic!("channel closed before Rewound"),
+            Ok(None) => panic!("channel closed before HistoryChanged"),
             Err(_) => panic!("timeout waiting for rewind"),
         }
     }
@@ -1811,4 +1963,181 @@ async fn slash_clear_does_not_copy_todos_to_new_session() {
         !fresh.iter().any(|r| matches!(r, Record::TodoList { .. })),
         "new session must not inherit the old todo_list"
     );
+}
+
+fn agent_envelopes(events: &[AppEvent]) -> Vec<&AgentEventEnvelope> {
+    events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            AppEventKind::Agent(env) => Some(env),
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_one_started_one_terminal(envs: &[&AgentEventEnvelope]) {
+    assert!(
+        matches!(
+            envs.first().map(|e| &e.event),
+            Some(AgentEvent::Turn(TurnEvent::Started))
+        ),
+        "first agent event must be TurnStarted: {envs:?}"
+    );
+    let started = envs
+        .iter()
+        .filter(|e| matches!(e.event, AgentEvent::Turn(TurnEvent::Started)))
+        .count();
+    let terminal = envs
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.event,
+                AgentEvent::Turn(
+                    TurnEvent::Completed { .. } | TurnEvent::Cancelled | TurnEvent::Failed { .. }
+                )
+            )
+        })
+        .count();
+    assert_eq!(started, 1, "exactly one Started");
+    assert_eq!(terminal, 1, "exactly one terminal");
+    assert!(
+        matches!(
+            envs.last().map(|e| &e.event),
+            Some(AgentEvent::Turn(
+                TurnEvent::Completed { .. } | TurnEvent::Cancelled | TurnEvent::Failed { .. }
+            ))
+        ),
+        "last agent event must be terminal"
+    );
+    let turn_id = envs[0].turn_id;
+    assert!(
+        envs.iter().all(|e| e.turn_id == turn_id),
+        "all agent events must belong to the active turn"
+    );
+}
+
+#[tokio::test]
+async fn successful_turn_lifecycle_matches_invariants() {
+    let tmp = tempdir::TempDir::new("app-runtime-lifecycle").unwrap();
+    let app = App::new(tmp.path());
+    let mock = MockProvider::new(vec![text_response("hello")]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+    assert!(handle.state().phase.is_idle());
+
+    let mut rx = handle.subscribe();
+    assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
+    assert!(handle.state().phase.is_idle());
+
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    let envs = agent_envelopes(&events);
+    assert_one_started_one_terminal(&envs);
+    assert!(matches!(
+        envs.last().map(|e| &e.event),
+        Some(AgentEvent::Turn(TurnEvent::Completed { .. }))
+    ));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelled_turn_lifecycle_matches_invariants() {
+    use tokio::sync::oneshot;
+
+    struct BlockProvider {
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl Provider for BlockProvider {
+        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+            let rx = self.release.lock().unwrap().take();
+            if let Some(rx) = rx {
+                let _ = rx.await;
+            }
+            Ok(text_response("late"))
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "no stream".into(),
+            })
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("block-lifecycle".into())
+        }
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let provider = BlockProvider {
+        release: Mutex::new(Some(rx)),
+    };
+    let tmp = tempdir::TempDir::new("app-runtime-cancel-lifecycle").unwrap();
+    let app = App::new(tmp.path());
+    let handle = spawn_app(&app, Box::new(provider)).await;
+    let mut sub = handle.subscribe();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "block".into(),
+        })
+        .unwrap();
+
+    let mut events = Vec::new();
+    let mut cancelled = false;
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+            Ok(Some(ev)) => {
+                if !cancelled
+                    && let AppEventKind::Agent(env) = &ev.kind
+                    && matches!(env.event, AgentEvent::Turn(TurnEvent::Started))
+                {
+                    assert!(matches!(
+                        handle.state().phase,
+                        AppPhase::Running { turn_id } if turn_id == env.turn_id
+                    ));
+                    handle
+                        .send(AppCommand::Cancel {
+                            turn_id: env.turn_id,
+                        })
+                        .unwrap();
+                    cancelled = true;
+                }
+                let done = is_turn_cancelled(&ev);
+                events.push(ev);
+                if done {
+                    break;
+                }
+            }
+            Ok(None) => panic!("channel closed before TurnCancelled"),
+            Err(_) => panic!("timeout waiting for TurnCancelled"),
+        }
+    }
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if handle.state().phase.is_idle() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timeout waiting for Idle phase");
+    let envs = agent_envelopes(&events);
+    assert_one_started_one_terminal(&envs);
+    assert!(matches!(
+        envs.last().map(|e| &e.event),
+        Some(AgentEvent::Turn(TurnEvent::Cancelled))
+    ));
+    handle.shutdown().await;
 }

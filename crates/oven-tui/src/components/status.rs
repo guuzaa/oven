@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
-use oven_app::{AgentEvent, AgentMode, AppEvent};
+use oven_app::{AgentEvent, AgentMode, AppEvent, AppEventKind, StateChange, StateEvent, TurnEvent};
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -167,31 +167,31 @@ impl Component for StatusBar {
     }
 
     fn on_event(&mut self, ev: &AppEvent) {
-        match ev {
-            AppEvent::Agent { event, .. } => match event {
-                AgentEvent::Done { usage, .. } => {
+        match &ev.kind {
+            AppEventKind::Agent(env) => {
+                if let AgentEvent::Turn(TurnEvent::Completed { usage }) = &env.event {
                     self.total = *usage;
                 }
-                AgentEvent::HistoryCleared { .. } => {
-                    self.total = Usage::default();
+            }
+            AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
+                StateChange::UsageChanged { usage } => {
+                    self.total = *usage;
                     self.clear_reply();
                 }
-                AgentEvent::ModelChanged {
+                StateChange::HistoryChanged { .. } => {
+                    self.clear_reply();
+                }
+                StateChange::ModelChanged {
                     model,
                     reasoning_effort,
-                    ..
                 } => {
                     self.model = model.clone();
                     self.effort = *reasoning_effort;
                 }
                 _ => {}
             },
-            AppEvent::Notify { text, .. } => {
+            AppEventKind::Notification { text } => {
                 self.set_reply(text.clone());
-            }
-            AppEvent::Rewound { usage, .. } => {
-                self.total = *usage;
-                self.clear_reply();
             }
             _ => {}
         }
@@ -329,13 +329,8 @@ fn display_path_with_home(path: &Path, home: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_app::{AgentId, AppId};
-
     fn agent_event(event: AgentEvent) -> AppEvent {
-        AppEvent::Agent {
-            app_id: AppId(1),
-            event,
-        }
+        AppEvent::agent(event)
     }
 
     #[test]
@@ -347,8 +342,8 @@ mod tests {
             cache_read_tokens: 0,
             reasoning_tokens: 0,
         };
-        bar.on_event(&agent_event(AgentEvent::HistoryCleared {
-            agent_id: AgentId(1),
+        bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
+            usage: Usage::default(),
         }));
         assert_eq!(bar.total, Usage::default());
     }
@@ -362,11 +357,9 @@ mod tests {
             cache_read_tokens: 789,
             reasoning_tokens: 10,
         };
-        bar.on_event(&agent_event(AgentEvent::Done {
-            agent_id: AgentId(1),
-            text: "done".into(),
+        bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
             usage,
-        }));
+        })));
         assert_eq!(bar.total, usage);
     }
 
@@ -385,28 +378,23 @@ mod tests {
             cache_read_tokens: 0,
             reasoning_tokens: 0,
         };
-        bar.on_event(&AppEvent::Rewound {
-            app_id: AppId(1),
-            text: Some("restored".into()),
-            messages: Vec::new(),
+        bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
             usage,
-        });
+        }));
         assert_eq!(bar.total, usage);
     }
 
     #[test]
     fn model_changed_updates_model_and_effort() {
         let mut bar = StatusBar::new("gpt-4o", Path::new("/tmp"), Usage::default());
-        bar.on_event(&agent_event(AgentEvent::ModelChanged {
-            agent_id: AgentId(1),
+        bar.on_event(&AppEvent::state_changed(StateChange::ModelChanged {
             model: "deepseek-chat".into(),
             reasoning_effort: Some(ReasoningEffort::High),
         }));
         assert_eq!(bar.model, "deepseek-chat");
         assert_eq!(bar.effort, Some(ReasoningEffort::High));
 
-        bar.on_event(&agent_event(AgentEvent::ModelChanged {
-            agent_id: AgentId(1),
+        bar.on_event(&AppEvent::state_changed(StateChange::ModelChanged {
             model: "gpt-4o".into(),
             reasoning_effort: None,
         }));
@@ -437,10 +425,7 @@ mod tests {
     fn reply_event_sets_reply_and_height() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         assert_eq!(bar.reply_height(80), 0);
-        bar.on_event(&AppEvent::Notify {
-            app_id: AppId(1),
-            text: "current model: gpt-4o".into(),
-        });
+        bar.on_event(&AppEvent::notification("current model: gpt-4o"));
         assert_eq!(bar.reply.as_deref(), Some("current model: gpt-4o"));
         assert_eq!(bar.reply_height(80), 1);
         assert_eq!(bar.reply_height(8), 3);
@@ -449,10 +434,7 @@ mod tests {
     }
 
     fn notify(text: &str) -> AppEvent {
-        AppEvent::Notify {
-            app_id: AppId(1),
-            text: text.into(),
-        }
+        AppEvent::notification(text)
     }
 
     fn draw_reply_row(bar: &StatusBar) -> (String, Option<ratatui::style::Color>) {
@@ -526,18 +508,15 @@ mod tests {
     fn history_cleared_and_rewound_drop_reply() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         bar.reply = Some("hi".into());
-        bar.on_event(&agent_event(AgentEvent::HistoryCleared {
-            agent_id: AgentId(1),
+        bar.on_event(&AppEvent::state_changed(StateChange::HistoryChanged {
+            revision: 1,
         }));
         assert!(bar.reply.is_none());
 
         bar.reply = Some("hi".into());
-        bar.on_event(&AppEvent::Rewound {
-            app_id: AppId(1),
-            text: None,
-            messages: Vec::new(),
+        bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
             usage: Usage::default(),
-        });
+        }));
         assert!(bar.reply.is_none());
     }
 
@@ -620,10 +599,7 @@ mod tests {
 
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         let state = State::new();
-        bar.on_event(&AppEvent::Notify {
-            app_id: AppId(1),
-            text: "current model: gpt-4o".into(),
-        });
+        bar.on_event(&AppEvent::notification("current model: gpt-4o"));
 
         let backend = TestBackend::new(40, 3);
         let mut terminal = Terminal::new(backend).unwrap();

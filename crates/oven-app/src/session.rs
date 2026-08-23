@@ -16,6 +16,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use oven_agent::{Record, SessionMeta};
 use oven_llm::{Message, Usage};
@@ -203,6 +204,61 @@ impl Session {
         }
         out.sort();
         Ok(out)
+    }
+}
+
+struct SharedSession {
+    session: Session,
+    has_content: bool,
+}
+
+pub(crate) struct SessionStore {
+    pub(crate) dir: PathBuf,
+    pub(crate) root: String,
+    shared: Arc<Mutex<SharedSession>>,
+}
+
+impl SessionStore {
+    pub(crate) fn new(session: Session, root: &Path, has_content: bool) -> Self {
+        let dir = session
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        Self {
+            dir,
+            root: canonical_root(root),
+            shared: Arc::new(Mutex::new(SharedSession {
+                session,
+                has_content,
+            })),
+        }
+    }
+
+    pub(crate) fn current(&self) -> Session {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .session
+            .clone()
+    }
+
+    pub(crate) fn set_current(&self, session: Session) {
+        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared.session = session;
+        shared.has_content = false;
+    }
+
+    pub(crate) fn mark_content(&self, has_content: bool) {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has_content = has_content;
+    }
+
+    pub(crate) fn session_id(&self) -> Option<String> {
+        let shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        shared.has_content.then(|| shared.session.id().to_string())
     }
 }
 

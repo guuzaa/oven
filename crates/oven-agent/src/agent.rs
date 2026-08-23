@@ -3,18 +3,21 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, Provider, ReasoningEffort, Request, Response, Role,
-    Router, SamplingParams, StreamCollector, StreamEvent, ThinkingMode, ToolChoice, Usage,
+    Router, SamplingParams, StreamCollector, StreamEvent as LlmStreamEvent, ThinkingMode,
+    ToolChoice, Usage,
 };
-use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::AgentError;
-use crate::event::{AgentEvent, AgentId};
+use crate::event::{AgentEvent, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
+use crate::identity::{AgentId, ToolCallId};
 use crate::live::{AgentLive, LiveHandle};
 use crate::mode::AgentMode;
+use crate::sink::EventSink;
 use crate::todo::{self, TodoList};
 use crate::tools::Tool;
+use crate::turn::{TurnContext, TurnOutput};
 
 /// The conversation driver. Holds tools and dispatches tool calls returned by
 /// the provider until the provider replies without tool calls.
@@ -41,7 +44,7 @@ impl Agent {
 
     pub fn new_with_live(router: Router, tools: Vec<Box<dyn Tool>>, live: LiveHandle) -> Self {
         Self {
-            id: AgentId(0),
+            id: AgentId::next(),
             router,
             tools,
             history: History::new(),
@@ -271,12 +274,6 @@ impl Agent {
         }
     }
 
-    fn emit(tx: &Option<UnboundedSender<AgentEvent>>, event: AgentEvent) {
-        if let Some(tx) = tx {
-            let _ = tx.send(event);
-        }
-    }
-
     async fn dispatch(
         &self,
         name: &str,
@@ -293,7 +290,7 @@ impl Agent {
 
     async fn complete_response(
         &mut self,
-        tx: &Option<UnboundedSender<AgentEvent>>,
+        sink: &mut impl EventSink,
     ) -> Result<Response, AgentError> {
         let req = self.build_request();
 
@@ -304,25 +301,17 @@ impl Agent {
                     match event {
                         Err(e) => return Err(e.into()),
                         Ok(event) => {
-                            if let StreamEvent::ContentBlockDelta { delta, .. } = &event {
+                            if let LlmStreamEvent::ContentBlockDelta { delta, .. } = &event {
                                 match delta {
                                     Delta::ThinkingDelta { thinking } if !thinking.is_empty() => {
-                                        Self::emit(
-                                            tx,
-                                            AgentEvent::ThinkingDelta {
-                                                agent_id: self.id,
-                                                text: thinking.clone(),
-                                            },
-                                        );
+                                        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
+                                            text: thinking.clone(),
+                                        }));
                                     }
                                     Delta::TextDelta { text } if !text.is_empty() => {
-                                        Self::emit(
-                                            tx,
-                                            AgentEvent::TextDelta {
-                                                agent_id: self.id,
-                                                text: text.clone(),
-                                            },
-                                        );
+                                        sink.emit(AgentEvent::Stream(StreamEvent::TextDelta {
+                                            text: text.clone(),
+                                        }));
                                     }
                                     _ => {}
                                 }
@@ -338,23 +327,13 @@ impl Agent {
                 if !response.has_tool_use() {
                     let thinking = response.thinking();
                     if !thinking.is_empty() {
-                        Self::emit(
-                            tx,
-                            AgentEvent::ThinkingDelta {
-                                agent_id: self.id,
-                                text: thinking,
-                            },
-                        );
+                        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
+                            text: thinking,
+                        }));
                     }
                     let text = response.text();
                     if !text.is_empty() {
-                        Self::emit(
-                            tx,
-                            AgentEvent::TextDelta {
-                                agent_id: self.id,
-                                text,
-                            },
-                        );
+                        sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
                     }
                 }
                 Ok(response)
@@ -364,10 +343,10 @@ impl Agent {
 
     async fn step(
         &mut self,
-        tx: &Option<UnboundedSender<AgentEvent>>,
+        sink: &mut impl EventSink,
         cancel: Option<&CancellationToken>,
     ) -> Result<Option<String>, AgentError> {
-        let response = self.complete_response(tx).await?;
+        let response = self.complete_response(sink).await?;
 
         self.history
             .push(Message::assistant(response.content.clone()));
@@ -389,73 +368,49 @@ impl Agent {
                 Some(t) => (t.view(input), t.caps().writes_todos),
                 None => (crate::tools::present_tool(name, input), false),
             };
-            Self::emit(
-                tx,
-                AgentEvent::ToolStart {
-                    agent_id: self.id,
-                    call_id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    view,
-                },
-            );
-            let (ok, result) = match self.dispatch(name, input, cancel).await {
-                Ok(r) => (true, r),
-                Err(e) => (false, format!("error: {e}")),
+            let call_id = ToolCallId::next();
+            sink.emit(AgentEvent::Tool(ToolEvent::Started {
+                call_id,
+                name: name.clone(),
+                view,
+            }));
+            let result = match self.dispatch(name, input, cancel).await {
+                Ok(r) => {
+                    if writes_todos {
+                        self.todo_written_this_turn = true;
+                        wrote_todo = true;
+                    }
+                    ToolResult::Success {
+                        output: truncate(&r, 1_500_000),
+                    }
+                }
+                Err(e) => {
+                    let output = truncate(&format!("error: {e}"), 1_500_000);
+                    ToolResult::Failed {
+                        error: e.to_string(),
+                        output: Some(output),
+                    }
+                }
             };
-            if ok && writes_todos {
-                self.todo_written_this_turn = true;
-                wrote_todo = true;
-                Self::emit(
-                    tx,
-                    AgentEvent::TodoUpdated {
-                        agent_id: self.id,
-                        items: self.todos().items,
-                    },
-                );
-            }
-            let summary = truncate(&result, 1_500_000);
-            Self::emit(
-                tx,
-                AgentEvent::ToolEnd {
-                    agent_id: self.id,
-                    call_id: id.clone(),
-                    ok,
-                    output: summary.clone(),
-                },
-            );
+            let summary = result.output().to_string();
+            let is_error = !result.is_success();
+            sink.emit(AgentEvent::Tool(ToolEvent::Finished { call_id, result }));
             self.history
-                .push(Message::tool_result(id.clone(), summary, !ok));
+                .push(Message::tool_result(id.clone(), summary, is_error));
         }
         self.todo_dirty = !wrote_todo;
         Ok(None)
     }
 
-    /// Run one user turn, optionally streaming [`AgentEvent`]s and honoring
-    /// cooperative cancellation via [`CancellationToken`].
-    pub async fn run_with_emitter(
+    pub async fn run(
         &mut self,
         input: impl Into<String>,
-        tx: Option<UnboundedSender<AgentEvent>>,
-        cancel: Option<&CancellationToken>,
-    ) -> Result<String, AgentError> {
+        ctx: TurnContext,
+        sink: &mut impl EventSink,
+    ) -> Result<TurnOutput, AgentError> {
         let input: String = input.into();
-        let finish = |this: &Agent, tx: &Option<UnboundedSender<AgentEvent>>, text: String| {
-            Self::emit(
-                tx,
-                AgentEvent::Done {
-                    agent_id: this.id,
-                    text: text.clone(),
-                    usage: *this.total_usage(),
-                },
-            );
-            text
-        };
+        sink.emit(AgentEvent::Turn(TurnEvent::Started));
 
-        // Race the whole turn against the cancellation token: a cancel landing
-        // at any await point (streaming, tool work) drops the turn future and
-        // aborts the in-flight provider stream or tool. The token is also
-        // passed to tools so long-running ones can stop promptly on their own.
         self.todo_written_this_turn = false;
         let turn = async {
             self.history.push(Message::user_text(input));
@@ -467,8 +422,15 @@ impl Agent {
 
             for _ in 0..self.max_iters {
                 self.history.trim_to_budget(self.budget);
-                match self.step(&tx, cancel).await {
-                    Ok(Some(final_text)) => return Ok(finish(self, &tx, final_text)),
+                match self.step(sink, Some(&ctx.cancellation)).await {
+                    Ok(Some(final_text)) => {
+                        let usage = *self.total_usage();
+                        sink.emit(AgentEvent::Turn(TurnEvent::Completed { usage }));
+                        return Ok(TurnOutput {
+                            response: Message::assistant_text(final_text),
+                            usage,
+                        });
+                    }
                     Ok(None) => continue,
                     Err(e) => return Err(e),
                 }
@@ -476,28 +438,25 @@ impl Agent {
             Err(AgentError::from("agent loop exceeded max iterations"))
         };
 
-        let result = match cancel {
-            Some(token) => {
-                tokio::pin!(turn);
-                tokio::select! {
-                    biased;
-                    _ = token.cancelled() => Err(AgentError::cancelled()),
-                    res = &mut turn => res,
-                }
+        let result = {
+            tokio::pin!(turn);
+            tokio::select! {
+                biased;
+                _ = ctx.cancellation.cancelled() => Err(AgentError::cancelled()),
+                res = &mut turn => res,
             }
-            None => turn.await,
         };
 
-        if result.as_ref().is_err_and(AgentError::is_cancelled) {
-            Self::emit(&tx, AgentEvent::Cancelled { agent_id: self.id });
+        match &result {
+            Ok(_) => {}
+            Err(e) if e.is_cancelled() => {
+                sink.emit(AgentEvent::Turn(TurnEvent::Cancelled));
+            }
+            Err(e) => {
+                sink.emit(AgentEvent::Turn(TurnEvent::Failed { error: e.clone() }));
+            }
         }
         result
-    }
-
-    /// Run one user turn. Collects no events; equivalent to
-    /// [`run_with_emitter`](Self::run_with_emitter) with no sink or cancel.
-    pub async fn run(&mut self, input: impl Into<String>) -> Result<String, AgentError> {
-        self.run_with_emitter(input, None, None).await
     }
 
     /// Cumulative token usage across all recorded responses.
@@ -518,14 +477,93 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TurnId;
+    use crate::identity::ToolCallId;
+    use crate::sink::{NullSink, VecEventSink};
     use crate::tools::{FileReadTool, FileWriteTool};
+    use crate::turn::TurnContext;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
-    use oven_llm::{ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason};
+    use oven_llm::{
+        ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason,
+        StreamEvent as LlmStreamEvent,
+    };
     use serde_json::json;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
-    use tokio::sync::mpsc::unbounded_channel;
+
+    fn turn_ctx() -> TurnContext {
+        TurnContext {
+            turn_id: TurnId::next(),
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    async fn run_text(agent: &mut Agent, input: &str) -> String {
+        let mut sink = NullSink;
+        agent
+            .run(input, turn_ctx(), &mut sink)
+            .await
+            .unwrap()
+            .text()
+    }
+
+    async fn run_with(
+        agent: &mut Agent,
+        input: &str,
+        ctx: TurnContext,
+        sink: &mut impl EventSink,
+    ) -> Result<TurnOutput, AgentError> {
+        agent.run(input, ctx, sink).await
+    }
+
+    fn is_terminal(event: &AgentEvent) -> bool {
+        matches!(
+            event,
+            AgentEvent::Turn(
+                TurnEvent::Completed { .. } | TurnEvent::Cancelled | TurnEvent::Failed { .. }
+            )
+        )
+    }
+
+    fn assert_valid_event_sequence(events: &[AgentEvent]) {
+        assert!(
+            matches!(events.first(), Some(AgentEvent::Turn(TurnEvent::Started))),
+            "turn must start with Started: {events:?}"
+        );
+        let started = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Turn(TurnEvent::Started)))
+            .count();
+        assert_eq!(started, 1, "exactly one Started: {events:?}");
+        let terminals = events.iter().filter(|e| is_terminal(e)).count();
+        assert_eq!(terminals, 1, "exactly one terminal: {events:?}");
+        assert!(
+            is_terminal(events.last().unwrap()),
+            "last event must be terminal: {events:?}"
+        );
+
+        let mut open: Vec<ToolCallId> = Vec::new();
+        for event in events {
+            match event {
+                AgentEvent::Tool(ToolEvent::Started { call_id, .. }) => open.push(*call_id),
+                AgentEvent::Tool(ToolEvent::Finished { call_id, .. }) => {
+                    assert!(
+                        open.iter().any(|id| id == call_id),
+                        "Finished without Started: {call_id:?}"
+                    );
+                    open.retain(|id| id != call_id);
+                }
+                AgentEvent::Tool(ToolEvent::OutputDelta { call_id, .. }) => {
+                    assert!(
+                        open.iter().any(|id| id == call_id),
+                        "OutputDelta without Started: {call_id:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
 
     fn router_with(provider: Box<dyn Provider>) -> Router {
         let mut router = Router::new();
@@ -561,7 +599,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
-        ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
+        ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "stream disabled in mock".into(),
@@ -644,7 +682,7 @@ mod tests {
             Box::new(FileWriteTool::new(root)),
         ];
         let mut agent = Agent::new(router_with(Box::new(mock)), tools).with_max_iters(4);
-        let result = agent.run("read note.txt").await.unwrap();
+        let result = run_text(&mut agent, "read note.txt").await;
         assert_eq!(result, "done");
         assert!(agent.history.iter().any(|m| content_has(m, "hello world")));
     }
@@ -665,56 +703,48 @@ mod tests {
             .with_id(AgentId(7))
             .with_max_iters(4);
 
-        let (tx, mut rx) = unbounded_channel();
-        let result = agent
-            .run_with_emitter("read it", Some(tx), None)
+        let mut sink = VecEventSink::default();
+        let result = run_with(&mut agent, "read it", turn_ctx(), &mut sink)
             .await
             .unwrap();
-        assert_eq!(result, "all good");
+        assert_eq!(result.text(), "all good");
 
-        let mut events = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            events.push(ev);
-        }
-
+        let events = sink.events;
+        assert_valid_event_sequence(&events);
+        assert!(matches!(
+            events.first(),
+            Some(AgentEvent::Turn(TurnEvent::Started))
+        ));
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::ToolStart {
-                agent_id: AgentId(7),
-                call_id,
+            AgentEvent::Tool(ToolEvent::Started {
                 name,
-                input,
-                view
-            } if call_id == "call_1"
-                && name == "file_read"
-                && *input == json!({"path": "note.txt"})
-                && view.summary == "Read note.txt"
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ToolEnd {
-                agent_id: AgentId(7),
-                call_id,
-                ok: true,
-                output
-            } if call_id == "call_1"
-                && output == "hello world"
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::TextDelta {
-                agent_id: AgentId(7),
-                text
-            } if text == "all good"
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::Done {
-                agent_id: AgentId(7),
-                text,
+                view,
                 ..
-            } if text == "all good"
+            }) if name == "file_read" && view.summary == "Read note.txt"
         )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Tool(ToolEvent::Finished {
+                result: ToolResult::Success { output },
+                ..
+            }) if output == "hello world"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Stream(StreamEvent::TextDelta { text }) if text == "all good"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Completed { .. }))
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Turn(_)))
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -723,19 +753,85 @@ mod tests {
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new()).with_id(AgentId(1));
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let (tx, mut rx) = unbounded_channel();
+        let mut sink = VecEventSink::default();
         let err = agent
-            .run_with_emitter("hi", Some(tx), Some(&cancel))
+            .run(
+                "hi",
+                TurnContext {
+                    turn_id: TurnId::next(),
+                    cancellation: cancel,
+                },
+                &mut sink,
+            )
             .await
             .unwrap_err();
         assert!(err.is_cancelled());
-        let ev = rx.try_recv().unwrap();
+        assert_valid_event_sequence(&sink.events);
         assert_eq!(
-            ev,
-            AgentEvent::Cancelled {
-                agent_id: AgentId(1)
-            }
+            sink.events,
+            vec![
+                AgentEvent::Turn(TurnEvent::Started),
+                AgentEvent::Turn(TurnEvent::Cancelled),
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn successful_turn_has_valid_lifecycle() {
+        let mock = MockProvider::new(vec![text_response("ok")]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+        let mut sink = VecEventSink::default();
+        let out = run_with(&mut agent, "hi", turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(out.text(), "ok");
+        assert_valid_event_sequence(&sink.events);
+        assert!(matches!(
+            sink.events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Completed { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_turn_has_one_terminal_event() {
+        let mock = MockProvider::new(vec![]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let mut sink = VecEventSink::default();
+        let err = agent
+            .run(
+                "hi",
+                TurnContext {
+                    turn_id: TurnId::next(),
+                    cancellation: cancel,
+                },
+                &mut sink,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.is_cancelled());
+        assert_valid_event_sequence(&sink.events);
+        assert!(matches!(
+            sink.events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Cancelled))
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_has_one_terminal_event() {
+        let mock = MockProvider::new(vec![]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+        let mut sink = VecEventSink::default();
+        let err = run_with(&mut agent, "hi", turn_ctx(), &mut sink)
+            .await
+            .unwrap_err();
+        assert!(!err.is_cancelled());
+        assert_valid_event_sequence(&sink.events);
+        assert!(matches!(
+            sink.events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Failed { .. }))
+        ));
     }
 
     struct CaptureSystem {
@@ -764,7 +860,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
-        ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
+        ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "stream disabled in mock".into(),
@@ -785,7 +881,7 @@ mod tests {
         let (mock, seen) = CaptureSystem::new();
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         agent.set_system("hello system");
-        let result = agent.run("hi").await.unwrap();
+        let result = run_text(&mut agent, "hi").await;
         assert_eq!(result, "ok");
         assert_eq!(
             seen.lock().unwrap().clone(),
@@ -798,7 +894,7 @@ mod tests {
         let (mock, seen) = CaptureSystem::new();
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         agent.push_history(Message::system("from history"));
-        let result = agent.run("hi").await.unwrap();
+        let result = run_text(&mut agent, "hi").await;
         assert_eq!(result, "ok");
         assert_eq!(
             seen.lock().unwrap().clone(),
@@ -835,7 +931,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
-        ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
+        ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "stream disabled in mock".into(),
@@ -862,7 +958,7 @@ mod tests {
     async fn default_request_omits_todo_write_tool() {
         let (mock, names) = CaptureTools::new();
         let mut agent = agent_with_todo_write(Box::new(mock));
-        agent.run("hi").await.unwrap();
+        run_text(&mut agent, "hi").await;
         let seen = names.lock().unwrap().clone();
         assert_eq!(seen.len(), 1);
         assert!(
@@ -877,7 +973,7 @@ mod tests {
         let (mock, names) = CaptureTools::new();
         let mut agent = agent_with_todo_write(Box::new(mock));
         agent.set_mode(AgentMode::Plan);
-        agent.run("hi").await.unwrap();
+        run_text(&mut agent, "hi").await;
         let seen = names.lock().unwrap().clone();
         assert_eq!(seen.len(), 1);
         assert!(
@@ -895,27 +991,22 @@ mod tests {
             text_response("done"),
         ]);
         let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
-        let (tx, mut rx) = unbounded_channel();
-        let result = agent
-            .run_with_emitter("plan it", Some(tx), None)
+        let mut sink = VecEventSink::default();
+        let result = run_with(&mut agent, "plan it", turn_ctx(), &mut sink)
             .await
             .unwrap();
-        assert_eq!(result, "done");
+        assert_eq!(result.text(), "done");
         assert_eq!(agent.todos().items.len(), 1);
         assert_eq!(agent.todos().items[0].id, "a");
         assert!(agent.todo_written_this_turn());
 
-        let mut events = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            events.push(ev);
-        }
+        let events = sink.events;
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::TodoUpdated { items, .. } if items.len() == 1 && items[0].id == "a"
-        )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ToolEnd { ok: true, output, .. } if output.contains("1 todos")
+            AgentEvent::Tool(ToolEvent::Finished {
+                result: ToolResult::Success { output },
+                ..
+            }) if output.contains("1 todos")
         )));
     }
 
@@ -940,28 +1031,21 @@ mod tests {
                 status: crate::todo::TodoStatus::Pending,
             }],
         });
-        let (tx, mut rx) = unbounded_channel();
-        agent
-            .run_with_emitter("bad write", Some(tx), None)
+        let mut sink = VecEventSink::default();
+        run_with(&mut agent, "bad write", turn_ctx(), &mut sink)
             .await
             .unwrap();
         assert_eq!(agent.todos().items[0].id, "keep");
         assert!(!agent.todo_written_this_turn());
 
-        let mut events = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            events.push(ev);
-        }
+        let events = sink.events;
         assert!(events.iter().any(|e| matches!(
             e,
-            AgentEvent::ToolEnd { ok: false, output, .. }
-                if output.starts_with("error: agent error: todo_write:")
+            AgentEvent::Tool(ToolEvent::Finished {
+                result: ToolResult::Failed { output: Some(output), .. },
+                ..
+            }) if output.starts_with("error: agent error: todo_write:")
         )));
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::TodoUpdated { .. }))
-        );
     }
 
     struct CaptureRequests {
@@ -1010,7 +1094,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
-        ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
+        ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "stream disabled in mock".into(),
@@ -1048,7 +1132,7 @@ mod tests {
         let mut agent = agent_with_todo_write(Box::new(mock));
         agent.set_system("base");
         agent.set_mode(AgentMode::Plan);
-        agent.run("hi").await.unwrap();
+        run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 1);
         assert!(system_of(&reqs[0]).contains("## Plan Mode"));
@@ -1062,7 +1146,7 @@ mod tests {
         let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
         let mut agent = agent_with_todo_write(Box::new(mock));
         agent.set_system("base");
-        agent.run("hi").await.unwrap();
+        run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 1);
         assert!(!system_of(&reqs[0]).contains("## Plan Mode"));
@@ -1077,7 +1161,7 @@ mod tests {
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
         });
-        agent.run("hi").await.unwrap();
+        run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
         assert!(system_of(&reqs[0]).contains("## Current TODO list"));
         assert!(!system_of(&reqs[0]).contains("## Plan Mode"));
@@ -1109,7 +1193,8 @@ mod tests {
         assert_eq!(agent.mode(), AgentMode::Default);
         let live = agent.live_handle();
 
-        let run = agent.run("read it");
+        let mut sink = NullSink;
+        let run = agent.run("read it", turn_ctx(), &mut sink);
         tokio::pin!(run);
         tokio::select! {
             biased;
@@ -1118,7 +1203,7 @@ mod tests {
         }
         live.lock().unwrap_or_else(|e| e.into_inner()).mode = AgentMode::Plan;
         drop(release_tx);
-        assert_eq!(run.await.unwrap(), "done");
+        assert_eq!(run.await.unwrap().text(), "done");
 
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 2);
@@ -1148,7 +1233,7 @@ mod tests {
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
         });
-        agent.run("read it").await.unwrap();
+        run_text(&mut agent, "read it").await;
 
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 2);
@@ -1181,7 +1266,7 @@ mod tests {
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
         });
-        agent.run("do it").await.unwrap();
+        run_text(&mut agent, "do it").await;
 
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 3);
@@ -1197,7 +1282,7 @@ mod tests {
         let mut agent = agent_with_todo_write(Box::new(mock));
         agent.push_history(Message::system("from history"));
         agent.set_mode(AgentMode::Plan);
-        agent.run("hi").await.unwrap();
+        run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 1);
         assert!(system_of(&reqs[0]).contains("from history"));
@@ -1226,9 +1311,9 @@ mod tests {
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
         });
-        agent.run("read it").await.unwrap();
+        run_text(&mut agent, "read it").await;
         agent.set_mode(AgentMode::Default);
-        agent.run("next").await.unwrap();
+        run_text(&mut agent, "next").await;
 
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 3);
@@ -1260,9 +1345,9 @@ mod tests {
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
         });
-        agent.run("read it").await.unwrap();
+        run_text(&mut agent, "read it").await;
         assert!(agent.rewind_last_turn().is_some());
-        agent.run("again").await.unwrap();
+        run_text(&mut agent, "again").await;
 
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 3);
@@ -1293,12 +1378,12 @@ mod tests {
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
         });
-        agent.run("read it").await.unwrap();
+        run_text(&mut agent, "read it").await;
         agent.clear_history();
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],
         });
-        agent.run("fresh").await.unwrap();
+        run_text(&mut agent, "fresh").await;
 
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 3);

@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use oven_app::AgentMode;
-use oven_app::AppEvent;
 use oven_app::FileMentions;
 use oven_app::config::ProviderConfig;
+use oven_app::{AppEvent, AppEventKind, StateChange, StateEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -200,19 +200,16 @@ impl InputView {
 
 impl Component for InputView {
     fn on_event(&mut self, ev: &AppEvent) {
-        match ev {
-            AppEvent::ModelsUpdated { models, .. } => {
+        let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind else {
+            return;
+        };
+        match change {
+            StateChange::ModelsChanged { models } => {
                 self.model_picker.update_models(models.clone());
             }
-            AppEvent::ProviderUpdated { provider, .. } => {
+            StateChange::ProviderChanged { provider } => {
                 self.setup.set_current(provider.clone());
             }
-            AppEvent::Rewound {
-                text: Some(text), ..
-            } => {
-                self.set_text(text);
-            }
-            AppEvent::Rewound { .. } => {}
             _ => {}
         }
     }
@@ -834,10 +831,9 @@ mod tests {
     #[test]
     fn update_models_refreshes_picker() {
         let mut view = InputView::new(commands(), ProviderConfig::default());
-        let ev = AppEvent::ModelsUpdated {
-            app_id: oven_app::AppId(1),
+        let ev = AppEvent::state_changed(oven_app::StateChange::ModelsChanged {
             models: vec![("kimi-k2".into(), "Moonshot".into())],
-        };
+        });
         view.on_event(&ev);
         type_text(&mut view, "/model");
         view.handle_key(key(KeyCode::Enter), &State::new());
@@ -862,17 +858,12 @@ mod tests {
     }
 
     #[test]
-    fn rewound_event_restores_input_text() {
+    fn history_changed_does_not_touch_input() {
         let mut view = view();
         type_text(&mut view, "draft");
-        let ev = AppEvent::Rewound {
-            app_id: oven_app::AppId(1),
-            text: Some("restored".into()),
-            messages: Vec::new(),
-            usage: oven_llm::Usage::default(),
-        };
+        let ev = AppEvent::state_changed(oven_app::StateChange::HistoryChanged { revision: 1 });
         view.on_event(&ev);
-        assert_eq!(view.textarea.lines()[0], "restored");
+        assert_eq!(view.textarea.lines()[0], "draft");
     }
 
     #[test]

@@ -1,55 +1,84 @@
-use oven_llm::{ReasoningEffort, Usage};
+use oven_llm::Usage;
 
-use crate::todo::TodoItem;
+use crate::error::AgentError;
+use crate::identity::{AgentId, ToolCallId, TurnId};
 use crate::tools::ToolView;
 
-/// Stable id for an agent instance (main or sub-agent).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct AgentId(pub u64);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentEventEnvelope {
+    pub seq: u64,
+    pub agent_id: AgentId,
+    pub turn_id: TurnId,
+    pub event: AgentEvent,
+}
 
-/// Events emitted during one agent turn. No app_id here — the App layer
-/// envelopes these when forwarding to the TUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
-    ThinkingDelta {
-        agent_id: AgentId,
-        text: String,
-    },
-    TextDelta {
-        agent_id: AgentId,
-        text: String,
-    },
-    ToolStart {
-        agent_id: AgentId,
-        call_id: String,
+    Turn(TurnEvent),
+    Stream(StreamEvent),
+    Tool(ToolEvent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnEvent {
+    Started,
+    Completed { usage: Usage },
+    Cancelled,
+    Failed { error: AgentError },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    TextDelta { text: String },
+    ThinkingDelta { text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolEvent {
+    Started {
+        call_id: ToolCallId,
         name: String,
-        input: serde_json::Value,
         view: ToolView,
     },
-    ToolEnd {
-        agent_id: AgentId,
-        call_id: String,
-        ok: bool,
+    OutputDelta {
+        call_id: ToolCallId,
+        stream: ToolOutputStream,
+        text: String,
+    },
+    Finished {
+        call_id: ToolCallId,
+        result: ToolResult,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOutputStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolResult {
+    Success {
         output: String,
     },
-    Done {
-        agent_id: AgentId,
-        text: String,
-        usage: Usage,
+    Failed {
+        error: String,
+        output: Option<String>,
     },
-    Cancelled {
-        agent_id: AgentId,
-    },
-    HistoryCleared {
-        agent_id: AgentId,
-    },
-    ModelChanged {
-        agent_id: AgentId,
-        model: String,
-        reasoning_effort: Option<ReasoningEffort>,
-    },
-    TodoUpdated {
-        agent_id: AgentId,
-        items: Vec<TodoItem>,
-    },
+    Cancelled,
+}
+
+impl ToolResult {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+
+    pub fn output(&self) -> &str {
+        match self {
+            Self::Success { output } => output,
+            Self::Failed { output, error } => output.as_deref().unwrap_or(error),
+            Self::Cancelled => "",
+        }
+    }
 }

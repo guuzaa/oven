@@ -5,7 +5,10 @@ use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
 };
 use futures::StreamExt;
-use oven_app::{AppCmd, AppEvent, AppHandle};
+use oven_app::{
+    AgentEvent, AppCommand, AppEvent, AppEventKind, AppHandle, AppPhase, StateChange, StateEvent,
+    TurnEvent,
+};
 use tokio::sync::mpsc;
 
 use crate::components::component::{Action, Component, KeyResult, State};
@@ -36,14 +39,14 @@ impl Ui {
     pub fn new(handle: AppHandle) -> Self {
         let events = handle.subscribe();
         let slash_commands = handle.slash_commands().to_vec();
-        let model = handle.model().to_string();
-        let provider = handle.provider_config().clone();
+        let model = handle.model();
+        let provider = handle.provider_config();
         let root = handle
             .root()
             .canonicalize()
             .unwrap_or_else(|_| handle.root().to_owned());
         let total_usage = handle.total_usage();
-        let todos = handle.todos().clone();
+        let todos = handle.todos();
         let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
         if provider.needs_setup() {
             input.open_setup();
@@ -66,7 +69,7 @@ impl Ui {
 
     #[inline]
     fn load_transcript(&mut self) {
-        self.transcript.seed(self.handle.history());
+        self.transcript.seed(&self.handle.history());
     }
 
     pub async fn run(mut self) -> io::Result<()> {
@@ -147,22 +150,36 @@ impl Ui {
     }
 
     fn apply_event(&mut self, ev: AppEvent) {
-        if matches!(ev, AppEvent::Exit { .. }) {
-            self.quit = true;
-        }
-        if matches!(ev, AppEvent::Idle { .. }) {
-            self.state.busy = false;
-        }
-        if let AppEvent::ModeChanged { mode, .. } = &ev {
-            self.state.mode = *mode;
+        match &ev.kind {
+            AppEventKind::Exited => self.quit = true,
+            AppEventKind::Agent(env) => match &env.event {
+                AgentEvent::Turn(TurnEvent::Started) => self.state.busy = true,
+                AgentEvent::Turn(
+                    TurnEvent::Completed { .. } | TurnEvent::Cancelled | TurnEvent::Failed { .. },
+                ) => self.state.busy = false,
+                _ => {}
+            },
+            AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
+                StateChange::ModeChanged { mode } => self.state.mode = *mode,
+                StateChange::HistoryChanged { .. } => {
+                    self.transcript.replace_from(&self.handle.history());
+                    self.rewinding = false;
+                }
+                _ => {}
+            },
+            AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {
+                if !matches!(
+                    self.handle.state().phase,
+                    AppPhase::Running { .. } | AppPhase::Cancelling { .. }
+                ) {
+                    self.state.busy = false;
+                }
+            }
         }
         self.transcript.on_event(&ev);
         self.status.on_event(&ev);
         self.input.on_event(&ev);
         self.todos.on_event(&ev);
-        if matches!(ev, AppEvent::Rewound { .. }) {
-            self.rewinding = false;
-        }
         self.maybe_flush();
     }
 
@@ -175,7 +192,9 @@ impl Ui {
         let remaining = send_each(texts, |text| {
             if self
                 .handle
-                .send(AppCmd::UserInput(text.to_string()))
+                .send(AppCommand::StartTurn {
+                    input: text.to_string(),
+                })
                 .is_ok()
             {
                 self.transcript.push_user(&display_user_input(text));
@@ -192,14 +211,17 @@ impl Ui {
         }
     }
 
+    fn send_cancel(&self) {
+        if let Some(turn_id) = self.handle.state().phase.turn_id() {
+            let _ = self.handle.send(AppCommand::Cancel { turn_id });
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         if let KeyResult::Action(Action::Notify(text)) =
             self.transcript.handle_mouse(mouse, &self.state)
         {
-            self.apply_event(AppEvent::Notify {
-                app_id: self.handle.id(),
-                text,
-            });
+            self.apply_event(AppEvent::notification(text));
         }
     }
 
@@ -210,7 +232,9 @@ impl Ui {
             }
             _ if is_mode_toggle(key) => {
                 self.state.mode = self.state.mode.toggle();
-                let _ = self.handle.send(AppCmd::SetMode(self.state.mode));
+                let _ = self.handle.send(AppCommand::SetMode {
+                    mode: self.state.mode,
+                });
                 KeyResult::Handled
             }
             KeyCode::Esc if self.input.overlay() == Overlay::None => match EscAction::new(
@@ -227,7 +251,7 @@ impl Ui {
                 EscAction::Rewind(text) => {
                     self.input.set_text(&text);
                     self.rewinding = true;
-                    if self.handle.send(AppCmd::Rewind).is_err() {
+                    if self.handle.send(AppCommand::Rewind).is_err() {
                         self.rewinding = false;
                     }
                     KeyResult::Handled
@@ -246,12 +270,12 @@ impl Ui {
             KeyResult::Ignored | KeyResult::Handled => false,
             KeyResult::Action(Action::Quit) => {
                 if self.state.busy {
-                    let _ = self.handle.send(AppCmd::Cancel);
+                    self.send_cancel();
                 }
                 true
             }
             KeyResult::Action(Action::Cancel) => {
-                let _ = self.handle.send(AppCmd::Cancel);
+                self.send_cancel();
                 false
             }
             KeyResult::Action(Action::Queue(text)) => {
@@ -263,20 +287,21 @@ impl Ui {
                 self.status.clear_reply();
                 self.input.clear();
                 self.state.busy = true;
-                if self.handle.send(AppCmd::UserInput(text)).is_err() {
+                if self
+                    .handle
+                    .send(AppCommand::StartTurn { input: text })
+                    .is_err()
+                {
                     self.state.busy = false;
                 }
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
-                let _ = self.handle.send(AppCmd::UserInput(text));
+                let _ = self.handle.send(AppCommand::StartTurn { input: text });
                 false
             }
             KeyResult::Action(Action::Notify(text)) => {
-                self.apply_event(AppEvent::Notify {
-                    app_id: self.handle.id(),
-                    text,
-                });
+                self.apply_event(AppEvent::notification(text));
                 false
             }
         }

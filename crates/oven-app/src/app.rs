@@ -11,10 +11,11 @@ use thiserror::Error;
 use crate::config::{AppConfig, ConfigError};
 use crate::dirs;
 use crate::event::AppId;
+use crate::handle::AppHandle;
 use crate::instructions::{InstructionDoc, load_instructions};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
-use crate::runtime::{AppHandle, hydrate_session, resolve_session, spawn_runtime};
+use crate::runtime::{hydrate_session, resolve_session, spawn_runtime};
 use crate::session::{SessionError, canonical_root, default_sessions_dir};
 use crate::{SkillRegistry, ToolRegistry};
 

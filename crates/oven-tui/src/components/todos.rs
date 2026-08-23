@@ -1,4 +1,4 @@
-use oven_app::{AgentEvent, AppEvent, TodoList, TodoStatus};
+use oven_app::{AppEvent, AppEventKind, StateChange, StateEvent, TodoList, TodoStatus};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -29,16 +29,14 @@ impl TodosWidget {
     }
 
     pub fn on_event(&mut self, ev: &AppEvent) {
-        let AppEvent::Agent { event, .. } = ev else {
+        let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind else {
             return;
         };
-        match event {
-            AgentEvent::TodoUpdated { items, .. } => {
-                self.list.items = items.clone();
+        match change {
+            StateChange::TodosChanged { todos } => {
+                self.list = todos.clone();
             }
-            AgentEvent::HistoryCleared { .. } => {
-                self.list.items.clear();
-            }
+            StateChange::HistoryChanged { .. } => {}
             _ => {}
         }
     }
@@ -75,7 +73,7 @@ fn item_line(status: TodoStatus, content: &str, width: usize) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_app::{AgentId, AppId, TodoItem};
+    use oven_app::TodoItem;
 
     fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {
         TodoItem {
@@ -97,11 +95,10 @@ mod tests {
         ])
     }
 
-    fn agent_event(event: AgentEvent) -> AppEvent {
-        AppEvent::Agent {
-            app_id: AppId(1),
-            event,
-        }
+    fn todos_changed(items: Vec<TodoItem>) -> AppEvent {
+        AppEvent::state_changed(StateChange::TodosChanged {
+            todos: TodoList { items },
+        })
     }
 
     fn render(widget: &TodosWidget) -> String {
@@ -150,20 +147,18 @@ mod tests {
     fn todo_updated_empty_hides_widget() {
         let mut widget = TodosWidget::new(sample());
         assert_eq!(widget.height(), 3);
-        widget.on_event(&agent_event(AgentEvent::TodoUpdated {
-            agent_id: AgentId(1),
-            items: Vec::new(),
-        }));
+        widget.on_event(&todos_changed(Vec::new()));
         assert_eq!(widget.height(), 0);
     }
 
     #[test]
     fn todo_updated_replaces_list() {
         let mut widget = TodosWidget::new(sample());
-        widget.on_event(&agent_event(AgentEvent::TodoUpdated {
-            agent_id: AgentId(1),
-            items: vec![item("n", "next task", TodoStatus::InProgress)],
-        }));
+        widget.on_event(&todos_changed(vec![item(
+            "n",
+            "next task",
+            TodoStatus::InProgress,
+        )]));
         assert_eq!(widget.height(), 1);
         let row = render(&widget);
         assert!(row.contains("[~]"), "{row:?}");
@@ -176,9 +171,7 @@ mod tests {
     #[test]
     fn history_cleared_hides_widget() {
         let mut widget = TodosWidget::new(sample());
-        widget.on_event(&agent_event(AgentEvent::HistoryCleared {
-            agent_id: AgentId(1),
-        }));
+        widget.on_event(&todos_changed(Vec::new()));
         assert_eq!(widget.height(), 0);
     }
 
