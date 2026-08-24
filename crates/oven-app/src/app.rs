@@ -204,39 +204,6 @@ impl App {
         out
     }
 
-    /// Run a single chat turn inside a persisted session. On success the
-    /// newly produced messages are appended to `<id>.jsonl` under the platform
-    /// data dir. The session file is created lazily on first append.
-    pub async fn run_session(
-        &self,
-        session_id: &str,
-        user: impl Into<String>,
-    ) -> Result<String, AppError> {
-        let Some(dir) = default_sessions_dir() else {
-            return Err(AppError::Session(SessionError::Io(
-                PathBuf::from("<data_dir>"),
-                std::io::Error::new(std::io::ErrorKind::NotFound, "no data_dir on this platform"),
-            )));
-        };
-        self.run_session_in(&dir, session_id, user).await
-    }
-
-    /// Same as [`run_session`] but with an explicit sessions directory (used
-    /// by tests and custom installs).
-    pub async fn run_session_in(
-        &self,
-        sessions_dir: &Path,
-        session_id: &str,
-        user: impl Into<String>,
-    ) -> Result<String, AppError> {
-        let handle = self
-            .spawn_session_in(sessions_dir, Some(session_id))
-            .await?;
-        let out = handle.prompt(user).await;
-        handle.shutdown().await;
-        out
-    }
-
     /// Spawn a long-lived app task with no session persistence.
     pub async fn spawn(&self) -> Result<AppHandle, AppError> {
         let agent = self.build_agent().await?;
