@@ -106,11 +106,12 @@ impl SetupWizard {
         }
     }
 
-    pub(crate) fn prompt_mask(&self) -> Option<String> {
-        if self.stage != Stage::ApiKey {
-            return None;
+    pub(crate) fn prompt_value(&self) -> Option<String> {
+        match self.stage {
+            Stage::CustomName | Stage::BaseUrl => Some(self.buffer.clone()),
+            Stage::ApiKey => Some("*".repeat(self.buffer.chars().count())),
+            _ => None,
         }
-        Some("*".repeat(self.buffer.chars().count()))
     }
 
     pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect) {
@@ -576,7 +577,30 @@ mod tests {
             w.handle_key(key(KeyCode::Char(ch)));
         }
         assert_eq!(w.buffer, "abcd");
-        assert_eq!(w.prompt_mask().as_deref(), Some("****"));
+        assert_eq!(w.prompt_value().as_deref(), Some("****"));
+        assert_eq!(w.prompt_hint(), "");
+    }
+
+    #[test]
+    fn custom_name_and_base_url_echo_typed_text() {
+        let mut w = open();
+        w.enter_stage(Stage::CustomName);
+        assert_eq!(w.prompt_value().as_deref(), Some(""));
+        for ch in "my-proxy".chars() {
+            w.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(w.prompt_value().as_deref(), Some("my-proxy"));
+
+        w.handle_key(key(KeyCode::Enter));
+        assert_eq!(w.stage, Stage::BaseUrl);
+        assert_eq!(w.prompt_value().as_deref(), Some(""));
+        for ch in "https://proxy.example/v1".chars() {
+            w.handle_key(key(KeyCode::Char(ch)));
+        }
+        assert_eq!(
+            w.prompt_value().as_deref(),
+            Some("https://proxy.example/v1")
+        );
         assert_eq!(w.prompt_hint(), "");
     }
 
@@ -584,7 +608,7 @@ mod tests {
     fn list_stages_show_hint_not_mask() {
         let w = open();
         assert_eq!(w.prompt_hint(), "choose a provider");
-        assert!(w.prompt_mask().is_none());
+        assert!(w.prompt_value().is_none());
     }
 
     #[test]

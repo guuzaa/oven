@@ -396,9 +396,9 @@ pub(crate) fn display_user_input(text: &str) -> String {
 }
 
 fn draw_setup_prompt(f: &mut Frame<'_>, area: Rect, setup: &SetupWizard) {
-    if let Some(mask) = setup.prompt_mask() {
-        f.render_widget(Paragraph::new(Span::raw(mask.clone())), area);
-        let col = (mask.chars().count() as u16).min(area.width.saturating_sub(1));
+    if let Some(value) = setup.prompt_value() {
+        f.render_widget(Paragraph::new(Span::raw(value.clone())), area);
+        let col = (value.chars().count() as u16).min(area.width.saturating_sub(1));
         f.set_cursor_position((area.x.saturating_add(col), area.y));
         return;
     }
