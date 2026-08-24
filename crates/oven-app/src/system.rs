@@ -28,7 +28,7 @@ pub(crate) fn system_prompt(
     out
 }
 
-pub(crate) fn env_block(root: &Path) -> String {
+fn env_block(root: &Path) -> String {
     let workspace = canonical_root(root);
     let cwd = std::env::current_dir()
         .map(|p| canonical_root(&p))
@@ -46,16 +46,13 @@ fn platform() -> &'static str {
     std::env::consts::OS
 }
 
+#[inline]
 fn is_git_repo(start: &Path) -> bool {
-    let mut dir = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    loop {
-        if dir.join(".git").exists() {
-            return true;
-        }
-        if !dir.pop() {
-            return false;
-        }
-    }
+    start
+        .canonicalize()
+        .unwrap_or_else(|_| start.to_path_buf())
+        .join(".git")
+        .exists()
 }
 
 #[inline]
