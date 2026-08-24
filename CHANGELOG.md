@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.4] - 2026-08-24
+
+### Added
+- @ syntax to mention files in chat
+
+### Changed
+- Move AppEvent to a single mod
+- Simplify env detection in system prompt
+- Enhance event protocol
+- Move resolve_session into Session::resolve
+
+### Fixed
+- Fix UI custom models displaying text
+- Put effort value right after model name with a space
+- Add rounded input border and quieter motion to TUI
+
 ## [0.0.3] - 2026-08-20
 
 ### Changed
