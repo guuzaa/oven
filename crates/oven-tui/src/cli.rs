@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use oven_app::App;
+use oven_app::{App, AppBuilder};
 
 use crate::ui::Ui;
 
@@ -48,58 +48,54 @@ impl Cli {
         }
     }
 
-    pub fn spawn(&self) -> App {
-        let mut app = App::new(&self.dir);
-        if let Err(e) = app.load_config() {
+    fn builder(&self) -> AppBuilder {
+        let mut builder = App::builder(&self.dir);
+        if let Err(e) = builder.load_config() {
             eprintln!("warning: loading config: {}", e);
         }
-        app
+        builder
+    }
+
+    async fn headless(&self, prompt: &str) -> ExitCode {
+        match App::query(&self.dir, prompt).await {
+            Ok(resp) => {
+                println!("{resp}");
+                ExitCode::SUCCESS
+            }
+            Err(_) => ExitCode::FAILURE,
+        }
+    }
+
+    async fn interactive(&self, session: Option<&str>) -> ExitCode {
+        let builder = self.builder();
+        let app = match builder.open_session(session).await {
+            Ok(app) => app,
+            Err(err) => {
+                eprintln!("error: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        match Ui::new(app).run().await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("error: {err}");
+                ExitCode::FAILURE
+            }
+        }
     }
 
     pub async fn run(&self) -> ExitCode {
-        let app = self.spawn();
-
         match self.query.as_deref() {
-            Some(prompt) => headless(&app, prompt.trim()).await,
+            Some(prompt) => self.headless(prompt.trim()).await,
             None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
                 let session = self.resolve_session_id();
-                interactive(&app, session.as_deref()).await
+                self.interactive(session.as_deref()).await
             }
             None => {
                 eprintln!("usage: oven [-C DIR] [--session ID] [--continue] [-Q|--query QUERY]");
                 ExitCode::from(2)
             }
-        }
-    }
-}
-
-async fn headless(app: &App, prompt: &str) -> ExitCode {
-    match app.query(prompt).await {
-        Ok(out) => {
-            println!("{out}");
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("error: {err}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-async fn interactive(app: &App, session: Option<&str>) -> ExitCode {
-    let handle = match app.spawn_session(session).await {
-        Ok(h) => h,
-        Err(err) => {
-            eprintln!("error: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    match Ui::new(handle).run().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("error: {err}");
-            ExitCode::FAILURE
         }
     }
 }

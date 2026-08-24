@@ -9,10 +9,10 @@ use oven_llm::{
 };
 use tokio::sync::{mpsc, watch};
 
+use crate::App;
 use crate::command::AppCommand;
 use crate::config::{AppConfig, ProviderConfig};
 use crate::event::{AppEvent, AppEventKind, AppId, Subscribers};
-use crate::handle::AppHandle;
 use crate::session::{Session, SessionError, SessionStore, record_recent};
 use crate::slash::{CommandOutcome, SlashRegistry};
 use crate::state::{AppPhase, AppState, SessionState, StateChange, StateEvent};
@@ -388,7 +388,7 @@ pub(crate) fn spawn_runtime(
     root: PathBuf,
     config: AppConfig,
     user_config_path: Option<PathBuf>,
-) -> AppHandle {
+) -> App {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
     let subscribers_task = subscribers.clone();
@@ -436,7 +436,7 @@ pub(crate) fn spawn_runtime(
     let join = tokio::spawn(async move {
         runtime.run(cmd_rx).await;
     });
-    AppHandle::new(
+    App::new(
         app_id,
         cmd_tx,
         subscribers,

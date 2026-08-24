@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mockall::mock;
 use oven_agent::Tool;
-use oven_app::App;
+use oven_app::AppBuilder;
 use oven_app::config::AppConfig;
 use oven_app::mcp::McpRegistry;
 use oven_app::mcp::client::{McpCaller, McpConnector, McpTool};
@@ -107,11 +107,11 @@ command = "ignored"
     )
     .unwrap();
     let tmp = tempdir::TempDir::new("mcp-fail").unwrap();
-    let app = App::new(tmp.path())
+    let app = AppBuilder::new(tmp.path())
         .with_config(cfg)
         .with_mcp_connector(Arc::new(connector));
 
-    let err = match app.spawn().await {
+    let err = match app.open().await {
         Ok(_) => panic!("spawn should fail when the mcp connector errors"),
         Err(e) => e,
     };
@@ -136,8 +136,8 @@ url = "http://127.0.0.1:1/mcp"
     )
     .unwrap();
     let tmp = tempdir::TempDir::new("mcp-http-bad-header").unwrap();
-    let app = App::new(tmp.path()).with_config(cfg);
-    let err = match app.spawn().await {
+    let app = AppBuilder::new(tmp.path()).with_config(cfg);
+    let err = match app.open().await {
         Ok(_) => panic!("spawn should fail for an invalid http header"),
         Err(e) => e,
     };

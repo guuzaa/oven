@@ -6,7 +6,7 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, AppCommand, AppEvent, AppEventKind, AppHandle, AppPhase, StateChange, StateEvent,
+    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, StateChange, StateEvent,
     TurnEvent,
 };
 use tokio::sync::mpsc;
@@ -20,7 +20,7 @@ use crate::components::transcript::Transcript;
 use crate::components::{layout, terminal};
 
 pub struct Ui {
-    handle: AppHandle,
+    app: App,
     events: mpsc::UnboundedReceiver<AppEvent>,
     state: State,
     quit: bool,
@@ -36,23 +36,23 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(handle: AppHandle) -> Self {
-        let events = handle.subscribe();
-        let slash_commands = handle.slash_commands().to_vec();
-        let model = handle.model();
-        let provider = handle.provider_config();
-        let root = handle
+    pub fn new(app: App) -> Self {
+        let events = app.subscribe();
+        let slash_commands = app.slash_commands().to_vec();
+        let model = app.model();
+        let provider = app.provider_config();
+        let root = app
             .root()
             .canonicalize()
-            .unwrap_or_else(|_| handle.root().to_owned());
-        let total_usage = handle.total_usage();
-        let todos = handle.todos();
+            .unwrap_or_else(|_| app.root().to_owned());
+        let total_usage = app.total_usage();
+        let todos = app.todos();
         let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
         if provider.needs_setup() {
             input.open_setup();
         }
         Self {
-            handle,
+            app,
             events,
             state: State::new(),
             quit: false,
@@ -69,7 +69,7 @@ impl Ui {
 
     #[inline]
     fn load_transcript(&mut self) {
-        self.transcript.seed(&self.handle.history());
+        self.transcript.seed(&self.app.history());
     }
 
     pub async fn run(mut self) -> io::Result<()> {
@@ -77,8 +77,8 @@ impl Ui {
         let mut terminal = terminal::setup()?;
         let result = self.event_loop(&mut terminal).await;
         terminal::restore(&mut terminal)?;
-        let session_id = self.handle.session_id();
-        self.handle.shutdown().await;
+        let session_id = self.app.session_id();
+        self.app.shutdown().await;
         if let Some(id) = session_id {
             println!("oven -s {id}");
         }
@@ -162,14 +162,14 @@ impl Ui {
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::ModeChanged { mode } => self.state.mode = *mode,
                 StateChange::HistoryChanged { .. } => {
-                    self.transcript.replace_from(&self.handle.history());
+                    self.transcript.replace_from(&self.app.history());
                     self.rewinding = false;
                 }
                 _ => {}
             },
             AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {
                 if !matches!(
-                    self.handle.state().phase,
+                    self.app.state().phase,
                     AppPhase::Running { .. } | AppPhase::Cancelling { .. }
                 ) {
                     self.state.busy = false;
@@ -191,7 +191,7 @@ impl Ui {
         self.state.busy = true;
         let remaining = send_each(texts, |text| {
             if self
-                .handle
+                .app
                 .send(AppCommand::StartTurn {
                     input: text.to_string(),
                 })
@@ -212,8 +212,8 @@ impl Ui {
     }
 
     fn send_cancel(&self) {
-        if let Some(turn_id) = self.handle.state().phase.turn_id() {
-            let _ = self.handle.send(AppCommand::Cancel { turn_id });
+        if let Some(turn_id) = self.app.state().phase.turn_id() {
+            let _ = self.app.send(AppCommand::Cancel { turn_id });
         }
     }
 
@@ -232,7 +232,7 @@ impl Ui {
             }
             _ if is_mode_toggle(key) => {
                 self.state.mode = self.state.mode.toggle();
-                let _ = self.handle.send(AppCommand::SetMode {
+                let _ = self.app.send(AppCommand::SetMode {
                     mode: self.state.mode,
                 });
                 KeyResult::Handled
@@ -251,7 +251,7 @@ impl Ui {
                 EscAction::Rewind(text) => {
                     self.input.set_text(&text);
                     self.rewinding = true;
-                    if self.handle.send(AppCommand::Rewind).is_err() {
+                    if self.app.send(AppCommand::Rewind).is_err() {
                         self.rewinding = false;
                     }
                     KeyResult::Handled
@@ -288,7 +288,7 @@ impl Ui {
                 self.input.clear();
                 self.state.busy = true;
                 if self
-                    .handle
+                    .app
                     .send(AppCommand::StartTurn { input: text })
                     .is_err()
                 {
@@ -297,7 +297,7 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
-                let _ = self.handle.send(AppCommand::StartTurn { input: text });
+                let _ = self.app.send(AppCommand::StartTurn { input: text });
                 false
             }
             KeyResult::Action(Action::Notify(text)) => {

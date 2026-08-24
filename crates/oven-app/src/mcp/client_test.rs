@@ -8,7 +8,7 @@ use oven_llm::{
     Request, Response, Role, StopReason, Usage,
 };
 
-use crate::App;
+use crate::AppBuilder;
 use crate::config::AppConfig;
 use crate::event::AppId;
 use crate::mcp::{McpRegistry, client::*};
@@ -129,7 +129,7 @@ impl Provider for MockProvider {
     }
 }
 
-async fn spawn_app(app: &App, provider: Box<dyn Provider>) -> crate::AppHandle {
+async fn spawn_app(app: &AppBuilder, provider: Box<dyn Provider>) -> crate::App {
     let agent = app.build_agent_with_provider(provider).await.unwrap();
     spawn_runtime(
         AppId::next(),
@@ -171,7 +171,7 @@ async fn mcp_tools_mounted_on_agent() {
             ..Default::default()
         },
     );
-    let app = App::new(tmp.path())
+    let app = AppBuilder::new(tmp.path())
         .with_config(cfg)
         .with_mcp_connector(Arc::new(connector));
 
@@ -281,7 +281,7 @@ url = "http://{addr}/mcp"
 "#
     ))
     .unwrap();
-    let app = App::new(tmp.path()).with_config(cfg);
+    let app = AppBuilder::new(tmp.path()).with_config(cfg);
 
     let mock = MockProvider::new(vec![
         Response {

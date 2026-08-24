@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 
 use oven_app::config::AppConfig;
-use oven_app::{App, McpServerConfig};
+use oven_app::{AppBuilder, McpServerConfig};
 
 #[test]
 fn config_enables_tools_and_mcps() {
@@ -27,7 +27,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     assert!(cfg.mcps.contains_key("filesystem"));
     assert_eq!(cfg.mcps.get("filesystem").unwrap().command, "npx");
 
-    let app = App::new(&root).with_config(cfg);
+    let app = AppBuilder::new(&root).with_config(cfg);
     let tools = app.tools().merged_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     assert!(names.contains(&"file_read"));
@@ -43,7 +43,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 fn unknown_tool_is_skipped_silently() {
     let cfg: AppConfig = toml::from_str(r#"tools = ["file_read", "nope-tool"]"#).unwrap();
     let tmp = tempdir::TempDir::new("app-unknown-ids").unwrap();
-    let app = App::new(tmp.path()).with_config(cfg);
+    let app = AppBuilder::new(tmp.path()).with_config(cfg);
     assert!(app.tools().contains("file_read"));
     assert!(!app.tools().contains("nope-tool"));
 }
@@ -60,7 +60,7 @@ fn filesystem_skills_are_loaded_and_mounted() {
     )
     .unwrap();
 
-    let app = App::new(root).with_config(AppConfig::default());
+    let app = AppBuilder::new(root).with_config(AppConfig::default());
     assert!(app.skills().contains("test"));
     let prompt = app.skills().merged_system_prompt().unwrap();
     assert!(prompt.contains("- **test**: be precise"));
@@ -87,7 +87,7 @@ fn register_skill_contributes_description() {
     }
 
     let tmp = tempdir::TempDir::new("app-skill-register").unwrap();
-    let mut app = App::new(tmp.path());
+    let mut app = AppBuilder::new(tmp.path());
     app.register_skill(Box::new(TestSkill));
     assert!(app.skills().contains("test"));
     let prompt = app.skills().merged_system_prompt().unwrap();
@@ -103,14 +103,14 @@ command = ""
 "#;
     let cfg: AppConfig = toml::from_str(cfg_toml).unwrap();
     let tmp = tempdir::TempDir::new("app-bad-mcp").unwrap();
-    let app = App::new(tmp.path()).with_config(cfg);
+    let app = AppBuilder::new(tmp.path()).with_config(cfg);
     assert!(app.mcps().is_empty());
 }
 
 #[test]
 fn default_tools_when_none_requested() {
     let tmp = tempdir::TempDir::new("app-fallback").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     // Tools default independently of skills: an unconfigured App still mounts
     // the built-in set.
     let names = app.tools().names();

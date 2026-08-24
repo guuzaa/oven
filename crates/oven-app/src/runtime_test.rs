@@ -1,11 +1,10 @@
-use crate::App;
 use crate::command::AppCommand;
 use crate::config::{AppConfig, ProviderConfig};
 use crate::event::{AppEvent, AppEventKind, AppId};
-use crate::handle::AppHandle;
 use crate::runtime::*;
 use crate::session::{Session, canonical_root};
 use crate::state::{AppPhase, StateChange, StateEvent};
+use crate::{App, AppBuilder};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -25,7 +24,7 @@ fn agent_from(provider: Box<dyn Provider>) -> Agent {
     Agent::new(router, Vec::new())
 }
 
-async fn spawn_app(app: &App, provider: Box<dyn Provider>) -> AppHandle {
+async fn spawn_app(app: &AppBuilder, provider: Box<dyn Provider>) -> App {
     let agent = app.build_agent_with_provider(provider).await.unwrap();
     spawn_runtime(
         AppId::next(),
@@ -37,7 +36,7 @@ async fn spawn_app(app: &App, provider: Box<dyn Provider>) -> AppHandle {
     )
 }
 
-async fn spawn_app_session(app: &App, provider: Box<dyn Provider>, session: Session) -> AppHandle {
+async fn spawn_app_session(app: &AppBuilder, provider: Box<dyn Provider>, session: Session) -> App {
     let prior = session.load_records().unwrap();
     let mut agent = app.build_agent_with_provider(provider).await.unwrap();
     let records: Vec<_> = prior
@@ -262,7 +261,7 @@ async fn wait_settled(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
 #[tokio::test]
 async fn spawn_prompt_emits_done_and_idle() {
     let tmp = tempdir::TempDir::new("app-runtime").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![text_response("hello")]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
@@ -289,7 +288,7 @@ async fn spawn_prompt_emits_done_and_idle() {
 #[tokio::test]
 async fn handle_exposes_slash_commands() {
     let tmp = tempdir::TempDir::new("app-runtime-slash").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
@@ -307,7 +306,7 @@ async fn handle_exposes_slash_commands() {
 #[tokio::test]
 async fn plan_slash_on_idle_switches() {
     let tmp = tempdir::TempDir::new("app-runtime-plan").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
@@ -378,7 +377,7 @@ async fn model_slash_switch_uses_request_model() {
 #[tokio::test]
 async fn slash_reply_emits_reply_not_done() {
     let tmp = tempdir::TempDir::new("app-runtime-slash-reply").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
@@ -409,7 +408,7 @@ async fn slash_reply_emits_reply_not_done() {
 #[tokio::test]
 async fn slash_exit_emits_exit_event() {
     let tmp = tempdir::TempDir::new("app-runtime-exit").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
@@ -434,7 +433,7 @@ async fn slash_exit_emits_exit_event() {
 #[tokio::test]
 async fn slash_clear_does_not_call_provider() {
     let tmp = tempdir::TempDir::new("app-runtime-clear-noprovider").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
     assert_eq!(handle.prompt("/clear").await.unwrap(), "history cleared");
@@ -444,7 +443,7 @@ async fn slash_clear_does_not_call_provider() {
 #[tokio::test]
 async fn slash_clear_emits_history_cleared_and_resets_usage() {
     let tmp = tempdir::TempDir::new("app-runtime-clear-events").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![text_response("one")]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
@@ -485,7 +484,7 @@ async fn slash_clear_emits_history_cleared_and_resets_usage() {
 #[tokio::test]
 async fn slash_exit_returns_goodbye() {
     let tmp = tempdir::TempDir::new("app-runtime-exit-prompt").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
     assert_eq!(handle.prompt("/exit").await.unwrap(), "goodbye");
@@ -684,23 +683,23 @@ async fn setup_keeps_existing_reasoning_effort() {
 }
 
 #[tokio::test]
-async fn spawn_session_without_api_key_starts() {
+async fn open_session_without_api_key_starts() {
     let tmp = tempdir::TempDir::new("app-first-run").unwrap();
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
-    let app = App::new(tmp.path());
-    let handle = app.spawn_session_in(&dir, None).await.unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let handle = app.open_session_in(&dir, None).await.unwrap();
     handle.shutdown().await;
 }
 
 #[tokio::test]
 async fn spawn_without_api_key_still_errors() {
     let tmp = tempdir::TempDir::new("app-headless-no-key").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     if !app.config().provider.needs_setup() {
         return;
     }
-    let err = match app.spawn().await {
+    let err = match app.open().await {
         Ok(_) => panic!("headless spawn should fail without an API key"),
         Err(e) => e,
     };
@@ -713,7 +712,7 @@ async fn spawn_without_api_key_still_errors() {
 #[tokio::test]
 async fn setup_slash_rejects_kind() {
     let tmp = tempdir::TempDir::new("app-runtime-setup-bad").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     let err = handle.prompt("/setup kind=chat").await.unwrap_err();
     assert!(err.to_string().contains("kind is no longer used"));
@@ -723,7 +722,7 @@ async fn setup_slash_rejects_kind() {
 #[tokio::test]
 async fn spawn_applies_configured_reasoning_effort() {
     let tmp = tempdir::TempDir::new("app-spawn-effort").unwrap();
-    let app = App::new(tmp.path()).with_config(AppConfig {
+    let app = AppBuilder::new(tmp.path()).with_config(AppConfig {
         provider: ProviderConfig {
             reasoning_effort: Some(oven_llm::ReasoningEffort::Medium),
             ..Default::default()
@@ -739,7 +738,7 @@ async fn spawn_applies_configured_reasoning_effort() {
 #[tokio::test]
 async fn session_persists_across_spawns() {
     let tmp = tempdir::TempDir::new("app-runtime-sess").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -776,7 +775,7 @@ async fn session_persists_across_spawns() {
 #[tokio::test]
 async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
     let tmp = tempdir::TempDir::new("app-runtime-resume-usage").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -843,7 +842,7 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
 #[tokio::test]
 async fn slash_clear_starts_new_session() {
     let tmp = tempdir::TempDir::new("app-runtime-clear").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -906,9 +905,9 @@ async fn slash_clear_starts_new_session() {
 }
 
 #[tokio::test]
-async fn spawn_session_creates_uuid_when_id_missing() {
+async fn open_session_creates_uuid_when_id_missing() {
     let tmp = tempdir::TempDir::new("app-tui-session").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -934,7 +933,7 @@ async fn spawn_session_creates_uuid_when_id_missing() {
 #[tokio::test]
 async fn fresh_session_without_messages_has_no_id_and_no_file() {
     let tmp = tempdir::TempDir::new("app-runtime-fresh").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -957,7 +956,7 @@ async fn fresh_session_without_messages_has_no_id_and_no_file() {
 #[tokio::test]
 async fn clear_without_new_messages_has_no_id_and_no_file() {
     let tmp = tempdir::TempDir::new("app-runtime-clear-empty").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -989,9 +988,9 @@ async fn clear_without_new_messages_has_no_id_and_no_file() {
 }
 
 #[tokio::test]
-async fn spawn_session_without_id_creates_uuid() {
+async fn open_session_without_id_creates_uuid() {
     let tmp = tempdir::TempDir::new("app-tui-session").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1016,9 +1015,9 @@ async fn spawn_session_without_id_creates_uuid() {
 }
 
 #[tokio::test]
-async fn spawn_session_resumes_existing_id() {
+async fn open_session_resumes_existing_id() {
     let tmp = tempdir::TempDir::new("app-tui-session").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1104,7 +1103,7 @@ async fn cancel_during_turn_returns_idle() {
     };
 
     let tmp = tempdir::TempDir::new("app-runtime-cancel").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
     handle
@@ -1183,7 +1182,7 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
     };
 
     let tmp = tempdir::TempDir::new("app-runtime-buffer").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
 
@@ -1225,7 +1224,7 @@ async fn session_persists_root_meta_and_recent_index() {
     use crate::session::{canonical_root, recent_session_id};
 
     let tmp = tempdir::TempDir::new("app-runtime-meta").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1258,7 +1257,7 @@ async fn clear_updates_recent_index_to_fresh_session() {
     use crate::session::recent_session_id;
 
     let tmp = tempdir::TempDir::new("app-runtime-recent-clear").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1313,7 +1312,7 @@ async fn wait_rewound(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
 #[tokio::test]
 async fn rewind_while_idle_emits_rewound_and_drops_last_exchange() {
     let tmp = tempdir::TempDir::new("app-runtime-rewind").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![
         text_response("one"),
         text_response("two"),
@@ -1354,7 +1353,7 @@ async fn rewind_while_idle_emits_rewound_and_drops_last_exchange() {
 #[tokio::test]
 async fn rewind_with_nothing_to_remove_emits_none() {
     let tmp = tempdir::TempDir::new("app-runtime-rewind-empty").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
@@ -1370,7 +1369,7 @@ async fn rewind_with_nothing_to_remove_emits_none() {
 #[tokio::test]
 async fn rewind_truncates_persisted_session_file() {
     let tmp = tempdir::TempDir::new("app-runtime-rewind-session").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1397,7 +1396,7 @@ async fn rewind_truncates_persisted_session_file() {
 #[tokio::test]
 async fn rewind_all_turns_clears_session_content() {
     let tmp = tempdir::TempDir::new("app-runtime-rewind-empty").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -1463,7 +1462,7 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
     };
 
     let tmp = tempdir::TempDir::new("app-runtime-rewind-queue").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
 
@@ -1629,7 +1628,7 @@ fn last_jsonl_line(path: &Path) -> String {
 #[tokio::test]
 async fn never_todo_write_session_has_no_todo_list_line() {
     let tmp = tempdir::TempDir::new("app-runtime-no-todo").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock = MockProvider::new(vec![text_response("one"), text_response("two")]);
@@ -1649,7 +1648,7 @@ async fn never_todo_write_session_has_no_todo_list_line() {
 #[tokio::test]
 async fn todo_write_appends_snapshot_without_advancing_prefix() {
     let tmp = tempdir::TempDir::new("app-runtime-todo-snap").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock = MockProvider::new(vec![
@@ -1734,7 +1733,7 @@ async fn cancel_does_not_roll_back_todos() {
         step: Mutex::new(0),
     };
     let tmp = tempdir::TempDir::new("app-runtime-todo-cancel").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let agent = app
         .build_agent_with_provider(Box::new(provider))
         .await
@@ -1795,7 +1794,7 @@ async fn cancel_does_not_roll_back_todos() {
 #[tokio::test]
 async fn rewind_restores_previous_todo_list() {
     let tmp = tempdir::TempDir::new("app-runtime-todo-rewind").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock = MockProvider::new(vec![
@@ -1869,7 +1868,7 @@ async fn rewind_restores_previous_todo_list() {
 #[tokio::test]
 async fn resume_hydrates_todos_from_snapshot() {
     let tmp = tempdir::TempDir::new("app-runtime-todo-hydrate").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock1 = MockProvider::new(vec![
@@ -1898,7 +1897,7 @@ async fn resume_hydrates_todos_from_snapshot() {
 #[tokio::test]
 async fn slash_clear_does_not_copy_todos_to_new_session() {
     let tmp = tempdir::TempDir::new("app-runtime-clear-todos").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock = MockProvider::new(vec![
@@ -1992,7 +1991,7 @@ fn assert_one_started_one_terminal(envs: &[&AgentEventEnvelope]) {
 #[tokio::test]
 async fn successful_turn_lifecycle_matches_invariants() {
     let tmp = tempdir::TempDir::new("app-runtime-lifecycle").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![text_response("hello")]);
     let handle = spawn_app(&app, Box::new(mock)).await;
     assert!(handle.state().phase.is_idle());
@@ -2056,7 +2055,7 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
         release: Mutex::new(Some(rx)),
     };
     let tmp = tempdir::TempDir::new("app-runtime-cancel-lifecycle").unwrap();
-    let app = App::new(tmp.path());
+    let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
     handle

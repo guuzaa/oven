@@ -1,23 +1,18 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use oven_agent::AgentError;
-use oven_agent::{Agent, Record, Skill, SkillReadTool, TodoWriteTool, Tool};
-#[cfg(test)]
-use oven_llm::Provider;
-use oven_llm::{Role, Router};
+use oven_agent::{AgentEvent, TodoList, TurnEvent};
+use oven_llm::{Message, Usage};
 use thiserror::Error;
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
-use crate::config::{AppConfig, ConfigError};
-use crate::dirs;
-use crate::event::AppId;
-use crate::handle::AppHandle;
-use crate::instructions::{InstructionDoc, load_instructions};
-use crate::mcp::McpRegistry;
-use crate::mcp::client::{DefaultMcpConnector, McpConnector};
-use crate::runtime::{hydrate_session, spawn_runtime};
-use crate::session::{Session, SessionError, canonical_root, default_sessions_dir};
-use crate::{SkillRegistry, ToolRegistry};
+use crate::builder::AppBuilder;
+use crate::command::AppCommand;
+use crate::config::{ConfigError, ProviderConfig};
+use crate::event::{AppEvent, AppEventKind, AppId, Subscribers};
+use crate::session::SessionError;
+use crate::state::AppState;
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -43,225 +38,177 @@ impl From<oven_llm::ProviderError> for AppError {
     }
 }
 
-/// App holds workspace context and resolves Provider + Agent runtime config
-/// from the layered config system.
 pub struct App {
+    id: AppId,
+    cmd_tx: mpsc::UnboundedSender<AppCommand>,
+    subscribers: Subscribers,
+    join: JoinHandle<()>,
+    slash_commands: Vec<(String, String)>,
     root: PathBuf,
-    config: AppConfig,
-    skills: SkillRegistry,
-    tools: ToolRegistry,
-    mcps: McpRegistry,
-    instructions: Vec<InstructionDoc>,
-    mcp_connector: Arc<dyn McpConnector>,
+    state: watch::Receiver<AppState>,
 }
 
 impl App {
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        let root = root.into();
+    pub fn builder(root: impl Into<PathBuf>) -> AppBuilder {
+        AppBuilder::new(root)
+    }
+
+    pub async fn open(root: impl Into<PathBuf>) -> Result<Self, AppError> {
+        let mut builder = Self::builder(root);
+        builder.load_config()?;
+        builder.open().await
+    }
+
+    pub async fn open_session(
+        root: impl Into<PathBuf>,
+        session_id: Option<&str>,
+    ) -> Result<Self, AppError> {
+        let mut builder = Self::builder(root);
+        builder.load_config()?;
+        builder.open_session(session_id).await
+    }
+
+    pub async fn query(
+        root: impl Into<PathBuf>,
+        prompt: impl Into<String>,
+    ) -> Result<String, AppError> {
+        let app = Self::open(root).await?;
+        let out = app.prompt(prompt).await;
+        app.shutdown().await;
+        out
+    }
+
+    pub(crate) fn new(
+        id: AppId,
+        cmd_tx: mpsc::UnboundedSender<AppCommand>,
+        subscribers: Subscribers,
+        join: JoinHandle<()>,
+        slash_commands: Vec<(String, String)>,
+        root: PathBuf,
+        state: watch::Receiver<AppState>,
+    ) -> Self {
         Self {
-            root: root.clone(),
-            config: AppConfig::default(),
-            skills: SkillRegistry::new(),
-            tools: ToolRegistry::from_config(root, &[]),
-            mcps: McpRegistry::new(),
-            instructions: Vec::new(),
-            mcp_connector: Arc::new(DefaultMcpConnector),
+            id,
+            cmd_tx,
+            subscribers,
+            join,
+            slash_commands,
+            root,
+            state,
         }
+    }
+
+    pub fn id(&self) -> AppId {
+        self.id
+    }
+
+    pub fn send(&self, cmd: AppCommand) -> Result<(), AppError> {
+        self.cmd_tx.send(cmd).map_err(|_| AppError::ChannelClosed)
+    }
+
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<AppEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.subscribers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(tx);
+        rx
+    }
+
+    pub fn slash_commands(&self) -> &[(String, String)] {
+        &self.slash_commands
+    }
+
+    pub fn state(&self) -> AppState {
+        self.state.borrow().clone()
+    }
+
+    pub fn watch_state(&self) -> watch::Receiver<AppState> {
+        self.state.clone()
+    }
+
+    pub fn model(&self) -> String {
+        self.state.borrow().model.clone()
+    }
+
+    pub fn provider_config(&self) -> ProviderConfig {
+        self.state.borrow().provider.clone()
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    pub fn config(&self) -> &AppConfig {
-        &self.config
+    pub fn history(&self) -> Vec<Message> {
+        self.state.borrow().history.clone()
     }
 
-    pub fn skills(&self) -> &SkillRegistry {
-        &self.skills
+    pub fn todos(&self) -> TodoList {
+        self.state.borrow().todos.clone()
     }
 
-    /// Register a skill module from code. Filesystem skills are discovered
-    /// automatically when config is applied; this is for programmatic skills.
-    /// Skills contribute system-prompt guidance only; they never mount tools
-    /// (see [`crate::tools::ToolRegistry`]).
-    pub fn register_skill(&mut self, skill: Box<dyn Skill>) {
-        self.skills.register(skill);
+    pub fn total_usage(&self) -> Usage {
+        self.state.borrow().usage
     }
 
-    pub fn tools(&self) -> &ToolRegistry {
-        &self.tools
+    pub fn session_id(&self) -> Option<String> {
+        self.state.borrow().session.id.clone()
     }
 
-    pub fn mcps(&self) -> &McpRegistry {
-        &self.mcps
-    }
+    pub async fn prompt(&self, input: impl Into<String>) -> Result<String, AppError> {
+        let mut rx = self.subscribe();
+        self.send(AppCommand::StartTurn {
+            input: input.into(),
+        })?;
 
-    /// Override how MCP servers are connected (used by tests).
-    pub fn with_mcp_connector(mut self, connector: Arc<dyn McpConnector>) -> Self {
-        self.mcp_connector = connector;
-        self
-    }
-
-    /// Load config from the bundled default locations: user-level
-    /// (`~/.oven/config.toml`, created as a template on first
-    /// run) then project-level (`.oven.toml` in the workspace root). After
-    /// loading, tools requested in `tools:` are mounted, MCP servers declared
-    /// under `mcps:` are registered, and skills are discovered from the
-    /// filesystem.
-    pub fn load_config(&mut self) -> Result<(), AppError> {
-        AppConfig::ensure_user_config()?;
-        let user = AppConfig::default_user_config_path();
-        let project = AppConfig::default_project_config_path(&self.root);
-        let cfg = AppConfig::load(user.as_deref(), Some(&project))?;
-        self.apply_config(cfg);
-        Ok(())
-    }
-
-    /// Use an explicit, already-loaded config (e.g. for tests).
-    pub fn with_config(mut self, config: AppConfig) -> Self {
-        self.apply_config(config);
-        self
-    }
-
-    fn apply_config(&mut self, mut config: AppConfig) {
-        config.provider.normalize();
-        self.tools = ToolRegistry::from_config(&self.root, &config.tools);
-        self.mcps = McpRegistry::new();
-        self.skills = SkillRegistry::new();
-        self.skills.load_from_dirs(&dirs::skill_dirs(&self.root));
-        self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root);
-
-        for (id, server) in &config.mcps {
-            let _ = self.mcps.register(id.clone(), server.clone());
+        let mut text = String::new();
+        let mut in_turn = false;
+        loop {
+            match rx.recv().await {
+                Some(AppEvent {
+                    kind: AppEventKind::Agent(env),
+                    ..
+                }) => match env.event {
+                    AgentEvent::Turn(TurnEvent::Started) => {
+                        in_turn = true;
+                        text.clear();
+                    }
+                    AgentEvent::Stream(oven_agent::StreamEvent::TextDelta { text: t }) => {
+                        text.push_str(&t);
+                    }
+                    AgentEvent::Turn(TurnEvent::Completed { .. }) => return Ok(text),
+                    AgentEvent::Turn(TurnEvent::Cancelled) => return Ok(text),
+                    AgentEvent::Turn(TurnEvent::Failed { error }) => {
+                        return Err(AppError::Runtime(error.message));
+                    }
+                    _ => {}
+                },
+                Some(AppEvent {
+                    kind: AppEventKind::Notification { text: t },
+                    ..
+                }) if !in_turn => return Ok(t),
+                Some(AppEvent {
+                    kind: AppEventKind::Error { message },
+                    ..
+                }) => return Err(AppError::Runtime(message)),
+                Some(AppEvent {
+                    kind: AppEventKind::Exited,
+                    ..
+                }) if !in_turn => {
+                    return Ok(if text.is_empty() {
+                        "goodbye".into()
+                    } else {
+                        text
+                    });
+                }
+                Some(_) => {}
+                None => return Err(AppError::ChannelClosed),
+            }
         }
-        let sources = Arc::new(
-            self.skills
-                .sources()
-                .into_iter()
-                .collect::<std::collections::BTreeMap<_, _>>(),
-        );
-        self.tools.register("read_skill", move || {
-            Box::new(SkillReadTool::new(sources.clone()))
-        });
-        self.config = config;
     }
 
-    fn build_router(&self) -> Result<Router, AppError> {
-        crate::provider::build_router(&self.config)
-    }
-
-    pub(crate) async fn build_agent(&self) -> Result<Agent, AppError> {
-        let model = self.config.provider.effective_model();
-        let agent = self.build_agent_with_router(self.build_router()?).await?;
-        Ok(agent.with_model(model))
-    }
-
-    pub(crate) async fn build_interactive_agent(&self) -> Result<Agent, AppError> {
-        let model = self.config.provider.effective_model();
-        let agent = self
-            .build_agent_with_router(crate::provider::build_interactive_router(&self.config)?)
-            .await?;
-        Ok(agent.with_model(model))
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn build_agent_with_provider(
-        &self,
-        provider: Box<dyn Provider>,
-    ) -> Result<Agent, AppError> {
-        let mut router = Router::new();
-        router.register(provider);
-        self.build_agent_with_router(router).await
-    }
-
-    pub(crate) async fn build_agent_with_router(&self, router: Router) -> Result<Agent, AppError> {
-        let mut tools = self.tools.merged_tools();
-        let mcp_tools = self
-            .mcp_connector
-            .connect(&self.mcps, &self.root)
-            .await
-            .map_err(AppError::Mcp)?;
-        tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
-        tools.push(Box::new(TodoWriteTool));
-        let mut agent = Agent::new(router, tools);
-        agent.set_system(crate::system::system_prompt(
-            &self.root,
-            &self.instructions,
-            self.skills.merged_system_prompt(),
-        ));
-        if let Some(effort) = self.config.provider.reasoning_effort {
-            agent.set_reasoning_effort(Some(effort));
-        }
-        Ok(agent)
-    }
-
-    /// Run a single chat turn with no persistence (via the app runtime channel API).
-    pub async fn query(&self, user: impl Into<String>) -> Result<String, AppError> {
-        let handle = self.spawn().await?;
-        let out = handle.prompt(user).await;
-        handle.shutdown().await;
-        out
-    }
-
-    /// Spawn a long-lived app task with no session persistence.
-    pub async fn spawn(&self) -> Result<AppHandle, AppError> {
-        let agent = self.build_agent().await?;
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            None,
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
-    }
-
-    /// Spawn with a persisted session under the platform data dir. `Some(id)`
-    /// resumes that session when its file exists; otherwise (or for `None`) a
-    /// new session is started with an auto-generated uuid v7 id that the
-    /// caller never has to provide.
-    pub async fn spawn_session(&self, session_id: Option<&str>) -> Result<AppHandle, AppError> {
-        let Some(dir) = default_sessions_dir() else {
-            let agent = self.build_interactive_agent().await?;
-            return Ok(spawn_runtime(
-                AppId::next(),
-                agent,
-                None,
-                self.root.clone(),
-                self.config.clone(),
-                AppConfig::default_user_config_path(),
-            ));
-        };
-        self.spawn_session_in(&dir, session_id).await
-    }
-
-    /// Same as [`App::spawn_session`] with an explicit sessions directory.
-    pub(crate) async fn spawn_session_in(
-        &self,
-        sessions_dir: &Path,
-        session_id: Option<&str>,
-    ) -> Result<AppHandle, AppError> {
-        let session = Session::resolve(sessions_dir, session_id)?;
-        let prior = session.load_records()?;
-        let mut agent = self.build_interactive_agent().await?;
-        let records: Vec<_> = prior
-            .iter()
-            .filter(
-                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
-            )
-            .cloned()
-            .collect();
-        agent.restore_history(records);
-        hydrate_session(&mut agent, &prior);
-        agent.ensure_session_meta(canonical_root(&self.root));
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            Some(session),
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
+    pub async fn shutdown(self) {
+        let _ = self.cmd_tx.send(AppCommand::Shutdown);
+        let _ = self.join.await;
     }
 }

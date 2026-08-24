@@ -1,9 +1,9 @@
 mod app;
+mod builder;
 mod command;
 pub mod config;
 pub mod dirs;
 mod event;
-mod handle;
 mod instructions;
 pub mod mcp;
 mod mention;
@@ -17,9 +17,9 @@ mod tools;
 mod turn;
 
 pub use app::{App, AppError};
+pub use builder::AppBuilder;
 pub use command::AppCommand;
 pub use event::{AppEvent, AppEventKind, AppId};
-pub use handle::AppHandle;
 pub use mcp::McpServerConfig;
 pub use mention::FileMentions;
 pub use oven_agent::{
