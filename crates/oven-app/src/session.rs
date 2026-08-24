@@ -77,6 +77,18 @@ impl Session {
         })
     }
 
+    pub fn resolve(dir: &Path, id: Option<&str>) -> Result<Self, SessionError> {
+        if let Some(id) = id {
+            let candidate = Self::open(dir, id)?;
+            if candidate.path().exists() {
+                return Ok(candidate);
+            }
+        }
+
+        let uuid = uuid::Uuid::now_v7().to_string();
+        Self::open(dir, &uuid)
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }

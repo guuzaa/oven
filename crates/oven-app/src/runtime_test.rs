@@ -913,7 +913,7 @@ async fn spawn_session_creates_uuid_when_id_missing() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one")]);
-    let session = resolve_session(&dir, Some("missing")).unwrap();
+    let session = Session::resolve(&dir, Some("missing")).unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert!(handle.history().is_empty(), "fresh session has no history");
     assert_eq!(handle.prompt("hello").await.unwrap(), "one");
@@ -939,7 +939,7 @@ async fn fresh_session_without_messages_has_no_id_and_no_file() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![]);
-    let session = resolve_session(&dir, None).unwrap();
+    let session = Session::resolve(&dir, None).unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert!(
         handle.session_id().is_none(),
@@ -996,7 +996,7 @@ async fn spawn_session_without_id_creates_uuid() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one")]);
-    let session = resolve_session(&dir, None).unwrap();
+    let session = Session::resolve(&dir, None).unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("hi").await.unwrap(), "one");
     let sid = handle.session_id().expect("session id present");
@@ -1029,7 +1029,7 @@ async fn spawn_session_resumes_existing_id() {
     handle.shutdown().await;
 
     let mock2 = MockProvider::new(vec![text_response("two")]);
-    let session = resolve_session(&dir, Some("s1")).unwrap();
+    let session = Session::resolve(&dir, Some("s1")).unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
     assert_eq!(handle.session_id().as_deref(), Some("s1"));
     let resumed = handle.history();
@@ -1230,7 +1230,7 @@ async fn session_persists_root_meta_and_recent_index() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one")]);
-    let session = resolve_session(&dir, None).unwrap();
+    let session = Session::resolve(&dir, None).unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("hi").await.unwrap(), "one");
     let sid = handle.session_id().expect("session id after content");

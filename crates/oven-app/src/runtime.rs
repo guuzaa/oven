@@ -9,7 +9,6 @@ use oven_llm::{
 };
 use tokio::sync::{mpsc, watch};
 
-use crate::AppError;
 use crate::command::AppCommand;
 use crate::config::{AppConfig, ProviderConfig};
 use crate::event::{AppEvent, AppEventKind, AppId, Subscribers};
@@ -380,28 +379,6 @@ impl Runtime {
 
 pub(crate) fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
     agent.set_todos(restore_todos(prior, agent.history()));
-}
-
-pub(crate) fn resolve_session(
-    sessions_dir: &Path,
-    session_id: Option<&str>,
-) -> Result<Session, AppError> {
-    let session = match session_id {
-        Some(id) => {
-            let candidate = Session::open(sessions_dir, id)?;
-            if candidate.path().exists() {
-                candidate
-            } else {
-                let uuid = uuid::Uuid::now_v7().to_string();
-                Session::open(sessions_dir, &uuid)?
-            }
-        }
-        None => {
-            let uuid = uuid::Uuid::now_v7().to_string();
-            Session::open(sessions_dir, &uuid)?
-        }
-    };
-    Ok(session)
 }
 
 pub(crate) fn spawn_runtime(

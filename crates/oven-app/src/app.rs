@@ -15,8 +15,8 @@ use crate::handle::AppHandle;
 use crate::instructions::{InstructionDoc, load_instructions};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
-use crate::runtime::{hydrate_session, resolve_session, spawn_runtime};
-use crate::session::{SessionError, canonical_root, default_sessions_dir};
+use crate::runtime::{hydrate_session, spawn_runtime};
+use crate::session::{Session, SessionError, canonical_root, default_sessions_dir};
 use crate::{SkillRegistry, ToolRegistry};
 
 #[derive(Debug, Error)]
@@ -275,7 +275,7 @@ impl App {
         sessions_dir: &Path,
         session_id: Option<&str>,
     ) -> Result<AppHandle, AppError> {
-        let session = resolve_session(sessions_dir, session_id)?;
+        let session = Session::resolve(sessions_dir, session_id)?;
         let prior = session.load_records()?;
         let mut agent = self.build_interactive_agent().await?;
         let records: Vec<_> = prior
