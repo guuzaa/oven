@@ -76,29 +76,6 @@ fn scan(root: &Path) -> Vec<String> {
 }
 
 #[cfg(test)]
-fn rank(files: &[String], query: &str, limit: usize) -> Vec<String> {
-    use nucleo_matcher::Matcher;
-    use nucleo_matcher::pattern::{AtomKind, Pattern};
-
-    if query.is_empty() {
-        return files.iter().take(limit).cloned().collect();
-    }
-    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-    let pattern = Pattern::new(
-        query,
-        CaseMatching::Smart,
-        Normalization::Smart,
-        AtomKind::Fuzzy,
-    );
-    pattern
-        .match_list(files.iter().map(|s| s.as_str()), &mut matcher)
-        .into_iter()
-        .take(limit)
-        .map(|(s, _)| s.to_string())
-        .collect()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -130,31 +107,17 @@ mod tests {
         assert!(files.contains(&"src/lib.rs".into()), "{files:?}");
         assert!(!files.contains(&"skip.txt".into()), "{files:?}");
         assert!(!files.iter().any(|p| p.ends_with(".secret")), "{files:?}");
+
+        let mut mentions = FileMentions::open(root);
+        assert_eq!(1, mentions.search("lib").len());
+        assert_eq!(1, mentions.search("slr").len());
+        assert_eq!(1, mentions.search("txt").len());
+        assert!(mentions.search("skip.txt").is_empty());
     }
 
     #[test]
     fn scan_missing_root_is_empty() {
         assert!(scan(Path::new("/no/such/oven-mention-root")).is_empty());
-    }
-
-    #[test]
-    fn rank_empty_query_preserves_order() {
-        let files = vec!["a.rs".into(), "b.rs".into(), "c.rs".into()];
-        assert_eq!(rank(&files, "", 2), vec!["a.rs", "b.rs"]);
-    }
-
-    #[test]
-    fn rank_fuzzy_prefers_path_match() {
-        let files = vec!["README.md".into(), "src/app.rs".into(), "src/lib.rs".into()];
-        let hits = rank(&files, "lib", 10);
-        assert_eq!(hits[0], "src/lib.rs");
-        assert!(!hits.iter().any(|p| p == "README.md"));
-    }
-
-    #[test]
-    fn rank_no_match_is_empty() {
-        let files = vec!["src/lib.rs".into()];
-        assert!(rank(&files, "zzzz", 10).is_empty());
     }
 
     #[test]
