@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use ignore::WalkBuilder;
 use nucleo::{Nucleo, Utf32String};
 use nucleo_matcher::Config;
 use nucleo_matcher::pattern::{CaseMatching, Normalization};
@@ -56,7 +55,7 @@ fn scan(root: &Path) -> Vec<String> {
         return Vec::new();
     }
     let mut files = Vec::new();
-    for entry in WalkBuilder::new(root).require_git(false).build() {
+    for entry in oven_agent::walk_dir(root) {
         let Ok(entry) = entry else {
             continue;
         };
@@ -94,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_skips_gitignore_and_hidden() {
+    fn scan_skips_gitignore_keeps_dot_dirs() {
         let tmp = tmp_dir();
         let root = tmp.path();
         write(root, "keep.txt", "x");
@@ -102,17 +101,32 @@ mod tests {
         write(root, ".gitignore", "skip.txt\n");
         write(root, "skip.txt", "x");
         write(root, ".secret", "x");
+        write(root, ".github/ci.yml", "x");
         let files = scan(root);
         assert!(files.contains(&"keep.txt".into()), "{files:?}");
         assert!(files.contains(&"src/lib.rs".into()), "{files:?}");
+        assert!(files.contains(&".secret".into()), "{files:?}");
+        assert!(files.contains(&".github/ci.yml".into()), "{files:?}");
         assert!(!files.contains(&"skip.txt".into()), "{files:?}");
-        assert!(!files.iter().any(|p| p.ends_with(".secret")), "{files:?}");
 
         let mut mentions = FileMentions::open(root);
         assert_eq!(1, mentions.search("lib").len());
         assert_eq!(1, mentions.search("slr").len());
-        assert_eq!(1, mentions.search("txt").len());
         assert!(mentions.search("skip.txt").is_empty());
+        assert_eq!(1, mentions.search("ci.yml").len());
+    }
+
+    #[test]
+    fn scan_skips_dot_dirs_without_gitignore() {
+        let tmp = tmp_dir();
+        let root = tmp.path();
+        write(root, "keep.txt", "x");
+        write(root, ".secret", "x");
+        write(root, ".hidden/x.txt", "x");
+        let files = scan(root);
+        assert!(files.contains(&"keep.txt".into()), "{files:?}");
+        assert!(files.contains(&".secret".into()), "{files:?}");
+        assert!(!files.contains(&".hidden/x.txt".into()), "{files:?}");
     }
 
     #[test]

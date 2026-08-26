@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use globset::Glob;
-use ignore::WalkBuilder;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, require_str, resolve_within};
 use crate::error::AgentError;
+use crate::walk::walk_dir;
 
 pub struct GlobTool {
     root: PathBuf,
@@ -76,7 +76,7 @@ impl Tool for GlobTool {
             .unwrap_or(self.max_results);
 
         let mut matches = Vec::new();
-        for entry in WalkBuilder::new(&base).require_git(false).build() {
+        for entry in walk_dir(&base) {
             if matches.len() >= limit {
                 break;
             }
@@ -147,13 +147,30 @@ mod tests {
         write(root, "keep.txt", "x");
         write(root, ".gitignore", "skip.txt\n");
         write(root, "skip.txt", "x");
+        write(root, ".github/keep.txt", "x");
         let glob = GlobTool::new(root);
         let out = glob
             .run(&json!({"pattern": "**/*.txt"}), None)
             .await
             .unwrap();
         assert!(out.contains("keep.txt"), "{out}");
+        assert!(out.contains(".github/keep.txt"), "{out}");
         assert!(!out.contains("skip.txt"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn skips_dot_dirs_without_gitignore() {
+        let tmp = tmp_dir();
+        let root = tmp.path();
+        write(root, "keep.txt", "x");
+        write(root, ".hidden/x.txt", "x");
+        let glob = GlobTool::new(root);
+        let out = glob
+            .run(&json!({"pattern": "**/*.txt"}), None)
+            .await
+            .unwrap();
+        assert!(out.contains("keep.txt"), "{out}");
+        assert!(!out.contains(".hidden"), "{out}");
     }
 
     #[tokio::test]

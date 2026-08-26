@@ -10,6 +10,7 @@ mod skills;
 mod todo;
 mod tools;
 mod turn;
+mod walk;
 
 pub use agent::Agent;
 pub use error::AgentError;
@@ -29,3 +30,4 @@ pub use tools::{
     GrepTool, SkillReadTool, TodoWriteTool, Tool, ToolCaps, ToolView, present_tool,
 };
 pub use turn::{TurnContext, TurnOutput};
+pub use walk::walk_dir;

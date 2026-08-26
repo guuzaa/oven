@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use globset::Glob;
-use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, require_str, resolve_within};
 use crate::error::AgentError;
+use crate::walk::walk_dir;
 
 pub struct GrepTool {
     root: PathBuf,
@@ -105,7 +105,7 @@ impl Tool for GrepTool {
             let rel = base.strip_prefix(&self.root).unwrap_or(&base);
             self.grep_file(&base, rel, &re, include.as_ref(), &mut out, limit)?;
         } else {
-            for entry in WalkBuilder::new(&base).require_git(false).build() {
+            for entry in walk_dir(&base) {
                 if out.len() >= limit {
                     break;
                 }
@@ -244,6 +244,22 @@ mod tests {
         write(root, "ignored.txt", "needle\n");
         std::fs::write(root.join("bin.dat"), b"needle\x00\xff").unwrap();
         write(root, "real.txt", "needle\n");
+        write(root, ".github/ci.yml", "needle\n");
+        let grep = GrepTool::new(root);
+        let out = grep.run(&json!({"pattern": "needle"}), None).await.unwrap();
+        let lines: Vec<_> = out.lines().collect();
+        assert!(lines.contains(&"real.txt:1:needle"), "{out}");
+        assert!(lines.contains(&".github/ci.yml:1:needle"), "{out}");
+        assert!(!out.contains("ignored.txt"), "{out}");
+        assert_eq!(lines.len(), 2, "{out}");
+    }
+
+    #[tokio::test]
+    async fn skips_dot_dirs_without_gitignore() {
+        let tmp = tmp_dir();
+        let root = tmp.path();
+        write(root, "real.txt", "needle\n");
+        write(root, ".hidden/x.txt", "needle\n");
         let grep = GrepTool::new(root);
         let out = grep.run(&json!({"pattern": "needle"}), None).await.unwrap();
         assert_eq!(out, "real.txt:1:needle");
