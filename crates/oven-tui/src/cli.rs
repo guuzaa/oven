@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use oven_app::{App, AppBuilder};
+use oven_app::{App, AppBuilder, dirs, session};
 
 use crate::ui::Ui;
 
@@ -38,8 +38,8 @@ impl Cli {
         if !self.r#continue {
             return None;
         }
-        let dir = oven_app::session::default_sessions_dir()?;
-        match oven_app::session::recent_session_id(&dir, &self.dir) {
+        let dir = dirs::sessions_dir()?;
+        match session::recent_session_id(&dir, &self.dir) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("warning: resolving recent session: {e}");

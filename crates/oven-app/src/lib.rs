@@ -4,15 +4,14 @@ mod command;
 pub mod config;
 pub mod dirs;
 mod event;
-mod instructions;
 pub mod mcp;
 mod mention;
+mod prompt_template;
 mod provider;
 mod runtime;
 pub mod session;
 mod slash;
 mod state;
-mod system;
 mod tools;
 mod turn;
 

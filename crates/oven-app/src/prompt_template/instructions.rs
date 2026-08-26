@@ -33,7 +33,7 @@ pub struct InstructionDoc {
 /// Load every existing, non-empty instruction document in discovery order:
 /// user config dir first, then the workspace root; within a dir `AGENTS.md`
 /// before `CLAUDE.md`. Missing or unreadable files are skipped silently.
-pub(crate) fn load_instructions(config_home: Option<&Path>, root: &Path) -> Vec<InstructionDoc> {
+pub fn load_instructions(config_home: Option<&Path>, root: &Path) -> Vec<InstructionDoc> {
     let mut docs = Vec::new();
     if let Some(home) = config_home {
         docs.extend(load_from_dir(home, InstructionScope::Global));

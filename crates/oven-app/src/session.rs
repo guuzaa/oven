@@ -33,14 +33,10 @@ pub enum SessionError {
     BadId(String),
 }
 
-/// Where sessions are stored. Defaults to `~/.oven/sessions/`.
-pub fn default_sessions_dir() -> Option<PathBuf> {
-    crate::dirs::sessions_dir()
-}
-
 /// Absolute, symlink-resolved form of a workspace root, falling back to the
 /// raw path when canonicalization fails. Used as the key for both the session
 /// meta record and the `cwd_latest.json` index so they match.
+#[inline]
 pub fn canonical_root(root: &Path) -> String {
     root.canonicalize()
         .unwrap_or_else(|_| root.to_path_buf())

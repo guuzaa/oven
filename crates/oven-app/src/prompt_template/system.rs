@@ -1,11 +1,11 @@
 use std::path::Path;
 
-use crate::instructions::InstructionDoc;
+use super::instructions::InstructionDoc;
 use crate::session::canonical_root;
 
 const BASE_PROMPT: &str = include_str!("system_prompt.md");
 
-pub(crate) fn system_prompt(
+pub fn system_prompt(
     root: &Path,
     instructions: &[InstructionDoc],
     skills: Option<String>,
@@ -65,7 +65,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use crate::instructions::{InstructionScope, load_instructions};
+    use crate::prompt_template::instructions::{InstructionScope, load_instructions};
 
     #[test]
     fn system_prompt_includes_bundled_markdown() {

@@ -11,11 +11,11 @@ use crate::AppError;
 use crate::config::AppConfig;
 use crate::dirs;
 use crate::event::AppId;
-use crate::instructions::{InstructionDoc, load_instructions};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
+use crate::prompt_template::{InstructionDoc, load_instructions, system_prompt};
 use crate::runtime::{hydrate_session, spawn_runtime};
-use crate::session::{Session, canonical_root, default_sessions_dir};
+use crate::session::{Session, canonical_root};
 use crate::{SkillRegistry, ToolRegistry};
 
 pub struct AppBuilder {
@@ -158,7 +158,7 @@ impl AppBuilder {
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
         tools.push(Box::new(TodoWriteTool));
         let mut agent = Agent::new(router, tools);
-        agent.set_system(crate::system::system_prompt(
+        agent.set_system(system_prompt(
             &self.root,
             &self.instructions,
             self.skills.merged_system_prompt(),
@@ -187,7 +187,7 @@ impl AppBuilder {
     /// new session is started with an auto-generated uuid v7 id that the
     /// caller never has to provide.
     pub async fn open_session(&self, session_id: Option<&str>) -> Result<App, AppError> {
-        let Some(dir) = default_sessions_dir() else {
+        let Some(dir) = dirs::sessions_dir() else {
             let agent = self.build_interactive_agent().await?;
             return Ok(spawn_runtime(
                 AppId::next(),
