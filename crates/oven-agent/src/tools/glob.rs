@@ -154,6 +154,9 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("keep.txt"), "{out}");
+        #[cfg(windows)]
+        assert!(out.contains(r".github\keep.txt"), "{out}");
+        #[cfg(not(windows))]
         assert!(out.contains(".github/keep.txt"), "{out}");
         assert!(!out.contains("skip.txt"), "{out}");
     }

@@ -249,6 +249,9 @@ mod tests {
         let out = grep.run(&json!({"pattern": "needle"}), None).await.unwrap();
         let lines: Vec<_> = out.lines().collect();
         assert!(lines.contains(&"real.txt:1:needle"), "{out}");
+        #[cfg(windows)]
+        assert!(lines.contains(&r".github\ci.yml:1:needle"), "{out}");
+        #[cfg(not(windows))]
         assert!(lines.contains(&".github/ci.yml:1:needle"), "{out}");
         assert!(!out.contains("ignored.txt"), "{out}");
         assert_eq!(lines.len(), 2, "{out}");
