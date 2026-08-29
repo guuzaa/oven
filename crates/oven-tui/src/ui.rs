@@ -315,7 +315,6 @@ impl Ui {
             self.queue.height(&self.pending),
             self.todos.height(),
             self.input.overlay_height(),
-            self.status.reply_height(area.width),
         );
 
         self.transcript.draw(f, regions.transcript, &self.state);
@@ -335,9 +334,7 @@ impl Ui {
             &self.state,
             status_hint(self.input.overlay(), self.state.busy),
         );
-        if let Some(reply) = regions.reply {
-            self.status.draw_reply(f, reply);
-        }
+        self.status.draw_reply_overlay(f, regions.transcript);
     }
 
     fn wants_tick(&self) -> bool {

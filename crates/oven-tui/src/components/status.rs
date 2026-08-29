@@ -8,7 +8,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::component::{Component, KeyResult, State};
@@ -76,28 +76,50 @@ impl StatusBar {
         }
     }
 
-    pub fn reply_height(&self, width: u16) -> u16 {
-        match self.reply.as_deref() {
-            Some(text) if !text.is_empty() && width > 0 => {
-                wrap_text(text, width as usize).len() as u16
-            }
-            _ => 0,
-        }
-    }
-
-    pub fn draw_reply(&self, f: &mut Frame<'_>, area: Rect) {
-        if self.is_flashing() {
-            f.render_widget(Clear, area);
-            return;
-        }
+    pub fn draw_reply_overlay(&self, f: &mut Frame<'_>, area: Rect) {
         let Some(text) = self.reply.as_deref() else {
             return;
         };
-        let lines: Vec<Line> = wrap_text(text, area.width as usize)
+
+        if text.is_empty() || area.width < 8 || area.height < 3 {
+            return;
+        }
+
+        let max_width = area.width.min(60);
+        let inner_width = max_width.saturating_sub(4) as usize;
+        let lines = wrap_text(text, inner_width);
+        if lines.is_empty() {
+            return;
+        }
+
+        let text_width = lines
+            .iter()
+            .map(|line| line.width() as u16)
+            .max()
+            .unwrap_or(0);
+        let width = text_width.saturating_add(4).min(max_width);
+        let height = (lines.len() as u16 + 2).min(area.height);
+        let toast = Rect {
+            x: area.right().saturating_sub(width + 1),
+            y: area.bottom().saturating_sub(height + 1),
+            width,
+            height,
+        };
+
+        f.render_widget(Clear, toast);
+        if self.is_flashing() {
+            return;
+        }
+
+        let lines: Vec<Line> = lines
             .into_iter()
             .map(|s| Line::from(Span::styled(s, theme::reply())))
             .collect();
-        f.render_widget(Paragraph::new(lines), area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(theme::border_type())
+            .border_style(theme::reply());
+        f.render_widget(Paragraph::new(lines).block(block), toast);
     }
 
     pub fn clear_reply(&mut self) {
@@ -422,13 +444,10 @@ mod tests {
     }
 
     #[test]
-    fn reply_event_sets_reply_and_height() {
+    fn reply_event_sets_reply() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        assert_eq!(bar.reply_height(80), 0);
         bar.on_event(&AppEvent::notification("current model: gpt-4o"));
         assert_eq!(bar.reply.as_deref(), Some("current model: gpt-4o"));
-        assert_eq!(bar.reply_height(80), 1);
-        assert_eq!(bar.reply_height(8), 3);
         assert!(bar.has_reply());
         assert!(!bar.expire_reply());
     }
@@ -437,25 +456,20 @@ mod tests {
         AppEvent::notification(text)
     }
 
-    fn draw_reply_row(bar: &StatusBar) -> (String, Option<ratatui::style::Color>) {
+    fn draw_reply_overlay_buffer(bar: &StatusBar) -> ratatui::buffer::Buffer {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        use ratatui::layout::{Constraint, Direction, Layout};
 
-        let backend = TestBackend::new(40, 2);
+        let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Length(1)])
-                    .split(f.area());
-                bar.draw_reply(f, chunks[1]);
-            })
+            .draw(|f| bar.draw_reply_overlay(f, f.area()))
             .unwrap();
-        let buf = terminal.backend().buffer();
-        let row: String = (0..40).map(|x| buf[(x, 1)].symbol().to_string()).collect();
-        (row, buf[(0, 1)].style().fg)
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
+        buf.content().iter().map(|cell| cell.symbol()).collect()
     }
 
     #[test]
@@ -464,8 +478,29 @@ mod tests {
         bar.on_event(&notify("Copied!"));
         assert!(!bar.is_flashing());
         assert!(bar.has_reply());
-        let (row, _) = draw_reply_row(&bar);
-        assert!(row.contains("Copied!"), "reply row was {row:?}");
+        let buf = draw_reply_overlay_buffer(&bar);
+        assert!(buffer_text(&buf).contains("Copied!"));
+        assert_eq!(buf[(28, 2)].symbol(), "╭");
+        assert_eq!(buf[(38, 2)].symbol(), "╮");
+        assert_eq!(
+            buf[(30, 3)].style().fg,
+            Some(ratatui::style::Color::Rgb(255, 140, 0))
+        );
+    }
+
+    #[test]
+    fn new_notify_replaces_previous_notify() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        bar.on_event(&notify("Copied!"));
+        bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
+        bar.on_event(&notify("Model changed"));
+
+        assert_eq!(bar.reply.as_deref(), Some("Model changed"));
+        assert!(bar.is_flashing());
+        bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
+        let text = buffer_text(&draw_reply_overlay_buffer(&bar));
+        assert!(!text.contains("Copied!"));
+        assert!(text.contains("Model changed"));
     }
 
     #[test]
@@ -475,19 +510,17 @@ mod tests {
         bar.on_event(&notify("Copied!"));
         assert!(bar.is_flashing());
         assert!(bar.has_reply());
-        assert_eq!(bar.reply_height(80), 1);
-
-        let (row, _) = draw_reply_row(&bar);
-        assert!(
-            !row.contains("Copied!"),
-            "flash should hide the reply, got {row:?}"
-        );
+        let buf = draw_reply_overlay_buffer(&bar);
+        assert!(!buffer_text(&buf).contains("Copied!"));
 
         bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
         assert!(!bar.is_flashing());
-        let (row, fg) = draw_reply_row(&bar);
-        assert!(row.contains("Copied!"), "reply should return, got {row:?}");
-        assert_eq!(fg, Some(ratatui::style::Color::Rgb(255, 140, 0)));
+        let buf = draw_reply_overlay_buffer(&bar);
+        assert!(buffer_text(&buf).contains("Copied!"));
+        assert_eq!(
+            buf[(30, 3)].style().fg,
+            Some(ratatui::style::Color::Rgb(255, 140, 0))
+        );
     }
 
     #[test]
@@ -591,36 +624,20 @@ mod tests {
     }
 
     #[test]
-    fn reply_paints_orange_on_the_row_below_status() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        use ratatui::layout::{Constraint, Direction, Layout};
+    fn reply_overlay_paints_orange_with_rounded_border() {
         use ratatui::style::Color;
 
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let state = State::new();
         bar.on_event(&AppEvent::notification("current model: gpt-4o"));
+        let buf = draw_reply_overlay_buffer(&bar);
+        let text = buffer_text(&buf);
 
-        let backend = TestBackend::new(40, 3);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Length(1)])
-                    .split(f.area());
-                bar.draw_bar(f, chunks[0], &state, StatusHint::Idle);
-                bar.draw_reply(f, chunks[1]);
-            })
-            .unwrap();
-
-        let buf = terminal.backend().buffer();
-        let row: String = (0..40).map(|x| buf[(x, 1)].symbol().to_string()).collect();
-        assert!(
-            row.contains("current model: gpt-4o"),
-            "reply row was {row:?}"
-        );
-        assert_eq!(buf[(0, 1)].style().fg, Some(Color::Rgb(255, 140, 0)));
+        assert!(text.contains("current model: gpt-4o"));
+        assert!(text.contains("╭"));
+        assert!(text.contains("╰"));
+        assert!(buf.content().iter().any(|cell| {
+            cell.symbol() == "c" && cell.style().fg == Some(Color::Rgb(255, 140, 0))
+        }));
     }
 
     #[test]
