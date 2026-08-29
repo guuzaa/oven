@@ -33,8 +33,9 @@ impl Tool for FileReadTool {
         Self::view_input(input)
     }
     fn description(&self) -> &str {
-        "Read the contents of a UTF-8 text file as a string. Optionally restrict \
-         to a range of lines with `offset` (1-based) and `limit` to reduce output."
+        "Read a UTF-8 text file. Returns selected source lines with their 1-based \
+         line numbers in the format `L<line>→<content>`, along with the file path \
+         and returned line range. Optionally restrict the range with `offset` and `limit`."
     }
     fn schema(&self) -> Value {
         json!({
@@ -71,10 +72,21 @@ impl Tool for FileReadTool {
             Some(n) if n > 0 => start.saturating_add(n as usize).min(total),
             _ => total,
         };
-        if start >= total {
-            return Ok(String::new());
+        let range = if start < end {
+            format!("{}-{}", start + 1, end)
+        } else {
+            "empty".to_string()
+        };
+        let mut output = format!("file: {path_str}\nlines: {range}\n");
+        if start >= end || content.is_empty() {
+            return Ok(output);
         }
-        Ok(lines[start..end].concat())
+
+        output.push('\n');
+        for (index, line) in lines[start..end].iter().enumerate() {
+            output.push_str(&format!("L{}→{}", start + index + 1, line));
+        }
+        Ok(output)
     }
 }
 
@@ -108,7 +120,7 @@ mod tests {
             .run(&json!({"path": "r.txt", "offset": 2, "limit": 2}), None)
             .await
             .unwrap();
-        assert_eq!(out, "l2\nl3\n");
+        assert_eq!(out, "file: r.txt\nlines: 2-3\n\nL2→l2\nL3→l3\n");
     }
 
     #[tokio::test]
@@ -121,7 +133,7 @@ mod tests {
             .run(&json!({"path": "r.txt", "offset": 99, "limit": 5}), None)
             .await
             .unwrap();
-        assert_eq!(out, "");
+        assert_eq!(out, "file: r.txt\nlines: empty\n");
     }
 
     #[tokio::test]
@@ -131,7 +143,7 @@ mod tests {
         std::fs::write(&path, "one\ntwo").unwrap();
         let read = FileReadTool::new(tmp.path());
         let out = read.run(&json!({"path": "r.txt"}), None).await.unwrap();
-        assert_eq!(out, "one\ntwo");
+        assert_eq!(out, "file: r.txt\nlines: 1-2\n\nL1→one\nL2→two");
     }
 
     #[tokio::test]
@@ -144,6 +156,6 @@ mod tests {
             .run(&json!({"path": "r.txt", "offset": 2}), None)
             .await
             .unwrap();
-        assert_eq!(out, "l2\nl3\nl4\n");
+        assert_eq!(out, "file: r.txt\nlines: 2-4\n\nL2→l2\nL3→l3\nL4→l4\n");
     }
 }

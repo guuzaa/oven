@@ -711,7 +711,7 @@ mod tests {
             AgentEvent::Tool(ToolEvent::Finished {
                 result: ToolResult::Success { output },
                 ..
-            }) if output == "hello world"
+            }) if output == "file: note.txt\nlines: 1-1\n\nL1→hello world"
         )));
         assert!(events.iter().any(|e| matches!(
             e,

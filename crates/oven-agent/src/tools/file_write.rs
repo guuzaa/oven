@@ -94,6 +94,9 @@ mod tests {
         assert!(out.contains("wrote"));
         let read = FileReadTool::new(root);
         let content = read.run(&json!({"path": "hello.txt"}), None).await.unwrap();
-        assert_eq!(content, "line one\nline two");
+        assert_eq!(
+            content,
+            "file: hello.txt\nlines: 1-2\n\nL1→line one\nL2→line two"
+        );
     }
 }
