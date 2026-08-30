@@ -97,8 +97,11 @@ async fn mcp_connect_failure_propagates() {
     let cfg: AppConfig = toml::from_str(
         r#"
 [provider]
+name = "openai"
+
+[providers.openai]
 model = "gpt-4o-mini"
-api_key = "x"
+api_key = "sk-placeholder"
 base_url = "http://127.0.0.1:1"
 
 [mcps.bad]
@@ -123,8 +126,11 @@ async fn mcp_http_invalid_header_rejected() {
     let cfg: AppConfig = toml::from_str(
         r#"
 [provider]
+name = "openai"
+
+[providers.openai]
 model = "gpt-4o-mini"
-api_key = "x"
+api_key = "sk-placeholder"
 base_url = "http://127.0.0.1:1"
 
 [mcps.test]

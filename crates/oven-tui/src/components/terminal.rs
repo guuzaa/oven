@@ -20,7 +20,9 @@ pub fn setup() -> io::Result<Terminal<CrosstermBackend<Stdout>>> {
         EnableBracketedPaste
     )?;
     let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend)
+    let mut terminal = Terminal::new(backend)?;
+    terminal.hide_cursor()?;
+    Ok(terminal)
 }
 
 pub fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {

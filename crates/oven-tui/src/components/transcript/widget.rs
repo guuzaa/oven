@@ -686,6 +686,7 @@ impl Component for Transcript {
             }
         }
         if self.is_live_text()
+            && end == total
             && (state.frame / CARET_FRAMES).is_multiple_of(2)
             && let Some(last) = visible.last_mut()
         {

@@ -350,9 +350,6 @@ impl Component for InputView {
         self.textarea.set_style(Style::default());
         self.textarea.set_cursor_line_style(Style::default());
         f.render_widget(&self.textarea, chunks[1]);
-        if let Some(pos) = self.textarea.rendered_cursor_position() {
-            f.set_cursor_position(pos);
-        }
     }
 }
 
@@ -406,8 +403,6 @@ pub(crate) fn display_user_input(text: &str) -> String {
 fn draw_setup_prompt(f: &mut Frame<'_>, area: Rect, setup: &SetupWizard) {
     if let Some(value) = setup.prompt_value() {
         f.render_widget(Paragraph::new(Span::raw(value.clone())), area);
-        let col = (value.chars().count() as u16).min(area.width.saturating_sub(1));
-        f.set_cursor_position((area.x.saturating_add(col), area.y));
         return;
     }
     f.render_widget(
@@ -467,7 +462,7 @@ fn draw_composer_border(f: &mut Frame<'_>, area: Rect, style: Style) -> Rect {
 fn new_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
     ta.set_cursor_line_style(Style::default());
-    ta.set_cursor_render_mode(CursorRenderMode::Hidden);
+    ta.set_cursor_render_mode(CursorRenderMode::Cell);
     ta.set_placeholder_text("message…");
     ta.set_wrap_mode(WrapMode::WordOrGlyph);
     ta.set_min_rows(1);

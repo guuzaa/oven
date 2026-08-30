@@ -97,14 +97,16 @@ tools = ["file_read", "file_write", "bash"]
 
 [provider]
 name = "deepseek"
-model = "deepseek-v4-flash"
 
 [providers.deepseek]
+model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
 api_key = "sk-xxx"
+reasoning_effort = "high"
 
 [providers.xai]
 api_key = "xai-xxx"
+reasoning_effort = "low"
 ```
 
 - `tools` — capabilities the agent can invoke (`file_read`, `file_write`,

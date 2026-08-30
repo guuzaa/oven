@@ -3,6 +3,8 @@ use oven_app::{
     AgentEvent, AppEvent, StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, present_tool,
 };
 use oven_llm::{ContentBlock, Message};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -891,6 +893,36 @@ fn stream_text_caret_blinks() {
     };
     assert!(off.contains("hello"), "{off:?}");
     assert!(!off.contains("▊"), "caret off at frame 5: {off:?}");
+}
+
+#[test]
+fn scrolled_stream_does_not_draw_caret_on_history() {
+    let mut t = Transcript::new();
+    for i in 0..10 {
+        t.push_row(LineKind::Text, &format!("line {i}"));
+    }
+    t.push_stream(LineKind::Text, "hello");
+    let backend = TestBackend::new(20, 3);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    t.scroll_up(2);
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+
+    let visible: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        !visible.contains("▊"),
+        "history must not show stream caret: {visible:?}"
+    );
 }
 
 #[test]
