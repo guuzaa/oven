@@ -45,7 +45,7 @@ impl Ui {
             .root()
             .canonicalize()
             .unwrap_or_else(|_| app.root().to_owned());
-        let total_usage = app.total_usage();
+        let last_turn_usage = app.last_turn_usage();
         let todos = app.todos();
         let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
         if provider.needs_setup() {
@@ -59,7 +59,7 @@ impl Ui {
             rewinding: false,
             pending: Vec::new(),
             transcript: Transcript::new(),
-            status: StatusBar::new(model, &root, total_usage)
+            status: StatusBar::new(model, &root, last_turn_usage)
                 .with_effort(provider.reasoning_effort),
             input,
             queue: QueueWidget::new(),

@@ -32,19 +32,19 @@ pub struct StatusBar {
     model: String,
     effort: Option<ReasoningEffort>,
     root: String,
-    total: Usage,
+    usage: Usage,
     reply: Option<String>,
     reply_until: Option<Instant>,
     flash_until: Option<Instant>,
 }
 
 impl StatusBar {
-    pub fn new(model: impl Into<String>, root: &Path, total: Usage) -> Self {
+    pub fn new(model: impl Into<String>, root: &Path, usage: Usage) -> Self {
         Self {
             model: model.into(),
             effort: None,
             root: display_path(root),
-            total,
+            usage,
             reply: None,
             reply_until: None,
             flash_until: None,
@@ -159,7 +159,7 @@ impl StatusBar {
         spans.push(Span::styled(state.mode.label(), mode_style));
         spans.push(Span::styled(" · ", gray));
         spans.push(Span::styled(self.root.clone(), theme::path()));
-        spans.extend(usage_spans(&self.total, gray));
+        spans.extend(usage_spans(&self.usage, gray));
         let hint = match hint {
             StatusHint::Slash => "tab fill · enter · esc",
             StatusHint::Modal => "enter · esc",
@@ -192,12 +192,12 @@ impl Component for StatusBar {
         match &ev.kind {
             AppEventKind::Agent(env) => {
                 if let AgentEvent::Turn(TurnEvent::Completed { usage }) = &env.event {
-                    self.total = *usage;
+                    self.usage = *usage;
                 }
             }
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::UsageChanged { usage } => {
-                    self.total = *usage;
+                    self.usage = *usage;
                     self.clear_reply();
                 }
                 StateChange::HistoryChanged { .. } => {
@@ -230,8 +230,7 @@ impl Component for StatusBar {
 }
 
 /// Token-usage segment of the status row: empty while nothing has been
-/// recorded (all-zero `Usage`), otherwise a separator plus the formatted
-/// totals.
+/// recorded (all-zero `Usage`), otherwise a separator plus the last turn.
 fn usage_spans(total: &Usage, gray: Style) -> Vec<Span<'static>> {
     if *total == Usage::default() {
         Vec::new()
@@ -358,7 +357,7 @@ mod tests {
     #[test]
     fn history_cleared_resets_usage() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.total = Usage {
+        bar.usage = Usage {
             input_tokens: 1000,
             output_tokens: 2000,
             cache_read_tokens: 0,
@@ -367,7 +366,7 @@ mod tests {
         bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
             usage: Usage::default(),
         }));
-        assert_eq!(bar.total, Usage::default());
+        assert_eq!(bar.usage, Usage::default());
     }
 
     #[test]
@@ -382,13 +381,36 @@ mod tests {
         bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
             usage,
         })));
-        assert_eq!(bar.total, usage);
+        assert_eq!(bar.usage, usage);
+    }
+
+    #[test]
+    fn completed_replaces_usage_with_last_turn() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        })));
+        bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 8,
+                cache_read_tokens: 0,
+                reasoning_tokens: 0,
+            },
+        })));
+        assert_eq!(bar.usage.input_tokens, 20);
+        assert_eq!(bar.usage.output_tokens, 8);
     }
 
     #[test]
     fn rewound_syncs_token_usage() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.total = Usage {
+        bar.usage = Usage {
             input_tokens: 1000,
             output_tokens: 2000,
             cache_read_tokens: 0,
@@ -403,7 +425,7 @@ mod tests {
         bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
             usage,
         }));
-        assert_eq!(bar.total, usage);
+        assert_eq!(bar.usage, usage);
     }
 
     #[test]
@@ -440,7 +462,7 @@ mod tests {
             reasoning_tokens: 0,
         };
         let bar = StatusBar::new("m", Path::new("/tmp"), usage);
-        assert_eq!(bar.total, usage);
+        assert_eq!(bar.usage, usage);
     }
 
     #[test]

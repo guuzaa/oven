@@ -785,10 +785,18 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
     let handle = spawn_app_session(&app, Box::new(mock1), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
+    assert_eq!(
+        (
+            handle.last_turn_usage().input_tokens,
+            handle.last_turn_usage().output_tokens
+        ),
+        (10, 5)
+    );
     handle.shutdown().await;
 
     // The persisted file carries one TokenUsage record per turn; the
-    // cumulative sum survives the restart.
+    // cumulative sum survives the restart. The TUI status bar shows the
+    // last turn's record, not the session total.
     let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
     let persisted: Usage = records
         .iter()
@@ -798,20 +806,25 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
         })
         .fold(Usage::default(), |acc, u| acc + u);
     assert_eq!((persisted.input_tokens, persisted.output_tokens), (20, 10));
+    let last_persisted = records.iter().rev().find_map(|r| match r {
+        Record::TokenUsage { usage, .. } => Some(*usage),
+        _ => None,
+    });
+    assert_eq!(
+        last_persisted.map(|u| (u.input_tokens, u.output_tokens)),
+        Some((10, 5))
+    );
 
     // Second process: resume, then rewind the last exchange.
     let mock2 = MockProvider::new(vec![text_response("three")]);
     let session = Session::open(&dir, "s1").unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
-    // The restored cumulative usage is visible on the handle immediately,
-    // before any new turn completes (the TUI seeds its status bar from
-    // this snapshot).
     assert_eq!(
         (
-            handle.total_usage().input_tokens,
-            handle.total_usage().output_tokens
+            handle.last_turn_usage().input_tokens,
+            handle.last_turn_usage().output_tokens
         ),
-        (20, 10)
+        (10, 5)
     );
     let mut sub = handle.subscribe();
     handle.send(AppCommand::Rewind).unwrap();
@@ -819,22 +832,22 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
     assert_eq!(user_texts(&handle.history()), vec!["first"]);
     assert_eq!(
         (
-            handle.total_usage().input_tokens,
-            handle.total_usage().output_tokens
+            handle.last_turn_usage().input_tokens,
+            handle.last_turn_usage().output_tokens
         ),
         (10, 5)
     );
 
     assert_eq!(handle.prompt("third").await.unwrap(), "three");
-    handle.send(AppCommand::Rewind).unwrap();
-    wait_rewound(&mut sub).await;
     assert_eq!(
         (
-            handle.total_usage().input_tokens,
-            handle.total_usage().output_tokens
+            handle.last_turn_usage().input_tokens,
+            handle.last_turn_usage().output_tokens
         ),
         (10, 5)
     );
+    handle.send(AppCommand::Rewind).unwrap();
+    wait_rewound(&mut sub).await;
 
     handle.shutdown().await;
 }
@@ -1327,25 +1340,11 @@ async fn rewind_while_idle_emits_rewound_and_drops_last_exchange() {
     handle.send(AppCommand::Rewind).unwrap();
     wait_rewound(&mut sub).await;
     assert_eq!(user_texts(&handle.history()), vec!["first"]);
-    assert_eq!(
-        (
-            handle.total_usage().input_tokens,
-            handle.total_usage().output_tokens
-        ),
-        (10, 5)
-    );
 
     assert_eq!(handle.prompt("third").await.unwrap(), "three");
     handle.send(AppCommand::Rewind).unwrap();
     wait_rewound(&mut sub).await;
     assert_eq!(user_texts(&handle.history()), vec!["first"]);
-    assert_eq!(
-        (
-            handle.total_usage().input_tokens,
-            handle.total_usage().output_tokens
-        ),
-        (10, 5)
-    );
 
     handle.shutdown().await;
 }
@@ -1361,7 +1360,7 @@ async fn rewind_with_nothing_to_remove_emits_none() {
     handle.send(AppCommand::Rewind).unwrap();
     wait_rewound(&mut sub).await;
     assert!(handle.history().is_empty());
-    assert_eq!(handle.total_usage(), Usage::default());
+    assert_eq!(handle.last_turn_usage(), Usage::default());
 
     handle.shutdown().await;
 }
@@ -1499,7 +1498,7 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
         handle.history().is_empty(),
         "the whole exchange is rolled back"
     );
-    assert_eq!(handle.total_usage(), Usage::default());
+    assert_eq!(handle.last_turn_usage(), Usage::default());
     handle.shutdown().await;
 }
 

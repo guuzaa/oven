@@ -28,9 +28,6 @@ pub struct Agent {
     todos: TodoList,
     reasoning_effort: Option<ReasoningEffort>,
     max_iters: usize,
-    /// Soft budget on conversation tokens; oldest turns are dropped to stay
-    /// under it before each provider call.
-    budget: usize,
     todo_written_this_turn: bool,
     todo_dirty: bool,
 }
@@ -48,7 +45,6 @@ impl Agent {
             todos: TodoList::default(),
             reasoning_effort: None,
             max_iters: 100,
-            budget: 128_000,
             todo_written_this_turn: false,
             todo_dirty: false,
         }
@@ -124,12 +120,6 @@ impl Agent {
 
     pub fn with_max_iters(mut self, n: usize) -> Self {
         self.max_iters = n;
-        self
-    }
-
-    /// Set the soft token budget for conversation history.
-    pub fn with_budget(mut self, budget: usize) -> Self {
-        self.budget = budget;
         self
     }
 
@@ -401,17 +391,11 @@ impl Agent {
         self.todo_written_this_turn = false;
         let turn = async {
             self.history.push(Message::user_text(input));
-            self.budget = self
-                .router
-                .resolve_model(&self.model)
-                .map(|info| info.context_window as usize)
-                .unwrap_or(128_000);
 
             for _ in 0..self.max_iters {
-                self.history.trim_to_budget(self.budget);
                 match self.step(sink, ctx).await {
                     Ok(Some(final_text)) => {
-                        let usage = *self.total_usage();
+                        let usage = self.last_turn_usage();
                         sink.emit(AgentEvent::Turn(TurnEvent::Completed { usage }));
                         return Ok(TurnOutput {
                             response: Message::assistant_text(final_text),
@@ -447,9 +431,10 @@ impl Agent {
         result
     }
 
-    /// Cumulative token usage across all recorded responses.
-    pub fn total_usage(&self) -> &Usage {
-        self.history.total_usage()
+    /// Token usage of the last user turn.
+    #[inline]
+    pub fn last_turn_usage(&self) -> Usage {
+        self.history.last_turn_usage()
     }
 }
 
@@ -770,6 +755,32 @@ mod tests {
             sink.events.last(),
             Some(AgentEvent::Turn(TurnEvent::Completed { .. }))
         ));
+    }
+
+    #[tokio::test]
+    async fn completed_usage_is_the_last_turn_not_session_total() {
+        let mock = MockProvider::new(vec![text_response("one"), text_response("two")]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+        let mut sink = VecEventSink::default();
+        let out1 = run_with(&mut agent, "first", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(out1.usage.input_tokens, 10);
+
+        sink.events.clear();
+        let out2 = run_with(&mut agent, "second", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(out2.usage.input_tokens, 10);
+        assert_eq!(out2.usage.output_tokens, 5);
+        assert_eq!(agent.last_turn_usage().input_tokens, 10);
+        match sink.events.last() {
+            Some(AgentEvent::Turn(TurnEvent::Completed { usage })) => {
+                assert_eq!(usage.input_tokens, 10);
+                assert_eq!(usage.output_tokens, 5);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

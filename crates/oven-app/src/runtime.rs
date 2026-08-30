@@ -166,7 +166,7 @@ impl Runtime {
         self.state.reasoning_effort = self.agent.reasoning_effort();
         self.state.history = self.agent.history().cloned().collect();
         self.state.todos = self.agent.todos().clone();
-        self.state.usage = *self.agent.total_usage();
+        self.state.last_turn_usage = self.agent.last_turn_usage();
     }
 
     pub(crate) fn sync_session_id(&mut self) {
@@ -226,7 +226,7 @@ impl Runtime {
             todos: self.state.todos.clone(),
         });
         self.emit_state(StateChange::UsageChanged {
-            usage: self.state.usage,
+            usage: self.state.last_turn_usage,
         });
         self.emit_state(StateChange::SessionChanged {
             session_id: self.state.session.id.clone(),
@@ -348,7 +348,7 @@ impl Runtime {
         self.publish();
         self.emit_state(StateChange::TodosChanged { todos: restored });
         self.emit_state(StateChange::UsageChanged {
-            usage: self.state.usage,
+            usage: self.state.last_turn_usage,
         });
         self.emit_state(StateChange::HistoryChanged {
             revision: self.agent.history_revision(),
@@ -395,7 +395,7 @@ pub(crate) fn spawn_runtime(
     let slash_commands = SlashRegistry::with_builtin().commands();
     let history: Vec<Message> = agent.history().cloned().collect();
     let todos = agent.todos().clone();
-    let total_usage = *agent.total_usage();
+    let last_turn_usage = agent.last_turn_usage();
     let provider = config.provider.clone();
     let mode = agent.mode();
     let model = agent.model().to_string();
@@ -419,7 +419,7 @@ pub(crate) fn spawn_runtime(
         provider,
         history,
         todos,
-        usage: total_usage,
+        last_turn_usage,
         session: session_state,
         models: Vec::new(),
     };

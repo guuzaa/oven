@@ -12,7 +12,7 @@ pub struct AppState {
     pub provider: ProviderConfig,
     pub history: Vec<Message>,
     pub todos: TodoList,
-    pub usage: Usage,
+    pub last_turn_usage: Usage,
     pub session: SessionState,
     pub models: Vec<(String, String)>,
 }

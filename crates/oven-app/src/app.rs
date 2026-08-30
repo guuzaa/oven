@@ -147,8 +147,8 @@ impl App {
         self.state.borrow().todos.clone()
     }
 
-    pub fn total_usage(&self) -> Usage {
-        self.state.borrow().usage
+    pub fn last_turn_usage(&self) -> Usage {
+        self.state.borrow().last_turn_usage
     }
 
     pub fn session_id(&self) -> Option<String> {

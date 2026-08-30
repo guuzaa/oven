@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use oven_llm::{ContentBlock, Message, Role, Usage};
+use oven_llm::{Message, Role, Usage};
 use serde::{Deserialize, Serialize};
 
 use crate::todo::TodoItem;
@@ -57,12 +57,6 @@ fn now_ms() -> u64 {
 
 /// Conversation history with API-reported token tracking.
 ///
-/// The conversation size (`last_prompt_tokens`) comes from the provider's
-/// last response, not a local estimate. Between calls we don't try to
-/// measure appended user/tool messages; we assume a single user message
-/// adds a negligible number of tokens relative to the budget, and refresh
-/// the count from the next API response.
-///
 /// Usage accounting accumulates every provider response of a user turn
 /// (`turn_usage`). A single `TokenUsage` record is persisted after the
 /// turn's final assistant message, holding that sum, so the in-memory total
@@ -76,8 +70,6 @@ fn now_ms() -> u64 {
 pub struct History {
     messages: Vec<(Message, Timestamp)>,
     turn_usage: Vec<(Usage, Timestamp)>,
-    total: Usage,
-    last_prompt_tokens: usize,
     revision: u64,
     meta: Option<SessionMeta>,
 }
@@ -87,8 +79,6 @@ impl History {
         Self {
             messages: Vec::new(),
             turn_usage: Vec::new(),
-            total: Usage::default(),
-            last_prompt_tokens: 0,
             revision: 0,
             meta: None,
         }
@@ -109,8 +99,6 @@ impl History {
         self.revision += 1;
         self.messages.clear();
         self.turn_usage.clear();
-        self.last_prompt_tokens = 0;
-        self.total = Usage::default();
         self.meta = None;
     }
 
@@ -138,7 +126,6 @@ impl History {
         self.revision += 1;
         self.messages.clear();
         self.turn_usage.clear();
-        self.last_prompt_tokens = 0;
         self.meta = None;
         for record in records {
             match record {
@@ -159,27 +146,18 @@ impl History {
                 Record::TodoList { .. } => {}
             }
         }
-        self.total = self
-            .turn_usage
-            .iter()
-            .fold(Usage::default(), |acc, (u, _)| acc + *u);
     }
 
     /// Remove the last user turn (the user message and everything after it),
     /// returning the removed user message. Returns `None` when there is no
-    /// user message to rewind. The cached prompt-token count is cleared so
-    /// the next provider call refreshes the conversation-size estimate, and
-    /// the removed turn's usage is rolled back out of `total`.
+    /// user message to rewind.
     pub fn rewind_last_turn(&mut self) -> Option<Message> {
         let idx = self
             .messages
             .iter()
             .rposition(|(m, _)| m.role == Role::User)?;
         let removed = self.messages.drain(idx..).next().map(|(m, _)| m)?;
-        if let Some((usage, _)) = self.turn_usage.pop() {
-            self.total -= usage;
-        }
-        self.last_prompt_tokens = 0;
+        let _ = self.turn_usage.pop();
         Some(removed)
     }
 
@@ -262,67 +240,21 @@ impl History {
         self.messages.is_empty()
     }
 
-    /// Last reported prompt-token count from the provider (0 before the
-    /// first call or after a trim).
-    pub fn prompt_tokens(&self) -> usize {
-        self.last_prompt_tokens
+    /// Usage of the current (last) user turn, or zero when there is none.
+    /// Matches the `TokenUsage` record persisted for that turn.
+    pub fn last_turn_usage(&self) -> Usage {
+        self.turn_usage.last().map(|(u, _)| *u).unwrap_or_default()
     }
 
-    /// Cumulative usage of every recorded provider response.
-    pub fn total_usage(&self) -> &Usage {
-        &self.total
-    }
-
-    /// Record a provider response's usage. Refreshes `last_prompt_tokens`
-    /// (the current conversation size) and accumulates the response into the
-    /// current turn and the session total.
+    /// Record a provider response's usage. Accumulates the response into the
+    /// current turn.
     pub fn record_usage(&mut self, usage: &Usage) {
-        self.last_prompt_tokens = usage.input_tokens as usize;
         if self.turn_usage.is_empty() {
             self.turn_usage.push((Usage::default(), 0));
         }
         let last = self.turn_usage.last_mut().expect("usage bucket exists");
         last.0 += *usage;
         last.1 = self.messages.last().map(|(_, ts)| *ts).unwrap_or(0);
-        self.total += *usage;
-    }
-
-    /// Drop the oldest non-system turn when the last API-reported
-    /// prompt-token count exceeds `budget`. We rely on the reported count
-    /// rather than a local estimate; after draining we clear the cached
-    /// count and let the next provider call refresh it. Trimming rolls back
-    /// history, not billing: `total` is untouched, and only the usage
-    /// buckets of turns whose user message was drained are dropped, keeping
-    /// them aligned with the remaining messages.
-    pub fn trim_to_budget(&mut self, budget: usize) {
-        if self.messages.is_empty() || self.last_prompt_tokens <= budget {
-            return;
-        }
-        let starts = turn_starts(&self.messages);
-        let first_starts_system = self
-            .messages
-            .first()
-            .is_some_and(|(m, _)| m.role == Role::System);
-        let first_removable = if first_starts_system { 1 } else { 0 };
-        if first_removable >= starts.len() {
-            return;
-        }
-        let start = starts[first_removable];
-        let end = if first_removable + 1 < starts.len() {
-            starts[first_removable + 1]
-        } else {
-            self.messages.len()
-        };
-        let drained_users = self.messages[start..end]
-            .iter()
-            .filter(|(m, _)| m.role == Role::User)
-            .count();
-        self.messages.drain(start..end);
-        if drained_users > 0 {
-            let n = drained_users.min(self.turn_usage.len());
-            self.turn_usage.drain(..n);
-        }
-        self.last_prompt_tokens = 0;
     }
 }
 
@@ -339,33 +271,10 @@ impl std::ops::Index<usize> for History {
     }
 }
 
-fn has_tool_use(m: &Message) -> bool {
-    m.content
-        .iter()
-        .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
-}
-
-/// A "turn" is a starter message (system, user, or assistant carrying tool
-/// calls) plus any following tool-result messages until the next starter.
-/// Returns the indices that begin each turn, including the leading system
-/// block as a single turn.
-fn turn_starts(history: &[(Message, Timestamp)]) -> Vec<usize> {
-    let mut starts = Vec::new();
-    for (i, (m, _)) in history.iter().enumerate() {
-        let is_starter = match m.role {
-            Role::System | Role::User => true,
-            Role::Assistant => has_tool_use(m) || i == 0,
-            Role::Tool => false,
-        };
-        if is_starter {
-            starts.push(i);
-        }
-    }
-    starts
-}
-
 #[cfg(test)]
 mod tests {
+    use oven_llm::ContentBlock;
+
     use super::*;
 
     fn usage(input: u32) -> Usage {
@@ -460,18 +369,33 @@ mod tests {
     }
 
     #[test]
+    fn last_turn_usage_is_the_current_bucket() {
+        let mut h = History::new();
+        assert_eq!(h.last_turn_usage(), Usage::default());
+
+        h.push(Message::user_text("first"));
+        h.push(Message::assistant_text("one"));
+        h.record_usage(&usage(100));
+        assert_eq!(h.last_turn_usage().input_tokens, 100);
+
+        h.push(Message::user_text("second"));
+        h.push(Message::assistant_text("two"));
+        h.record_usage(&usage(200));
+        assert_eq!(h.last_turn_usage().input_tokens, 200);
+
+        h.rewind_last_turn();
+        assert_eq!(h.last_turn_usage().input_tokens, 100);
+    }
+
+    #[test]
     fn record_usage_accumulates_every_response() {
         let mut h = History::new();
         h.push(Message::user_text("hi"));
         h.record_usage(&usage(100));
-        assert_eq!(h.prompt_tokens(), 100);
-        assert_eq!(h.total_usage().input_tokens, 100);
-        assert_eq!(h.total_usage().output_tokens, 10);
+        assert_eq!(h.last_turn_usage().input_tokens, 100);
 
         h.record_usage(&usage(150));
-        assert_eq!(h.prompt_tokens(), 150);
-        assert_eq!(h.total_usage().input_tokens, 250);
-        assert_eq!(h.total_usage().output_tokens, 20);
+        assert_eq!(h.last_turn_usage().input_tokens, 250);
     }
 
     #[test]
@@ -483,89 +407,8 @@ mod tests {
         h.clear();
 
         assert!(h.is_empty());
-        assert_eq!(h.total_usage().input_tokens, 0);
-        assert_eq!(h.total_usage().output_tokens, 0);
-    }
-
-    #[test]
-    fn trim_drops_oldest_user_turn_when_over_budget() {
-        let mut h = History::new();
-        h.insert_system(Message::system("system"));
-        for _ in 0..5 {
-            h.push(Message::user_text("x".repeat(1600)));
-        }
-        h.record_usage(&usage(1000));
-        h.trim_to_budget(700);
-        assert_eq!(h.messages().next().unwrap().role, Role::System);
-        let remaining_user = h.iter().filter(|m| m.role == Role::User).count();
-        assert!(remaining_user < 5);
-        assert_eq!(h.prompt_tokens(), 0);
-    }
-
-    #[test]
-    fn trim_preserves_system_turn() {
-        let mut h = History::new();
-        h.insert_system(Message::system("system"));
-        h.push(Message::user_text("hi"));
-        h.record_usage(&usage(100));
-        h.trim_to_budget(10);
-        assert_eq!(h.messages().next().unwrap().role, Role::System);
-        assert!(h.iter().filter(|m| m.role == Role::User).count() <= 1);
-    }
-
-    #[test]
-    fn trim_no_op_when_under_budget() {
-        let mut h = History::new();
-        h.push(Message::user_text("hi"));
-        h.record_usage(&usage(50));
-        let before = h.len();
-        h.trim_to_budget(100);
-        assert_eq!(h.len(), before);
-        assert_eq!(h.prompt_tokens(), 50);
-    }
-
-    #[test]
-    fn trim_uses_last_prompt_tokens_not_cumulative_total() {
-        let mut h = History::new();
-        h.push(Message::user_text("first"));
-        h.push(Message::assistant_text("one"));
-        h.record_usage(&usage(100));
-        h.push(Message::user_text("second"));
-        h.push(Message::assistant_text("two"));
-        h.record_usage(&usage(200));
-        let before = h.len();
-        h.trim_to_budget(250);
-        assert_eq!(h.len(), before);
-        assert_eq!(h.prompt_tokens(), 200);
-        assert_eq!(h.total_usage().input_tokens, 300);
-    }
-
-    #[test]
-    fn trim_keeps_tool_results_with_their_assistant_turn() {
-        let mut h = History::new();
-        h.insert_system(Message::system("s"));
-        h.push(assistant_tools(
-            "c1",
-            "file_read",
-            serde_json::json!({"path": "a"}),
-        ));
-        h.push(Message::tool_result("c1", "x".repeat(1600), false));
-        h.push(assistant_tools(
-            "c1",
-            "file_read",
-            serde_json::json!({"path": "a"}),
-        ));
-        h.push(Message::tool_result("c1", "small result", false));
-        h.record_usage(&usage(1000));
-        h.trim_to_budget(200);
-        for (i, m) in h.iter().enumerate() {
-            if m.role == Role::Tool {
-                assert!(
-                    i > 0 && h[i - 1].role == Role::Assistant && has_tool_use(&h[i - 1]),
-                    "orphan tool result at index {i}"
-                );
-            }
-        }
+        assert_eq!(h.last_turn_usage().input_tokens, 0);
+        assert_eq!(h.last_turn_usage().output_tokens, 0);
     }
 
     #[test]
@@ -589,9 +432,6 @@ mod tests {
         let roles: Vec<Role> = h.iter().map(|m| m.role).collect();
         assert_eq!(roles, vec![Role::User, Role::Assistant]);
         assert!(matches!(&h[0].content[0], ContentBlock::Text { text } if text == "first"));
-        assert_eq!(h.prompt_tokens(), 0);
-        assert_eq!(h.total_usage().input_tokens, 0);
-        assert_eq!(h.total_usage().output_tokens, 0);
     }
 
     #[test]
@@ -618,17 +458,11 @@ mod tests {
         ));
         h.push(Message::tool_result("c1", "out", false));
         h.record_usage(&usage(200));
-        assert_eq!(h.total_usage().input_tokens, 300);
 
         assert!(h.rewind_last_turn().is_some());
-        assert_eq!(h.total_usage().input_tokens, 100);
-
         assert!(h.rewind_last_turn().is_some());
-        assert_eq!(h.total_usage().input_tokens, 0);
         assert!(h.is_empty());
-
         assert!(h.rewind_last_turn().is_none());
-        assert_eq!(h.total_usage().input_tokens, 0);
     }
 
     #[test]
@@ -647,37 +481,10 @@ mod tests {
         h.record_usage(&usage(100));
         h.push(Message::assistant(vec![ContentBlock::text("two")]));
         h.record_usage(&usage(50));
-        assert_eq!(h.total_usage().input_tokens, 160);
         assert_eq!(usage_inputs(&h), vec![10, 150]);
 
         h.rewind_last_turn();
-        assert_eq!(h.total_usage().input_tokens, 10);
-    }
-
-    #[test]
-    fn trim_then_rewind_rolls_back_only_remaining_turn() {
-        let mut h = History::new();
-        h.push(Message::user_text("first"));
-        h.push(Message::assistant_text("one"));
-        h.record_usage(&usage(100));
-        h.push(Message::user_text("second"));
-        h.push(Message::assistant_text("two"));
-        h.record_usage(&usage(200));
-
-        // Budget trim drops the first turn but keeps the cumulative total.
-        h.trim_to_budget(1);
-        let roles: Vec<Role> = h.iter().map(|m| m.role).collect();
-        assert_eq!(roles, vec![Role::User, Role::Assistant]);
-        assert_eq!(h.total_usage().input_tokens, 300);
-
-        h.rewind_last_turn();
-        assert_eq!(h.total_usage().input_tokens, 100);
-
-        // Nothing left to rewind; the trimmed turn's usage stays in the
-        // cumulative total (trim rolls back history, not billing).
-        assert!(h.rewind_last_turn().is_none());
-        assert_eq!(h.total_usage().input_tokens, 100);
-        assert!(h.is_empty());
+        assert_eq!(h.last_turn_usage().input_tokens, 10);
     }
 
     #[test]
@@ -782,14 +589,14 @@ mod tests {
         let mut restored = History::new();
         restored.set_messages_with_records(records.clone());
         assert_records_equal(&restored.records(), &records);
-        assert_eq!(restored.total_usage().input_tokens, 33);
+        assert_eq!(restored.last_turn_usage().input_tokens, 22);
 
         // Rewind works on the restored history and rolls back one turn at a
         // time using the persisted usage.
         assert!(restored.rewind_last_turn().is_some());
-        assert_eq!(restored.total_usage().input_tokens, 11);
+        assert_eq!(restored.last_turn_usage().input_tokens, 11);
         assert!(restored.rewind_last_turn().is_some());
-        assert_eq!(restored.total_usage().input_tokens, 0);
+        assert_eq!(restored.last_turn_usage().input_tokens, 0);
     }
 
     #[test]
@@ -847,7 +654,6 @@ mod tests {
         ];
         let mut h = History::new();
         h.set_messages_with_records(records);
-        assert_eq!(h.total_usage().input_tokens, 150);
         assert_eq!(usage_inputs(&h), vec![150]);
     }
 
