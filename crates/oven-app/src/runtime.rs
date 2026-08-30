@@ -237,24 +237,49 @@ impl Runtime {
     }
 
     fn set_model(&mut self, model: String, reasoning_effort: Option<ReasoningEffort>) {
+        let id = ModelId::from(model.as_str());
+        let name = id
+            .vendor()
+            .map(oven_llm::canonical_vendor)
+            .or_else(|| {
+                self.agent
+                    .router()
+                    .provider(&id)
+                    .ok()
+                    .map(|p| p.provider_name().slug().to_string())
+            })
+            .unwrap_or_else(|| self.config.active_provider.name.clone());
+        let provider = self
+            .config
+            .providers
+            .entry(name.clone())
+            .or_insert_with(|| {
+                let mut provider = ProviderConfig {
+                    name: Some(name.clone()),
+                    ..Default::default()
+                };
+                provider.apply_name_presets();
+                provider
+            });
+        provider.model = Some(model.clone());
+        if reasoning_effort.is_some() {
+            provider.reasoning_effort = reasoning_effort;
+        }
+        provider.normalize();
+        let effective_reasoning_effort = provider.reasoning_effort;
+        self.config.active_provider.name = name;
         self.agent.set_model(&*model);
-        self.agent.set_reasoning_effort(reasoning_effort);
-        self.config.provider.model = Some(model.clone());
-        self.config.provider.reasoning_effort = reasoning_effort;
+        self.agent.set_reasoning_effort(effective_reasoning_effort);
+        let overlay = provider.clone();
         self.state.model = model.clone();
-        self.state.reasoning_effort = reasoning_effort;
+        self.state.reasoning_effort = effective_reasoning_effort;
         self.publish();
         self.emit_state(StateChange::ModelChanged {
             model: model.clone(),
-            reasoning_effort,
+            reasoning_effort: effective_reasoning_effort,
         });
-        let overlay = ProviderConfig {
-            model: Some(model.clone()),
-            reasoning_effort,
-            ..Default::default()
-        };
         let saved = self.save_provider_overlay(&overlay);
-        let mut text = match reasoning_effort {
+        let mut text = match effective_reasoning_effort {
             Some(e) => format!("model switched to {model} (effort: {e})"),
             None => format!("model switched to {model}"),
         };
@@ -265,32 +290,75 @@ impl Runtime {
     }
 
     async fn set_provider(&mut self, mut overlay: ProviderConfig) {
-        overlay.apply_name_presets();
-        if overlay.reasoning_effort.is_none() && self.config.provider.reasoning_effort.is_none() {
+        overlay.normalize();
+        if let Some(name) = overlay.name.clone() {
+            if let Some(saved) = self.config.providers.get(&name).cloned() {
+                overlay.fill_missing(&saved);
+                let mut presets = ProviderConfig {
+                    name: Some(name),
+                    ..Default::default()
+                };
+                presets.apply_name_presets();
+                overlay.fill_missing(&presets);
+            } else {
+                overlay.apply_name_presets();
+            }
+        } else if let Some(current) = self.config.active_provider_config().cloned() {
+            overlay.fill_missing(&current);
+            overlay.name = current.name;
+        } else {
+            self.emit_error("no active provider configured");
+            return;
+        }
+        if overlay.reasoning_effort.is_none() {
             overlay.reasoning_effort = Some(ReasoningEffort::Medium);
         }
+        if overlay.needs_setup() {
+            self.emit_error("api_key required; run /setup name=<provider> api_key=<key>");
+            return;
+        }
         let mut next = self.config.clone();
-        next.merge(AppConfig {
-            provider: overlay.clone(),
-            ..AppConfig::default()
-        });
-        let model = next.provider.effective_model();
-        match crate::provider::build_client(&next) {
+        let name = overlay
+            .name
+            .clone()
+            .expect("provider name assigned before update");
+        next.providers
+            .entry(name.clone())
+            .or_default()
+            .merge_fields(&overlay);
+        next.active_provider.name = name;
+        let model = next
+            .active_provider_config()
+            .expect("active provider inserted before build")
+            .effective_model();
+        match crate::provider::build_client(
+            next.active_provider_config()
+                .expect("active provider inserted before build"),
+        ) {
             Ok(client) => {
                 self.config = next;
                 self.agent
                     .router_mut()
                     .upsert(crate::provider::retrying(&self.config, client));
                 self.agent.set_model(model.clone());
-                self.agent
-                    .set_reasoning_effort(self.config.provider.reasoning_effort);
+                self.agent.set_reasoning_effort(
+                    self.config
+                        .active_provider_config()
+                        .and_then(|provider| provider.reasoning_effort),
+                );
                 let saved = self.save_provider_overlay(&overlay);
-                self.state.provider = public_provider(&self.config.provider);
+                self.state.provider = public_provider(
+                    self.config
+                        .active_provider_config()
+                        .expect("active provider exists after update"),
+                );
+                self.state.configured_providers = self.config.configured_providers();
                 self.state.model = model.clone();
                 self.state.reasoning_effort = self.agent.reasoning_effort();
                 self.publish();
                 self.emit_state(StateChange::ProviderChanged {
                     provider: self.state.provider.clone(),
+                    configured_providers: self.state.configured_providers.clone(),
                 });
                 self.emit_state(StateChange::ModelChanged {
                     model: model.clone(),
@@ -396,7 +464,11 @@ pub(crate) fn spawn_runtime(
     let history: Vec<Message> = agent.history().cloned().collect();
     let todos = agent.todos().clone();
     let last_turn_usage = agent.last_turn_usage();
-    let provider = config.provider.clone();
+    let provider = config
+        .active_provider_config()
+        .map(public_provider)
+        .unwrap_or_default();
+    let configured_providers = config.configured_providers();
     let mode = agent.mode();
     let model = agent.model().to_string();
     let reasoning_effort = agent.reasoning_effort();
@@ -417,6 +489,7 @@ pub(crate) fn spawn_runtime(
         model,
         reasoning_effort,
         provider,
+        configured_providers,
         history,
         todos,
         last_turn_usage,
@@ -555,8 +628,12 @@ async fn refresh_model_choices(
         Ok(Err(ProviderError::Auth(body))) => (Vec::new(), Some(body)),
         _ => (Vec::new(), None),
     };
+    let current_provider = ModelId::from(current_model)
+        .vendor()
+        .map(ProviderName::from)
+        .unwrap_or_else(|| provider.provider_name());
     (
-        merge_model_choices(known, dynamic, current_model, &provider.provider_name()),
+        merge_model_choices(known, dynamic, current_model, &current_provider),
         auth_error,
     )
 }

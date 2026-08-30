@@ -1,5 +1,5 @@
 use crate::command::AppCommand;
-use crate::config::{AppConfig, ProviderConfig};
+use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::event::{AppEvent, AppEventKind, AppId};
 use crate::runtime::*;
 use crate::session::{Session, canonical_root};
@@ -632,13 +632,14 @@ async fn model_slash_persists_model_and_effort() {
     assert!(out.contains(cfg_path.to_str().unwrap()));
 
     let saved = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(saved.contains("name = \"mock\""));
     assert!(saved.contains("model = \"gpt-4o-turbo\""));
     assert!(saved.contains("reasoning_effort = \"high\""));
     handle.shutdown().await;
 }
 
 #[tokio::test]
-async fn setup_keeps_existing_reasoning_effort() {
+async fn setup_uses_target_provider_reasoning_effort() {
     let tmp = tempdir::TempDir::new("app-runtime-setup-keep-effort").unwrap();
     let cfg_path = tmp.path().join("config.toml");
     let agent = agent_from(Box::new(MockProvider::new(vec![])))
@@ -649,10 +650,19 @@ async fn setup_keeps_existing_reasoning_effort() {
         None,
         tmp.path().to_path_buf(),
         AppConfig {
-            provider: ProviderConfig {
-                reasoning_effort: Some(oven_llm::ReasoningEffort::High),
-                ..Default::default()
+            active_provider: ProviderSelection {
+                name: "mock".into(),
             },
+            providers: [(
+                "mock".into(),
+                ProviderConfig {
+                    name: Some("mock".into()),
+                    reasoning_effort: Some(oven_llm::ReasoningEffort::High),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
             ..AppConfig::default()
         },
         Some(cfg_path.clone()),
@@ -676,9 +686,90 @@ async fn setup_keeps_existing_reasoning_effort() {
         }
     }
     let current = handle.prompt("/model").await.unwrap();
-    assert!(current.contains("reasoning effort: high"));
+    assert!(current.contains("reasoning effort: medium"));
     let saved = std::fs::read_to_string(&cfg_path).unwrap();
-    assert!(!saved.contains("reasoning_effort"));
+    assert!(saved.contains("reasoning_effort = \"medium\""));
+    handle.shutdown().await;
+}
+
+async fn wait_setup(handle: &App, input: &str) -> String {
+    let mut rx = handle.subscribe();
+    handle
+        .send(AppCommand::StartTurn {
+            input: input.into(),
+        })
+        .unwrap();
+    loop {
+        match rx.recv().await {
+            Some(ev) => {
+                if let Some(text) = notification(&ev) {
+                    return text.to_string();
+                }
+                if let AppEventKind::Error { message } = &ev.kind {
+                    panic!("setup failed: {message}");
+                }
+            }
+            None => panic!("channel closed before notify"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn setup_persists_multiple_vendors_and_reuses_saved_key() {
+    let tmp = tempdir::TempDir::new("app-runtime-setup-multi").unwrap();
+    let cfg_path = tmp.path().join("config.toml");
+    let agent = agent_from(Box::new(MockProvider::new(vec![])));
+    let handle = spawn_runtime(
+        AppId::next(),
+        agent,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        Some(cfg_path.clone()),
+    );
+
+    wait_setup(&handle, "/setup name=deepseek api_key=sk-ds").await;
+    wait_setup(&handle, "/setup name=xai api_key=xai-key").await;
+
+    let saved = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(saved.contains("[providers.deepseek]"));
+    assert!(saved.contains("[providers.xai]"));
+    assert!(saved.contains("sk-ds"));
+    assert!(saved.contains("xai-key"));
+    assert_eq!(handle.provider_config().name.as_deref(), Some("xai"));
+
+    let out = wait_setup(&handle, "/setup name=deepseek").await;
+    assert!(out.contains("name=deepseek"));
+    assert_eq!(handle.provider_config().name.as_deref(), Some("deepseek"));
+    let saved = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(saved.contains("sk-ds"));
+    assert!(saved.contains("xai-key"));
+
+    let switched = handle.prompt("/model xai/grok-4.6").await.unwrap();
+    assert!(
+        switched.contains("model switched to xai/grok-4.6"),
+        "{switched}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn setup_new_vendor_without_key_errors() {
+    let tmp = tempdir::TempDir::new("app-runtime-setup-need-key").unwrap();
+    let agent = agent_from(Box::new(MockProvider::new(vec![])));
+    let handle = spawn_runtime(
+        AppId::next(),
+        agent,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+    let err = handle.prompt("/setup name=xai").await.unwrap_err();
+    assert!(
+        err.to_string().contains("api_key required"),
+        "unexpected error: {err}"
+    );
     handle.shutdown().await;
 }
 
@@ -696,7 +787,7 @@ async fn open_session_without_api_key_starts() {
 async fn spawn_without_api_key_still_errors() {
     let tmp = tempdir::TempDir::new("app-headless-no-key").unwrap();
     let app = AppBuilder::new(tmp.path());
-    if !app.config().provider.needs_setup() {
+    if !app.config().needs_setup() {
         return;
     }
     let err = match app.open().await {
@@ -723,10 +814,19 @@ async fn setup_slash_rejects_kind() {
 async fn spawn_applies_configured_reasoning_effort() {
     let tmp = tempdir::TempDir::new("app-spawn-effort").unwrap();
     let app = AppBuilder::new(tmp.path()).with_config(AppConfig {
-        provider: ProviderConfig {
-            reasoning_effort: Some(oven_llm::ReasoningEffort::Medium),
-            ..Default::default()
+        active_provider: ProviderSelection {
+            name: "mock".into(),
         },
+        providers: [(
+            "mock".into(),
+            ProviderConfig {
+                name: Some("mock".into()),
+                reasoning_effort: Some(oven_llm::ReasoningEffort::Medium),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect(),
         ..AppConfig::default()
     });
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;

@@ -16,23 +16,28 @@ base_backoff_ms = 500
 # (file_read, file_write, bash).
 # tools = ["file_read", "file_write", "bash"]
 
-# LLM provider settings.
+# LLM provider settings. `[provider]` is the active selection; `/setup` also
+# writes each vendor under `[providers.<slug>]` so switching does not require
+# re-entering API keys.
 [provider]
 # Canonical vendor slug. Aliases are accepted on read (`grok` → `xai`,
 # `kimi` → `moonshot`, `glm` → `zhipu`) and rewritten as the canonical name.
-# name = "deepseek"
-# Wire id only; oven joins it with `name` (e.g. deepseek/deepseek-v4-flash).
+name = "deepseek"
+# Provider details live under `[providers.<slug>]`.
+
+# Saved vendors. `/setup name=xai api_key=...` then `/setup name=deepseek`
+# keeps both; `/model xai/grok-4.6` switches without a new key.
+# [providers.deepseek]
+# Wire id only; oven joins it with `name`.
 # model = "deepseek-v4-flash"
-# Override the API endpoint. Useful for OpenAI-compatible proxies.
+# Override the API endpoint for an OpenAI-compatible proxy.
 # base_url = "https://api.deepseek.com"
-# Wire protocol for unknown/custom vendors only. Known vendors ignore this;
-# they pick a protocol from the model catalog (or a `:responses` suffix).
-# protocol = "completions"
 # Explicit API key. If unset, the OVEN_API_KEY env var is used.
 # api_key = "sk-..."
-# Reasoning effort: "none", "low", "medium", or "high". Unset leaves thinking off
-# until /setup (which defaults to medium) or /model <id> <effort>.
 # reasoning_effort = "medium"
+# [providers.xai]
+# api_key = "xai-..."
+# reasoning_effort = "low"
 
 # MCP servers to connect to at startup: stdio via command/args/env, or a
 # remote streamable HTTP endpoint via url (headers optional). Each server's

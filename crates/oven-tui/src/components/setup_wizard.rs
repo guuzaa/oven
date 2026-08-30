@@ -44,6 +44,7 @@ enum Stage {
 
 pub(crate) struct SetupWizard {
     current: ProviderConfig,
+    configured: Vec<String>,
     draft: ProviderConfig,
     stage: Stage,
     selected: usize,
@@ -53,8 +54,13 @@ pub(crate) struct SetupWizard {
 
 impl SetupWizard {
     pub(crate) fn new(current: ProviderConfig) -> Self {
+        Self::with_configured(current, Vec::new())
+    }
+
+    pub(crate) fn with_configured(current: ProviderConfig, configured: Vec<String>) -> Self {
         Self {
             current,
+            configured,
             draft: ProviderConfig::default(),
             stage: Stage::Name,
             selected: 0,
@@ -69,6 +75,10 @@ impl SetupWizard {
 
     pub(crate) fn set_current(&mut self, current: ProviderConfig) {
         self.current = current;
+    }
+
+    pub(crate) fn set_configured(&mut self, configured: Vec<String>) {
+        self.configured = configured;
     }
 
     pub(crate) fn open(&mut self) {
@@ -135,7 +145,7 @@ impl SetupWizard {
                 let label = if self.requires_new_key() {
                     "api_key · required · Enter to save · Esc to go back"
                 } else {
-                    "api_key · empty keeps current · Enter to save · Esc to go back"
+                    "api_key · empty keeps saved · Enter to save · Esc to go back"
                 };
                 self.draw_label(f, area, label);
             }
@@ -310,10 +320,13 @@ impl SetupWizard {
     }
 
     fn requires_new_key(&self) -> bool {
-        match self.draft.name.as_deref() {
-            Some(name) => self.current.name.as_deref() != Some(name),
-            None => false,
+        let Some(name) = self.draft.name.as_deref() else {
+            return false;
+        };
+        if self.current.name.as_deref() == Some(name) {
+            return false;
         }
+        !self.configured.iter().any(|s| s == name)
     }
 
     fn draw_list(&self, f: &mut Frame<'_>, area: Rect, items: &[(&str, &str)]) {
@@ -460,6 +473,27 @@ mod tests {
         match w.handle_key(key(KeyCode::Enter)) {
             SetupWizardAction::Submit(line) => {
                 assert_eq!(line, "/setup api_key=sk-new");
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn switching_to_configured_provider_keeps_saved_key() {
+        let mut w = SetupWizard::with_configured(
+            ProviderConfig {
+                name: Some("deepseek".into()),
+                ..Default::default()
+            },
+            vec!["deepseek".into(), "zhipu".into()],
+        );
+        w.open();
+        w.handle_key(key(KeyCode::Down));
+        w.handle_key(key(KeyCode::Enter));
+        assert_eq!(w.stage, Stage::ApiKey);
+        match w.handle_key(key(KeyCode::Enter)) {
+            SetupWizardAction::Submit(line) => {
+                assert_eq!(line, "/setup name=zhipu");
             }
             other => panic!("expected Submit, got {other:?}"),
         }

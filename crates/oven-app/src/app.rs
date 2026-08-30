@@ -135,6 +135,10 @@ impl App {
         self.state.borrow().provider.clone()
     }
 
+    pub fn configured_providers(&self) -> Vec<String> {
+        self.state.borrow().configured_providers.clone()
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

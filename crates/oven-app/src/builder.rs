@@ -97,8 +97,7 @@ impl AppBuilder {
         self
     }
 
-    fn apply_config(&mut self, mut config: AppConfig) {
-        config.provider.normalize();
+    fn apply_config(&mut self, config: AppConfig) {
         self.tools = ToolRegistry::from_config(&self.root, &config.tools);
         self.mcps = McpRegistry::new();
         self.skills = SkillRegistry::new();
@@ -125,13 +124,21 @@ impl AppBuilder {
     }
 
     pub(crate) async fn build_agent(&self) -> Result<Agent, AppError> {
-        let model = self.config.provider.effective_model();
+        let provider = self
+            .config
+            .active_provider_config()
+            .ok_or_else(|| AppError::Provider("no active provider configured".into()))?;
+        let model = provider.effective_model();
         let agent = self.build_agent_with_router(self.build_router()?).await?;
         Ok(agent.with_model(model))
     }
 
     pub(crate) async fn build_interactive_agent(&self) -> Result<Agent, AppError> {
-        let model = self.config.provider.effective_model();
+        let provider = self
+            .config
+            .active_provider_config()
+            .ok_or_else(|| AppError::Provider("no active provider configured".into()))?;
+        let model = provider.effective_model();
         let agent = self
             .build_agent_with_router(crate::provider::build_interactive_router(&self.config)?)
             .await?;
@@ -163,7 +170,11 @@ impl AppBuilder {
             &self.instructions,
             self.skills.merged_system_prompt(),
         ));
-        if let Some(effort) = self.config.provider.reasoning_effort {
+        if let Some(effort) = self
+            .config
+            .active_provider_config()
+            .and_then(|provider| provider.reasoning_effort)
+        {
             agent.set_reasoning_effort(Some(effort));
         }
         Ok(agent)

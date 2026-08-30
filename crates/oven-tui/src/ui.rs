@@ -47,8 +47,10 @@ impl Ui {
             .unwrap_or_else(|_| app.root().to_owned());
         let last_turn_usage = app.last_turn_usage();
         let todos = app.todos();
+        let configured = app.configured_providers();
         let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
-        if provider.needs_setup() {
+        input.set_configured(configured.clone());
+        if configured.is_empty() && provider.needs_setup() {
             input.open_setup();
         }
         Self {

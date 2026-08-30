@@ -2,7 +2,7 @@ use oven_agent::RetryingProvider;
 use oven_llm::{Provider, ProviderBuilder, ProviderKind, ProviderName, Router};
 
 use crate::AppError;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, ProviderConfig};
 
 pub(crate) fn retrying(config: &AppConfig, client: Box<dyn Provider>) -> Box<dyn Provider> {
     Box::new(
@@ -15,19 +15,35 @@ pub(crate) fn retrying(config: &AppConfig, client: Box<dyn Provider>) -> Box<dyn
 
 pub(crate) fn build_router(config: &AppConfig) -> Result<Router, AppError> {
     let mut router = Router::new();
-    router.register(retrying(config, build_client(config)?));
+    let mut last_err = None;
+    let mut registered = 0usize;
+    for provider in config.registerable_providers() {
+        match build_client(provider) {
+            Ok(client) => {
+                router.register(retrying(config, client));
+                registered += 1;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if registered == 0 {
+        return Err(last_err.unwrap_or_else(|| {
+            AppError::Provider(
+                "no API key for any provider; set provider.api_key or run /setup".into(),
+            )
+        }));
+    }
     Ok(router)
 }
 
 pub(crate) fn build_interactive_router(config: &AppConfig) -> Result<Router, AppError> {
-    if config.provider.needs_setup() {
+    if config.needs_setup() {
         return Ok(Router::new());
     }
     build_router(config)
 }
 
-pub(crate) fn build_client(config: &AppConfig) -> Result<Box<dyn Provider>, AppError> {
-    let provider = &config.provider;
+pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider>, AppError> {
     let provider_name = provider.effective_provider_name();
     let api_key = provider.effective_api_key();
     let base_url = provider.effective_base_url();
@@ -77,7 +93,7 @@ mod tests {
     #[test]
     fn interactive_router_is_empty_without_key() {
         let cfg = AppConfig::default();
-        if !cfg.provider.needs_setup() {
+        if !cfg.needs_setup() {
             return;
         }
         let router = build_interactive_router(&cfg).unwrap();

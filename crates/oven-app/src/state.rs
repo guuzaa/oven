@@ -10,6 +10,7 @@ pub struct AppState {
     pub model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub provider: ProviderConfig,
+    pub configured_providers: Vec<String>,
     pub history: Vec<Message>,
     pub todos: TodoList,
     pub last_turn_usage: Usage,
@@ -76,6 +77,7 @@ pub enum StateChange {
     },
     ProviderChanged {
         provider: ProviderConfig,
+        configured_providers: Vec<String>,
     },
     ModelsChanged {
         models: Vec<(String, String)>,

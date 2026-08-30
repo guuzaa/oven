@@ -62,6 +62,10 @@ impl InputView {
         self
     }
 
+    pub fn set_configured(&mut self, configured: Vec<String>) {
+        self.setup.set_configured(configured);
+    }
+
     #[cfg(test)]
     fn with_files(mut self, files: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.mentions = Some(FileMentions::from_files(files));
@@ -207,8 +211,12 @@ impl Component for InputView {
             StateChange::ModelsChanged { models } => {
                 self.model_picker.update_models(models.clone());
             }
-            StateChange::ProviderChanged { provider } => {
+            StateChange::ProviderChanged {
+                provider,
+                configured_providers,
+            } => {
                 self.setup.set_current(provider.clone());
+                self.setup.set_configured(configured_providers.clone());
             }
             _ => {}
         }

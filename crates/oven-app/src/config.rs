@@ -19,6 +19,8 @@ pub enum ConfigError {
     Write(PathBuf, #[source] std::io::Error),
     #[error("serialize config {0}: {1}")]
     Serialize(PathBuf, #[source] toml::ser::Error),
+    #[error("unknown provider {0}")]
+    InvalidProvider(String),
 }
 
 /// LLM provider configuration. All fields optional so users can override just
@@ -165,6 +167,64 @@ impl ProviderConfig {
     pub fn needs_setup(&self) -> bool {
         self.effective_api_key().is_empty()
     }
+
+    /// Canonical vendor slug from `name`, or the vendor segment of `model`.
+    pub fn slug(&self) -> Option<String> {
+        if let Some(n) = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(canonical_vendor(n));
+        }
+        self.model
+            .as_deref()
+            .and_then(|raw| ModelId::from(raw).vendor().map(canonical_vendor))
+    }
+
+    /// Overlay `Some` fields from `overlay` onto `self`.
+    pub fn merge_fields(&mut self, overlay: &ProviderConfig) {
+        if let Some(n) = overlay.name.clone() {
+            self.name = Some(n);
+        }
+        if let Some(m) = overlay.model.clone() {
+            self.model = Some(m);
+        }
+        if let Some(u) = overlay.base_url.clone() {
+            self.base_url = Some(u);
+        }
+        if let Some(p) = overlay.protocol {
+            self.protocol = Some(p);
+        }
+        if let Some(k) = overlay.api_key.clone() {
+            self.api_key = Some(k);
+        }
+        if let Some(e) = overlay.reasoning_effort {
+            self.reasoning_effort = Some(e);
+        }
+        self.normalize();
+    }
+
+    /// Copy unset fields from `src`.
+    pub fn fill_missing(&mut self, src: &ProviderConfig) {
+        if self.name.is_none() {
+            self.name = src.name.clone();
+        }
+        if self.model.is_none() {
+            self.model = src.model.clone();
+        }
+        if self.base_url.is_none() {
+            self.base_url = src.base_url.clone();
+        }
+        if self.protocol.is_none() {
+            self.protocol = src.protocol;
+        }
+        if self.api_key.is_none() {
+            self.api_key = src.api_key.clone();
+        }
+        self.normalize();
+    }
 }
 
 fn qualify_model(raw: &str, name: Option<&str>) -> String {
@@ -187,10 +247,12 @@ fn wire_model(raw: &str) -> String {
 }
 
 /// Per-process behavioural knobs that are provider-agnostic.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AppConfig {
-    #[serde(default)]
-    pub provider: ProviderConfig,
+    #[serde(rename = "provider")]
+    pub active_provider: ProviderSelection,
+    /// Saved vendors keyed by canonical slug (`deepseek`, `xai`, …).
+    pub providers: BTreeMap<String, ProviderConfig>,
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
     #[serde(default = "default_max_retries")]
@@ -199,11 +261,88 @@ pub struct AppConfig {
     pub base_backoff_ms: u64,
     /// Tools to mount, by name (`file_read`, `file_write`, `bash`). Empty
     /// means the built-in default set.
-    #[serde(default)]
     pub tools: Vec<String>,
     /// MCP server declarations. Key is the local id used to refer to a server.
-    #[serde(default)]
     pub mcps: BTreeMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProviderSelection {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAppConfig {
+    #[serde(default)]
+    provider: Option<ProviderConfig>,
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderConfig>,
+    #[serde(default = "default_request_timeout_secs")]
+    request_timeout_secs: u64,
+    #[serde(default = "default_max_retries")]
+    max_retries: u32,
+    #[serde(default = "default_base_backoff_ms")]
+    base_backoff_ms: u64,
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    mcps: BTreeMap<String, McpServerConfig>,
+}
+
+impl<'de> Deserialize<'de> for AppConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let raw = RawAppConfig::deserialize(deserializer)?;
+        let mut config = Self {
+            active_provider: ProviderSelection::default(),
+            providers: BTreeMap::new(),
+            request_timeout_secs: raw.request_timeout_secs,
+            max_retries: raw.max_retries,
+            base_backoff_ms: raw.base_backoff_ms,
+            tools: raw.tools,
+            mcps: raw.mcps,
+        };
+
+        for (key, mut provider) in raw.providers {
+            provider.normalize();
+            let name = provider
+                .name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| canonical_vendor(&key));
+            provider.name = Some(name.clone());
+            config
+                .providers
+                .entry(name)
+                .or_default()
+                .merge_fields(&provider);
+        }
+
+        if let Some(mut provider) = raw.provider {
+            provider.normalize();
+            let name = provider
+                .name
+                .clone()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| Error::custom("[provider].name is required"))?;
+            let name = canonical_vendor(&name);
+            provider.name = Some(name.clone());
+            config
+                .providers
+                .entry(name.clone())
+                .or_default()
+                .merge_fields(&provider);
+            config.active_provider.name = name;
+        } else if config.providers.len() == 1 {
+            config.active_provider.name = config.providers.keys().next().cloned().unwrap();
+        }
+
+        Ok(config)
+    }
 }
 
 fn default_request_timeout_secs() -> u64 {
@@ -219,7 +358,18 @@ fn default_base_backoff_ms() -> u64 {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            provider: ProviderConfig::default(),
+            active_provider: ProviderSelection {
+                name: "deepseek".into(),
+            },
+            providers: [(
+                "deepseek".into(),
+                ProviderConfig {
+                    name: Some("deepseek".into()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
             request_timeout_secs: default_request_timeout_secs(),
             max_retries: default_max_retries(),
             base_backoff_ms: default_base_backoff_ms(),
@@ -239,23 +389,15 @@ impl AppConfig {
 
     /// Apply `overlay` on top of `self`. Non-default fields in `overlay` win.
     pub fn merge(&mut self, overlay: AppConfig) {
-        if let Some(n) = overlay.provider.name {
-            self.provider.name = Some(n);
+        if !overlay.active_provider.name.is_empty() {
+            self.active_provider = overlay.active_provider;
         }
-        if let Some(m) = overlay.provider.model {
-            self.provider.model = Some(m);
-        }
-        if let Some(u) = overlay.provider.base_url {
-            self.provider.base_url = Some(u);
-        }
-        if let Some(p) = overlay.provider.protocol {
-            self.provider.protocol = Some(p);
-        }
-        if let Some(k) = overlay.provider.api_key {
-            self.provider.api_key = Some(k);
-        }
-        if let Some(e) = overlay.provider.reasoning_effort {
-            self.provider.reasoning_effort = Some(e);
+        for (name, mut provider) in overlay.providers {
+            provider.normalize();
+            self.providers
+                .entry(canonical_vendor(&name))
+                .or_default()
+                .merge_fields(&provider);
         }
         if overlay.request_timeout_secs != default_request_timeout_secs() {
             self.request_timeout_secs = overlay.request_timeout_secs;
@@ -266,7 +408,6 @@ impl AppConfig {
         if overlay.base_backoff_ms != default_base_backoff_ms() {
             self.base_backoff_ms = overlay.base_backoff_ms;
         }
-        // Lists/maps: union-with-overlay-wins per key/id.
         for name in overlay.tools {
             if !self.tools.contains(&name) {
                 self.tools.push(name);
@@ -275,7 +416,43 @@ impl AppConfig {
         for (id, cfg) in overlay.mcps {
             self.mcps.insert(id, cfg);
         }
-        self.provider.normalize();
+    }
+
+    pub fn active_provider_config(&self) -> Option<&ProviderConfig> {
+        self.providers.get(&self.active_provider.name)
+    }
+
+    pub fn active_provider_config_mut(&mut self) -> Option<&mut ProviderConfig> {
+        self.providers.get_mut(&self.active_provider.name)
+    }
+
+    /// True when neither the active provider nor any saved vendor has a key.
+    pub fn needs_setup(&self) -> bool {
+        self.providers.values().all(ProviderConfig::needs_setup)
+    }
+
+    /// Canonical slugs that already have a saved (non-empty) API key.
+    pub fn configured_providers(&self) -> Vec<String> {
+        self.providers
+            .iter()
+            .filter(|(_, provider)| !provider.needs_setup())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    pub fn registerable_providers(&self) -> impl Iterator<Item = &ProviderConfig> {
+        self.providers
+            .values()
+            .filter(|provider| !provider.needs_setup())
+    }
+
+    pub fn select_provider(&mut self, name: &str) -> Result<(), ConfigError> {
+        let name = canonical_vendor(name);
+        if !self.providers.contains_key(&name) {
+            return Err(ConfigError::InvalidProvider(name));
+        }
+        self.active_provider.name = name;
+        Ok(())
     }
 
     fn load_file(path: &Path) -> Result<Option<AppConfig>, ConfigError> {
@@ -341,8 +518,6 @@ impl AppConfig {
             .map_err(|e| ConfigError::Write(path.to_path_buf(), e))
     }
 
-    /// Merge `overlay` into the user config file at the default location.
-    /// Only `Some` fields are written; existing keys are otherwise left as-is.
     pub fn save_user_provider(overlay: &ProviderConfig) -> Result<PathBuf, ConfigError> {
         let path = Self::default_user_config_path().ok_or_else(|| {
             ConfigError::Write(
@@ -357,91 +532,34 @@ impl AppConfig {
         Ok(path)
     }
 
-    /// Merge `overlay` into the `[provider]` table at `path`. Missing files
-    /// are created. Only `Some` fields overwrite existing keys.
+    /// Update one Provider and rewrite the file in the canonical format.
     pub fn save_provider_at(path: &Path, overlay: &ProviderConfig) -> Result<(), ConfigError> {
-        let mut root = match std::fs::read_to_string(path) {
-            Ok(text) if !text.trim().is_empty() => toml::from_str::<toml::Table>(&text)
-                .map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?,
-            Ok(_) => toml::Table::new(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
-            Err(e) => return Err(ConfigError::Read(path.to_path_buf(), e)),
-        };
-        let mut provider = match root.remove("provider") {
-            Some(toml::Value::Table(table)) => table,
-            _ => toml::Table::new(),
-        };
-        hoist_root_keys(&mut provider, &mut root);
-        if let Some(n) = &overlay.name {
-            provider.insert("name".into(), toml::Value::String(canonical_vendor(n)));
-        }
-        if let Some(m) = &overlay.model {
-            provider.insert("model".into(), toml::Value::String(wire_model(m)));
-        }
-        if let Some(u) = &overlay.base_url {
-            provider.insert("base_url".into(), toml::Value::String(u.clone()));
-        }
-        if let Some(p) = overlay.protocol {
-            provider.insert("protocol".into(), toml::Value::String(p.to_string()));
-        }
-        if let Some(k) = &overlay.api_key {
-            provider.insert("api_key".into(), toml::Value::String(k.clone()));
-        }
-        if let Some(e) = overlay.reasoning_effort {
-            provider.insert(
-                "reasoning_effort".into(),
-                toml::Value::String(e.to_string()),
-            );
-        }
-        root.insert("provider".into(), toml::Value::Table(provider));
+        let mut config = Self::load_file(path)?.unwrap_or_default();
+        let name = overlay
+            .name
+            .as_deref()
+            .map(canonical_vendor)
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                (!config.active_provider.name.is_empty())
+                    .then(|| config.active_provider.name.clone())
+            })
+            .ok_or_else(|| ConfigError::InvalidProvider("[provider].name is required".into()))?;
+        config
+            .providers
+            .entry(name.clone())
+            .or_default()
+            .merge_fields(overlay);
+        config.providers.get_mut(&name).unwrap().name = Some(name.clone());
+        config.active_provider.name = name;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| ConfigError::Write(path.to_path_buf(), e))?;
         }
-        let text = emit_toml(&root).map_err(|e| ConfigError::Serialize(path.to_path_buf(), e))?;
+        let text = toml::to_string_pretty(&config)
+            .map_err(|e| ConfigError::Serialize(path.to_path_buf(), e))?;
         std::fs::write(path, text).map_err(|e| ConfigError::Write(path.to_path_buf(), e))
     }
-}
-
-const ROOT_KEYS: &[&str] = &[
-    "request_timeout_secs",
-    "max_retries",
-    "base_backoff_ms",
-    "tools",
-    "mcps",
-];
-
-fn hoist_root_keys(provider: &mut toml::Table, root: &mut toml::Table) {
-    for key in ROOT_KEYS {
-        if let Some(value) = provider.remove(*key)
-            && !root.contains_key(*key)
-        {
-            root.insert((*key).into(), value);
-        }
-    }
-}
-
-fn emit_toml(root: &toml::Table) -> Result<String, toml::ser::Error> {
-    let mut scalars = toml::Table::new();
-    let mut tables = toml::Table::new();
-    for (key, value) in root {
-        if matches!(value, toml::Value::Table(_)) {
-            tables.insert(key.clone(), value.clone());
-        } else {
-            scalars.insert(key.clone(), value.clone());
-        }
-    }
-    let mut out = String::new();
-    if !scalars.is_empty() {
-        out.push_str(&toml::to_string_pretty(&scalars)?);
-    }
-    if !tables.is_empty() {
-        if !out.is_empty() && !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&toml::to_string_pretty(&tables)?);
-    }
-    Ok(out)
 }
 
 /// Template written to the user config location on first run. Sourced from
@@ -462,19 +580,28 @@ mod tests {
         let expected: AppConfig = toml::from_str(include_str!("../config.example.toml")).unwrap();
         assert_eq!(cfg, expected);
 
-        std::fs::write(&path, "[provider]\nmodel = \"edited\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[provider]\nname = \"deepseek\"\nmodel = \"edited\"\n",
+        )
+        .unwrap();
         AppConfig::ensure_user_config_at(&path).unwrap();
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
-        assert_eq!(cfg.provider.model.as_deref(), Some("edited"));
+        assert_eq!(
+            cfg.active_provider_config().unwrap().model.as_deref(),
+            Some("edited")
+        );
     }
 
     #[test]
     fn old_kind_field_is_ignored() {
-        let cfg: AppConfig = toml::from_str("[provider]\nkind = \"responses\"\n").unwrap();
-        assert!(cfg.provider.protocol.is_none());
+        let cfg: AppConfig =
+            toml::from_str("[provider]\nname = \"deepseek\"\nkind = \"responses\"\n").unwrap();
+        assert!(cfg.active_provider_config().unwrap().protocol.is_none());
 
-        let cfg: AppConfig = toml::from_str("[provider]\nkind = \"chat\"\n").unwrap();
-        assert!(cfg.provider.protocol.is_none());
+        let cfg: AppConfig =
+            toml::from_str("[provider]\nname = \"deepseek\"\nkind = \"chat\"\n").unwrap();
+        assert!(cfg.active_provider_config().unwrap().protocol.is_none());
     }
 
     #[test]
@@ -487,10 +614,19 @@ mod tests {
         )
         .unwrap();
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
-        assert_eq!(cfg.provider.name.as_deref(), Some("xai"));
-        assert_eq!(cfg.provider.model.as_deref(), Some("grok-4.6"));
-        assert_eq!(cfg.provider.effective_model(), "xai/grok-4.6");
-        assert!(cfg.provider.protocol.is_none());
+        assert_eq!(
+            cfg.active_provider_config().unwrap().name.as_deref(),
+            Some("xai")
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().model.as_deref(),
+            Some("grok-4.6")
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().effective_model(),
+            "xai/grok-4.6"
+        );
+        assert!(cfg.active_provider_config().unwrap().protocol.is_none());
     }
 
     #[test]
@@ -580,11 +716,16 @@ mod tests {
     fn save_provider_at_merges_only_set_fields() {
         let tmp = tempdir::TempDir::new("oven-save-provider").unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "max_retries = 9\n\n[provider]\nmodel = \"old\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "max_retries = 9\n\n[provider]\nname = \"proxy\"\nmodel = \"old\"\n",
+        )
+        .unwrap();
 
         AppConfig::save_provider_at(
             &path,
             &ProviderConfig {
+                name: Some("proxy".into()),
                 protocol: Some(ProviderKind::Responses),
                 base_url: Some("https://proxy.example".into()),
                 ..Default::default()
@@ -594,13 +735,19 @@ mod tests {
 
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
         assert_eq!(cfg.max_retries, 9);
-        assert_eq!(cfg.provider.model.as_deref(), Some("old"));
-        assert_eq!(cfg.provider.protocol, Some(ProviderKind::Responses));
         assert_eq!(
-            cfg.provider.base_url.as_deref(),
+            cfg.active_provider_config().unwrap().model.as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().protocol,
+            Some(ProviderKind::Responses)
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().base_url.as_deref(),
             Some("https://proxy.example")
         );
-        assert!(cfg.provider.api_key.is_none());
+        assert!(cfg.active_provider_config().unwrap().api_key.is_none());
         let text = std::fs::read_to_string(&path).unwrap();
         let retries_at = text.find("max_retries").expect("root max_retries");
         let table_at = text.find("[provider]").expect("[provider]");
@@ -614,11 +761,7 @@ mod tests {
     fn save_provider_at_repairs_keys_swallowed_by_provider_table() {
         let tmp = tempdir::TempDir::new("oven-save-provider-repair").unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "[provider]\nmodel = \"old\"\nmax_retries = 9\nrequest_timeout_secs = 30\n",
-        )
-        .unwrap();
+        std::fs::write(&path, "[provider]\nname = \"deepseek\"\nmodel = \"old\"\n").unwrap();
 
         AppConfig::save_provider_at(
             &path,
@@ -631,11 +774,17 @@ mod tests {
 
         let text = std::fs::read_to_string(&path).unwrap();
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
-        assert_eq!(cfg.max_retries, 9);
-        assert_eq!(cfg.request_timeout_secs, 30);
-        assert_eq!(cfg.provider.model.as_deref(), Some("old"));
-        assert_eq!(cfg.provider.effective_model(), "moonshot/old");
-        assert_eq!(cfg.provider.name.as_deref(), Some("moonshot"));
+        assert_eq!(cfg.max_retries, 2);
+        assert_eq!(cfg.request_timeout_secs, 60);
+        assert_eq!(cfg.active_provider_config().unwrap().model.as_deref(), None);
+        assert_eq!(
+            cfg.active_provider_config().unwrap().effective_model(),
+            "moonshot/kimi-k3"
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().name.as_deref(),
+            Some("moonshot")
+        );
         assert!(text.find("max_retries").unwrap() < text.find("[provider]").unwrap());
     }
 
@@ -646,6 +795,7 @@ mod tests {
         AppConfig::save_provider_at(
             &path,
             &ProviderConfig {
+                name: Some("openai".into()),
                 model: Some("gpt-4o".into()),
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 ..Default::default()
@@ -654,7 +804,142 @@ mod tests {
         .unwrap();
 
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
-        assert_eq!(cfg.provider.model.as_deref(), Some("gpt-4o"));
-        assert_eq!(cfg.provider.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(
+            cfg.active_provider_config().unwrap().model.as_deref(),
+            Some("gpt-4o")
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().reasoning_effort,
+            Some(ReasoningEffort::Medium)
+        );
+    }
+
+    #[test]
+    fn load_migrates_legacy_provider_into_map() {
+        let tmp = tempdir::TempDir::new("oven-hydrate-legacy").unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[provider]\nname = \"deepseek\"\napi_key = \"sk-old\"\nmodel = \"deepseek-v4-flash\"\n",
+        )
+        .unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        assert_eq!(
+            cfg.active_provider_config().unwrap().name.as_deref(),
+            Some("deepseek")
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().api_key.as_deref(),
+            Some("sk-old")
+        );
+        let saved = cfg.providers.get("deepseek").expect("hydrated");
+        assert_eq!(saved.api_key.as_deref(), Some("sk-old"));
+        assert_eq!(saved.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(cfg.configured_providers(), vec!["deepseek"]);
+        assert!(!cfg.needs_setup());
+    }
+
+    #[test]
+    fn save_second_vendor_keeps_first() {
+        let tmp = tempdir::TempDir::new("oven-save-two").unwrap();
+        let path = tmp.path().join("config.toml");
+        AppConfig::save_provider_at(
+            &path,
+            &ProviderConfig {
+                name: Some("deepseek".into()),
+                api_key: Some("sk-ds".into()),
+                model: Some("deepseek-v4-flash".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        AppConfig::save_provider_at(
+            &path,
+            &ProviderConfig {
+                name: Some("xai".into()),
+                api_key: Some("xai-key".into()),
+                model: Some("grok-4.6".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        assert_eq!(
+            cfg.active_provider_config().unwrap().name.as_deref(),
+            Some("xai")
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().model.as_deref(),
+            Some("grok-4.6")
+        );
+        assert_eq!(cfg.providers["deepseek"].api_key.as_deref(), Some("sk-ds"));
+        assert_eq!(cfg.providers["xai"].api_key.as_deref(), Some("xai-key"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[providers.deepseek]"));
+        assert!(text.contains("[providers.xai]"));
+    }
+
+    #[test]
+    fn save_model_updates_active_and_saved_model_not_api_key() {
+        let tmp = tempdir::TempDir::new("oven-save-model").unwrap();
+        let path = tmp.path().join("config.toml");
+        AppConfig::save_provider_at(
+            &path,
+            &ProviderConfig {
+                name: Some("deepseek".into()),
+                api_key: Some("sk-ds".into()),
+                model: Some("deepseek-v4-flash".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        AppConfig::save_provider_at(
+            &path,
+            &ProviderConfig {
+                name: Some("deepseek".into()),
+                model: Some("deepseek-chat".into()),
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        assert_eq!(
+            cfg.active_provider_config().unwrap().model.as_deref(),
+            Some("deepseek-chat")
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        assert_eq!(
+            cfg.active_provider_config().unwrap().api_key.as_deref(),
+            Some("sk-ds")
+        );
+        assert_eq!(cfg.providers["deepseek"].api_key.as_deref(), Some("sk-ds"));
+        assert_eq!(
+            cfg.providers["deepseek"].model.as_deref(),
+            Some("deepseek-chat")
+        );
+    }
+
+    #[test]
+    fn load_selects_active_provider_from_map() {
+        let tmp = tempdir::TempDir::new("oven-hydrate-map").unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[provider]\nname = \"xai\"\nmodel = \"grok-4.6\"\n\n[providers.xai]\napi_key = \"xai-key\"\n[providers.deepseek]\napi_key = \"sk-ds\"\nmodel = \"deepseek-v4-flash\"\n",
+        )
+        .unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        assert_eq!(
+            cfg.active_provider_config().unwrap().api_key.as_deref(),
+            Some("xai-key")
+        );
+        assert_eq!(cfg.providers["deepseek"].api_key.as_deref(), Some("sk-ds"));
+        assert_eq!(cfg.configured_providers(), vec!["deepseek", "xai"]);
     }
 }
