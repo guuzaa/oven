@@ -150,13 +150,28 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         } else {
             LINE_INDENT
         };
+        let line_style = if kind == LineKind::Diff {
+            match part.chars().next() {
+                Some('+') => theme::diff_added(),
+                Some('-') => theme::diff_removed(),
+                _ => style,
+            }
+        } else {
+            style
+        };
+        let body = if blank {
+            String::new()
+        } else {
+            part.to_string()
+        };
+        let body_span = if kind == LineKind::Diff {
+            Span::styled(body, line_style)
+        } else {
+            Span::raw(body)
+        };
         lines.push(Line::from(vec![
-            Span::styled(head.to_string(), style),
-            Span::raw(if blank {
-                String::new()
-            } else {
-                part.to_string()
-            }),
+            Span::styled(head.to_string(), line_style),
+            body_span,
         ]));
     }
     if lines.is_empty() {
@@ -173,10 +188,19 @@ pub(super) fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>,
         out.push(line.clone());
         return;
     }
-    let (prefix, style, body) = match line.spans.as_slice() {
+    let (prefix, style, body_style, body) = match line.spans.as_slice() {
         [head, rest @ ..] => {
             let body: String = rest.iter().map(|s| s.content.as_ref()).collect();
-            (head.content.as_ref().to_string(), head.style, body)
+            let body_style = rest
+                .first()
+                .map(|span| span.style)
+                .filter(|style| *style != Style::default());
+            (
+                head.content.as_ref().to_string(),
+                head.style,
+                body_style,
+                body,
+            )
         }
         [] => {
             out.push(line.clone());
@@ -187,7 +211,7 @@ pub(super) fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>,
     if body.is_empty() {
         out.push(Line::from(vec![
             Span::styled(prefix, style),
-            Span::raw(String::new()),
+            body_span(String::new(), body_style),
         ]));
         return;
     }
@@ -203,9 +227,16 @@ pub(super) fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>,
         };
         out.push(Line::from(vec![
             Span::styled(head.to_string(), style),
-            Span::raw(chunk.to_string()),
+            body_span(chunk.to_string(), body_style),
         ]));
         rest = next;
+    }
+}
+
+fn body_span(text: String, style: Option<Style>) -> Span<'static> {
+    match style {
+        Some(style) => Span::styled(text, style),
+        None => Span::raw(text),
     }
 }
 

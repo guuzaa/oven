@@ -242,7 +242,12 @@ impl Transcript {
         if !view.collapse {
             self.close_tool_burst();
             self.detail_ids.insert(call_id.to_string());
-            self.push_row(LineKind::Tool, &view.summary);
+            let kind = if view.diff {
+                LineKind::Diff
+            } else {
+                LineKind::Tool
+            };
+            self.push_row(kind, &view.summary);
             return;
         }
         let label = compact_tool_arg(&view.summary);

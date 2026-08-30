@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, labeled, require_str, resolve_within};
+use super::{Tool, ToolView, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileEditTool {
@@ -16,12 +16,39 @@ impl FileEditTool {
     pub const NAME: &'static str = "file_edit";
 
     pub fn view_input(input: &Value) -> ToolView {
-        labeled(Self::NAME, "Edited", input, "path")
+        let Some(path) = input.get("path").and_then(Value::as_str) else {
+            return ToolView::named(Self::NAME);
+        };
+        let Some(old_string) = input.get("old_string").and_then(Value::as_str) else {
+            return ToolView::named(Self::NAME);
+        };
+        let Some(new_string) = input.get("new_string").and_then(Value::as_str) else {
+            return ToolView::named(Self::NAME);
+        };
+
+        ToolView {
+            summary: format_diff(path, old_string, new_string),
+            collapse: false,
+            diff: true,
+        }
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
+}
+
+fn format_diff(path: &str, old_string: &str, new_string: &str) -> String {
+    let mut diff = format!("Edit {}", path.trim());
+    for line in old_string.split('\n') {
+        diff.push_str("\n- ");
+        diff.push_str(line.trim_end_matches('\r'));
+    }
+    for line in new_string.split('\n') {
+        diff.push_str("\n+ ");
+        diff.push_str(line.trim_end_matches('\r'));
+    }
+    diff
 }
 
 #[async_trait]
@@ -110,6 +137,28 @@ mod tests {
 
     fn tmp_dir() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-test").unwrap()
+    }
+
+    #[test]
+    fn view_shows_edit_as_diff() {
+        let view = FileEditTool::view_input(&json!({
+            "path": "src/main.rs",
+            "old_string": "let answer = 41;",
+            "new_string": "let answer = 42;",
+        }));
+        assert!(!view.collapse);
+        assert_eq!(
+            view.summary,
+            "Edit src/main.rs\n- let answer = 41;\n+ let answer = 42;"
+        );
+    }
+
+    #[test]
+    fn view_falls_back_without_edit_content() {
+        assert_eq!(
+            FileEditTool::view_input(&json!({ "path": "src/main.rs" })).summary,
+            FileEditTool::NAME
+        );
     }
 
     #[tokio::test]

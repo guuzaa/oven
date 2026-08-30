@@ -6,6 +6,7 @@ use super::{BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool};
 pub struct ToolView {
     pub summary: String,
     pub collapse: bool,
+    pub diff: bool,
 }
 
 impl ToolView {
@@ -13,6 +14,7 @@ impl ToolView {
         Self {
             summary: name.into(),
             collapse: true,
+            diff: false,
         }
     }
 }
@@ -47,6 +49,7 @@ pub(crate) fn labeled(name: &str, verb: &str, input: &Value, key: &str) -> ToolV
         Some(v) => ToolView {
             summary: format!("{verb} {v}"),
             collapse: true,
+            diff: false,
         },
         None => ToolView::named(name),
     }
@@ -68,12 +71,42 @@ mod tests {
             "Read src/main.rs"
         );
         assert_eq!(
-            present_tool(FileEditTool::NAME, &json!({ "path": "src/main.rs" })).summary,
-            "Edited src/main.rs"
+            present_tool(
+                FileEditTool::NAME,
+                &json!({
+                    "path": "src/main.rs",
+                    "old_string": "old",
+                    "new_string": "new"
+                })
+            )
+            .summary,
+            "Edit src/main.rs\n- old\n+ new"
+        );
+        assert!(
+            !present_tool(
+                FileEditTool::NAME,
+                &json!({
+                    "path": "src/main.rs",
+                    "old_string": "old",
+                    "new_string": "new"
+                })
+            )
+            .collapse
         );
         assert_eq!(
-            present_tool(FileWriteTool::NAME, &json!({ "path": "out.txt" })).summary,
-            "Wrote out.txt"
+            present_tool(
+                FileWriteTool::NAME,
+                &json!({ "path": "out.txt", "content": "new content" })
+            )
+            .summary,
+            "Write out.txt\n+ new content"
+        );
+        assert!(
+            !present_tool(
+                FileWriteTool::NAME,
+                &json!({ "path": "out.txt", "content": "new content" })
+            )
+            .collapse
         );
         assert_eq!(
             present_tool("grep", &json!({ "pattern": "foo" })).summary,

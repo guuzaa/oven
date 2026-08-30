@@ -19,6 +19,14 @@ pub fn tool() -> Style {
     Style::default().fg(Color::Magenta)
 }
 
+pub fn diff_added() -> Style {
+    Style::default().fg(Color::Black).bg(Color::LightGreen)
+}
+
+pub fn diff_removed() -> Style {
+    Style::default().fg(Color::Black).bg(Color::LightRed)
+}
+
 pub fn ok() -> Style {
     Style::default().fg(Color::DarkGray)
 }

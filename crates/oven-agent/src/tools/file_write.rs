@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, labeled, require_str, resolve_within};
+use super::{Tool, ToolView, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileWriteTool {
@@ -16,7 +16,24 @@ impl FileWriteTool {
     pub const NAME: &'static str = "file_write";
 
     pub fn view_input(input: &Value) -> ToolView {
-        labeled(Self::NAME, "Wrote", input, "path")
+        let Some(path) = input.get("path").and_then(Value::as_str) else {
+            return ToolView::named(Self::NAME);
+        };
+        let Some(content) = input.get("content").and_then(Value::as_str) else {
+            return ToolView::named(Self::NAME);
+        };
+
+        let mut diff = format!("Write {}", path.trim());
+        for line in content.split('\n') {
+            diff.push_str("\n+ ");
+            diff.push_str(line.trim_end_matches('\r'));
+        }
+
+        ToolView {
+            summary: diff,
+            collapse: false,
+            diff: true,
+        }
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -77,6 +94,24 @@ mod tests {
 
     fn tmp_dir() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-test").unwrap()
+    }
+
+    #[test]
+    fn view_shows_content_as_diff() {
+        let view = FileWriteTool::view_input(&json!({
+            "path": "hello.txt",
+            "content": "line one\nline two",
+        }));
+        assert!(!view.collapse);
+        assert_eq!(view.summary, "Write hello.txt\n+ line one\n+ line two");
+    }
+
+    #[test]
+    fn view_falls_back_without_content() {
+        assert_eq!(
+            FileWriteTool::view_input(&json!({ "path": "hello.txt" })).summary,
+            FileWriteTool::NAME
+        );
     }
 
     #[tokio::test]

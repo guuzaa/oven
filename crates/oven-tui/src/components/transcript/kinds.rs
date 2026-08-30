@@ -22,6 +22,7 @@ pub(super) enum LineKind {
     Thinking,
     Text,
     Tool,
+    Diff,
     ToolResult(bool),
     Error,
     System,
@@ -35,6 +36,7 @@ impl LineKind {
             LineKind::Thinking => theme::thinking(),
             LineKind::Text => theme::assistant(),
             LineKind::Tool => theme::tool(),
+            LineKind::Diff => theme::tool(),
             LineKind::ToolResult(true) => theme::ok(),
             LineKind::ToolResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
@@ -48,9 +50,11 @@ impl LineKind {
             LineKind::Text => "∙ ",
             LineKind::Thinking => "⋅ ",
             LineKind::Tool => "$ ",
-            LineKind::ToolResult(_) | LineKind::Error | LineKind::System | LineKind::Separator => {
-                "  "
-            }
+            LineKind::ToolResult(_)
+            | LineKind::Diff
+            | LineKind::Error
+            | LineKind::System
+            | LineKind::Separator => "  ",
         }
     }
 }

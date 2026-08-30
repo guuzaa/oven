@@ -75,6 +75,7 @@ fn all_gutters_are_two_wide() {
         LineKind::Thinking,
         LineKind::Text,
         LineKind::Tool,
+        LineKind::Diff,
         LineKind::ToolResult(true),
         LineKind::ToolResult(false),
         LineKind::Error,
@@ -108,6 +109,25 @@ fn format_tool_summary_counts_and_failures() {
 #[test]
 fn compact_tool_arg_joins_whitespace() {
     assert_eq!(compact_tool_arg("Ran echo\n  hi"), "Ran echo hi");
+}
+
+#[test]
+fn regular_text_keeps_default_body_style() {
+    let lines = format_lines(LineKind::Text, "hello");
+    assert_eq!(lines[0].spans[1].style, ratatui::style::Style::default());
+}
+
+#[test]
+fn diff_lines_have_add_remove_backgrounds() {
+    let lines = format_lines(LineKind::Diff, "Edit file.txt\n- old\n+ new");
+    assert_eq!(
+        lines[1].spans[1].style.bg,
+        Some(ratatui::style::Color::LightRed)
+    );
+    assert_eq!(
+        lines[2].spans[1].style.bg,
+        Some(ratatui::style::Color::LightGreen)
+    );
 }
 
 #[test]
