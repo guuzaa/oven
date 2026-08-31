@@ -15,6 +15,7 @@ use super::kinds::{
 };
 
 pub(super) const MAX_RESULT_LINES: usize = 6;
+pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 
 pub(super) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
     f.render_widget(Paragraph::new(lines), area);
@@ -102,6 +103,15 @@ pub(super) fn truncate_result(text: &str) -> String {
     out
 }
 
+pub(super) fn tail_lines(text: &str, max: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max {
+        return text.to_string();
+    }
+    let skip = lines.len() - max;
+    format!("… {skip} earlier lines\n{}", lines[skip..].join("\n"))
+}
+
 pub(super) fn wrap_row_into(
     out: &mut Vec<Line<'static>>,
     kind: LineKind,
@@ -164,10 +174,9 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         } else {
             part.to_string()
         };
-        let body_span = if kind == LineKind::Diff {
-            Span::styled(body, line_style)
-        } else {
-            Span::raw(body)
+        let body_span = match kind {
+            LineKind::Diff | LineKind::Shell => Span::styled(body, line_style),
+            _ => Span::raw(body),
         };
         lines.push(Line::from(vec![
             Span::styled(head.to_string(), line_style),

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use oven_agent::{Agent, AgentMode, Record, TodoList, restore_todos};
+use oven_agent::{Agent, AgentMode, CancellationToken, Record, TodoList, TurnId, restore_todos};
 use oven_llm::{
     Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort,
 };
@@ -12,10 +12,14 @@ use tokio::sync::{mpsc, watch};
 use crate::App;
 use crate::command::AppCommand;
 use crate::config::{AppConfig, ProviderConfig};
-use crate::event::{AppEvent, AppEventKind, AppId, Subscribers};
+use crate::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
 use crate::session::{Session, SessionError, SessionStore, record_recent};
+use crate::shell;
 use crate::slash::{CommandOutcome, SlashRegistry};
 use crate::state::{AppPhase, AppState, SessionState, StateChange, StateEvent};
+use crate::turn::cancel_turn;
+
+const EMPTY_SHELL: &str = "empty shell command";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Control {
@@ -25,6 +29,7 @@ pub(crate) enum Control {
 
 pub(crate) struct Runtime {
     pub(crate) agent: Agent,
+    pub(crate) root: PathBuf,
     pub(crate) state: AppState,
     pub(crate) state_tx: watch::Sender<AppState>,
     pub(crate) session: Option<SessionStore>,
@@ -40,8 +45,10 @@ pub(crate) struct Runtime {
 }
 
 impl Runtime {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         agent: Agent,
+        root: PathBuf,
         session: Option<SessionStore>,
         config: AppConfig,
         user_config_path: Option<PathBuf>,
@@ -56,6 +63,7 @@ impl Runtime {
         let persisted_rev = agent.history_revision();
         Self {
             agent,
+            root,
             state,
             state_tx,
             session,
@@ -126,6 +134,90 @@ impl Runtime {
         }
     }
 
+    pub(crate) async fn run_shell(
+        &mut self,
+        command: String,
+        cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
+    ) -> Control {
+        let turn_id = TurnId::next();
+        self.state.phase = AppPhase::Running { turn_id };
+        self.publish();
+        self.emit(AppEventKind::Shell(ShellEvent::Started {
+            command: command.clone(),
+        }));
+
+        let cancel = CancellationToken::new();
+        let root = self.root.clone();
+        let run = shell::run_host_shell(&root, &command, shell::HOST_SHELL_TIMEOUT, Some(&cancel));
+        tokio::pin!(run);
+
+        let result = loop {
+            tokio::select! {
+                biased;
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        None | Some(AppCommand::Shutdown) => {
+                            self.state.phase = AppPhase::ShuttingDown;
+                            self.publish();
+                            cancel.cancel();
+                            let _ = run.await;
+                            return Control::Shutdown;
+                        }
+                        Some(AppCommand::Cancel { turn_id: id }) if id == turn_id => {
+                            cancel_turn(&mut self.state, &self.state_tx, turn_id, &cancel);
+                        }
+                        Some(AppCommand::Cancel { .. }) => {}
+                        Some(AppCommand::SetMode { mode }) => {
+                            self.set_mode(mode);
+                        }
+                        Some(cmd) => self.pending.push_back(cmd),
+                    }
+                }
+                res = &mut run => break res,
+            }
+        };
+
+        if let Some(store) = &self.session {
+            self.agent.ensure_session_meta(store.root.clone());
+        }
+
+        let shell = shell::commit_shell(&command, result);
+        match &shell.error {
+            None => {
+                let exit_code = shell.exit_code.unwrap_or(0);
+                self.emit(AppEventKind::Shell(ShellEvent::Finished {
+                    command: command.clone(),
+                    output: shell.output.clone(),
+                    exit_code,
+                }));
+            }
+            Some(error) => {
+                self.emit(AppEventKind::Shell(ShellEvent::Failed {
+                    command: command.clone(),
+                    error: error.clone(),
+                    output: shell.output.clone(),
+                }));
+            }
+        }
+
+        self.agent
+            .push_history(Message::user_text(shell.to_string()));
+        self.persist_turn();
+        self.snapshot_agent();
+        if !matches!(self.state.phase, AppPhase::ShuttingDown) {
+            self.state.phase = AppPhase::Idle;
+            self.publish();
+        }
+        Control::Continue
+    }
+
+    pub(crate) fn reject_empty_shell(&mut self) -> Control {
+        self.emit(AppEventKind::Notification {
+            text: EMPTY_SHELL.into(),
+        });
+        Control::Continue
+    }
+
     async fn bootstrap(&mut self) {
         let model = self.agent.model().to_string();
         let (models, _) = refresh_model_choices(self.agent.router(), &model, &self.config).await;
@@ -139,7 +231,7 @@ impl Runtime {
         self.publish();
     }
 
-    fn emit(&mut self, kind: AppEventKind) {
+    pub(crate) fn emit(&mut self, kind: AppEventKind) {
         emit(&mut self.seq, &self.subscribers, kind);
     }
 
@@ -499,6 +591,7 @@ pub(crate) fn spawn_runtime(
     let (state_tx, state_rx) = watch::channel(state.clone());
     let runtime = Runtime::new(
         agent,
+        root.clone(),
         session_store,
         config,
         user_config_path,

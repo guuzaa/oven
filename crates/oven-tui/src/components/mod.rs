@@ -6,6 +6,7 @@ pub(super) mod list;
 pub(super) mod model_picker;
 pub(super) mod queue;
 pub(super) mod setup_wizard;
+pub(super) mod shell;
 pub(super) mod slash_command_popup;
 pub(super) mod status;
 pub(super) mod terminal;

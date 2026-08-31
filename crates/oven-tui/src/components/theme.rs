@@ -7,6 +7,10 @@ pub fn user() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+pub fn shell() -> Style {
+    Style::default().fg(Color::Blue)
+}
+
 pub fn assistant() -> Style {
     Style::default().fg(Color::Green)
 }

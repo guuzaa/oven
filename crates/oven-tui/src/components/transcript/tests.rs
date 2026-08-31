@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, present_tool,
+    AgentEvent, AppEvent, LocalShell, ShellEvent, StreamEvent, ToolCallId, ToolEvent, ToolResult,
+    TurnEvent, present_tool,
 };
 use oven_llm::{ContentBlock, Message};
 use ratatui::Terminal;
@@ -15,7 +16,10 @@ use super::kinds::{LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH, THINKING_LABEL,
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::tools::{compact_tool_arg, format_tool_summary};
 use super::widget::Transcript;
-use super::wrap::{MAX_RESULT_LINES, apply_thinking_shimmer, format_lines, truncate_result};
+use super::wrap::{
+    MAX_RESULT_LINES, MAX_SHELL_DISPLAY_LINES, apply_thinking_shimmer, format_lines, tail_lines,
+    truncate_result,
+};
 
 fn wide(t: &mut Transcript) {
     t.width = 80;
@@ -74,12 +78,15 @@ fn truncate_result_caps_lines() {
 fn all_gutters_are_two_wide() {
     let kinds = [
         LineKind::User,
+        LineKind::Shell,
         LineKind::Thinking,
         LineKind::Text,
         LineKind::Tool,
         LineKind::Diff,
         LineKind::ToolResult(true),
         LineKind::ToolResult(false),
+        LineKind::ShellResult(true),
+        LineKind::ShellResult(false),
         LineKind::Error,
         LineKind::System,
         LineKind::Separator,
@@ -97,6 +104,15 @@ fn all_gutters_are_two_wide() {
 fn assistant_gutter_is_bullet() {
     let lines = format_lines(LineKind::Text, "hi");
     assert_eq!(lines[0].spans[0].content.as_ref(), LineKind::Text.gutter());
+}
+
+#[test]
+fn shell_command_gutter_is_dollar() {
+    let lines = format_lines(LineKind::Shell, "ls");
+    assert_eq!(lines[0].spans[0].content.as_ref(), LineKind::Shell.gutter());
+    assert_eq!(lines[0].spans[0].style.fg, theme::shell().fg);
+    assert_eq!(lines[0].spans[1].content.as_ref(), "ls");
+    assert_eq!(lines[0].spans[1].style.fg, theme::shell().fg);
 }
 
 #[test]
@@ -645,6 +661,13 @@ fn last_user_text_none_without_user_rows() {
 }
 
 #[test]
+fn last_user_text_rewinds_shell_as_bang() {
+    let mut t = Transcript::new();
+    t.push_shell_command("ls -la");
+    assert_eq!(t.last_user_text().as_deref(), Some("! ls -la"));
+}
+
+#[test]
 fn replace_from_rebuilds_rows() {
     let mut t = Transcript::new();
     t.push_user("old");
@@ -995,4 +1018,108 @@ fn replace_from_clears_selection() {
     t.replace_from(&[Message::user_text("resumed")]);
     assert!(t.select_anchor.is_none());
     assert!(!t.dragging);
+}
+
+#[test]
+fn tail_lines_keeps_last_max() {
+    let text = (0..150)
+        .map(|i| format!("l{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let out = tail_lines(&text, MAX_SHELL_DISPLAY_LINES);
+    assert!(out.starts_with("… 50 earlier lines"));
+    assert!(out.contains("l50"));
+    assert!(out.ends_with("l149"));
+    assert!(!out.contains("l0\n"));
+    assert_eq!(out.lines().count(), MAX_SHELL_DISPLAY_LINES + 1);
+}
+
+#[test]
+fn seed_shell_envelope_renders_command_and_output() {
+    let mut t = Transcript::new();
+    let msg = LocalShell {
+        command: "ls".into(),
+        exit_code: Some(0),
+        output: "a.rs\nb.rs".into(),
+        error: None,
+    }
+    .to_string();
+    t.seed(&[Message::user_text(msg)]);
+    assert_eq!(t.rows[0].kind, LineKind::Shell);
+    assert_eq!(t.rows[0].text, "ls");
+    assert_eq!(t.rows[1].kind, LineKind::ShellResult(true));
+    assert_eq!(t.rows[1].text, "a.rs\nb.rs");
+    assert_eq!(t.last_user_text().as_deref(), Some("! ls"));
+}
+
+#[test]
+fn seed_does_not_treat_bang_user_text_as_shell() {
+    let mut t = Transcript::new();
+    t.seed(&[Message::user_text("! ls")]);
+    assert_eq!(t.rows[0].kind, LineKind::User);
+    assert_eq!(t.rows[0].text, "! ls");
+    assert_eq!(t.rows.len(), 1);
+}
+
+#[test]
+fn seed_nonzero_exit_is_failed_result() {
+    let mut t = Transcript::new();
+    let msg = LocalShell {
+        command: "false".into(),
+        exit_code: Some(1),
+        output: "[exit code: 1]".into(),
+        error: None,
+    }
+    .to_string();
+    t.seed(&[Message::user_text(msg)]);
+    assert_eq!(t.rows[0].kind, LineKind::Shell);
+    assert_eq!(t.rows[1].kind, LineKind::ShellResult(false));
+    assert_eq!(t.rows[1].text, "[exit code: 1]");
+}
+
+#[test]
+fn seed_shell_envelope_does_not_show_raw_xml() {
+    let mut t = Transcript::new();
+    let msg = LocalShell {
+        command: "echo hi".into(),
+        exit_code: Some(0),
+        output: "hi".into(),
+        error: None,
+    }
+    .to_string();
+    t.seed(&[Message::user_text(msg)]);
+    assert!(!t.rows.iter().any(|r| r.text.contains("<local-shell>")));
+}
+
+#[test]
+fn shell_finished_event_appends_tailed_output() {
+    let mut t = Transcript::new();
+    t.push_shell_command("ls");
+    let output = (0..150)
+        .map(|i| format!("l{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    t.on_event(&AppEvent::shell(ShellEvent::Finished {
+        command: "ls".into(),
+        output,
+        exit_code: 0,
+    }));
+    assert_eq!(t.rows[0].kind, LineKind::Shell);
+    assert_eq!(t.rows[1].kind, LineKind::ShellResult(true));
+    assert!(t.rows[1].text.starts_with("… 50 earlier lines"));
+    assert!(t.rows[1].text.ends_with("l149"));
+}
+
+#[test]
+fn shell_failed_event_is_error_result() {
+    let mut t = Transcript::new();
+    t.push_shell_command("sleep 60");
+    t.on_event(&AppEvent::shell(ShellEvent::Failed {
+        command: "sleep 60".into(),
+        error: "cancelled".into(),
+        output: String::new(),
+    }));
+    assert_eq!(t.rows[0].kind, LineKind::Shell);
+    assert_eq!(t.rows[1].kind, LineKind::ShellResult(false));
+    assert_eq!(t.rows[1].text, "cancelled");
 }

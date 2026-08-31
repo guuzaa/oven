@@ -9,6 +9,7 @@ use crate::runtime::{
     Control, Runtime, emit, emit_error, emit_state, persist_todo_snapshot, publish,
     record_recent_path, should_persist_todos,
 };
+use crate::shell;
 use crate::slash::CommandOutcome;
 use crate::state::{AppPhase, AppState, StateChange};
 
@@ -18,6 +19,13 @@ impl Runtime {
         input: String,
         cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
     ) -> Control {
+        if let Some(shell) = shell::ShellInput::parse(&input) {
+            return match shell.command() {
+                Some(command) => self.run_shell(command.to_string(), cmd_rx).await,
+                None => self.reject_empty_shell(),
+            };
+        }
+
         match self.slash.parse_and_run(&mut self.agent, &input) {
             Ok(CommandOutcome::Passthrough) => {}
             Ok(outcome) => {
@@ -116,7 +124,7 @@ impl Runtime {
         Control::Continue
     }
 
-    fn persist_turn(&mut self) {
+    pub(crate) fn persist_turn(&mut self) {
         let Some(store) = &self.session else {
             return;
         };
@@ -149,7 +157,7 @@ impl Runtime {
     }
 }
 
-fn cancel_turn(
+pub(crate) fn cancel_turn(
     state: &mut AppState,
     state_tx: &tokio::sync::watch::Sender<AppState>,
     turn_id: TurnId,

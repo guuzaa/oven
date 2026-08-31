@@ -6,14 +6,15 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, StateChange, StateEvent,
-    TurnEvent,
+    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ShellEvent, StateChange,
+    StateEvent, TurnEvent,
 };
 use tokio::sync::mpsc;
 
 use crate::components::component::{Action, Component, KeyResult, State};
 use crate::components::input::{InputView, Overlay, display_user_input};
 use crate::components::queue::QueueWidget;
+use crate::components::shell;
 use crate::components::status::{StatusBar, StatusHint};
 use crate::components::todos::TodosWidget;
 use crate::components::transcript::Transcript;
@@ -161,6 +162,12 @@ impl Ui {
                 ) => self.state.busy = false,
                 _ => {}
             },
+            AppEventKind::Shell(ev) => match ev {
+                ShellEvent::Started { .. } => self.state.busy = true,
+                ShellEvent::Finished { .. } | ShellEvent::Failed { .. } => {
+                    self.state.busy = false;
+                }
+            },
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::ModeChanged { mode } => self.state.mode = *mode,
                 StateChange::HistoryChanged { .. } => {
@@ -199,7 +206,7 @@ impl Ui {
                 })
                 .is_ok()
             {
-                self.transcript.push_user(&display_user_input(text));
+                self.push_submitted(text);
                 true
             } else {
                 false
@@ -210,6 +217,14 @@ impl Ui {
             rest.append(&mut self.pending);
             self.pending = rest;
             self.state.busy = false;
+        }
+    }
+
+    fn push_submitted(&mut self, text: &str) {
+        if let Some(cmd) = shell::command(text) {
+            self.transcript.push_shell_command(cmd);
+        } else {
+            self.transcript.push_user(&display_user_input(text));
         }
     }
 
@@ -285,7 +300,7 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::Submit(text)) => {
-                self.transcript.push_user(&display_user_input(&text));
+                self.push_submitted(&text);
                 self.status.clear_reply();
                 self.input.clear();
                 self.state.busy = true;

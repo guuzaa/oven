@@ -26,9 +26,27 @@ pub struct AppEvent {
 pub enum AppEventKind {
     Agent(AgentEventEnvelope),
     StateChanged(StateEvent),
+    Shell(ShellEvent),
     Notification { text: String },
     Error { message: String },
     Exited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellEvent {
+    Started {
+        command: String,
+    },
+    Finished {
+        command: String,
+        output: String,
+        exit_code: i32,
+    },
+    Failed {
+        command: String,
+        error: String,
+        output: String,
+    },
 }
 
 impl AppEvent {
@@ -55,6 +73,10 @@ impl AppEvent {
             revision: 0,
             change,
         }))
+    }
+
+    pub fn shell(event: ShellEvent) -> Self {
+        Self::new(AppEventKind::Shell(event))
     }
 
     pub fn agent(event: AgentEvent) -> Self {

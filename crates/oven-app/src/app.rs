@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use crate::builder::AppBuilder;
 use crate::command::AppCommand;
 use crate::config::{ConfigError, ProviderConfig};
-use crate::event::{AppEvent, AppEventKind, AppId, Subscribers};
+use crate::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
 use crate::session::SessionError;
 use crate::state::AppState;
 
@@ -186,6 +186,22 @@ impl App {
                         return Err(AppError::Runtime(error.message));
                     }
                     _ => {}
+                },
+                Some(AppEvent {
+                    kind: AppEventKind::Shell(ev),
+                    ..
+                }) => match ev {
+                    ShellEvent::Started { .. } => {
+                        in_turn = true;
+                    }
+                    ShellEvent::Finished { output, .. } => return Ok(output),
+                    ShellEvent::Failed { error, output, .. } => {
+                        return Err(AppError::Runtime(if output.is_empty() {
+                            error
+                        } else {
+                            output
+                        }));
+                    }
                 },
                 Some(AppEvent {
                     kind: AppEventKind::Notification { text: t },

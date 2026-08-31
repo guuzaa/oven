@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, AppEventKind, StreamEvent, ToolEvent, ToolResult, ToolView, TurnEvent,
-    present_tool,
+    AgentEvent, AppEvent, AppEventKind, LocalShell, ShellEvent, StreamEvent, ToolEvent, ToolResult,
+    ToolView, TurnEvent, display_shell_line, present_tool,
 };
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
@@ -16,8 +16,9 @@ use super::kinds::{LineKind, Row, THINKING_LABEL, THOUGHT_LABEL};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::{ToolBurst, compact_tool_arg, format_tool_summary};
 use super::wrap::{
-    apply_thinking_shimmer, collect_lines, format_lines, line_display_width, paint_visible,
-    thinking_phase, trim_message, truncate_result, wrap_line_into, wrap_row_into,
+    MAX_SHELL_DISPLAY_LINES, apply_thinking_shimmer, collect_lines, format_lines,
+    line_display_width, paint_visible, tail_lines, thinking_phase, trim_message, truncate_result,
+    wrap_line_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -76,12 +77,28 @@ impl Transcript {
         self.push_row(LineKind::User, text);
     }
 
+    pub fn push_shell_command(&mut self, command: &str) {
+        self.close_tool_burst();
+        self.push_row(LineKind::Shell, command);
+    }
+
+    pub fn push_shell_output(&mut self, output: &str, ok: bool) {
+        self.close_tool_burst();
+        let trimmed = trim_message(output);
+        let body = if trimmed.is_empty() {
+            "(no output)".to_string()
+        } else {
+            trimmed
+        };
+        self.push_row(LineKind::ShellResult(ok), &body);
+    }
+
     pub(crate) fn last_user_text(&self) -> Option<String> {
-        self.rows
-            .iter()
-            .rev()
-            .find(|r| r.kind == LineKind::User)
-            .map(|r| r.text.clone())
+        self.rows.iter().rev().find_map(|r| match r.kind {
+            LineKind::User => Some(r.text.clone()),
+            LineKind::Shell => Some(display_shell_line(&r.text)),
+            _ => None,
+        })
     }
 
     pub(crate) fn replace_from(&mut self, messages: &[Message]) {
@@ -100,7 +117,12 @@ impl Transcript {
                         match block {
                             ContentBlock::Text { text } => {
                                 self.close_tool_burst();
-                                self.push_row(LineKind::User, text);
+                                if let Some(sh) = LocalShell::try_parse(text) {
+                                    self.push_shell_command(&sh.command);
+                                    self.push_shell_output(&sh.output, sh.ok());
+                                } else {
+                                    self.push_row(LineKind::User, text);
+                                }
                             }
                             ContentBlock::ToolResult {
                                 tool_use_id,
@@ -309,6 +331,7 @@ impl Transcript {
         let text = match kind {
             LineKind::Thinking => THOUGHT_LABEL.to_string(),
             LineKind::ToolResult(_) => truncate_result(text),
+            LineKind::ShellResult(_) => tail_lines(text, MAX_SHELL_DISPLAY_LINES),
             LineKind::Separator => String::new(),
             _ => text.to_string(),
         };
@@ -327,6 +350,7 @@ impl Transcript {
         let text = match kind {
             LineKind::Thinking => THOUGHT_LABEL.to_string(),
             LineKind::ToolResult(_) => truncate_result(text),
+            LineKind::ShellResult(_) => tail_lines(text, MAX_SHELL_DISPLAY_LINES),
             LineKind::Separator => String::new(),
             _ => text.to_string(),
         };
@@ -640,6 +664,16 @@ impl Component for Transcript {
                     self.push_separator();
                 }
                 AgentEvent::TodosChanged { .. } => {}
+            },
+            AppEventKind::Shell(ev) => match ev {
+                ShellEvent::Started { .. } => {}
+                ShellEvent::Finished {
+                    output, exit_code, ..
+                } => self.push_shell_output(output, *exit_code == 0),
+                ShellEvent::Failed { error, output, .. } => {
+                    let body = if output.is_empty() { error } else { output };
+                    self.push_shell_output(body, false);
+                }
             },
             AppEventKind::StateChanged(_) => {}
             AppEventKind::Exited => {}

@@ -22,6 +22,7 @@ use super::component::{Action, Component, KeyResult, State};
 use super::file_mention_popup::{FileMentionPopup, FileMentionPopupAction};
 use super::model_picker::{ModelPicker, ModelPickerAction};
 use super::setup_wizard::{SetupWizard, SetupWizardAction};
+use super::shell;
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
 use super::theme;
 
@@ -192,7 +193,9 @@ impl InputView {
     }
 
     fn border_style(&self, state: &State) -> Style {
-        if state.mode == AgentMode::Plan {
+        if shell::is_active(&self.text()) {
+            theme::shell()
+        } else if state.mode == AgentMode::Plan {
             theme::mode()
         } else if self.textarea.lines().iter().any(|line| !line.is_empty()) {
             theme::border_active()
@@ -309,7 +312,7 @@ impl Component for InputView {
             }
             KeyCode::Enter => {
                 let text = self.text().trim().to_string();
-                if text.is_empty() {
+                if text.is_empty() || (shell::is_active(&text) && shell::command(&text).is_none()) {
                     KeyResult::Handled
                 } else if state.busy {
                     if is_model_or_setup(&text) {
@@ -338,17 +341,22 @@ impl Component for InputView {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(PROMPT_COLS), Constraint::Min(1)])
             .split(inner);
-        let prompt = if state.busy { "⋅ " } else { "› " };
+        let active = shell::is_active(&self.text());
         f.render_widget(
-            Paragraph::new(Span::styled(prompt, theme::user())),
+            Paragraph::new(Span::styled(
+                shell::prompt(state.busy, active),
+                shell::prompt_style(active),
+            )),
             chunks[0],
         );
         if self.setup.is_open() {
             draw_setup_prompt(f, chunks[1], &self.setup);
             return;
         }
-        self.textarea.set_style(Style::default());
+        self.textarea.set_style(shell::text_style(active));
         self.textarea.set_cursor_line_style(Style::default());
+        self.textarea
+            .set_placeholder_text(shell::placeholder(active));
         f.render_widget(&self.textarea, chunks[1]);
     }
 }
@@ -1261,5 +1269,57 @@ mod tests {
         };
         let (_, buf) = render(&mut view, 40, 3, &busy_plan);
         assert_eq!(buf[(0, 0)].style().fg, theme::mode().fg);
+    }
+
+    #[test]
+    fn bang_uses_shell_border_and_prompt() {
+        let mut view = view();
+        type_text(&mut view, "!");
+        assert_eq!(view.overlay(), Overlay::None);
+        let (out, buf) = render(&mut view, 40, 3, &State::new());
+        assert_eq!(buf[(0, 0)].style().fg, theme::shell().fg);
+        assert!(out.contains('$'), "{out}");
+    }
+
+    #[test]
+    fn deleting_bang_restores_idle_border() {
+        let mut view = view();
+        type_text(&mut view, "!");
+        view.handle_key(key(KeyCode::Backspace), &State::new());
+        let (out, buf) = render(&mut view, 40, 3, &State::new());
+        assert_eq!(buf[(0, 0)].style().fg, theme::border_idle().fg);
+        assert!(out.contains('›'), "{out}");
+    }
+
+    #[test]
+    fn bang_wins_over_plan_mode_border() {
+        let mut view = view();
+        type_text(&mut view, "!ls");
+        let plan = State {
+            mode: AgentMode::Plan,
+            ..State::new()
+        };
+        let (_, buf) = render(&mut view, 40, 3, &plan);
+        assert_eq!(buf[(0, 0)].style().fg, theme::shell().fg);
+    }
+
+    #[test]
+    fn empty_bang_does_not_submit() {
+        let mut view = view();
+        type_text(&mut view, "!");
+        let result = view.handle_key(key(KeyCode::Enter), &State::new());
+        assert!(matches!(result, KeyResult::Handled));
+        assert_eq!(view.textarea.lines()[0], "!");
+    }
+
+    #[test]
+    fn bang_command_submits() {
+        let mut view = view();
+        type_text(&mut view, "!ls");
+        let result = view.handle_key(key(KeyCode::Enter), &State::new());
+        match result {
+            KeyResult::Action(Action::Submit(text)) => assert_eq!(text, "!ls"),
+            _ => panic!("expected submit"),
+        }
     }
 }

@@ -19,11 +19,13 @@ pub(super) fn thinking_display_label(text: &str) -> &'static str {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LineKind {
     User,
+    Shell,
     Thinking,
     Text,
     Tool,
     Diff,
     ToolResult(bool),
+    ShellResult(bool),
     Error,
     System,
     Separator,
@@ -33,12 +35,13 @@ impl LineKind {
     pub(super) fn style(self) -> Style {
         match self {
             LineKind::User => theme::user(),
+            LineKind::Shell => theme::shell(),
             LineKind::Thinking => theme::thinking(),
             LineKind::Text => theme::assistant(),
             LineKind::Tool => theme::tool(),
             LineKind::Diff => theme::tool(),
-            LineKind::ToolResult(true) => theme::ok(),
-            LineKind::ToolResult(false) => theme::fail(),
+            LineKind::ToolResult(true) | LineKind::ShellResult(true) => theme::ok(),
+            LineKind::ToolResult(false) | LineKind::ShellResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
             LineKind::System | LineKind::Separator => theme::dim(),
         }
@@ -47,10 +50,11 @@ impl LineKind {
     pub(super) fn gutter(self) -> &'static str {
         match self {
             LineKind::User => "› ",
+            LineKind::Shell | LineKind::Tool => "$ ",
             LineKind::Text => "∙ ",
             LineKind::Thinking => "⋅ ",
-            LineKind::Tool => "$ ",
             LineKind::ToolResult(_)
+            | LineKind::ShellResult(_)
             | LineKind::Diff
             | LineKind::Error
             | LineKind::System

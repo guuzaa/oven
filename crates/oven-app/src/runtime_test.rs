@@ -1,10 +1,10 @@
 use crate::command::AppCommand;
 use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
-use crate::event::{AppEvent, AppEventKind, AppId};
-use crate::runtime::*;
+use crate::event::{AppEvent, AppEventKind, AppId, ShellEvent};
 use crate::session::{Session, canonical_root};
 use crate::state::{AppPhase, StateChange, StateEvent};
 use crate::{App, AppBuilder};
+use crate::{LocalShell, runtime::*};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -176,6 +176,14 @@ fn is_turn_cancelled(ev: &AppEvent) -> bool {
     )
 }
 
+fn is_shell_done(ev: &AppEvent) -> bool {
+    matches!(
+        ev.kind,
+        AppEventKind::Shell(ShellEvent::Finished { .. })
+            | AppEventKind::Shell(ShellEvent::Failed { .. })
+    )
+}
+
 fn is_exited(ev: &AppEvent) -> bool {
     matches!(ev.kind, AppEventKind::Exited)
 }
@@ -240,6 +248,7 @@ async fn wait_settled(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
                 Some(ev)
                     if is_turn_completed(&ev)
                         || is_turn_cancelled(&ev)
+                        || is_shell_done(&ev)
                         || is_exited(&ev)
                         || notification(&ev).is_some() =>
                 {
@@ -2210,5 +2219,199 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
         envs.last().map(|e| &e.event),
         Some(AgentEvent::Turn(TurnEvent::Cancelled))
     ));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn bang_shell_does_not_call_provider() {
+    let tmp = tempdir::TempDir::new("app-runtime-shell").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+
+    let out = handle.prompt("!echo hi").await.unwrap();
+    assert!(out.contains("hi"), "{out}");
+    assert!(
+        handle.state().phase.is_idle(),
+        "shell should return to idle"
+    );
+
+    let history = handle.history();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].role, Role::User);
+    let parsed = LocalShell::try_parse(&user_texts(&history)[0]).expect("envelope");
+    assert_eq!(parsed.command, "echo hi");
+    assert_eq!(parsed.exit_code, Some(0));
+    assert!(parsed.output.contains("hi"), "{}", parsed.output);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn empty_bang_does_not_push_history() {
+    let tmp = tempdir::TempDir::new("app-runtime-shell-empty").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+    let out = handle.prompt("!").await.unwrap();
+    assert!(out.contains("empty shell command"), "{out}");
+    assert!(handle.history().is_empty());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn bang_shell_nonzero_exit_is_finished_not_agent_turn() {
+    let tmp = tempdir::TempDir::new("app-runtime-shell-exit").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+    let mut rx = handle.subscribe();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "!exit 7".into(),
+        })
+        .unwrap();
+    wait_settled(&mut rx).await;
+    let parsed = LocalShell::try_parse(&user_texts(&handle.history())[0]).unwrap();
+    assert_eq!(parsed.exit_code, Some(7));
+    assert!(
+        parsed.output.contains("[exit code: 7]"),
+        "{}",
+        parsed.output
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn bang_shell_cancel_commits_cancelled_envelope() {
+    let tmp = tempdir::TempDir::new("app-runtime-shell-cancel").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+    let mut rx = handle.subscribe();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "!sleep 60".into(),
+        })
+        .unwrap();
+
+    let turn_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match rx.recv().await {
+                Some(ev) => {
+                    if let AppEventKind::Shell(ShellEvent::Started { .. }) = ev.kind {
+                        return handle.state().phase.turn_id().expect("running");
+                    }
+                }
+                None => panic!("channel closed before shell started"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for shell start");
+
+    handle.send(AppCommand::Cancel { turn_id }).unwrap();
+    wait_settled(&mut rx).await;
+
+    let parsed = LocalShell::try_parse(&user_texts(&handle.history())[0]).unwrap();
+    assert_eq!(parsed.command, "sleep 60");
+    assert_eq!(parsed.error.as_deref(), Some("cancelled"));
+    assert!(handle.state().phase.is_idle());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn bang_shell_persists_and_rewinds() {
+    let tmp = tempdir::TempDir::new("app-runtime-shell-sess").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let session = Session::open(&dir, "s1").unwrap();
+    let handle = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
+    let _ = handle.prompt("!echo persisted").await.unwrap();
+    handle.shutdown().await;
+
+    let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+    let text = loaded
+        .iter()
+        .find(|m| m.role == Role::User)
+        .and_then(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+        })
+        .expect("user envelope");
+    let parsed = LocalShell::try_parse(text).expect("envelope");
+    assert_eq!(parsed.command, "echo persisted");
+
+    let session = Session::open(&dir, "s1").unwrap();
+    let handle = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
+    assert_eq!(handle.history().len(), 1);
+    let mut sub = handle.subscribe();
+    handle.send(AppCommand::Rewind).unwrap();
+    wait_rewound(&mut sub).await;
+    assert!(handle.history().is_empty());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn bang_shell_queues_behind_agent_turn() {
+    use tokio::sync::oneshot;
+    struct BlockProvider {
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+    #[async_trait]
+    impl Provider for BlockProvider {
+        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+            let rx = self.release.lock().unwrap().take().unwrap();
+            let _ = rx.await;
+            Ok(text_response("done"))
+        }
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "unused".into(),
+            })
+        }
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("block-shell-queue".into())
+        }
+    }
+
+    let (tx, rx) = oneshot::channel();
+    let tmp = tempdir::TempDir::new("app-runtime-shell-queue").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let handle = spawn_app(
+        &app,
+        Box::new(BlockProvider {
+            release: Mutex::new(Some(rx)),
+        }),
+    )
+    .await;
+    let mut sub = handle.subscribe();
+    handle
+        .send(AppCommand::StartTurn {
+            input: "block".into(),
+        })
+        .unwrap();
+    let _ = wait_turn_id(&mut sub).await;
+    handle
+        .send(AppCommand::StartTurn {
+            input: "!echo queued".into(),
+        })
+        .unwrap();
+    let _ = tx.send(());
+    wait_settled(&mut sub).await;
+    wait_settled(&mut sub).await;
+
+    let texts = user_texts(&handle.history());
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert_eq!(texts[0], "block");
+    let parsed = LocalShell::try_parse(&texts[1]).unwrap();
+    assert_eq!(parsed.command, "echo queued");
     handle.shutdown().await;
 }
