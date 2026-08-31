@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use oven_agent::{
@@ -836,7 +837,6 @@ fn merge_model_choices(
     current_model: &str,
     current_provider: &ProviderName,
 ) -> Vec<(String, String)> {
-    use std::collections::HashSet;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     let choices = std::iter::once((

@@ -254,14 +254,15 @@ impl ModelPicker {
             );
             return;
         }
+        let start = self.selected.saturating_sub(MAX_LIST_ROWS - 1);
         list::draw_choice_list(
             f,
             chunks[1],
-            indices.iter().take(MAX_LIST_ROWS).map(|&idx| {
+            indices.iter().skip(start).take(MAX_LIST_ROWS).map(|&idx| {
                 let (id, provider) = &self.models[idx];
                 (wire_id(id), provider.clone())
             }),
-            self.selected,
+            self.selected - start,
         );
     }
 
