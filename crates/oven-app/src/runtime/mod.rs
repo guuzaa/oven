@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+
 use std::time::Duration;
 
-use oven_agent::{Agent, AgentMode, CancellationToken, Record, TodoList, TurnId, restore_todos};
+use oven_agent::{
+    Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink, Record,
+    TodoList, TurnContext, TurnId, restore_todos,
+};
 use oven_llm::{
     Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort,
 };
@@ -12,12 +15,11 @@ use tokio::sync::{mpsc, watch};
 use crate::App;
 use crate::command::AppCommand;
 use crate::config::{AppConfig, ProviderConfig};
-use crate::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
+use crate::event::{AppEventKind, AppId, EventBus, ShellEvent};
 use crate::session::{Session, SessionError, SessionStore, record_recent};
 use crate::shell;
 use crate::slash::{CommandOutcome, SlashRegistry};
-use crate::state::{AppPhase, AppState, SessionState, StateChange, StateEvent};
-use crate::turn::cancel_turn;
+use crate::state::{AppPhase, AppState, SessionState, StateChange};
 
 const EMPTY_SHELL: &str = "empty shell command";
 
@@ -35,10 +37,8 @@ pub(crate) struct Runtime {
     pub(crate) session: Option<SessionStore>,
     pub(crate) config: AppConfig,
     pub(crate) user_config_path: Option<PathBuf>,
-    pub(crate) subscribers: Subscribers,
+    pub(crate) events: EventBus,
     pub(crate) slash: SlashRegistry,
-    pub(crate) seq: u64,
-    pub(crate) state_rev: u64,
     pub(crate) persisted_prefix: usize,
     pub(crate) persisted_rev: u64,
     pub(crate) pending: VecDeque<AppCommand>,
@@ -52,7 +52,7 @@ impl Runtime {
         session: Option<SessionStore>,
         config: AppConfig,
         user_config_path: Option<PathBuf>,
-        subscribers: Subscribers,
+        events: EventBus,
         state: AppState,
         state_tx: watch::Sender<AppState>,
     ) -> Self {
@@ -69,10 +69,8 @@ impl Runtime {
             session,
             config,
             user_config_path,
-            subscribers,
+            events,
             slash: SlashRegistry::with_builtin(),
-            seq: 0,
-            state_rev: 0,
             persisted_prefix,
             persisted_rev,
             pending: VecDeque::new(),
@@ -132,6 +130,141 @@ impl Runtime {
             }
             AppCommand::StartTurn { input } => self.start_turn(input, rx).await,
         }
+    }
+
+    pub(crate) async fn start_turn(
+        &mut self,
+        input: String,
+        cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
+    ) -> Control {
+        if let Some(shell) = shell::ShellInput::parse(&input) {
+            return match shell.command() {
+                Some(command) => self.run_shell(command.to_string(), cmd_rx).await,
+                None => self.reject_empty_shell(),
+            };
+        }
+
+        match self.slash.parse_and_run(&mut self.agent, &input) {
+            Ok(CommandOutcome::Passthrough) => {}
+            Ok(outcome) => {
+                self.apply_slash(outcome).await;
+                return Control::Continue;
+            }
+            Err(e) => {
+                self.emit_error(e.to_string());
+                return Control::Continue;
+            }
+        }
+
+        let turn_id = TurnId::next();
+        self.state.phase = AppPhase::Running { turn_id };
+        self.publish();
+
+        let cancel = CancellationToken::new();
+        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let mut sink = ChannelEventSink::new(agent_tx, self.agent.id(), turn_id);
+        let ctx = TurnContext::new(turn_id, cancel.clone(), self.agent.mode());
+
+        let result = {
+            let turn = self.agent.run(input, &ctx, &mut sink);
+            tokio::pin!(turn);
+
+            loop {
+                tokio::select! {
+                    biased;
+                    cmd = cmd_rx.recv() => {
+                        match cmd {
+                            None | Some(AppCommand::Shutdown) => {
+                                self.state.phase = AppPhase::ShuttingDown;
+                                let _ = self.state_tx.send(self.state.clone());
+                                cancel.cancel();
+                                let _ = turn.await;
+                                return Control::Shutdown;
+                            }
+                            Some(AppCommand::Cancel { turn_id: id }) if id == turn_id => {
+                                cancel_turn(&mut self.state, &self.state_tx, turn_id, &cancel);
+                            }
+                            Some(AppCommand::Cancel { .. }) => {}
+                            Some(AppCommand::SetMode { mode }) => {
+                                ctx.set_mode(mode);
+                                self.state.mode = mode;
+                                let _ = self.state_tx.send(self.state.clone());
+                                self.events.emit_state(StateChange::ModeChanged { mode });
+                            }
+                            Some(cmd) => self.pending.push_back(cmd),
+                        }
+                    }
+                    ev = agent_rx.recv() => {
+                        match ev {
+                            Some(event) => forward_agent_event(
+                                event,
+                                &mut self.events,
+                                &mut self.state,
+                                &self.state_tx,
+                            ),
+                            None => break turn.await,
+                        }
+                    }
+                    res = &mut turn => break res,
+                }
+            }
+        };
+
+        if let Some(store) = &self.session {
+            self.agent.ensure_session_meta(store.root.clone());
+        }
+
+        while let Ok(event) = agent_rx.try_recv() {
+            forward_agent_event(event, &mut self.events, &mut self.state, &self.state_tx);
+        }
+
+        if result.is_ok() {
+            self.persist_turn();
+        }
+
+        self.sync_state();
+        self.state.phase = AppPhase::Idle;
+        self.publish();
+        Control::Continue
+    }
+
+    pub(crate) fn persist_turn(&mut self) {
+        let errors = match self.session.as_ref() {
+            None => return,
+            Some(store) => {
+                let mut errors = Vec::new();
+                let rev = self.agent.history_revision();
+                let after = self.agent.history_records();
+                if rev != self.persisted_rev {
+                    self.persisted_prefix = 0;
+                    self.persisted_rev = rev;
+                } else if after.len() > self.persisted_prefix {
+                    if let Err(error) = store
+                        .current()
+                        .append_records(&after[self.persisted_prefix..])
+                    {
+                        errors.push(error.to_string());
+                    } else {
+                        store.mark_content(true);
+                        self.persisted_prefix = after.len();
+                        if let Err(error) = record_recent_path(store) {
+                            errors.push(error.to_string());
+                        }
+                    }
+                }
+                if should_persist_todos(self.agent.todos(), self.agent.todo_written_this_turn())
+                    && let Err(error) = persist_todo_snapshot(store, self.agent.todos())
+                {
+                    errors.push(error.to_string());
+                }
+                errors
+            }
+        };
+        for error in errors {
+            self.emit_error(error);
+        }
+        self.sync_state();
+        self.publish();
     }
 
     pub(crate) async fn run_shell(
@@ -203,7 +336,7 @@ impl Runtime {
         self.agent
             .push_history(Message::user_text(shell.to_string()));
         self.persist_turn();
-        self.snapshot_agent();
+        self.sync_state();
         if !matches!(self.state.phase, AppPhase::ShuttingDown) {
             self.state.phase = AppPhase::Idle;
             self.publish();
@@ -232,36 +365,28 @@ impl Runtime {
     }
 
     pub(crate) fn emit(&mut self, kind: AppEventKind) {
-        emit(&mut self.seq, &self.subscribers, kind);
+        self.events.emit(kind);
     }
 
-    fn emit_state(&mut self, change: StateChange) {
-        emit_state(
-            &mut self.seq,
-            &mut self.state_rev,
-            &self.subscribers,
-            change,
-        );
+    pub(crate) fn emit_state(&mut self, change: StateChange) {
+        self.events.emit_state(change);
     }
 
     pub(crate) fn emit_error(&mut self, message: impl Into<String>) {
-        emit_error(&mut self.seq, &self.subscribers, message);
+        self.events.emit_error(message);
     }
 
     pub(crate) fn publish(&self) {
-        publish(&self.state_tx, &self.state);
+        let _ = self.state_tx.send(self.state.clone());
     }
 
-    pub(crate) fn snapshot_agent(&mut self) {
+    pub(crate) fn sync_state(&mut self) {
         self.state.mode = self.agent.mode();
         self.state.model = self.agent.model().to_string();
         self.state.reasoning_effort = self.agent.reasoning_effort();
         self.state.history = self.agent.history().cloned().collect();
         self.state.todos = self.agent.todos().clone();
         self.state.last_turn_usage = self.agent.last_turn_usage();
-    }
-
-    pub(crate) fn sync_session_id(&mut self) {
         self.state.session.id = self.session.as_ref().and_then(SessionStore::session_id);
     }
 
@@ -308,8 +433,7 @@ impl Runtime {
         }
         self.persisted_prefix = 0;
         self.persisted_rev = self.agent.history_revision();
-        self.snapshot_agent();
-        self.sync_session_id();
+        self.sync_state();
         self.publish();
         self.emit_state(StateChange::HistoryChanged {
             revision: self.agent.history_revision(),
@@ -503,8 +627,7 @@ impl Runtime {
             self.persisted_prefix = self.agent.history_records().len();
         }
         self.persisted_rev = self.agent.history_revision();
-        self.snapshot_agent();
-        self.sync_session_id();
+        self.sync_state();
         self.publish();
         self.emit_state(StateChange::TodosChanged { todos: restored });
         self.emit_state(StateChange::UsageChanged {
@@ -537,6 +660,33 @@ impl Runtime {
     }
 }
 
+fn cancel_turn(
+    state: &mut AppState,
+    state_tx: &watch::Sender<AppState>,
+    turn_id: TurnId,
+    cancel: &CancellationToken,
+) {
+    state.phase = AppPhase::Cancelling { turn_id };
+    let _ = state_tx.send(state.clone());
+    cancel.cancel();
+}
+
+fn forward_agent_event(
+    event: AgentEventEnvelope,
+    events: &mut EventBus,
+    state: &mut AppState,
+    state_tx: &watch::Sender<AppState>,
+) {
+    if let AgentEvent::TodosChanged { todos } = &event.event {
+        state.todos = todos.clone();
+        let _ = state_tx.send(state.clone());
+        events.emit_state(StateChange::TodosChanged {
+            todos: todos.clone(),
+        });
+    }
+    events.emit(AppEventKind::Agent(event));
+}
+
 pub(crate) fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
     agent.set_todos(restore_todos(prior, agent.history()));
 }
@@ -550,20 +700,14 @@ pub(crate) fn spawn_runtime(
     user_config_path: Option<PathBuf>,
 ) -> App {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let subscribers: Subscribers = Arc::new(Mutex::new(Vec::new()));
-    let subscribers_task = subscribers.clone();
+    let events = EventBus::new();
+    let subscribers = events.subscribers();
     let slash_commands = SlashRegistry::with_builtin().commands();
-    let history: Vec<Message> = agent.history().cloned().collect();
-    let todos = agent.todos().clone();
-    let last_turn_usage = agent.last_turn_usage();
     let provider = config
         .active_provider_config()
         .map(public_provider)
         .unwrap_or_default();
     let configured_providers = config.configured_providers();
-    let mode = agent.mode();
-    let model = agent.model().to_string();
-    let reasoning_effort = agent.reasoning_effort();
     let (session_store, session_state) = match session {
         Some(s) => {
             let has_content = agent.history().len() != 0;
@@ -575,19 +719,7 @@ pub(crate) fn spawn_runtime(
         }
         None => (None, SessionState { id: None }),
     };
-    let state = AppState {
-        phase: AppPhase::Idle,
-        mode,
-        model,
-        reasoning_effort,
-        provider,
-        configured_providers,
-        history,
-        todos,
-        last_turn_usage,
-        session: session_state,
-        models: Vec::new(),
-    };
+    let state = AppState::from_agent(&agent, provider, configured_providers, session_state);
     let (state_tx, state_rx) = watch::channel(state.clone());
     let runtime = Runtime::new(
         agent,
@@ -595,7 +727,7 @@ pub(crate) fn spawn_runtime(
         session_store,
         config,
         user_config_path,
-        subscribers_task,
+        events,
         state,
         state_tx,
     );
@@ -611,39 +743,6 @@ pub(crate) fn spawn_runtime(
         root,
         state_rx,
     )
-}
-
-pub(crate) fn emit(seq: &mut u64, subs: &Subscribers, kind: AppEventKind) {
-    *seq += 1;
-    let event = AppEvent { seq: *seq, kind };
-    let mut subs = subs.lock().unwrap_or_else(|e| e.into_inner());
-    subs.retain(|tx| tx.send(event.clone()).is_ok());
-}
-
-pub(crate) fn publish(state_tx: &watch::Sender<AppState>, state: &AppState) {
-    let _ = state_tx.send(state.clone());
-}
-
-pub(crate) fn emit_state(seq: &mut u64, rev: &mut u64, subs: &Subscribers, change: StateChange) {
-    *rev += 1;
-    emit(
-        seq,
-        subs,
-        AppEventKind::StateChanged(StateEvent {
-            revision: *rev,
-            change,
-        }),
-    );
-}
-
-pub(crate) fn emit_error(seq: &mut u64, subs: &Subscribers, message: impl Into<String>) {
-    emit(
-        seq,
-        subs,
-        AppEventKind::Error {
-            message: message.into(),
-        },
-    );
 }
 
 fn now_ms() -> u64 {

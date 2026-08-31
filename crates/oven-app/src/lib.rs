@@ -14,7 +14,6 @@ mod shell;
 mod slash;
 mod state;
 mod tools;
-mod turn;
 
 pub use app::{App, AppError};
 pub use builder::AppBuilder;

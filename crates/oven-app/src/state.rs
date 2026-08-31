@@ -1,4 +1,4 @@
-use oven_agent::{AgentMode, TodoList, TurnId};
+use oven_agent::{Agent, AgentMode, TodoList, TurnId};
 use oven_llm::{Message, ReasoningEffort, Usage};
 
 use crate::config::ProviderConfig;
@@ -16,6 +16,29 @@ pub struct AppState {
     pub last_turn_usage: Usage,
     pub session: SessionState,
     pub models: Vec<(String, String)>,
+}
+
+impl AppState {
+    pub(crate) fn from_agent(
+        agent: &Agent,
+        provider: ProviderConfig,
+        configured_providers: Vec<String>,
+        session: SessionState,
+    ) -> Self {
+        Self {
+            phase: AppPhase::Idle,
+            mode: agent.mode(),
+            model: agent.model().to_string(),
+            reasoning_effort: agent.reasoning_effort(),
+            provider,
+            configured_providers,
+            history: agent.history().cloned().collect(),
+            todos: agent.todos().clone(),
+            last_turn_usage: agent.last_turn_usage(),
+            session,
+            models: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

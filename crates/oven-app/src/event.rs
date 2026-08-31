@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, TurnId};
 use tokio::sync::mpsc;
 
-use crate::state::StateEvent;
+use crate::state::{StateChange, StateEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AppId(pub u64);
@@ -94,3 +94,50 @@ impl AppEvent {
 }
 
 pub(crate) type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<AppEvent>>>>;
+
+pub(crate) struct EventBus {
+    subscribers: Subscribers,
+    seq: u64,
+    state_rev: u64,
+}
+
+impl EventBus {
+    pub(crate) fn new() -> Self {
+        Self {
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+            seq: 0,
+            state_rev: 0,
+        }
+    }
+
+    pub(crate) fn subscribers(&self) -> Subscribers {
+        self.subscribers.clone()
+    }
+
+    pub(crate) fn emit(&mut self, kind: AppEventKind) {
+        self.seq += 1;
+        let event = AppEvent {
+            seq: self.seq,
+            kind,
+        };
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
+    }
+
+    pub(crate) fn emit_state(&mut self, change: StateChange) {
+        self.state_rev += 1;
+        self.emit(AppEventKind::StateChanged(StateEvent {
+            revision: self.state_rev,
+            change,
+        }));
+    }
+
+    pub(crate) fn emit_error(&mut self, message: impl Into<String>) {
+        self.emit(AppEventKind::Error {
+            message: message.into(),
+        });
+    }
+}
