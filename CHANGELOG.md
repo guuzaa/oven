@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.5] - 2026-09-01
+
+### Added
+- `!` local shell in the composer (host bash/PowerShell in the workspace, no LLM turn)
+- Diff rendering for `file_edit` / `file_write` in the transcript
+- Persist vendors under `[providers.<slug>]` so `/setup` and `/model` reuse saved API keys
+
+### Changed
+- Merge `AppHandle` into `App`; construct via `AppBuilder`
+- Status bar reports last-turn token usage; drop history budget trimming
+- Extract `walk_dir` into `oven-agent`; `oven-app` no longer depends on `ignore`
+- Reorganize prompt templates under `prompt_template/`
+- Fold `turn.rs` into `runtime/mod.rs`
+- Slash replies shown as a toast
+
+### Fixed
+- Keep the selected model visible when scrolling the picker
+- Cursor blinking in the input
+- `file_read` results include line numbers
+- Flaky tests on Windows
+
 ## [0.0.4] - 2026-08-24
 
 ### Added

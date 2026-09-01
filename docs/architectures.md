@@ -44,8 +44,19 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | --- | --- |
 | `oven-llm` | `Message`, `Usage`, provider I/O |
 | `oven-agent` | `Agent`, turn execution, `AgentEvent`, `EventSink` |
-| `oven-app` | `AppCommand`, `AppEvent`, `AppState`, runtime actor, session |
+| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `AppEvent`, `AppState`, runtime actor, session, local shell |
 | `oven-tui` | render events and state; send commands |
+
+## App facade
+
+`App` is the only public runtime handle. `AppHandle` is gone. `AppBuilder` loads config, skills, tools, and MCP, then `open()` / `open_session()` spawns the actor.
+
+```text
+AppBuilder ──open──► App ──AppCommand──► Runtime
+                     │
+                     ├── subscribe()    → AppEvent
+                     └── watch_state()  → AppState
+```
 
 ## IDs
 
@@ -80,6 +91,8 @@ pub enum AppCommand {
 
 Slash commands still arrive as `StartTurn { input: "/plan on" }`. The runtime parses them and either starts an agent turn or applies a state change.
 
+A composer line whose trimmed body starts with `!` is a **local shell request**, not a slash command and not an LLM turn. The runtime strips the bang, runs the host shell (bash on Unix, PowerShell on Windows) in the workspace root, and commits one user message describing the command and its result.
+
 Input received while a turn is running is queued and processed after the turn ends.
 
 ---
@@ -88,7 +101,7 @@ Input received while a turn is running is queued and processed after the turn en
 
 ## Agent events
 
-Emitted during one LLM turn. No history/model/todo mutations here.
+Emitted during one LLM turn. History and model stay on the committed `Message` / `AppState`. Todo updates are the exception: the agent emits `TodosChanged` and the runtime mirrors it into `StateChange::TodosChanged`.
 
 ```rust
 pub struct AgentEventEnvelope {
@@ -102,6 +115,7 @@ pub enum AgentEvent {
     Turn(TurnEvent),
     Stream(StreamEvent),
     Tool(ToolEvent),
+    TodosChanged { todos: TodoList },
 }
 ```
 
@@ -117,7 +131,7 @@ ToolEvent     Started { call_id, name, view }
 
 `ToolResult` is `Success`, `Failed { error, output }`, or `Cancelled` — not `ok: bool`.
 
-Tool input is not on `ToolEvent::Started`. The UI uses `ToolView`. Full arguments live on the committed `Message`.
+Tool input is not on `ToolEvent::Started`. The UI uses `ToolView`. `view.diff` paints `+/-` lines as a file diff. Full arguments live on the committed `Message`.
 
 Final assistant text is the concatenation of `TextDelta`s (or `TurnOutput` / history), not a duplicated `Done { text }`.
 
@@ -132,15 +146,22 @@ pub struct AppEvent {
 pub enum AppEventKind {
     Agent(AgentEventEnvelope),
     StateChanged(StateEvent),
+    Shell(ShellEvent),
     Notification { text: String },
     Error { message: String },
     Exited,
+}
+
+pub enum ShellEvent {
+    Started { command: String },
+    Finished { command: String, output: String, exit_code: i32 },
+    Failed { command: String, error: String, output: String },
 }
 ```
 
 There is no `Idle` event. Turn completion is `TurnEvent::Completed | Cancelled | Failed`. App idleness is `AppState.phase`.
 
-Subscribers get a lossless unbounded channel. `AppHandle::state()` / `watch_state()` is the current snapshot.
+Subscribers get a lossless unbounded channel. `App::state()` / `watch_state()` is the current snapshot.
 
 ## Agent API
 
@@ -167,9 +188,10 @@ pub struct AppState {
     pub model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub provider: ProviderConfig,
+    pub configured_providers: Vec<String>,
     pub history: Vec<Message>,
     pub todos: TodoList,
-    pub usage: Usage,
+    pub last_turn_usage: Usage,
     pub session: SessionState,
     pub models: Vec<(String, String)>,
 }
@@ -189,6 +211,8 @@ ModelChanged | ModeChanged | TodosChanged | HistoryChanged
 SessionChanged | UsageChanged | ProviderChanged | ModelsChanged
 ```
 
+`UsageChanged` carries `last_turn_usage` — tokens for the most recent agent turn, not a session total. `ProviderChanged` includes `configured_providers` (canonical slugs saved under `[providers.<slug>]`).
+
 UI rule: consume state as truth, events as “something happened”.
 
 | Old event | Now |
@@ -196,7 +220,7 @@ UI rule: consume state as truth, events as “something happened”.
 | `AgentEvent::Done { text, usage }` | `TurnCompleted` + `TextDelta*` |
 | `AgentEvent::HistoryCleared` | `StateChange::HistoryChanged` |
 | `AgentEvent::ModelChanged` | `StateChange::ModelChanged` |
-| `AgentEvent::TodoUpdated` | `StateChange::TodosChanged` |
+| `AgentEvent::TodoUpdated` | `AgentEvent::TodosChanged` + `StateChange::TodosChanged` |
 | `AppEvent::Idle` | `AppPhase::Idle` |
 | `AppEvent::Rewound { messages, … }` | `HistoryChanged` + `UsageChanged` |
 | `AppEvent::Notify` | `Notification` |
@@ -212,8 +236,8 @@ Phase is runtime state. Turn events are facts about one turn. Do not mix them.
 stateDiagram-v2
     [*] --> Idle
 
-    Idle --> Running: StartTurn (passthrough)
-    Idle --> Idle: slash / Rewind / SetMode / SetModel / SetProvider / ClearSession
+    Idle --> Running: StartTurn (passthrough or bang-shell)
+    Idle --> Idle: slash / empty bang / Rewind / SetMode / SetModel / SetProvider / ClearSession
     Idle --> ShuttingDown: Shutdown
 
     Running --> Cancelling: Cancel { matching turn_id }
@@ -227,6 +251,8 @@ stateDiagram-v2
 ```
 
 Idle slash commands do not enter `Running`. They emit `StateChanged` and/or `Notification` and stay `Idle`.
+
+A bang-shell `StartTurn` enters `Running` like an agent turn (so Cancel and queuing work) but emits `AppEventKind::Shell` instead of `AgentEvent`. The agent is not called. On finish the runtime appends a `<local-shell>` user message and persists; it does not emit `HistoryChanged` on the live path.
 
 `Cancel` while idle is a no-op. `Cancel { turn_id }` only applies if it matches the active turn.
 
@@ -323,15 +349,35 @@ StartTurn("/model gpt-4o")
   → phase stays Idle
 ```
 
-`prompt()` waits for `TurnCompleted`/`Cancelled`/`Failed`, or for `Notification`/`Exited` when no turn started.
+`prompt()` waits for `TurnCompleted`/`Cancelled`/`Failed`, or `Shell` Finished/Failed, or for `Notification`/`Exited` when no turn started.
+
+## Bang shell
+
+```mermaid
+sequenceDiagram
+    participant TUI
+    participant Runtime
+    participant Shell
+
+    TUI->>Runtime: StartTurn("!ls")
+    Runtime->>Runtime: TurnId::next()
+    Runtime->>Runtime: phase = Running(id)
+    Runtime-->>TUI: Shell(Started)
+    Runtime->>Shell: bash/powershell in workspace root
+    Shell-->>Runtime: stdout/stderr/exit
+    Runtime-->>TUI: Shell(Finished | Failed)
+    Runtime->>Runtime: push user envelope, persist, phase = Idle
+```
+
+The TUI shows the typed `!` line as a user row and the last 100 output lines as a result row. The committed user message is the parseable envelope so resume/rewind can rebuild the same rows. The agent does not auto-reply.
 
 ---
 
 # Invariants
 
-1. `Running(turn_id)` means exactly one active turn.
-2. Every `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running` or `Cancelling`.
-3. Each turn emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`.
+1. `Running(turn_id)` means exactly one active request: an agent turn **or** a bang-shell command.
+2. Every `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running` or `Cancelling`. Agent envelopes are not emitted for bang-shell.
+3. Each agent turn emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`. Each bang-shell request emits exactly one `Shell::Started` and exactly one of `Finished | Failed`.
 4. `ToolFinished` is always preceded by `ToolStarted` for the same `ToolCallId`.
 
 Runtime is a single actor:
@@ -349,4 +395,4 @@ impl Runtime {
 }
 ```
 
-`runtime.rs` owns select / command dispatch. `turn.rs` owns `start_turn` / `cancel_turn` / `persist_turn`.
+`runtime/mod.rs` owns select, command dispatch, and `start_turn` / `cancel_turn` / `persist_turn`. `builder.rs` owns construction.
