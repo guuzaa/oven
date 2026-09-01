@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use oven_agent::CancellationToken;
+use oven_agent::{CancellationToken, decode_command_output};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -312,8 +312,8 @@ async fn join_output(
     let stdout = stdout.await.unwrap_or_default();
     let stderr = stderr.await.unwrap_or_default();
     ShellOutput {
-        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout: decode_command_output(&stdout),
+        stderr: decode_command_output(&stderr),
         exit_code,
     }
 }
@@ -360,6 +360,17 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[cfg(windows)]
+    const NIHAO: &str = "你好";
+    #[cfg(windows)]
+    const REPLACEMENT: char = '\u{FFFD}';
+    #[cfg(windows)]
+    const GBK_NIHAO: &[u8] = &[0xC4, 0xE3, 0xBA, 0xC3];
+    #[cfg(windows)]
+    const NIHAO_FILE: &str = "nihao.txt";
+    #[cfg(windows)]
+    const CP_GBK: u32 = 936;
+
     fn tmp_dir() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-shell-test").unwrap()
     }
@@ -373,6 +384,15 @@ mod tests {
         {
             "cat marker.txt"
         }
+    }
+
+    #[cfg(windows)]
+    fn ansi_code_page() -> u32 {
+        unsafe extern "system" {
+            fn GetACP() -> u32;
+        }
+        // SAFETY: GetACP reads the ANSI code page and has no preconditions.
+        unsafe { GetACP() }
     }
 
     #[test]
@@ -514,6 +534,28 @@ mod tests {
         assert!(out.stdout.contains("hi"), "{:?}", out.stdout);
         assert_eq!(out.exit_code, Some(0));
         assert!(format_shell_text(&out).contains("hi"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn host_shell_decodes_gbk_chinese_stdout() {
+        let tmp = tmp_dir();
+        let root = tmp.path().to_path_buf();
+        std::fs::write(root.join(NIHAO_FILE), GBK_NIHAO).unwrap();
+        let command = format!(
+            "$b = [IO.File]::ReadAllBytes('{NIHAO_FILE}'); [Console]::OpenStandardOutput().Write($b, 0, $b.Length)"
+        );
+        let out = run_host_shell(&root, &command, HOST_SHELL_TIMEOUT, None)
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, Some(0));
+        let got = out.stdout.trim_end_matches(['\r', '\n']);
+        assert_eq!(got, decode_command_output(GBK_NIHAO));
+        if ansi_code_page() == CP_GBK {
+            assert!(!got.contains(REPLACEMENT), "{got:?}");
+            assert_eq!(got, NIHAO);
+            assert!(format_shell_text(&out).contains(NIHAO));
+        }
     }
 
     #[tokio::test]

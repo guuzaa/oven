@@ -7,6 +7,7 @@ use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolView, labeled, require_str};
+use crate::decode::decode_command_output;
 use crate::error::AgentError;
 
 pub struct BashTool {
@@ -101,7 +102,7 @@ impl Tool for BashTool {
 
         let mut text = String::new();
         if !output.stdout.is_empty() {
-            text.push_str(&String::from_utf8_lossy(&output.stdout));
+            text.push_str(&decode_command_output(&output.stdout));
         }
         if !output.stderr.is_empty() {
             if !text.is_empty() {
@@ -109,7 +110,7 @@ impl Tool for BashTool {
             } else {
                 text.push_str("--- stderr ---\n");
             }
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            text.push_str(&decode_command_output(&output.stderr));
         }
         if !output.status.success() {
             text.push_str(&format!(

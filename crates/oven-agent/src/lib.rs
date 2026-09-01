@@ -1,4 +1,5 @@
 mod agent;
+mod decode;
 mod error;
 mod event;
 mod history;
@@ -13,6 +14,7 @@ mod turn;
 mod walk;
 
 pub use agent::Agent;
+pub use decode::decode_command_output;
 pub use error::AgentError;
 pub use event::{
     AgentEvent, AgentEventEnvelope, StreamEvent, ToolEvent, ToolOutputStream, ToolResult, TurnEvent,
