@@ -10,6 +10,8 @@ use tokio::process::Command;
 pub(crate) const HOST_SHELL_TIMEOUT: Duration = Duration::from_secs(300);
 const HISTORY_MAX_LINES: usize = 200;
 const HISTORY_MAX_BYTES: usize = 32 * 1024;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const STDERR_MARK: &str = "--- stderr ---";
 const NO_OUTPUT: &str = "(no output)";
@@ -259,7 +261,13 @@ fn spawn_host(root: &Path, command: &str) -> std::io::Result<tokio::process::Chi
         spawn_with(
             root,
             "powershell.exe",
-            &["-NoProfile", "-NonInteractive", "-Command", command],
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
         )
     }
     #[cfg(not(windows))]
@@ -282,6 +290,8 @@ fn spawn_with(root: &Path, program: &str, args: &[&str]) -> std::io::Result<toki
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.spawn()
 }
 

@@ -222,6 +222,10 @@ fn turn_id_of(ev: &AppEvent) -> Option<TurnId> {
     }
 }
 
+fn settle_timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(if cfg!(windows) { 15 } else { 2 })
+}
+
 async fn wait_turn_id(sub: &mut mpsc::UnboundedReceiver<AppEvent>) -> TurnId {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -242,7 +246,7 @@ async fn wait_turn_id(sub: &mut mpsc::UnboundedReceiver<AppEvent>) -> TurnId {
 }
 
 async fn wait_settled(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(settle_timeout(), async {
         loop {
             match sub.recv().await {
                 Some(ev)
