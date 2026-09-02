@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, require_str, resolve_within};
+use super::{Tool, ToolView, require_str, resolve_within};
 use crate::error::AgentError;
 use crate::matching::compile_glob;
 use oven_host::walk_dir;
@@ -16,6 +16,26 @@ pub struct GlobTool {
 
 impl GlobTool {
     pub const NAME: &'static str = "glob";
+
+    pub fn view_input(input: &Value) -> ToolView {
+        let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
+            return ToolView::named(Self::NAME);
+        };
+        let path = input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty());
+        let summary = match path {
+            Some(path) => format!("Find {pattern} in {path}"),
+            None => format!("Find {pattern}"),
+        };
+        ToolView {
+            summary,
+            collapse: true,
+            diff: false,
+        }
+    }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {

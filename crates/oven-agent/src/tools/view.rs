@@ -1,6 +1,8 @@
 use serde_json::Value;
 
-use super::{BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool};
+use super::{
+    BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, TodoWriteTool,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolView {
@@ -31,6 +33,8 @@ pub fn present_tool(name: &str, input: &Value) -> ToolView {
         FileReadTool::NAME => FileReadTool::view_input(input),
         FileEditTool::NAME => FileEditTool::view_input(input),
         FileWriteTool::NAME => FileWriteTool::view_input(input),
+        GlobTool::NAME => GlobTool::view_input(input),
+        GrepTool::NAME => GrepTool::view_input(input),
         TodoWriteTool::NAME => TodoWriteTool::view_input(input),
         _ => ToolView::named(name),
     }
@@ -109,8 +113,16 @@ mod tests {
             .collapse
         );
         assert_eq!(
-            present_tool("grep", &json!({ "pattern": "foo" })).summary,
-            "grep"
+            present_tool(GrepTool::NAME, &json!({ "pattern": "foo" })).summary,
+            "Search foo"
+        );
+        assert_eq!(
+            present_tool(
+                GlobTool::NAME,
+                &json!({ "pattern": "**/*.rs", "path": "src" })
+            )
+            .summary,
+            "Find **/*.rs in src"
         );
         assert_eq!(
             present_tool(BashTool::NAME, &json!({})).summary,

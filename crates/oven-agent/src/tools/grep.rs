@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, require_str, resolve_within};
+use super::{Tool, ToolView, require_str, resolve_within};
 use crate::error::AgentError;
 use crate::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
 use oven_host::walk_dir;
@@ -17,6 +17,34 @@ pub struct GrepTool {
 
 impl GrepTool {
     pub const NAME: &'static str = "grep";
+
+    pub fn view_input(input: &Value) -> ToolView {
+        let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
+            return ToolView::named(Self::NAME);
+        };
+        let path = input
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty());
+        let include = input
+            .get("include")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|include| !include.is_empty());
+        let mut summary = format!("Search {pattern}");
+        if let Some(path) = path {
+            summary.push_str(&format!(" in {path}"));
+        }
+        if let Some(include) = include {
+            summary.push_str(&format!(" ({include})"));
+        }
+        ToolView {
+            summary,
+            collapse: true,
+            diff: false,
+        }
+    }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {

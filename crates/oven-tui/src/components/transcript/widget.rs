@@ -14,7 +14,7 @@ use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
 use super::kinds::{LineKind, Row, THINKING_LABEL, THOUGHT_LABEL};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
-use super::tools::{ToolBurst, compact_tool_arg, format_tool_summary};
+use super::tools::{ToolBurst, ToolLabel};
 use super::wrap::{
     MAX_SHELL_DISPLAY_LINES, apply_thinking_shimmer, collect_lines, format_lines,
     line_display_width, paint_visible, tail_lines, thinking_phase, trim_message, truncate_result,
@@ -272,11 +272,8 @@ impl Transcript {
             self.push_row(kind, &view.summary);
             return;
         }
-        let label = compact_tool_arg(&view.summary);
-        self.tool_burst
-            .pending
-            .insert(call_id.to_string(), label.clone());
-        self.tool_burst.bump(&label);
+        let label = ToolLabel::from_summary(&view.summary);
+        self.tool_burst.start(call_id.to_string(), label);
         self.upsert_tool_summary();
     }
 
@@ -293,11 +290,7 @@ impl Transcript {
             }
             return;
         }
-        let Some(name) = self.tool_burst.pending.remove(call_id) else {
-            return;
-        };
-        if !ok {
-            self.tool_burst.bump_failed(&name);
+        if self.tool_burst.finish(call_id, !ok) && !ok {
             self.upsert_tool_summary();
         }
     }
@@ -307,17 +300,13 @@ impl Transcript {
             self.push_tool_result(is_error, content);
             return;
         }
-        let Some(name) = self.tool_burst.pending.remove(tool_use_id) else {
-            return;
-        };
-        if is_error {
-            self.tool_burst.bump_failed(&name);
+        if self.tool_burst.finish(tool_use_id, is_error) && is_error {
             self.upsert_tool_summary();
         }
     }
 
     fn upsert_tool_summary(&mut self) {
-        let text = format_tool_summary(&self.tool_burst.entries);
+        let text = self.tool_burst.summary();
         if self.tool_burst.row_open {
             self.replace_last_row(LineKind::Tool, &text);
         } else {

@@ -339,10 +339,12 @@ impl Agent {
             let ContentBlock::ToolUse { id, name, input } = block else {
                 continue;
             };
-            let (view, writes_todos) = match self.tools.iter().find(|t| t.name() == name) {
-                Some(t) => (t.view(input), t.caps().writes_todos),
-                None => (crate::tools::present_tool(name, input), false),
-            };
+            let view = crate::tools::present_tool(name, input);
+            let writes_todos = self
+                .tools
+                .iter()
+                .find(|tool| tool.name() == name)
+                .is_some_and(|tool| tool.caps().writes_todos);
             let call_id = ToolCallId::next();
             sink.emit(AgentEvent::Tool(ToolEvent::Started {
                 call_id,

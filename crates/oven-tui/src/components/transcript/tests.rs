@@ -14,7 +14,7 @@ use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
 use super::kinds::{LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH, THINKING_LABEL, THOUGHT_LABEL};
 use super::selection::{extract_line_range, highlight_line, slice_cols};
-use super::tools::{compact_tool_arg, format_tool_summary};
+
 use super::widget::Transcript;
 use super::wrap::{
     MAX_RESULT_LINES, MAX_SHELL_DISPLAY_LINES, apply_thinking_shimmer, format_lines, tail_lines,
@@ -113,20 +113,6 @@ fn shell_command_gutter_is_dollar() {
     assert_eq!(lines[0].spans[0].style.fg, theme::shell().fg);
     assert_eq!(lines[0].spans[1].content.as_ref(), "ls");
     assert_eq!(lines[0].spans[1].style.fg, theme::shell().fg);
-}
-
-#[test]
-fn format_tool_summary_counts_and_failures() {
-    assert_eq!(format_tool_summary(&[("Ran ls".into(), 1, 0)]), "Ran ls");
-    assert_eq!(
-        format_tool_summary(&[("Ran ls".into(), 2, 1), ("Read a".into(), 1, 0)]),
-        "Ran ls ×2 · Read a · 1 failed"
-    );
-}
-
-#[test]
-fn compact_tool_arg_joins_whitespace() {
-    assert_eq!(compact_tool_arg("Ran echo\n  hi"), "Ran echo hi");
 }
 
 #[test]
@@ -506,7 +492,7 @@ fn live_tools_aggregate_counts_and_failures() {
     ));
     t.on_event(&tool_end(3, true, "hi"));
     assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
-    assert_eq!(t.rows[0].text, "Ran ls · Ran pwd · Read a · 1 failed");
+    assert_eq!(t.rows[0].text, "Ran ×2 (ls · pwd) · Read a · 1 failed");
 }
 
 #[test]
@@ -582,6 +568,49 @@ fn todo_write_splits_tool_bursts() {
 }
 
 #[test]
+fn restored_tool_trajectory_matches_live_presentation() {
+    let grep = serde_json::json!({
+        "pattern": "ToolEvent",
+        "path": "crates",
+        "include": "*.rs"
+    });
+    let glob = serde_json::json!({ "pattern": "**/*.rs", "path": "crates" });
+
+    let mut live = Transcript::new();
+    live.on_event(&tool_start(1, "grep", grep.clone()));
+    live.on_event(&tool_end(1, true, "event.rs:1:ToolEvent"));
+    live.on_event(&tool_start(2, "glob", glob.clone()));
+    live.on_event(&tool_end(2, true, "crates/oven-agent/src/agent.rs"));
+
+    let mut restored = Transcript::new();
+    restored.seed(&[
+        Message::assistant(vec![
+            ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "grep".into(),
+                input: grep,
+            },
+            ContentBlock::ToolUse {
+                id: "c2".into(),
+                name: "glob".into(),
+                input: glob,
+            },
+        ]),
+        Message::tool_result("c1", "event.rs:1:ToolEvent", false),
+        Message::tool_result("c2", "crates/oven-agent/src/agent.rs", false),
+    ]);
+
+    assert_eq!(kinds_of(&live), kinds_of(&restored));
+    let live_rows: Vec<_> = live.rows.iter().map(|row| row.text.as_str()).collect();
+    let restored_rows: Vec<_> = restored.rows.iter().map(|row| row.text.as_str()).collect();
+    assert_eq!(live_rows, restored_rows);
+    assert_eq!(
+        live_rows,
+        vec!["Search ToolEvent in crates (*.rs) · Find **/*.rs in crates"]
+    );
+}
+
+#[test]
 fn seed_todo_write_keeps_result() {
     let mut t = Transcript::new();
     t.seed(&[
@@ -629,7 +658,7 @@ fn seed_failed_tool_counts_without_result() {
         Message::tool_result("c3", "hi", false),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
-    assert_eq!(t.rows[0].text, "Ran ls · Ran pwd · Read a · 1 failed");
+    assert_eq!(t.rows[0].text, "Ran ×2 (ls · pwd) · Read a · 1 failed");
 }
 
 #[test]
