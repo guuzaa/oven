@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use tokio::fs;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -58,7 +57,7 @@ impl Tool for FileReadTool {
         if !path.is_file() {
             return Err(AgentError::from(format!("not a file: {}", path.display())));
         }
-        let content = fs::read_to_string(&path)
+        let content = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))?;
 

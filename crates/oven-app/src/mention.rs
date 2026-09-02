@@ -55,11 +55,11 @@ fn scan(root: &Path) -> Vec<String> {
         return Vec::new();
     }
     let mut files = Vec::new();
-    for entry in oven_agent::walk_dir(root) {
+    for entry in oven_host::walk_dir(root) {
         let Ok(entry) = entry else {
             continue;
         };
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
+        if !entry.is_file() {
             continue;
         }
         let Ok(rel) = entry.path().strip_prefix(root) else {

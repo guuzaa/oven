@@ -1,9 +1,9 @@
 mod agent;
-mod decode;
 mod error;
 mod event;
 mod history;
 mod identity;
+mod matching;
 mod mode;
 mod retry;
 mod sink;
@@ -11,10 +11,8 @@ mod skills;
 mod todo;
 mod tools;
 mod turn;
-mod walk;
 
 pub use agent::Agent;
-pub use decode::decode_command_output;
 pub use error::AgentError;
 pub use event::{
     AgentEvent, AgentEventEnvelope, StreamEvent, ToolEvent, ToolOutputStream, ToolResult, TurnEvent,
@@ -32,4 +30,3 @@ pub use tools::{
     GrepTool, SkillReadTool, TodoWriteTool, Tool, ToolCaps, ToolView, present_tool,
 };
 pub use turn::{TurnContext, TurnOutput};
-pub use walk::walk_dir;

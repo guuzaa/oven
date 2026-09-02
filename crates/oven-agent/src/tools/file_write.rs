@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use tokio::fs;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -70,12 +69,7 @@ impl Tool for FileWriteTool {
         let path_str = require_str(args, "path", Self::NAME)?;
         let content = require_str(args, "content", Self::NAME)?;
         let path = resolve_within(&self.root, path_str)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).await.map_err(|e| {
-                AgentError::from(format!("create dirs {}: {}", parent.display(), e))
-            })?;
-        }
-        fs::write(&path, content)
+        oven_host::write(&path, content)
             .await
             .map_err(|e| AgentError::from(format!("write {}: {}", path.display(), e)))?;
         Ok(format!(

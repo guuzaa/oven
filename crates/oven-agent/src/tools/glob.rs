@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use globset::Glob;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, require_str, resolve_within};
 use crate::error::AgentError;
-use crate::walk::walk_dir;
+use crate::matching::compile_glob;
+use oven_host::walk_dir;
 
 pub struct GlobTool {
     root: PathBuf,
@@ -52,9 +52,8 @@ impl Tool for GlobTool {
         cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;
-        let matcher = Glob::new(pattern)
-            .map_err(|e| AgentError::from(format!("glob: invalid pattern {:?}: {}", pattern, e)))?
-            .compile_matcher();
+        let matcher = compile_glob(pattern)
+            .map_err(|e| AgentError::from(format!("glob: invalid pattern {:?}: {}", pattern, e)))?;
 
         let base_str = args
             .get("path")
@@ -86,7 +85,7 @@ impl Tool for GlobTool {
                 return Err(AgentError::cancelled());
             }
             let entry = entry.map_err(|e| AgentError::from(format!("glob: walk: {}", e)))?;
-            if entry.file_type().is_some_and(|t| t.is_file())
+            if entry.is_file()
                 && let Ok(rel) = entry.path().strip_prefix(&base)
                 && matcher.is_match(rel)
             {

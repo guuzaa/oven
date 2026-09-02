@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/oven-agent", "crates/oven-app", "crates/oven-tui"]
+members = [
+    "crates/oven-agent",
+    "crates/oven-app",
+    "crates/oven-host",
+    "crates/oven-tui",
+]
 resolver = "2"
 
 [workspace.package]
@@ -11,6 +16,7 @@ description = "A toy coding agent for joy only."
 [workspace.dependencies]
 oven-app = { path = "./crates/oven-app" }
 oven-agent = { path = "./crates/oven-agent" }
+oven-host = { path = "./crates/oven-host" }
 oven-tui = { path = "./crates/oven-tui" }
 oven-llm = { version = "0.4.1" }
 

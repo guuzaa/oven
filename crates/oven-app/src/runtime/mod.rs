@@ -8,6 +8,7 @@ use oven_agent::{
     Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink, Record,
     TodoList, TurnContext, TurnId, restore_todos,
 };
+use oven_host::run_shell_command;
 use oven_llm::{
     Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort,
 };
@@ -282,7 +283,7 @@ impl Runtime {
 
         let cancel = CancellationToken::new();
         let root = self.root.clone();
-        let run = shell::run_host_shell(&root, &command, shell::HOST_SHELL_TIMEOUT, Some(&cancel));
+        let run = run_shell_command(&command, &root, shell::HOST_SHELL_TIMEOUT, Some(&cancel));
         tokio::pin!(run);
 
         let result = loop {

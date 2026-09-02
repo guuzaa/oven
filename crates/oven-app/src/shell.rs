@@ -1,17 +1,11 @@
 use std::fmt;
-use std::path::Path;
-use std::process::Stdio;
 use std::time::Duration;
 
-use oven_agent::{CancellationToken, decode_command_output};
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
+use oven_host::{CommandError, CommandOutput};
 
 pub(crate) const HOST_SHELL_TIMEOUT: Duration = Duration::from_secs(300);
 const HISTORY_MAX_LINES: usize = 200;
 const HISTORY_MAX_BYTES: usize = 32 * 1024;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const STDERR_MARK: &str = "--- stderr ---";
 const NO_OUTPUT: &str = "(no output)";
@@ -108,70 +102,63 @@ impl<'a> ShellInput<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ShellOutput {
-    stdout: String,
-    stderr: String,
-    exit_code: Option<i32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ShellError {
-    Spawn(String),
-    Wait(String),
-    Timeout { secs: u64, output: ShellOutput },
-    Cancelled { output: ShellOutput },
-}
-
 pub fn display_shell_line(command: &str) -> String {
     format!("{BANG} {command}")
 }
 
-pub(crate) fn commit_shell(command: &str, result: Result<ShellOutput, ShellError>) -> LocalShell {
+pub(crate) fn commit_shell(
+    command: &str,
+    result: Result<CommandOutput, CommandError>,
+) -> LocalShell {
     match result {
-        Ok(output) => {
-            let text = format_shell_text(&output);
-            LocalShell {
-                command: command.to_string(),
-                exit_code: output.exit_code,
-                output: text,
-                error: None,
-            }
-        }
-        Err(ShellError::Cancelled { output }) => LocalShell {
+        Ok(output) => LocalShell {
+            command: command.to_string(),
+            exit_code: output.status.and_then(|status| status.code()),
+            output: format_shell_text(&output),
+            error: None,
+        },
+        Err(CommandError::Cancelled { output }) => LocalShell {
             command: command.to_string(),
             exit_code: None,
             output: format_shell_text(&output),
             error: Some("cancelled".into()),
         },
-        Err(ShellError::Timeout { secs, output }) => {
-            let err = format!("command timed out after {secs}s");
+        Err(error @ CommandError::TimedOut { .. }) => {
+            let message = error.to_string();
+            let CommandError::TimedOut { output, .. } = error else {
+                unreachable!()
+            };
             let mut text = format_shell_text(&output);
             if text == NO_OUTPUT {
-                text = err.clone();
+                text = message.clone();
             } else if !text.ends_with('\n') {
                 text.push('\n');
-                text.push_str(&err);
+                text.push_str(&message);
             } else {
-                text.push_str(&err);
+                text.push_str(&message);
             }
             LocalShell {
                 command: command.to_string(),
                 exit_code: None,
                 output: text,
-                error: Some(err),
+                error: Some(message),
             }
         }
-        Err(ShellError::Spawn(e) | ShellError::Wait(e)) => LocalShell {
-            command: command.to_string(),
-            exit_code: None,
-            output: e.clone(),
-            error: Some(e),
-        },
+        Err(CommandError::Spawn(error)) => shell_error(command, format!("shell: spawn: {error}")),
+        Err(CommandError::Wait(error)) => shell_error(command, format!("shell: wait: {error}")),
     }
 }
 
-fn format_shell_text(output: &ShellOutput) -> String {
+fn shell_error(command: &str, error: String) -> LocalShell {
+    LocalShell {
+        command: command.to_string(),
+        exit_code: None,
+        output: error.clone(),
+        error: Some(error),
+    }
+}
+
+fn format_shell_text(output: &CommandOutput) -> String {
     let mut text = String::new();
     if !output.stdout.is_empty() {
         text.push_str(&output.stdout);
@@ -184,7 +171,7 @@ fn format_shell_text(output: &ShellOutput) -> String {
         text.push('\n');
         text.push_str(&output.stderr);
     }
-    if let Some(code) = output.exit_code
+    if let Some(code) = output.status.and_then(|status| status.code())
         && code != 0
     {
         if !text.is_empty() && !text.ends_with('\n') {
@@ -196,125 +183,6 @@ fn format_shell_text(output: &ShellOutput) -> String {
         NO_OUTPUT.to_string()
     } else {
         text
-    }
-}
-
-enum Waited {
-    Status(std::process::ExitStatus),
-    Wait(std::io::Error),
-    Timeout,
-    Cancelled,
-}
-
-pub(crate) async fn run_host_shell(
-    root: &Path,
-    command: &str,
-    timeout: Duration,
-    cancel: Option<&CancellationToken>,
-) -> Result<ShellOutput, ShellError> {
-    let mut child =
-        spawn_host(root, command).map_err(|e| ShellError::Spawn(format!("shell: spawn: {e}")))?;
-    let stdout_task = tokio::spawn(read_pipe(child.stdout.take()));
-    let stderr_task = tokio::spawn(read_pipe(child.stderr.take()));
-
-    let waited = if let Some(token) = cancel {
-        let mut wait = std::pin::pin!(tokio::time::timeout(timeout, child.wait()));
-        tokio::select! {
-            biased;
-            _ = token.cancelled() => Waited::Cancelled,
-            res = &mut wait => match res {
-                Ok(Ok(status)) => Waited::Status(status),
-                Ok(Err(e)) => Waited::Wait(e),
-                Err(_) => Waited::Timeout,
-            },
-        }
-    } else {
-        match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(Ok(status)) => Waited::Status(status),
-            Ok(Err(e)) => Waited::Wait(e),
-            Err(_) => Waited::Timeout,
-        }
-    };
-
-    match waited {
-        Waited::Status(status) => Ok(join_output(stdout_task, stderr_task, status.code()).await),
-        Waited::Wait(e) => Err(ShellError::Wait(format!("shell: wait: {e}"))),
-        Waited::Cancelled => {
-            drop(child);
-            Err(ShellError::Cancelled {
-                output: join_output(stdout_task, stderr_task, None).await,
-            })
-        }
-        Waited::Timeout => {
-            drop(child);
-            Err(ShellError::Timeout {
-                secs: timeout.as_secs(),
-                output: join_output(stdout_task, stderr_task, None).await,
-            })
-        }
-    }
-}
-
-fn spawn_host(root: &Path, command: &str) -> std::io::Result<tokio::process::Child> {
-    #[cfg(windows)]
-    {
-        spawn_with(
-            root,
-            "powershell.exe",
-            &[
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                command,
-            ],
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        match spawn_with(root, "bash", &["-c", command]) {
-            Ok(child) => Ok(child),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                spawn_with(root, "sh", &["-c", command])
-            }
-            Err(e) => Err(e),
-        }
-    }
-}
-
-fn spawn_with(root: &Path, program: &str, args: &[&str]) -> std::io::Result<tokio::process::Child> {
-    let mut cmd = Command::new(program);
-    cmd.args(args)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.spawn()
-}
-
-async fn read_pipe<R: tokio::io::AsyncRead + Unpin + Send + 'static>(pipe: Option<R>) -> Vec<u8> {
-    let Some(mut pipe) = pipe else {
-        return Vec::new();
-    };
-    let mut buf = Vec::new();
-    let _ = pipe.read_to_end(&mut buf).await;
-    buf
-}
-
-async fn join_output(
-    stdout: tokio::task::JoinHandle<Vec<u8>>,
-    stderr: tokio::task::JoinHandle<Vec<u8>>,
-    exit_code: Option<i32>,
-) -> ShellOutput {
-    let stdout = stdout.await.unwrap_or_default();
-    let stderr = stderr.await.unwrap_or_default();
-    ShellOutput {
-        stdout: decode_command_output(&stdout),
-        stderr: decode_command_output(&stderr),
-        exit_code,
     }
 }
 
@@ -358,6 +226,10 @@ fn xml_unescape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oven_agent::CancellationToken;
+    #[cfg(windows)]
+    use oven_host::decode_command_output;
+    use oven_host::run_shell_command;
     use std::path::PathBuf;
 
     #[cfg(windows)]
@@ -373,6 +245,17 @@ mod tests {
 
     fn tmp_dir() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-shell-test").unwrap()
+    }
+
+    fn sleep_command(seconds: u64) -> String {
+        #[cfg(windows)]
+        {
+            format!("Start-Sleep -Seconds {seconds}")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("sleep {seconds}")
+        }
     }
 
     fn read_marker() -> &'static str {
@@ -516,10 +399,10 @@ mod tests {
     #[test]
     fn format_shell_text_empty_is_placeholder() {
         assert_eq!(
-            format_shell_text(&ShellOutput {
+            format_shell_text(&CommandOutput {
                 stdout: String::new(),
                 stderr: String::new(),
-                exit_code: Some(0),
+                status: None,
             }),
             NO_OUTPUT
         );
@@ -528,11 +411,11 @@ mod tests {
     #[tokio::test]
     async fn host_shell_captures_stdout() {
         let tmp = tmp_dir();
-        let out = run_host_shell(tmp.path(), "echo hi", HOST_SHELL_TIMEOUT, None)
+        let out = run_shell_command("echo hi", tmp.path(), HOST_SHELL_TIMEOUT, None)
             .await
             .unwrap();
         assert!(out.stdout.contains("hi"), "{:?}", out.stdout);
-        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.status.and_then(|status| status.code()), Some(0));
         assert!(format_shell_text(&out).contains("hi"));
     }
 
@@ -545,10 +428,10 @@ mod tests {
         let command = format!(
             "$b = [IO.File]::ReadAllBytes('{NIHAO_FILE}'); [Console]::OpenStandardOutput().Write($b, 0, $b.Length)"
         );
-        let out = run_host_shell(&root, &command, HOST_SHELL_TIMEOUT, None)
+        let out = run_shell_command(&command, &root, HOST_SHELL_TIMEOUT, None)
             .await
             .unwrap();
-        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.status.and_then(|status| status.code()), Some(0));
         let got = out.stdout.trim_end_matches(['\r', '\n']);
         assert_eq!(got, decode_command_output(GBK_NIHAO));
         if ansi_code_page() == CP_GBK {
@@ -561,21 +444,24 @@ mod tests {
     #[tokio::test]
     async fn host_shell_reports_nonzero_exit() {
         let tmp = tmp_dir();
-        let out = run_host_shell(tmp.path(), "exit 7", HOST_SHELL_TIMEOUT, None)
+        let out = run_shell_command("exit 7", tmp.path(), HOST_SHELL_TIMEOUT, None)
             .await
             .unwrap();
-        assert_eq!(out.exit_code, Some(7));
+        assert_eq!(out.status.and_then(|status| status.code()), Some(7));
         assert!(format_shell_text(&out).contains("[exit code: 7]"));
     }
 
     #[tokio::test]
     async fn host_shell_times_out() {
         let tmp = tmp_dir();
-        let err = run_host_shell(tmp.path(), "sleep 5", Duration::from_millis(100), None)
+        let timeout = Duration::from_millis(100);
+        let err = run_shell_command(&sleep_command(5), tmp.path(), timeout, None)
             .await
             .unwrap_err();
         match err {
-            ShellError::Timeout { secs, .. } => assert_eq!(secs, 0),
+            CommandError::TimedOut {
+                timeout: actual, ..
+            } => assert_eq!(actual, timeout),
             other => panic!("expected timeout, got {other:?}"),
         }
     }
@@ -585,7 +471,7 @@ mod tests {
         let tmp = tmp_dir();
         let root: PathBuf = tmp.path().to_path_buf();
         std::fs::write(root.join("marker.txt"), "found").unwrap();
-        let out = run_host_shell(&root, read_marker(), HOST_SHELL_TIMEOUT, None)
+        let out = run_shell_command(read_marker(), &root, HOST_SHELL_TIMEOUT, None)
             .await
             .unwrap();
         assert!(out.stdout.contains("found"), "{:?}", out.stdout);
@@ -599,9 +485,9 @@ mod tests {
         let root = tmp.path().to_path_buf();
         let cancel_for_task = cancel.clone();
         let handle = tokio::spawn(async move {
-            let result = run_host_shell(
+            let result = run_shell_command(
+                &sleep_command(60),
                 &root,
-                "sleep 60",
                 HOST_SHELL_TIMEOUT,
                 Some(&cancel_for_task),
             )
@@ -616,7 +502,7 @@ mod tests {
             .await
             .expect("cancel should resolve promptly")
             .expect("shell task alive");
-        assert!(matches!(result, Err(ShellError::Cancelled { .. })));
+        assert!(matches!(result, Err(CommandError::Cancelled { .. })));
         handle.await.unwrap();
     }
 }

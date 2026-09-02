@@ -1,15 +1,13 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use globset::Glob;
-use regex::RegexBuilder;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, require_str, resolve_within};
 use crate::error::AgentError;
-use crate::walk::walk_dir;
+use crate::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
+use oven_host::walk_dir;
 
 pub struct GrepTool {
     root: PathBuf,
@@ -58,14 +56,13 @@ impl Tool for GrepTool {
         cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;
-        let re = RegexBuilder::new(pattern)
-            .case_insensitive(
-                args.get("case_insensitive")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-            )
-            .build()
-            .map_err(|e| AgentError::from(format!("grep: invalid regex {:?}: {}", pattern, e)))?;
+        let re = compile_regex(
+            pattern,
+            args.get("case_insensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        )
+        .map_err(|e| AgentError::from(format!("grep: invalid regex {:?}: {}", pattern, e)))?;
 
         let include = args
             .get("include")
@@ -73,11 +70,9 @@ impl Tool for GrepTool {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|p| {
-                Glob::new(p)
-                    .map_err(|e| {
-                        AgentError::from(format!("grep: invalid include pattern {:?}: {}", p, e))
-                    })
-                    .map(|g| g.compile_matcher())
+                compile_glob(p).map_err(|e| {
+                    AgentError::from(format!("grep: invalid include pattern {:?}: {}", p, e))
+                })
             })
             .transpose()?;
 
@@ -115,7 +110,7 @@ impl Tool for GrepTool {
                     return Err(AgentError::cancelled());
                 }
                 let entry = entry.map_err(|e| AgentError::from(format!("grep: walk: {}", e)))?;
-                if entry.file_type().is_some_and(|t| t.is_file()) {
+                if entry.is_file() {
                     let full = entry.path();
                     let rel = full.strip_prefix(&self.root).unwrap_or(full);
                     self.grep_file(full, rel, &re, include.as_ref(), &mut out, limit)?;
@@ -139,27 +134,19 @@ impl GrepTool {
         &self,
         full: &Path,
         rel: &Path,
-        re: &regex::Regex,
-        include: Option<&globset::GlobMatcher>,
+        re: &Regex,
+        include: Option<&GlobMatcher>,
         out: &mut Vec<String>,
         limit: usize,
     ) -> Result<(), AgentError> {
         if let Some(m) = include
             && let Some(name) = full.file_name()
-            && !m.is_match(name)
+            && !m.is_match(Path::new(name))
         {
             return Ok(());
         }
-        let bytes = match fs::read(full) {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(AgentError::from(format!(
-                    "grep: read {}: {}",
-                    full.display(),
-                    e
-                )));
-            }
-        };
+        let bytes = std::fs::read(full)
+            .map_err(|e| AgentError::from(format!("grep: read {}: {}", full.display(), e)))?;
         if bytes.contains(&0) {
             return Ok(());
         }

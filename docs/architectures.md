@@ -43,13 +43,50 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | Crate | Owns |
 | --- | --- |
 | `oven-llm` | `Message`, `Usage`, provider I/O |
-| `oven-agent` | `Agent`, turn execution, `AgentEvent`, `EventSink` |
-| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `AppEvent`, `AppState`, runtime actor, session, local shell |
+| `oven-agent` | `Agent`, turn execution, tool protocol, `AgentEvent`, `EventSink`, history/todo domain models, provider retry decoration |
+| `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking |
+| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration |
 | `oven-tui` | render events and state; send commands |
+
+`oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
+
+The dependency direction is:
+
+```text
+oven-tui ──► oven-app ──► oven-agent ──► oven-llm
+                   │          │
+                   └──────────┴──► oven-host
+```
+
+`oven-host` may depend on operating-system and third-party implementation crates such as Tokio and `ignore`, but those types do not appear in its public API. Consumers use host-owned types such as `WalkEntry`, `PathError`, and `CommandError`. Pattern matching remains an Agent concern.
+
+## Infrastructure boundary
+
+`oven-host` isolates external side effects from Agent orchestration:
+
+| Capability | Host API | Agent/App responsibility |
+| --- | --- | --- |
+| Workspace paths | `resolve_within` | Parse tool arguments and map errors to domain errors |
+| File access | `write` | Choose paths and content; read files and map errors to domain errors |
+| Process execution | `run_shell_command` | Choose command, timeout, cancellation, and event formatting |
+| Output decoding | `decode_command_output` | Render decoded stdout/stderr and exit status |
+| File discovery | `walk_dir`, `WalkEntry` | Apply glob/grep semantics and result limits |
+
+The host facade deliberately does not know about `AgentError`, `Tool`, `AgentEvent`, `AppEvent`, or `AppState`. This keeps the infrastructure reusable and prevents a dependency cycle.
+
+`oven-agent` retains the `Tool` trait because it describes the Agent protocol. Concrete tools adapt that protocol to host capabilities:
+
+```text
+oven-agent::Tool
+  ├── FileReadTool / FileEditTool / SkillReadTool ──► tokio::fs
+  ├── FileWriteTool / FileEditTool                ──► oven-host write
+  ├── BashTool                                    ──► oven-host process
+  └── GlobTool / GrepTool                         ──► oven-agent matching + oven-host walk
+```
 
 ## App facade
 
-`App` is the only public runtime handle. `AppHandle` is gone. `AppBuilder` loads config, skills, tools, and MCP, then `open()` / `open_session()` spawns the actor.
+`App` is the only public app-runtime handle. `AppHandle` is gone. `AppBuilder` loads config, skills, tools, and MCP, then `open()` / `open_session()` spawns the actor. This app runtime is distinct from the `oven-host` infrastructure crate: the former coordinates commands and state, while the latter performs isolated filesystem and process operations.
 
 ```text
 AppBuilder ──open──► App ──AppCommand──► Runtime
@@ -91,7 +128,7 @@ pub enum AppCommand {
 
 Slash commands still arrive as `StartTurn { input: "/plan on" }`. The runtime parses them and either starts an agent turn or applies a state change.
 
-A composer line whose trimmed body starts with `!` is a **local shell request**, not a slash command and not an LLM turn. The runtime strips the bang, runs the host shell (bash on Unix, PowerShell on Windows) in the workspace root, and commits one user message describing the command and its result.
+A composer line whose trimmed body starts with `!` is a **local shell request**, not a slash command and not an LLM turn. The app runtime strips the bang and invokes `oven-host::run_shell_command` in the workspace root (bash on Unix, falling back to sh; PowerShell on Windows). `oven-host` owns process management and output decoding; the app retains timeout/cancellation choices, shell events, exit-code mapping, and persistence. It commits one user message describing the command and its result.
 
 Input received while a turn is running is queued and processed after the turn ends.
 
@@ -169,6 +206,8 @@ Subscribers get a lossless unbounded channel. `App::state()` / `watch_state()` i
 agent.run(input, TurnContext { turn_id, cancellation }, &mut sink)
     -> Result<TurnOutput, AgentError>
 ```
+
+The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`.
 
 `EventSink::emit` is synchronous. Production uses `ChannelEventSink`; tests use `VecEventSink`.
 
@@ -380,7 +419,7 @@ The TUI shows the typed `!` line as a user row and the last 100 output lines as 
 3. Each agent turn emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`. Each bang-shell request emits exactly one `Shell::Started` and exactly one of `Finished | Failed`.
 4. `ToolFinished` is always preceded by `ToolStarted` for the same `ToolCallId`.
 
-Runtime is a single actor:
+Runtime is a single app actor. It is not the `oven-host` crate:
 
 ```rust
 struct Runtime {
@@ -389,7 +428,11 @@ struct Runtime {
     session: Option<SessionStore>,
     config: AppConfig,
 }
+```
 
+`oven-host` is stateless infrastructure from the app actor's point of view. It owns no session, Agent, event stream, or app state. Its filesystem entry point rejects empty, parent-relative, absolute, and platform-prefixed paths before joining them to a workspace root. This is lexical path confinement; callers requiring protection against symlink traversal must add a canonicalization or symlink policy before treating the workspace as a security sandbox.
+
+```rust
 impl Runtime {
     async fn run(mut self, mut rx: Receiver<AppCommand>) { /* dispatch */ }
 }

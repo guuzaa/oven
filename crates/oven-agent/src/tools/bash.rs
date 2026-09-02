@@ -3,12 +3,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolView, labeled, require_str};
-use crate::decode::decode_command_output;
 use crate::error::AgentError;
+use oven_host::{CommandError, run_shell_command};
 
 pub struct BashTool {
     root: PathBuf,
@@ -44,13 +43,13 @@ impl Tool for BashTool {
         Self::view_input(input)
     }
     fn description(&self) -> &str {
-        "Execute a shell command in the workspace root and return stdout/stderr. Use for running builds, tests, git, etc."
+        "Execute a command with the host shell in the workspace root and return stdout/stderr. Uses PowerShell on Windows and bash (falling back to sh) elsewhere. Use for builds, tests, git, etc."
     }
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The shell command to execute." }
+                "command": { "type": "string", "description": "The command to execute with the host shell." }
             },
             "required": ["command"]
         })
@@ -61,48 +60,18 @@ impl Tool for BashTool {
         cancel: Option<&CancellationToken>,
     ) -> Result<String, AgentError> {
         let command = require_str(args, "command", Self::NAME)?;
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command).current_dir(&self.root);
-        cmd.stdin(std::process::Stdio::null());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd.kill_on_drop(true);
-
-        let child = cmd
-            .spawn()
-            .map_err(|e| AgentError::from(format!("bash: spawn: {}", e)))?;
-
-        // The wait future owns the child; dropping it (cancel or timeout)
-        // kills the process because `kill_on_drop` is set.
-        let mut wait = Box::pin(tokio::time::timeout(self.timeout, child.wait_with_output()));
-        let output = if let Some(c) = cancel {
-            let picked = tokio::select! {
-                biased;
-                _ = c.cancelled() => None,
-                res = wait.as_mut() => Some(res),
-            };
-            match picked {
-                None => return Err(AgentError::cancelled()),
-                Some(res) => res,
-            }
-        } else {
-            wait.await
-        };
-
-        let output = match output {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => return Err(AgentError::from(format!("bash: wait: {}", e))),
-            Err(_) => {
-                return Err(AgentError::from(format!(
-                    "bash: command timed out after {}s",
-                    self.timeout.as_secs()
-                )));
-            }
-        };
+        let output = run_shell_command(command, &self.root, self.timeout, cancel)
+            .await
+            .map_err(|error| match error {
+                CommandError::Cancelled { .. } => AgentError::cancelled(),
+                CommandError::Spawn(error) => AgentError::from(format!("bash: spawn: {error}")),
+                CommandError::Wait(error) => AgentError::from(format!("bash: wait: {error}")),
+                error @ CommandError::TimedOut { .. } => AgentError::from(format!("bash: {error}")),
+            })?;
 
         let mut text = String::new();
         if !output.stdout.is_empty() {
-            text.push_str(&decode_command_output(&output.stdout));
+            text.push_str(&output.stdout);
         }
         if !output.stderr.is_empty() {
             if !text.is_empty() {
@@ -110,13 +79,12 @@ impl Tool for BashTool {
             } else {
                 text.push_str("--- stderr ---\n");
             }
-            text.push_str(&decode_command_output(&output.stderr));
+            text.push_str(&output.stderr);
         }
-        if !output.status.success() {
-            text.push_str(&format!(
-                "\n[exit code: {}]",
-                output.status.code().unwrap_or(-1)
-            ));
+        if let Some(status) = output.status
+            && !status.success()
+        {
+            text.push_str(&format!("\n[exit code: {}]", status.code().unwrap_or(-1)));
         }
         if text.is_empty() {
             text.push_str("(no output)");
@@ -133,6 +101,28 @@ mod tests {
 
     fn tmp_dir() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-test").unwrap()
+    }
+
+    fn sleep_command(seconds: u64) -> String {
+        #[cfg(windows)]
+        {
+            format!("Start-Sleep -Seconds {seconds}")
+        }
+        #[cfg(not(windows))]
+        {
+            format!("sleep {seconds}")
+        }
+    }
+
+    fn read_marker_command() -> &'static str {
+        #[cfg(windows)]
+        {
+            "Get-Content -Raw marker.txt"
+        }
+        #[cfg(not(windows))]
+        {
+            "cat marker.txt"
+        }
     }
 
     #[tokio::test]
@@ -159,7 +149,7 @@ mod tests {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path()).with_timeout(Duration::from_millis(100));
         let err = bash
-            .run(&json!({"command": "sleep 5"}), None)
+            .run(&json!({"command": sleep_command(5)}), None)
             .await
             .unwrap_err();
         assert!(err.message.contains("timed out"), "{}", err.message);
@@ -172,7 +162,7 @@ mod tests {
         std::fs::write(root.join("marker.txt"), "found").unwrap();
         let bash = BashTool::new(&root);
         let out = bash
-            .run(&json!({"command": "cat marker.txt"}), None)
+            .run(&json!({"command": read_marker_command()}), None)
             .await
             .unwrap();
         assert_eq!(out.trim(), "found");
@@ -189,7 +179,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             let result = bash
                 .run(
-                    &json!({"command": "sleep 60; echo done"}),
+                    &json!({"command": sleep_command(60)}),
                     Some(&cancel_for_task),
                 )
                 .await;

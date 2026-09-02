@@ -1,8 +1,9 @@
-/// Decode subprocess stdout/stderr into a UTF-8 string.
-///
-/// Windows shells write the ANSI/OEM code page (e.g. GBK on Chinese Windows),
-/// not UTF-8. Strict UTF-8 is tried first; on Windows, invalid UTF-8 falls back
-/// to the process ANSI code page instead of `U+FFFD` replacement.
+//! Decode subprocess output as UTF-8, falling back to the Windows ANSI code page.
+//!
+//! Windows shells commonly write the system ANSI/OEM code page rather than UTF-8.
+//! Valid UTF-8 remains preferred; invalid output is decoded through ACP on Windows
+//! and lossily as UTF-8 elsewhere.
+
 pub fn decode_command_output(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
@@ -33,15 +34,16 @@ fn decode_acp(bytes: &[u8]) -> Option<String> {
     }
 
     let nbytes = i32::try_from(bytes.len()).ok()?;
-    // SAFETY: `bytes` is a valid slice of `nbytes`; a null `wide` with
-    // `nwide == 0` asks Windows for the required UTF-16 length.
+    // SAFETY: `bytes` points to a valid slice of `nbytes`; a null output pointer
+    // with length zero is the documented Windows length-query form.
     let nwide =
         unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), nbytes, std::ptr::null_mut(), 0) };
     if nwide <= 0 {
         return None;
     }
     let mut wide = vec![0u16; nwide as usize];
-    // SAFETY: `wide` has `nwide` elements, matching the size queried above.
+    // SAFETY: `wide` contains exactly the number of UTF-16 code units returned
+    // by the preceding length query, so the Windows call can write at most nwide.
     let written =
         unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), nbytes, wide.as_mut_ptr(), nwide) };
     if written <= 0 {
@@ -67,7 +69,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn non_utf8_acp_bytes_are_not_replacement_chars() {
-        // GBK 你好 (also invalid UTF-8). ACP decode must not emit U+FFFD.
         let bytes = [0xC4, 0xE3, 0xBA, 0xC3];
         let text = decode_command_output(&bytes);
         assert!(!text.is_empty(), "{text:?}");

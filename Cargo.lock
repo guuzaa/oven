@@ -1940,14 +1940,15 @@ dependencies = [
  "async-trait",
  "futures",
  "globset",
- "ignore",
  "mockall",
+ "oven-host",
  "oven-llm",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempdir",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-util",
 ]
@@ -1965,6 +1966,7 @@ dependencies = [
  "nucleo",
  "nucleo-matcher",
  "oven-agent",
+ "oven-host",
  "oven-llm",
  "rmcp",
  "serde",
@@ -1974,6 +1976,17 @@ dependencies = [
  "tokio",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "oven-host"
+version = "0.0.5"
+dependencies = [
+ "ignore",
+ "tempdir",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

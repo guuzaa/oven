@@ -9,7 +9,7 @@ mod skill_read;
 mod todo_write;
 mod view;
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -48,16 +48,7 @@ pub trait Tool: Send + Sync {
 }
 
 pub(crate) fn resolve_within(root: &Path, rel: &str) -> Result<PathBuf, AgentError> {
-    let rel = rel.trim();
-    if rel.is_empty() {
-        return Err(AgentError::from("missing path argument"));
-    }
-    for comp in Path::new(rel).components() {
-        if matches!(comp, Component::ParentDir) {
-            return Err(AgentError::from(format!("path escapes root: {}", rel)));
-        }
-    }
-    Ok(root.join(rel))
+    oven_host::resolve_within(root, rel).map_err(|error| AgentError::from(error.to_string()))
 }
 
 pub(crate) fn require_str<'a>(

@@ -1,0 +1,15 @@
+[package]
+name = "oven-host"
+description = "Host system interaction infrastructure for Oven"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[dependencies]
+ignore = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "time", "process"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tempdir = { workspace = true }
