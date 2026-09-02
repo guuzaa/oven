@@ -1,20 +1,11 @@
 use ratatui::style::Style;
 
+use super::super::collapsible::Collapsible;
 use super::super::theme;
 
 pub(super) const LINE_PREFIX_WIDTH: usize = 2;
 pub(super) const LINE_INDENT: &str = "  ";
 pub(super) const SEPARATOR_GLYPH: char = '−';
-pub(super) const THINKING_LABEL: &str = "Thinking...";
-pub(super) const THOUGHT_LABEL: &str = "Thought";
-
-pub(super) fn thinking_display_label(text: &str) -> &'static str {
-    if text == THINKING_LABEL {
-        THINKING_LABEL
-    } else {
-        THOUGHT_LABEL
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LineKind {
@@ -66,4 +57,5 @@ impl LineKind {
 pub(super) struct Row {
     pub kind: LineKind,
     pub text: String,
+    pub collapsible: Option<Collapsible>,
 }

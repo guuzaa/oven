@@ -9,13 +9,22 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::super::collapsible::Collapsible;
 use super::super::theme;
-use super::kinds::{
-    LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH, thinking_display_label,
-};
+use super::kinds::{LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH};
 
 pub(super) const MAX_RESULT_LINES: usize = 6;
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
+pub(super) const THINKING_LABEL: &str = "Thinking...";
+pub(super) const THOUGHT_LABEL: &str = "Thought";
+
+pub(super) fn thinking_display_label(text: &str) -> &'static str {
+    if text == THINKING_LABEL {
+        THINKING_LABEL
+    } else {
+        THOUGHT_LABEL
+    }
+}
 
 pub(super) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
     f.render_widget(Paragraph::new(lines), area);
@@ -135,6 +144,38 @@ fn separator_line(width: usize) -> Line<'static> {
         SEPARATOR_GLYPH.to_string().repeat(width.max(1)),
         theme::dim(),
     ))
+}
+
+pub(super) fn wrap_collapsible_thinking_into(
+    out: &mut Vec<Line<'static>>,
+    title: &str,
+    collapsible: &Collapsible,
+    width: usize,
+) {
+    if !out.is_empty() {
+        out.push(Line::from(""));
+    }
+    let style = theme::thinking();
+    let marker = if collapsible.is_expanded() {
+        "⌄ "
+    } else {
+        "› "
+    };
+    let header = Line::from(vec![
+        Span::styled(LineKind::Thinking.gutter().to_string(), style),
+        Span::styled(format!("{marker}{title}"), style),
+    ]);
+    wrap_line_into(out, &header, width);
+    if !collapsible.is_expanded() {
+        return;
+    }
+    for part in collapsible.body().lines() {
+        let line = Line::from(vec![
+            Span::styled(LINE_INDENT.to_string(), style),
+            Span::styled(format!("{LINE_INDENT}{part}"), style),
+        ]);
+        wrap_line_into(out, &line, width);
+    }
 }
 
 pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {

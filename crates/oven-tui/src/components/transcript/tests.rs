@@ -12,8 +12,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
-use super::kinds::{LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH, THINKING_LABEL, THOUGHT_LABEL};
+use super::kinds::{LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH};
 use super::selection::{extract_line_range, highlight_line, slice_cols};
+use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
 use super::widget::Transcript;
 use super::wrap::{
@@ -413,6 +414,69 @@ fn thinking_delta_shows_label_not_content() {
 }
 
 #[test]
+fn thinking_double_click_toggles_detail() {
+    const THINKING: &str = "inspect the implementation";
+
+    let mut t = Transcript::new();
+    t.on_event(&thinking(THINKING));
+    t.on_event(&completed());
+    ready(&mut t, Rect::new(0, 0, 80, 5));
+
+    let detail = t.rows[0].collapsible.as_ref().expect("thinking detail");
+    assert_eq!(detail.body(), THINKING);
+    assert!(!detail.is_expanded());
+    assert!(t.wrapped.iter().all(|line| {
+        !line
+            .spans
+            .iter()
+            .any(|span| span.content.contains(THINKING))
+    }));
+
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::Down(MouseButton::Left),
+    ] {
+        assert!(matches!(
+            t.handle_mouse(mouse(kind, 2, 0), &State::new()),
+            KeyResult::Handled
+        ));
+    }
+
+    assert!(
+        t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("thinking detail")
+            .is_expanded()
+    );
+    assert!(t.wrapped.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.contains(THINKING))
+    }));
+
+    t.handle_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 2, 0),
+        &State::new(),
+    );
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::Down(MouseButton::Left),
+    ] {
+        t.handle_mouse(mouse(kind, 2, 0), &State::new());
+    }
+    assert!(
+        !t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("thinking detail")
+            .is_expanded()
+    );
+}
+
+#[test]
 fn seed_collapses_consecutive_thinking() {
     let mut t = Transcript::new();
     t.seed(&[Message::assistant(vec![
@@ -429,6 +493,14 @@ fn seed_collapses_consecutive_thinking() {
         vec![LineKind::Thinking, LineKind::Text, LineKind::Separator]
     );
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
+    assert_eq!(
+        t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("thinking detail")
+            .body(),
+        "onetwo"
+    );
 }
 
 #[test]

@@ -1,4 +1,7 @@
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+use super::super::collapsible::Collapsible;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
@@ -12,22 +15,24 @@ use ratatui::text::{Line, Span};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
-use super::kinds::{LineKind, Row, THINKING_LABEL, THOUGHT_LABEL};
+use super::kinds::{LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::{ToolBurst, ToolLabel};
 use super::wrap::{
-    MAX_SHELL_DISPLAY_LINES, apply_thinking_shimmer, collect_lines, format_lines,
-    line_display_width, paint_visible, tail_lines, thinking_phase, trim_message, truncate_result,
-    wrap_line_into, wrap_row_into,
+    MAX_SHELL_DISPLAY_LINES, THINKING_LABEL, THOUGHT_LABEL, apply_thinking_shimmer, collect_lines,
+    format_lines, line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
+    truncate_result, wrap_collapsible_thinking_into, wrap_line_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
 const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
+const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct Transcript {
     pub(super) rows: Vec<Row>,
     pub(super) wrapped: Vec<Line<'static>>,
+    thinking_headers: Vec<Option<usize>>,
     streaming: String,
     stream_kind: LineKind,
     wrapped_stream: Vec<Line<'static>>,
@@ -46,6 +51,8 @@ pub struct Transcript {
     pub(super) select_anchor: Option<SelPos>,
     select_head: Option<SelPos>,
     pub(super) dragging: bool,
+    pressed_thinking_header: Option<usize>,
+    last_thinking_click: Option<(usize, Instant)>,
     tool_burst: ToolBurst,
     detail_ids: HashSet<String>,
 }
@@ -55,6 +62,7 @@ impl Transcript {
         Self {
             rows: Vec::new(),
             wrapped: Vec::new(),
+            thinking_headers: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
             wrapped_stream: Vec::new(),
@@ -67,6 +75,8 @@ impl Transcript {
             select_anchor: None,
             select_head: None,
             dragging: false,
+            pressed_thinking_header: None,
+            last_thinking_click: None,
             tool_burst: ToolBurst::default(),
             detail_ids: HashSet::new(),
         }
@@ -150,14 +160,9 @@ impl Transcript {
                     let mut has_tool = false;
                     for block in &m.content {
                         match block {
-                            ContentBlock::Thinking { .. } => {
+                            ContentBlock::Thinking { thinking } => {
                                 self.close_tool_burst();
-                                if !matches!(
-                                    self.rows.last().map(|r| r.kind),
-                                    Some(LineKind::Thinking)
-                                ) {
-                                    self.push_row(LineKind::Thinking, THOUGHT_LABEL);
-                                }
+                                self.push_thinking(THOUGHT_LABEL, thinking);
                                 emitted = true;
                             }
                             ContentBlock::Text { text } => {
@@ -248,10 +253,12 @@ impl Transcript {
     pub(super) fn reset(&mut self) {
         self.rows.clear();
         self.wrapped.clear();
+        self.thinking_headers.clear();
         self.clear_stream();
         self.pinned = true;
         self.top = 0;
         self.clear_selection();
+        self.last_thinking_click = None;
         self.close_tool_burst();
         self.detail_ids.clear();
     }
@@ -343,13 +350,62 @@ impl Transcript {
             LineKind::Separator => String::new(),
             _ => text.to_string(),
         };
-        let mut wrapped = Vec::new();
-        if self.width > 0 {
-            wrap_row_into(&mut wrapped, kind, &text, self.width);
+        self.push_row_with_detail(kind, text, None);
+    }
+
+    fn push_thinking(&mut self, title: &str, text: &str) {
+        if let Some(Row {
+            kind: LineKind::Thinking,
+            text: current_title,
+            collapsible: Some(collapsible),
+        }) = self.rows.last_mut()
+        {
+            *current_title = title.to_string();
+            collapsible.append(text);
+            self.rewrap_all();
+            self.keep_following();
+            return;
         }
-        self.rows.push(Row { kind, text });
-        self.wrapped.extend(wrapped);
+        self.push_row_with_detail(
+            LineKind::Thinking,
+            title.to_string(),
+            Some(Collapsible::new(text)),
+        );
+    }
+
+    fn push_row_with_detail(
+        &mut self,
+        kind: LineKind,
+        text: String,
+        collapsible: Option<Collapsible>,
+    ) {
+        let row = Row {
+            kind,
+            text,
+            collapsible,
+        };
+        let header = if self.width > 0 {
+            Self::wrap_row_into(&mut self.wrapped, &row, self.width)
+        } else {
+            None
+        };
+        self.rows.push(row);
+        self.thinking_headers.push(header);
         self.keep_following();
+    }
+
+    fn wrap_row_into(out: &mut Vec<Line<'static>>, row: &Row, width: usize) -> Option<usize> {
+        let start = out.len();
+        if row.kind == LineKind::Thinking
+            && let Some(collapsible) = &row.collapsible
+        {
+            let header = start + usize::from(start > 0);
+            wrap_collapsible_thinking_into(out, &row.text, collapsible, width);
+            Some(header)
+        } else {
+            wrap_row_into(out, row.kind, &row.text, width);
+            None
+        }
     }
 
     fn push_separator(&mut self) {
@@ -390,13 +446,13 @@ impl Transcript {
         self.keep_following();
     }
 
-    fn wrap_rows_from(&mut self, start: usize) {
-        let width = self.width;
-        if width == 0 {
+    fn wrap_rows(&mut self, start: usize, end: usize) {
+        if self.width == 0 {
             return;
         }
-        for row in &self.rows[start..] {
-            wrap_row_into(&mut self.wrapped, row.kind, &row.text, width);
+        for row in &self.rows[start..end] {
+            let header = Self::wrap_row_into(&mut self.wrapped, row, self.width);
+            self.thinking_headers.push(header);
         }
     }
 
@@ -416,21 +472,14 @@ impl Transcript {
 
     pub(super) fn rewrap_all(&mut self) {
         self.wrapped.clear();
+        self.thinking_headers.clear();
         if self.tool_burst.row_open && !self.rows.is_empty() {
             let last = self.rows.len() - 1;
-            let width = self.width;
-            if width > 0 {
-                for row in &self.rows[..last] {
-                    wrap_row_into(&mut self.wrapped, row.kind, &row.text, width);
-                }
-            }
+            self.wrap_rows(0, last);
             self.tool_burst.wrap_at = self.wrapped.len();
-            if width > 0 {
-                let last = &self.rows[last];
-                wrap_row_into(&mut self.wrapped, last.kind, &last.text, width);
-            }
+            self.wrap_rows(last, self.rows.len());
         } else {
-            self.wrap_rows_from(0);
+            self.wrap_rows(0, self.rows.len());
         }
         self.rewrap_stream();
         self.clear_selection();
@@ -440,6 +489,7 @@ impl Transcript {
         self.select_anchor = None;
         self.select_head = None;
         self.dragging = false;
+        self.pressed_thinking_header = None;
     }
 
     fn begin_selection(&mut self, column: u16, row: u16) {
@@ -519,8 +569,44 @@ impl Transcript {
         }
     }
 
-    fn is_live_thinking(&self) -> bool {
-        self.stream_kind == LineKind::Thinking && !self.streaming.is_empty()
+    fn thinking_header_at(&self, column: u16, row: u16) -> Option<usize> {
+        let line = self.pos_at(column, row).line;
+        self.thinking_headers
+            .iter()
+            .position(|header| *header == Some(line))
+    }
+
+    fn toggle_thinking(&mut self, row: usize) {
+        if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
+            collapsible.toggle();
+            self.rewrap_all();
+            self.keep_following();
+        }
+    }
+
+    fn finish_thinking(&mut self) {
+        if let Some(Row {
+            kind: LineKind::Thinking,
+            text,
+            collapsible: Some(_),
+        }) = self.rows.last_mut()
+        {
+            *text = THOUGHT_LABEL.to_string();
+            self.rewrap_all();
+        }
+    }
+
+    fn live_thinking_header(&self) -> Option<usize> {
+        matches!(
+            self.rows.last(),
+            Some(Row {
+                kind: LineKind::Thinking,
+                text,
+                collapsible: Some(_),
+            }) if text == THINKING_LABEL
+        )
+        .then(|| self.thinking_headers.last().copied().flatten())
+        .flatten()
     }
 
     fn is_live_text(&self) -> bool {
@@ -579,6 +665,21 @@ impl Component for Transcript {
                 KeyResult::Handled
             }
             MouseEventKind::Down(MouseButton::Left) if in_area => {
+                let header = self.thinking_header_at(mouse.column, mouse.row);
+                if let Some(row) = header
+                    && let Some((last, at)) = self.last_thinking_click
+                    && last == row
+                    && at.elapsed() <= DOUBLE_CLICK_TIMEOUT
+                {
+                    self.last_thinking_click = None;
+                    self.toggle_thinking(row);
+                    self.clear_selection();
+                    return KeyResult::Handled;
+                }
+                if header.is_none() {
+                    self.last_thinking_click = None;
+                }
+                self.pressed_thinking_header = header;
                 self.begin_selection(mouse.column, mouse.row);
                 KeyResult::Handled
             }
@@ -588,9 +689,16 @@ impl Component for Transcript {
             }
             MouseEventKind::Up(MouseButton::Left) if self.dragging => {
                 self.update_selection(mouse.column, mouse.row);
+                let header = self.pressed_thinking_header;
+                let selected = self.normalized_sel().is_some();
                 if self.end_selection() {
                     KeyResult::Action(Action::Notify("Copied!".into()))
                 } else {
+                    if !selected {
+                        self.last_thinking_click = header.map(|row| (row, Instant::now()));
+                    } else {
+                        self.last_thinking_click = None;
+                    }
                     KeyResult::Handled
                 }
             }
@@ -601,17 +709,17 @@ impl Component for Transcript {
     fn on_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Agent(env) => match &env.event {
-                AgentEvent::Stream(StreamEvent::ThinkingDelta { .. }) => {
+                AgentEvent::Stream(StreamEvent::ThinkingDelta { text }) => {
                     self.close_tool_burst();
-                    if self.stream_kind != LineKind::Thinking || self.streaming.is_empty() {
-                        self.push_stream(LineKind::Thinking, THINKING_LABEL);
-                    }
+                    self.push_thinking(THINKING_LABEL, text);
                 }
                 AgentEvent::Stream(StreamEvent::TextDelta { text }) => {
                     self.close_tool_burst();
+                    self.finish_thinking();
                     self.push_stream(LineKind::Text, text);
                 }
                 AgentEvent::Tool(ToolEvent::Started { call_id, view, .. }) => {
+                    self.finish_thinking();
                     self.flush_streaming();
                     self.note_tool_start(&call_id.0.to_string(), view);
                 }
@@ -629,11 +737,13 @@ impl Component for Transcript {
                 AgentEvent::Turn(TurnEvent::Started) => {}
                 AgentEvent::Turn(TurnEvent::Completed { .. }) => {
                     self.close_tool_burst();
+                    self.finish_thinking();
                     self.flush_streaming();
                     self.push_separator();
                 }
                 AgentEvent::Turn(TurnEvent::Cancelled) => {
                     self.close_tool_burst();
+                    self.finish_thinking();
                     if !self.streaming.is_empty() {
                         let kind = self.stream_kind;
                         let partial = trim_message(&std::mem::take(&mut self.streaming));
@@ -648,6 +758,7 @@ impl Component for Transcript {
                 }
                 AgentEvent::Turn(TurnEvent::Failed { error }) => {
                     self.close_tool_burst();
+                    self.finish_thinking();
                     self.flush_streaming();
                     self.push_row(LineKind::Error, &error.message);
                     self.push_separator();
@@ -699,14 +810,11 @@ impl Component for Transcript {
         let start = if self.pinned { max_top } else { self.top };
         let end = start.saturating_add(height).min(total);
         let mut visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
-        if self.is_live_thinking() {
-            let phase = thinking_phase();
-            let stream_start = self.wrapped.len();
-            for (i, line) in visible.iter_mut().enumerate() {
-                if start + i >= stream_start {
-                    *line = apply_thinking_shimmer(line, phase);
-                }
-            }
+        if let Some(header) = self.live_thinking_header()
+            && header >= start
+            && let Some(line) = visible.get_mut(header - start)
+        {
+            *line = apply_thinking_shimmer(line, thinking_phase());
         }
         if self.is_live_text()
             && end == total
