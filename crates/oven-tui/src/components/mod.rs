@@ -5,6 +5,7 @@ pub(super) mod input;
 pub(super) mod layout;
 pub(super) mod list;
 pub(super) mod model_picker;
+pub(super) mod paste_burst;
 pub(super) mod queue;
 pub(super) mod setup_wizard;
 pub(super) mod shell;

@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::components::component::{Action, Component, KeyResult, State};
 use crate::components::input::{InputView, Overlay, display_user_input};
+use crate::components::paste_burst::{self, Burst};
 use crate::components::queue::QueueWidget;
 use crate::components::shell;
 use crate::components::status::{StatusBar, StatusHint};
@@ -105,20 +106,8 @@ impl Ui {
                     self.status.expire_reply();
                 }
                 Some(ev) = term_events.next() => {
-                    match ev? {
-                        Event::Key(key) if key.kind == KeyEventKind::Press => {
-                            if self.handle_key(key) {
-                                break;
-                            }
-                        }
-                        Event::Paste(text) => {
-                            self.input.paste(&text);
-                        }
-                        Event::Mouse(mouse) => {
-                            self.handle_mouse(mouse);
-                        }
-                        Event::Resize(_, _) => {}
-                        _ => continue,
+                    if self.handle_term_event(ev?)? {
+                        break;
                     }
                 }
                 result = self.events.recv() => {
@@ -137,6 +126,30 @@ impl Ui {
             terminal.draw(|f| self.draw(f))?;
         }
         Ok(())
+    }
+
+    /// Returns `true` when the app should quit.
+    fn handle_term_event(&mut self, ev: Event) -> io::Result<bool> {
+        match ev {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let (burst, trailing) = paste_burst::coalesce(key)?;
+                match burst {
+                    Burst::Key(key) => {
+                        if self.handle_key(key) {
+                            return Ok(true);
+                        }
+                    }
+                    Burst::Paste(text) => self.input.paste(&text),
+                }
+                if let Some(ev) = trailing {
+                    return self.handle_term_event(ev);
+                }
+            }
+            Event::Paste(text) => self.input.paste(&text),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn drain_events(&mut self) {
@@ -235,10 +248,14 @@ impl Ui {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        if let KeyResult::Action(Action::Notify(text)) =
-            self.transcript.handle_mouse(mouse, &self.state)
-        {
-            self.apply_event(AppEvent::notification(text));
+        match self.transcript.handle_mouse(mouse, &self.state) {
+            KeyResult::Action(Action::Notify(text)) => {
+                self.apply_event(AppEvent::notification(text));
+            }
+            KeyResult::Ignored => {
+                self.input.handle_mouse(mouse, &self.state);
+            }
+            _ => {}
         }
     }
 

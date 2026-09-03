@@ -1,22 +1,23 @@
 use std::path::{Path, PathBuf};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use oven_app::AgentMode;
 use oven_app::FileMentions;
 use oven_app::config::ProviderConfig;
 use oven_app::{AppEvent, AppEventKind, StateChange, StateEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Paragraph};
-use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
+use tui_textarea::{CursorMove, CursorRenderMode, TextArea, WrapMode};
 
 const PROMPT_COLS: u16 = 2;
 const MAX_INPUT_ROWS: u16 = 8;
 const BORDER_COLS: u16 = 2;
 const BORDER_ROWS: u16 = 2;
+const WHEEL_SCROLL_ROWS: u8 = 1;
 
 use super::component::{Action, Component, KeyResult, State};
 use super::file_mention_popup::{FileMentionPopup, FileMentionPopupAction};
@@ -43,6 +44,7 @@ pub struct InputView {
     setup: SetupWizard,
     root: PathBuf,
     mentions: Option<FileMentions>,
+    area: Rect,
 }
 
 impl InputView {
@@ -55,6 +57,7 @@ impl InputView {
             setup: SetupWizard::new(provider),
             root: PathBuf::new(),
             mentions: None,
+            area: Rect::default(),
         }
     }
 
@@ -336,6 +339,7 @@ impl Component for InputView {
     }
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
+        self.area = area;
         let inner = draw_composer_border(f, area, self.border_style(state));
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -358,6 +362,29 @@ impl Component for InputView {
         self.textarea
             .set_placeholder_text(shell::placeholder(active));
         f.render_widget(&self.textarea, chunks[1]);
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
+        let direction = match mouse.kind {
+            MouseEventKind::ScrollUp => CursorMove::Up,
+            MouseEventKind::ScrollDown => CursorMove::Down,
+            _ => return KeyResult::Ignored,
+        };
+        let in_area = self.area.contains(Position {
+            x: mouse.column,
+            y: mouse.row,
+        });
+        if !in_area || self.setup.is_open() || self.textarea.lines().len() < 2 {
+            return KeyResult::Ignored;
+        }
+        // `CursorMove` moves by one wrapped screen row and is a no-op past
+        // the first/last row, so the viewport can never scroll past the
+        // actual content (unlike `TextArea::scroll`, which lets the top row
+        // run past the end and leaves the box mostly blank).
+        for _ in 0..WHEEL_SCROLL_ROWS {
+            self.textarea.move_cursor(direction);
+        }
+        KeyResult::Handled
     }
 }
 
@@ -1321,5 +1348,111 @@ mod tests {
             KeyResult::Action(Action::Submit(text)) => assert_eq!(text, "!ls"),
             _ => panic!("expected submit"),
         }
+    }
+
+    fn wheel(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn multiline_view(lines: usize) -> InputView {
+        let mut view = view();
+        let text: Vec<String> = (0..lines).map(|i| format!("line{i}")).collect();
+        view.set_text(&text.join("\n"));
+        view
+    }
+
+    /// Content area is 3 rows tall (5 - 2 border rows) for these tests.
+    const CONTENT_ROWS: usize = 3;
+
+    #[test]
+    fn wheel_scroll_up_reveals_earlier_lines_past_the_window() {
+        let mut view = multiline_view(12);
+        let (out, _) = render(&mut view, 40, 5, &State::new());
+        assert!(out.contains("line11"), "{out}");
+        assert!(!out.contains("line8"), "{out}");
+
+        // The cursor starts pinned to the bottom edge of the window, so it
+        // takes `CONTENT_ROWS` ticks to push it out the top and shift the
+        // view.
+        for _ in 0..CONTENT_ROWS {
+            let result = view.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 2), &State::new());
+            assert!(matches!(result, KeyResult::Handled));
+        }
+        let (out, _) = render(&mut view, 40, 5, &State::new());
+        assert!(out.contains("line8"), "{out}");
+        assert!(!out.contains("line11"), "{out}");
+    }
+
+    #[test]
+    fn wheel_scroll_down_at_bottom_does_not_blank_the_box() {
+        let mut view = multiline_view(12);
+        let (before, _) = render(&mut view, 40, 5, &State::new());
+        assert!(before.contains("line11"), "{before}");
+
+        for _ in 0..5 {
+            let result = view.handle_mouse(wheel(MouseEventKind::ScrollDown, 5, 2), &State::new());
+            assert!(matches!(result, KeyResult::Handled));
+        }
+        let (after, _) = render(&mut view, 40, 5, &State::new());
+        assert_eq!(
+            before, after,
+            "scrolling past the last line must be a no-op"
+        );
+    }
+
+    #[test]
+    fn wheel_scroll_up_at_top_does_not_blank_the_box() {
+        let mut view = multiline_view(12);
+        render(&mut view, 40, 5, &State::new());
+        for _ in 0..20 {
+            view.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 2), &State::new());
+        }
+        let (top, _) = render(&mut view, 40, 5, &State::new());
+        assert!(top.contains("line0"), "{top}");
+        assert!(top.contains("line2"), "{top}");
+
+        let result = view.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 2), &State::new());
+        assert!(matches!(result, KeyResult::Handled));
+        let (after, _) = render(&mut view, 40, 5, &State::new());
+        assert_eq!(top, after, "scrolling past the first line must be a no-op");
+    }
+
+    #[test]
+    fn wheel_ignored_on_single_line() {
+        let mut view = view();
+        type_text(&mut view, "hello");
+        render(&mut view, 40, 3, &State::new());
+        let result = view.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 1), &State::new());
+        assert!(matches!(result, KeyResult::Ignored));
+    }
+
+    #[test]
+    fn wheel_outside_area_is_ignored() {
+        let mut view = multiline_view(12);
+        render(&mut view, 40, 5, &State::new());
+        let result = view.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 20), &State::new());
+        assert!(matches!(result, KeyResult::Ignored));
+    }
+
+    #[test]
+    fn wheel_ignored_while_setup_open() {
+        let mut view = multiline_view(12);
+        view.open_setup();
+        render(&mut view, 40, 5, &State::new());
+        let result = view.handle_mouse(wheel(MouseEventKind::ScrollUp, 5, 2), &State::new());
+        assert!(matches!(result, KeyResult::Ignored));
+    }
+
+    #[test]
+    fn non_wheel_mouse_is_ignored() {
+        let mut view = multiline_view(12);
+        render(&mut view, 40, 5, &State::new());
+        let result = view.handle_mouse(wheel(MouseEventKind::Moved, 5, 2), &State::new());
+        assert!(matches!(result, KeyResult::Ignored));
     }
 }
