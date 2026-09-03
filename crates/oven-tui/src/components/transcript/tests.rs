@@ -477,6 +477,42 @@ fn thinking_double_click_toggles_detail() {
 }
 
 #[test]
+fn thinking_hover_paints_gray_background() {
+    let hover_bg = theme::hover().bg.expect("hover bg");
+
+    let mut t = Transcript::new();
+    t.push_user("q");
+    t.on_event(&thinking("secret"));
+    t.on_event(&completed());
+    let area = Rect::new(0, 0, 40, 6);
+    ready(&mut t, area);
+
+    let header_y = 2;
+    let backend = TestBackend::new(area.width, area.height);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    t.handle_mouse(mouse(MouseEventKind::Moved, 3, header_y), &State::new());
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    assert_eq!(buf[(3, header_y)].style().bg, Some(hover_bg));
+    assert_eq!(
+        buf[(area.width - 1, header_y)].style().bg,
+        Some(hover_bg),
+        "hover must cover trailing blank cells"
+    );
+    assert_ne!(buf[(3, 0)].style().bg, Some(hover_bg));
+
+    t.handle_mouse(mouse(MouseEventKind::Moved, 3, 0), &State::new());
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    assert_ne!(buf[(3, header_y)].style().bg, Some(hover_bg));
+}
+
+#[test]
 fn seed_collapses_consecutive_thinking() {
     let mut t = Transcript::new();
     t.seed(&[Message::assistant(vec![

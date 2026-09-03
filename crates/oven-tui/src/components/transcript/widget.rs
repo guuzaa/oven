@@ -19,9 +19,9 @@ use super::kinds::{LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::{ToolBurst, ToolLabel};
 use super::wrap::{
-    MAX_SHELL_DISPLAY_LINES, THINKING_LABEL, THOUGHT_LABEL, apply_thinking_shimmer, collect_lines,
-    format_lines, line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
-    truncate_result, wrap_collapsible_thinking_into, wrap_line_into, wrap_row_into,
+    MAX_SHELL_DISPLAY_LINES, THINKING_LABEL, THOUGHT_LABEL, apply_hover, apply_thinking_shimmer,
+    collect_lines, format_lines, line_display_width, paint_visible, tail_lines, thinking_phase,
+    trim_message, truncate_result, wrap_collapsible_thinking_into, wrap_line_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -52,6 +52,7 @@ pub struct Transcript {
     select_head: Option<SelPos>,
     pub(super) dragging: bool,
     pressed_thinking_header: Option<usize>,
+    hovered_thinking: Option<usize>,
     last_thinking_click: Option<(usize, Instant)>,
     tool_burst: ToolBurst,
     detail_ids: HashSet<String>,
@@ -76,6 +77,7 @@ impl Transcript {
             select_head: None,
             dragging: false,
             pressed_thinking_header: None,
+            hovered_thinking: None,
             last_thinking_click: None,
             tool_burst: ToolBurst::default(),
             detail_ids: HashSet::new(),
@@ -258,6 +260,7 @@ impl Transcript {
         self.pinned = true;
         self.top = 0;
         self.clear_selection();
+        self.hovered_thinking = None;
         self.last_thinking_click = None;
         self.close_tool_burst();
         self.detail_ids.clear();
@@ -576,6 +579,15 @@ impl Transcript {
             .position(|header| *header == Some(line))
     }
 
+    fn update_hover(&mut self, in_area: bool, column: u16, row: u16) -> bool {
+        let hovered = in_area
+            .then(|| self.thinking_header_at(column, row))
+            .flatten();
+        let changed = self.hovered_thinking != hovered;
+        self.hovered_thinking = hovered;
+        changed
+    }
+
     fn toggle_thinking(&mut self, row: usize) {
         if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
             collapsible.toggle();
@@ -658,10 +670,12 @@ impl Component for Transcript {
         match mouse.kind {
             MouseEventKind::ScrollUp if in_area => {
                 self.scroll_up(MOUSE_SCROLL_STEP);
+                self.update_hover(in_area, mouse.column, mouse.row);
                 KeyResult::Handled
             }
             MouseEventKind::ScrollDown if in_area => {
                 self.scroll_down(MOUSE_SCROLL_STEP);
+                self.update_hover(in_area, mouse.column, mouse.row);
                 KeyResult::Handled
             }
             MouseEventKind::Down(MouseButton::Left) if in_area => {
@@ -686,6 +700,13 @@ impl Component for Transcript {
             MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved if self.dragging => {
                 self.update_selection(mouse.column, mouse.row);
                 KeyResult::Handled
+            }
+            MouseEventKind::Moved => {
+                if self.update_hover(in_area, mouse.column, mouse.row) {
+                    KeyResult::Handled
+                } else {
+                    KeyResult::Ignored
+                }
             }
             MouseEventKind::Up(MouseButton::Left) if self.dragging => {
                 self.update_selection(mouse.column, mouse.row);
@@ -815,6 +836,13 @@ impl Component for Transcript {
             && let Some(line) = visible.get_mut(header - start)
         {
             *line = apply_thinking_shimmer(line, thinking_phase());
+        }
+        if let Some(row) = self.hovered_thinking
+            && let Some(Some(header)) = self.thinking_headers.get(row)
+            && *header >= start
+            && let Some(line) = visible.get_mut(header - start)
+        {
+            *line = apply_hover(line, width);
         }
         if self.is_live_text()
             && end == total

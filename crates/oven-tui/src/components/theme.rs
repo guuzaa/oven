@@ -71,6 +71,10 @@ pub fn selection() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
 
+pub fn hover() -> Style {
+    Style::default().bg(Color::Rgb(48, 48, 48))
+}
+
 pub fn border_idle() -> Style {
     dim()
 }

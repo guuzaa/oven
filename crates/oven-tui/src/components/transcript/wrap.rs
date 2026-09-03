@@ -146,6 +146,20 @@ fn separator_line(width: usize) -> Line<'static> {
     ))
 }
 
+pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {
+    let hover = theme::hover();
+    let mut spans: Vec<Span<'static>> = line
+        .spans
+        .iter()
+        .map(|span| Span::styled(span.content.clone(), span.style.patch(hover)))
+        .collect();
+    let pad = width.saturating_sub(line_display_width(line));
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), hover));
+    }
+    Line::from(spans)
+}
+
 pub(super) fn wrap_collapsible_thinking_into(
     out: &mut Vec<Line<'static>>,
     title: &str,
