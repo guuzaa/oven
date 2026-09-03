@@ -65,6 +65,9 @@ impl FileMentionPopup {
             self.matches.clear();
             return;
         };
+        if !was_open {
+            mentions.rescan();
+        }
         self.matches = mentions.search(&token.query);
         self.matches.truncate(MAX_LIST_ROWS);
         if !was_open {

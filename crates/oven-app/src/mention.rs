@@ -1,7 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 
-use nucleo::{Nucleo, Utf32String};
+use nucleo::{Injector, Nucleo, Utf32String};
 use nucleo_matcher::Config;
 use nucleo_matcher::pattern::{CaseMatching, Normalization};
 
@@ -9,27 +11,83 @@ const SEARCH_LIMIT: usize = 50;
 
 pub struct FileMentions {
     nucleo: Nucleo<String>,
+    files: Vec<String>,
+    root: Option<PathBuf>,
+    pending: Option<Receiver<Vec<String>>>,
 }
 
 impl FileMentions {
     pub fn open(root: impl AsRef<Path>) -> Self {
-        Self::from_files(scan(root.as_ref()))
+        let root = root.as_ref().to_path_buf();
+        let files = scan(&root);
+        Self::new(Some(root), files)
     }
 
     pub fn from_files(files: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let files: Vec<String> = files.into_iter().map(Into::into).collect();
+        Self::new(None, files)
+    }
+
+    fn new(root: Option<PathBuf>, files: Vec<String>) -> Self {
         let nucleo = Nucleo::new(Config::DEFAULT.match_paths(), Arc::new(|| {}), Some(1), 1);
-        let injector = nucleo.injector();
-        for path in files {
-            let path = path.into();
-            injector.push(path, |item, cols| {
-                cols[0] = Utf32String::from(item.as_str());
-            });
+        inject(&nucleo.injector(), &files);
+        Self {
+            nucleo,
+            files,
+            root,
+            pending: None,
         }
-        Self { nucleo }
+    }
+
+    pub fn rescan(&mut self) {
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        if self.pending.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(scan(&root));
+        });
+        self.pending = Some(rx);
     }
 
     pub fn search(&mut self, query: &str) -> Vec<String> {
+        self.apply_pending();
         self.search_n(query, SEARCH_LIMIT)
+    }
+
+    fn apply_pending(&mut self) {
+        let Some(rx) = &self.pending else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(files) => {
+                self.pending = None;
+                self.replace_files(files);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.pending = None,
+        }
+    }
+
+    fn replace_files(&mut self, files: Vec<String>) {
+        if files == self.files {
+            return;
+        }
+        self.nucleo.restart(true);
+        inject(&self.nucleo.injector(), &files);
+        self.files = files;
+    }
+
+    #[cfg(test)]
+    fn wait_rescan(&mut self) {
+        if let Some(rx) = self.pending.take()
+            && let Ok(files) = rx.recv()
+        {
+            self.replace_files(files);
+        }
     }
 
     fn search_n(&mut self, query: &str, limit: usize) -> Vec<String> {
@@ -47,6 +105,14 @@ impl FileMentions {
         snap.matched_items(..n)
             .map(|item| item.data.clone())
             .collect()
+    }
+}
+
+fn inject(injector: &Injector<String>, files: &[String]) {
+    for path in files {
+        injector.push(path.clone(), |item, cols| {
+            cols[0] = Utf32String::from(item.as_str());
+        });
     }
 }
 
@@ -132,6 +198,34 @@ mod tests {
     #[test]
     fn scan_missing_root_is_empty() {
         assert!(scan(Path::new("/no/such/oven-mention-root")).is_empty());
+    }
+
+    #[test]
+    fn rescan_picks_up_created_and_deleted_files() {
+        let tmp = tmp_dir();
+        let root = tmp.path();
+        write(root, "old.txt", "x");
+        let mut mentions = FileMentions::open(root);
+        assert!(mentions.search("new.txt").is_empty());
+
+        write(root, "new.txt", "x");
+        mentions.rescan();
+        mentions.wait_rescan();
+        assert_eq!(mentions.search("new.txt"), vec!["new.txt".to_string()]);
+        assert_eq!(1, mentions.search("old.txt").len());
+
+        fs::remove_file(root.join("old.txt")).unwrap();
+        mentions.rescan();
+        mentions.wait_rescan();
+        assert!(mentions.search("old.txt").is_empty());
+    }
+
+    #[test]
+    fn rescan_without_root_is_noop() {
+        let mut mentions = FileMentions::from_files(["a.txt"]);
+        mentions.rescan();
+        mentions.wait_rescan();
+        assert_eq!(1, mentions.search("a.txt").len());
     }
 
     #[test]
