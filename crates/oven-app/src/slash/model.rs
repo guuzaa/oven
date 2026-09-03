@@ -1,13 +1,27 @@
 use oven_agent::Agent;
-use oven_llm::{ModelId, ReasoningEffort, RouterError};
+use oven_llm::{ModelId, ReasoningEffort, Router, RouterError};
 
 use super::{CommandOutcome, SlashCommand};
 use crate::AppError;
 
+const USAGE: &str = "usage: /model <id> [none|low|medium|high]";
+
 pub struct Model;
 
+/// The result of parsing `/model` arguments: either a request to report
+/// the current model, or a validated switch.
+pub(crate) enum ModelDirective {
+    Query,
+    Switch {
+        model: String,
+        reasoning_effort: Option<ReasoningEffort>,
+    },
+}
+
 impl Model {
-    fn parse_effort(s: &str) -> Result<ReasoningEffort, AppError> {
+    pub(crate) const NAME: &'static str = "model";
+
+    pub(crate) fn parse_effort(s: &str) -> Result<ReasoningEffort, AppError> {
         match s.to_ascii_lowercase().as_str() {
             "none" => Ok(ReasoningEffort::None),
             "low" => Ok(ReasoningEffort::Low),
@@ -19,11 +33,11 @@ impl Model {
         }
     }
 
-    pub(crate) fn qualify(agent: &Agent, raw: &str) -> Result<String, AppError> {
+    pub(crate) fn qualify_against(router: &Router, raw: &str) -> Result<String, AppError> {
         let id = ModelId::from(raw);
-        let qualified = agent.router().qualify(&id);
+        let qualified = router.qualify(&id);
         if qualified.vendor().is_some() {
-            match agent.router().provider(&qualified) {
+            match router.provider(&qualified) {
                 Ok(_) => Ok(qualified.to_string()),
                 Err(RouterError::UnknownModel(_)) | Err(RouterError::NoProviderRegistered) => {
                     Err(AppError::Runtime(format!(
@@ -36,11 +50,39 @@ impl Model {
             Ok(qualified.to_string())
         }
     }
+
+    /// Renders the "current model" summary shared by the idle `/model`
+    /// reply and the mid-turn query path (see `runtime::apply_model_during_turn`).
+    pub(crate) fn describe(model: &str, reasoning_effort: Option<ReasoningEffort>) -> String {
+        let effort = reasoning_effort.map_or_else(|| "none".to_string(), |e| e.to_string());
+        format!("current model: {model} (reasoning effort: {effort})")
+    }
+
+    /// Parses `/model` arguments against `router`, qualifying any model id
+    /// without requiring `&mut Agent`. `current_effort` is kept when only a
+    /// model id is given.
+    pub(crate) fn resolve(
+        router: &Router,
+        current_effort: Option<ReasoningEffort>,
+        args: &str,
+    ) -> Result<ModelDirective, AppError> {
+        let tokens: Vec<&str> = args.split_whitespace().collect();
+        let (raw_model, reasoning_effort) = match tokens.as_slice() {
+            [] => return Ok(ModelDirective::Query),
+            [model] => (*model, current_effort),
+            [model, effort] => (*model, Some(Self::parse_effort(effort)?)),
+            _ => return Err(AppError::Runtime(USAGE.to_string())),
+        };
+        Ok(ModelDirective::Switch {
+            model: Self::qualify_against(router, raw_model)?,
+            reasoning_effort,
+        })
+    }
 }
 
 impl SlashCommand for Model {
     fn name(&self) -> &str {
-        "model"
+        Self::NAME
     }
 
     fn description(&self) -> &str {
@@ -48,29 +90,18 @@ impl SlashCommand for Model {
     }
 
     fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
-        let tokens: Vec<&str> = args.split_whitespace().collect();
-        match tokens.as_slice() {
-            [] => {
-                let effort = match agent.reasoning_effort() {
-                    Some(e) => e.to_string(),
-                    None => "none".to_string(),
-                };
-                Ok(CommandOutcome::Reply(format!(
-                    "current model: {} (reasoning effort: {effort})",
-                    agent.model().as_str()
-                )))
-            }
-            [model] => Ok(CommandOutcome::ModelChanged {
-                model: Self::qualify(agent, model)?,
-                reasoning_effort: agent.reasoning_effort(),
+        match Self::resolve(&agent.router(), agent.reasoning_effort(), args)? {
+            ModelDirective::Query => Ok(CommandOutcome::Reply(Self::describe(
+                agent.model().as_str(),
+                agent.reasoning_effort(),
+            ))),
+            ModelDirective::Switch {
+                model,
+                reasoning_effort,
+            } => Ok(CommandOutcome::ModelChanged {
+                model,
+                reasoning_effort,
             }),
-            [model, effort] => Ok(CommandOutcome::ModelChanged {
-                model: Self::qualify(agent, model)?,
-                reasoning_effort: Some(Self::parse_effort(effort)?),
-            }),
-            _ => Err(AppError::Runtime(
-                "usage: /model <id> [none|low|medium|high]".to_string(),
-            )),
         }
     }
 }

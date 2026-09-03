@@ -6,8 +6,8 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ShellEvent, StateChange,
-    StateEvent, TurnEvent,
+    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ControlCommand, ShellEvent,
+    StateChange, StateEvent, TurnEvent,
 };
 use tokio::sync::mpsc;
 
@@ -212,13 +212,7 @@ impl Ui {
         let texts = std::mem::take(&mut self.pending);
         self.state.busy = true;
         let remaining = send_each(texts, |text| {
-            if self
-                .app
-                .send(AppCommand::StartTurn {
-                    input: text.to_string(),
-                })
-                .is_ok()
-            {
+            if self.app.send(AppCommand::Prompt(text.to_string())).is_ok() {
                 self.push_submitted(text);
                 true
             } else {
@@ -243,7 +237,9 @@ impl Ui {
 
     fn send_cancel(&self) {
         if let Some(turn_id) = self.app.state().phase.turn_id() {
-            let _ = self.app.send(AppCommand::Cancel { turn_id });
+            let _ = self
+                .app
+                .send(AppCommand::Control(ControlCommand::Cancel { turn_id }));
         }
     }
 
@@ -266,9 +262,9 @@ impl Ui {
             }
             _ if is_mode_toggle(key) => {
                 self.state.mode = self.state.mode.toggle();
-                let _ = self.app.send(AppCommand::SetMode {
+                let _ = self.app.send(AppCommand::Control(ControlCommand::SetMode {
                     mode: self.state.mode,
-                });
+                }));
                 KeyResult::Handled
             }
             KeyCode::Esc if self.input.overlay() == Overlay::None => match EscAction::new(
@@ -285,7 +281,11 @@ impl Ui {
                 EscAction::Rewind(text) => {
                     self.input.set_text(&text);
                     self.rewinding = true;
-                    if self.app.send(AppCommand::Rewind).is_err() {
+                    if self
+                        .app
+                        .send(AppCommand::Control(ControlCommand::Rewind))
+                        .is_err()
+                    {
                         self.rewinding = false;
                     }
                     KeyResult::Handled
@@ -321,17 +321,13 @@ impl Ui {
                 self.status.clear_reply();
                 self.input.clear();
                 self.state.busy = true;
-                if self
-                    .app
-                    .send(AppCommand::StartTurn { input: text })
-                    .is_err()
-                {
+                if self.app.send(AppCommand::Prompt(text)).is_err() {
                     self.state.busy = false;
                 }
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
-                let _ = self.app.send(AppCommand::StartTurn { input: text });
+                let _ = self.app.send(AppCommand::Prompt(text));
                 false
             }
             KeyResult::Action(Action::Notify(text)) => {

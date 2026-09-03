@@ -6,24 +6,26 @@ use std::time::Duration;
 
 use oven_agent::{
     Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink, Record,
-    TodoList, TurnContext, TurnId, restore_todos,
+    RouterHandle, TodoList, TurnContext, TurnId, restore_todos,
 };
 use oven_host::run_shell_command;
 use oven_llm::{
-    Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort,
+    Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Router,
 };
 use tokio::sync::{mpsc, watch};
 
 use crate::App;
-use crate::command::AppCommand;
+use crate::command::{AppCommand, ControlCommand};
 use crate::config::{AppConfig, ProviderConfig};
 use crate::event::{AppEventKind, AppId, EventBus, ShellEvent};
 use crate::session::{Session, SessionError, SessionStore, record_recent};
 use crate::shell;
-use crate::slash::{CommandOutcome, SlashRegistry};
+use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::state::{AppPhase, AppState, SessionState, StateChange};
 
 const EMPTY_SHELL: &str = "empty shell command";
+const QUEUED_NOTICE_SUFFIX: &str = "queued: will apply once the current reply finishes";
+const REWIND_QUEUED_NOTICE: &str = "rewind queued: will apply once the current reply finishes";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Control {
@@ -33,6 +35,9 @@ pub(crate) enum Control {
 
 pub(crate) struct Runtime {
     pub(crate) agent: Agent,
+    /// Independent of `&mut agent`, so `/model` can be validated and
+    /// applied while a turn holds the agent's exclusive borrow.
+    pub(crate) router: RouterHandle,
     pub(crate) root: PathBuf,
     pub(crate) state: AppState,
     pub(crate) state_tx: watch::Sender<AppState>,
@@ -63,8 +68,10 @@ impl Runtime {
             _ => 0,
         };
         let persisted_rev = agent.history_revision();
+        let router = agent.router_handle();
         Self {
             agent,
+            router,
             root,
             state,
             state_tx,
@@ -106,31 +113,16 @@ impl Runtime {
     ) -> Control {
         match cmd {
             AppCommand::Shutdown => Control::Shutdown,
-            AppCommand::Cancel { .. } => Control::Continue,
-            AppCommand::SetMode { mode } => {
+            AppCommand::Control(ControlCommand::Cancel { .. }) => Control::Continue,
+            AppCommand::Control(ControlCommand::SetMode { mode }) => {
                 self.set_mode(mode);
                 Control::Continue
             }
-            AppCommand::Rewind => {
+            AppCommand::Control(ControlCommand::Rewind) => {
                 self.rewind();
                 Control::Continue
             }
-            AppCommand::ClearSession => {
-                self.clear_session();
-                Control::Continue
-            }
-            AppCommand::SetModel {
-                model,
-                reasoning_effort,
-            } => {
-                self.set_model(model, reasoning_effort);
-                Control::Continue
-            }
-            AppCommand::SetProvider { provider } => {
-                self.set_provider(provider).await;
-                Control::Continue
-            }
-            AppCommand::StartTurn { input } => self.start_turn(input, rx).await,
+            AppCommand::Prompt(input) => self.start_turn(input, rx).await,
         }
     }
 
@@ -165,7 +157,13 @@ impl Runtime {
         let cancel = CancellationToken::new();
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
         let mut sink = ChannelEventSink::new(agent_tx, self.agent.id(), turn_id);
-        let ctx = TurnContext::new(turn_id, cancel.clone(), self.agent.mode());
+        let ctx = TurnContext::new(
+            turn_id,
+            cancel.clone(),
+            self.agent.mode(),
+            self.agent.model().clone(),
+            self.agent.reasoning_effort(),
+        );
 
         let result = {
             let turn = self.agent.run(input, &ctx, &mut sink);
@@ -183,17 +181,36 @@ impl Runtime {
                                 let _ = turn.await;
                                 return Control::Shutdown;
                             }
-                            Some(AppCommand::Cancel { turn_id: id }) if id == turn_id => {
+                            Some(AppCommand::Control(ControlCommand::Cancel { turn_id: id }))
+                                if id == turn_id =>
+                            {
                                 cancel_turn(&mut self.state, &self.state_tx, turn_id, &cancel);
                             }
-                            Some(AppCommand::Cancel { .. }) => {}
-                            Some(AppCommand::SetMode { mode }) => {
+                            Some(AppCommand::Control(ControlCommand::Cancel { .. })) => {}
+                            Some(AppCommand::Control(ControlCommand::SetMode { mode })) => {
                                 ctx.set_mode(mode);
                                 self.state.mode = mode;
                                 let _ = self.state_tx.send(self.state.clone());
                                 self.events.emit_state(StateChange::ModeChanged { mode });
                             }
-                            Some(cmd) => self.pending.push_back(cmd),
+                            Some(cmd) => match model_command_args(&cmd) {
+                                Some(args) => apply_model_during_turn(
+                                    args,
+                                    &ctx,
+                                    &self.router,
+                                    &mut self.config,
+                                    &mut self.state,
+                                    &self.state_tx,
+                                    self.user_config_path.as_deref(),
+                                    &mut self.events,
+                                ),
+                                None => defer_command(
+                                    cmd,
+                                    &self.slash,
+                                    &mut self.events,
+                                    &mut self.pending,
+                                ),
+                            },
                         }
                     }
                     ev = agent_rx.recv() => {
@@ -298,14 +315,18 @@ impl Runtime {
                             let _ = run.await;
                             return Control::Shutdown;
                         }
-                        Some(AppCommand::Cancel { turn_id: id }) if id == turn_id => {
+                        Some(AppCommand::Control(ControlCommand::Cancel { turn_id: id }))
+                            if id == turn_id =>
+                        {
                             cancel_turn(&mut self.state, &self.state_tx, turn_id, &cancel);
                         }
-                        Some(AppCommand::Cancel { .. }) => {}
-                        Some(AppCommand::SetMode { mode }) => {
+                        Some(AppCommand::Control(ControlCommand::Cancel { .. })) => {}
+                        Some(AppCommand::Control(ControlCommand::SetMode { mode })) => {
                             self.set_mode(mode);
                         }
-                        Some(cmd) => self.pending.push_back(cmd),
+                        Some(cmd) => {
+                            defer_command(cmd, &self.slash, &mut self.events, &mut self.pending)
+                        }
                     }
                 }
                 res = &mut run => break res,
@@ -355,7 +376,8 @@ impl Runtime {
 
     async fn bootstrap(&mut self) {
         let model = self.agent.model().to_string();
-        let (models, _) = refresh_model_choices(self.agent.router(), &model, &self.config).await;
+        let router = self.agent.router();
+        let (models, _) = refresh_model_choices(router.as_ref(), &model, &self.config).await;
         self.state.models = models.clone();
         self.publish();
         self.emit_state(StateChange::ModelsChanged { models });
@@ -455,52 +477,19 @@ impl Runtime {
     }
 
     fn set_model(&mut self, model: String, reasoning_effort: Option<ReasoningEffort>) {
-        let id = ModelId::from(model.as_str());
-        let name = id
-            .vendor()
-            .map(oven_llm::canonical_vendor)
-            .or_else(|| {
-                self.agent
-                    .router()
-                    .provider(&id)
-                    .ok()
-                    .map(|p| p.provider_name().slug().to_string())
-            })
-            .unwrap_or_else(|| self.config.active_provider.name.clone());
-        let provider = self
-            .config
-            .providers
-            .entry(name.clone())
-            .or_insert_with(|| {
-                let mut provider = ProviderConfig {
-                    name: Some(name.clone()),
-                    ..Default::default()
-                };
-                provider.apply_name_presets();
-                provider
-            });
-        provider.model = Some(model.clone());
-        if reasoning_effort.is_some() {
-            provider.reasoning_effort = reasoning_effort;
-        }
-        provider.normalize();
-        let effective_reasoning_effort = provider.reasoning_effort;
-        self.config.active_provider.name = name;
-        self.agent.set_model(&*model);
-        self.agent.set_reasoning_effort(effective_reasoning_effort);
-        let overlay = provider.clone();
-        self.state.model = model.clone();
-        self.state.reasoning_effort = effective_reasoning_effort;
+        let router = self.agent.router();
+        let outcome = resolve_model_switch(&router, &mut self.config, model, reasoning_effort);
+        self.agent.set_model(&*outcome.model);
+        self.agent.set_reasoning_effort(outcome.reasoning_effort);
+        self.state.model = outcome.model.clone();
+        self.state.reasoning_effort = outcome.reasoning_effort;
         self.publish();
         self.emit_state(StateChange::ModelChanged {
-            model: model.clone(),
-            reasoning_effort: effective_reasoning_effort,
+            model: outcome.model.clone(),
+            reasoning_effort: outcome.reasoning_effort,
         });
-        let saved = self.save_provider_overlay(&overlay);
-        let mut text = match effective_reasoning_effort {
-            Some(e) => format!("model switched to {model} (effort: {e})"),
-            None => format!("model switched to {model}"),
-        };
+        let saved = self.save_provider_overlay(&outcome.overlay);
+        let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
         if let Some(path) = saved {
             text.push_str(&format!("\nsaved to {}", path.display()));
         }
@@ -555,9 +544,9 @@ impl Runtime {
         ) {
             Ok(client) => {
                 self.config = next;
-                self.agent
-                    .router_mut()
-                    .upsert(crate::provider::retrying(&self.config, client));
+                self.agent.update_router(|router| {
+                    router.upsert(crate::provider::retrying(&self.config, client));
+                });
                 self.agent.set_model(model.clone());
                 self.agent.set_reasoning_effort(
                     self.config
@@ -582,8 +571,9 @@ impl Runtime {
                     model: model.clone(),
                     reasoning_effort: self.agent.reasoning_effort(),
                 });
+                let router = self.agent.router();
                 let (models, auth_error) =
-                    refresh_model_choices(self.agent.router(), &model, &self.config).await;
+                    refresh_model_choices(router.as_ref(), &model, &self.config).await;
                 self.state.models = models.clone();
                 self.publish();
                 self.emit_state(StateChange::ModelsChanged { models });
@@ -651,14 +641,7 @@ impl Runtime {
     }
 
     fn save_provider_overlay(&mut self, overlay: &ProviderConfig) -> Option<PathBuf> {
-        let path = self.user_config_path.as_deref()?;
-        match AppConfig::save_provider_at(path, overlay) {
-            Ok(()) => Some(path.to_path_buf()),
-            Err(e) => {
-                self.emit_error(e.to_string());
-                None
-            }
-        }
+        save_provider_overlay(self.user_config_path.as_deref(), overlay, &mut self.events)
     }
 }
 
@@ -671,6 +654,170 @@ fn cancel_turn(
     state.phase = AppPhase::Cancelling { turn_id };
     let _ = state_tx.send(state.clone());
     cancel.cancel();
+}
+
+/// Defers a command that arrived while a turn holds `&mut Agent` exclusively.
+/// Anything the user can recognize as a command (a slash command, or a
+/// rewind) gets an immediate acknowledgement so the UI never looks stuck
+/// while the deferred command waits in `pending`.
+fn defer_command(
+    cmd: AppCommand,
+    slash: &SlashRegistry,
+    events: &mut EventBus,
+    pending: &mut VecDeque<AppCommand>,
+) {
+    if let Some(notice) = deferred_notice(&cmd, slash) {
+        events.emit(AppEventKind::Notification { text: notice });
+    }
+    pending.push_back(cmd);
+}
+
+fn deferred_notice(cmd: &AppCommand, slash: &SlashRegistry) -> Option<String> {
+    match cmd {
+        AppCommand::Control(ControlCommand::Rewind) => Some(REWIND_QUEUED_NOTICE.to_string()),
+        AppCommand::Prompt(text) => slash
+            .recognized_name(text)
+            .map(|name| format!("/{name} {QUEUED_NOTICE_SUFFIX}")),
+        AppCommand::Control(ControlCommand::Cancel { .. })
+        | AppCommand::Control(ControlCommand::SetMode { .. })
+        | AppCommand::Shutdown => None,
+    }
+}
+
+struct ModelSwitchOutcome {
+    model: String,
+    reasoning_effort: Option<ReasoningEffort>,
+    overlay: ProviderConfig,
+}
+
+/// Resolves a `/model` switch against `router`/`config` without touching
+/// `Agent`, so the same logic serves both the idle path (`Runtime::set_model`)
+/// and the mid-turn path (`apply_model_during_turn`).
+fn resolve_model_switch(
+    router: &Router,
+    config: &mut AppConfig,
+    model: String,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> ModelSwitchOutcome {
+    let id = ModelId::from(model.as_str());
+    let name = id
+        .vendor()
+        .map(oven_llm::canonical_vendor)
+        .or_else(|| {
+            router
+                .provider(&id)
+                .ok()
+                .map(|p| p.provider_name().slug().to_string())
+        })
+        .unwrap_or_else(|| config.active_provider.name.clone());
+    let provider = config.providers.entry(name.clone()).or_insert_with(|| {
+        let mut provider = ProviderConfig {
+            name: Some(name.clone()),
+            ..Default::default()
+        };
+        provider.apply_name_presets();
+        provider
+    });
+    provider.model = Some(model.clone());
+    if reasoning_effort.is_some() {
+        provider.reasoning_effort = reasoning_effort;
+    }
+    provider.normalize();
+    let reasoning_effort = provider.reasoning_effort;
+    let overlay = provider.clone();
+    config.active_provider.name = name;
+    ModelSwitchOutcome {
+        model,
+        reasoning_effort,
+        overlay,
+    }
+}
+
+fn format_model_switched(model: &str, reasoning_effort: Option<ReasoningEffort>) -> String {
+    match reasoning_effort {
+        Some(e) => format!("model switched to {model} (effort: {e})"),
+        None => format!("model switched to {model}"),
+    }
+}
+
+/// Persists `overlay` to the user config file, if one is configured.
+fn save_provider_overlay(
+    user_config_path: Option<&Path>,
+    overlay: &ProviderConfig,
+    events: &mut EventBus,
+) -> Option<PathBuf> {
+    let path = user_config_path?;
+    match AppConfig::save_provider_at(path, overlay) {
+        Ok(()) => Some(path.to_path_buf()),
+        Err(e) => {
+            events.emit_error(e.to_string());
+            None
+        }
+    }
+}
+
+/// If `cmd` is a `/model` command, returns its argument string. `/model`
+/// is the one slash command that can run mid-turn (see
+/// `apply_model_during_turn`): validating it only needs a `Router`
+/// snapshot and applying it only needs `TurnContext`, neither of which
+/// requires the `&mut Agent` a running turn holds exclusively.
+fn model_command_args(cmd: &AppCommand) -> Option<&str> {
+    let AppCommand::Prompt(text) = cmd else {
+        return None;
+    };
+    let body = text.trim_start().strip_prefix('/')?;
+    let (name, args) = match body.split_once(char::is_whitespace) {
+        Some((n, rest)) => (n, rest.trim()),
+        None => (body, ""),
+    };
+    (name == Model::NAME).then_some(args)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_model_during_turn(
+    args: &str,
+    ctx: &TurnContext,
+    router: &RouterHandle,
+    config: &mut AppConfig,
+    state: &mut AppState,
+    state_tx: &watch::Sender<AppState>,
+    user_config_path: Option<&Path>,
+    events: &mut EventBus,
+) {
+    let snapshot = router.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let current_effort = ctx.model().1;
+    match Model::resolve(&snapshot, current_effort, args) {
+        Ok(ModelDirective::Query) => {
+            let (model, effort) = ctx.model();
+            events.emit(AppEventKind::Notification {
+                text: Model::describe(model.as_str(), effort),
+            });
+        }
+        Ok(ModelDirective::Switch {
+            model,
+            reasoning_effort,
+        }) => {
+            let outcome = resolve_model_switch(&snapshot, config, model, reasoning_effort);
+            ctx.set_model(
+                ModelId::from(outcome.model.as_str()),
+                outcome.reasoning_effort,
+            );
+            state.model = outcome.model.clone();
+            state.reasoning_effort = outcome.reasoning_effort;
+            let _ = state_tx.send(state.clone());
+            events.emit_state(StateChange::ModelChanged {
+                model: outcome.model.clone(),
+                reasoning_effort: outcome.reasoning_effort,
+            });
+            let saved = save_provider_overlay(user_config_path, &outcome.overlay, events);
+            let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
+            if let Some(path) = saved {
+                text.push_str(&format!("\nsaved to {}", path.display()));
+            }
+            events.emit(AppEventKind::Notification { text });
+        }
+        Err(e) => events.emit_error(e.to_string()),
+    }
 }
 
 fn forward_agent_event(

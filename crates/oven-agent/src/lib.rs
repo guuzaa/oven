@@ -12,7 +12,7 @@ mod todo;
 mod tools;
 mod turn;
 
-pub use agent::Agent;
+pub use agent::{Agent, RouterHandle};
 pub use error::AgentError;
 pub use event::{
     AgentEvent, AgentEventEnvelope, StreamEvent, ToolEvent, ToolOutputStream, ToolResult, TurnEvent,

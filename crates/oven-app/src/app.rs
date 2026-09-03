@@ -161,9 +161,7 @@ impl App {
 
     pub async fn prompt(&self, input: impl Into<String>) -> Result<String, AppError> {
         let mut rx = self.subscribe();
-        self.send(AppCommand::StartTurn {
-            input: input.into(),
-        })?;
+        self.send(AppCommand::Prompt(input.into()))?;
 
         let mut text = String::new();
         let mut in_turn = false;

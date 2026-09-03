@@ -43,9 +43,9 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | Crate | Owns |
 | --- | --- |
 | `oven-llm` | `Message`, `Usage`, provider I/O |
-| `oven-agent` | `Agent`, turn execution, tool protocol, `AgentEvent`, `EventSink`, history/todo domain models, provider retry decoration |
+| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, turn execution, tool protocol, `AgentEvent`, `EventSink`, history/todo domain models, provider retry decoration |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking |
-| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration |
+| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `ControlCommand`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration |
 | `oven-tui` | render events and state; send commands |
 
 `oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
@@ -106,7 +106,7 @@ AppId
 
 IDs start at 1. There is no `Default` sentinel of `0`.
 
-A turn is an app-level user request. The runtime allocates `TurnId` and passes it into `Agent::run` via `TurnContext`.
+A turn is an app-level user request. The runtime allocates `TurnId` and passes it into `Agent::run` via `TurnContext`. `TurnContext` also holds live `mode` and `model` so `SetMode` / `/model` can take effect at the next agent step without waiting for `&mut Agent`.
 
 ---
 
@@ -116,21 +116,42 @@ TUI / CLI → runtime:
 
 ```rust
 pub enum AppCommand {
-    StartTurn { input: String },
-    Cancel { turn_id: TurnId },
-    Rewind,
-    ClearSession,
-    SetMode { mode: AgentMode },
-    SetModel { model: String, reasoning_effort: Option<ReasoningEffort> },
-    SetProvider { provider: ProviderConfig },
+    Prompt(String),
+    Control(ControlCommand),
     Shutdown,
+}
+
+pub enum ControlCommand {
+    Cancel { turn_id: TurnId },
+    SetMode { mode: AgentMode },
+    Rewind,
+}
 ```
 
-Slash commands still arrive as `StartTurn { input: "/plan on" }`. The runtime parses them and either starts an agent turn or applies a state change.
+`Prompt` and `Control` are structurally distinct so callers never sniff strings. Classification of composer text (chat vs slash vs bang-shell) happens once, inside the runtime, where the slash registry lives.
 
-A composer line whose trimmed body starts with `!` is a **local shell request**, not a slash command and not an LLM turn. The app runtime strips the bang and invokes `oven-host::run_shell_command` in the workspace root (bash on Unix, falling back to sh; PowerShell on Windows). `oven-host` owns process management and output decoding; the app retains timeout/cancellation choices, shell events, exit-code mapping, and persistence. It commits one user message describing the command and its result.
+There is no `SetModel` / `SetProvider` / `ClearSession` command. Those mutations are slash text on `Prompt` (`/model`, `/setup`, `/clear`). The TUI still sends structured `Control` for keyboard cancel, mode toggle, and rewind.
 
-Input received while a turn is running is queued and processed after the turn ends.
+A `Prompt` whose trimmed body starts with `/` is a slash command. The runtime parses it and either starts an agent turn (`Passthrough`) or applies a state change. Slash commands still arrive as `Prompt("/plan on")`.
+
+A `Prompt` whose trimmed body starts with `!` is a **local shell request**, not a slash command and not an LLM turn. The app runtime strips the bang and invokes `oven-host::run_shell_command` in the workspace root (bash on Unix, falling back to sh; PowerShell on Windows). `oven-host` owns process management and output decoding; the app retains timeout/cancellation choices, shell events, exit-code mapping, and persistence. It commits one user message describing the command and its result.
+
+## Mid-turn dispatch
+
+A running turn holds `&mut Agent` exclusively. Incoming commands split on whether they need that borrow:
+
+| Command | While a turn is running |
+| --- | --- |
+| `Control::Cancel { matching turn_id }` | cancel immediately |
+| `Control::SetMode` | apply immediately via `TurnContext` + `AppState` |
+| `Prompt("/model …")` | apply immediately via `RouterHandle` + `TurnContext` |
+| `Control::Rewind` | queue; emit `Notification` |
+| other `Prompt` (chat, other slash, bang-shell) | queue; recognized slash names get a `Notification` |
+| `Shutdown` | cancel the turn and exit |
+
+`TurnContext` carries `mode` and `model` behind a lock so those two can change without `&mut Agent`. The agent re-reads them at each step and at turn end. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::update_router`, so it waits.
+
+Queued commands drain after the turn ends, in arrival order. Keyboard mode toggle is `Control::SetMode` and applies live; `/plan` is Prompt slash and therefore waits until the agent is free.
 
 ---
 
@@ -203,9 +224,11 @@ Subscribers get a lossless unbounded channel. `App::state()` / `watch_state()` i
 ## Agent API
 
 ```rust
-agent.run(input, TurnContext { turn_id, cancellation }, &mut sink)
+agent.run(input, TurnContext { turn_id, cancellation, mode, model }, &mut sink)
     -> Result<TurnOutput, AgentError>
 ```
+
+`mode` and `model` are shared (`Arc<Mutex<_>>`) so the runtime can update them while the turn holds `&mut Agent`. The agent copies both onto itself at the start of every step.
 
 The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`.
 
@@ -275,8 +298,8 @@ Phase is runtime state. Turn events are facts about one turn. Do not mix them.
 stateDiagram-v2
     [*] --> Idle
 
-    Idle --> Running: StartTurn (passthrough or bang-shell)
-    Idle --> Idle: slash / empty bang / Rewind / SetMode / SetModel / SetProvider / ClearSession
+    Idle --> Running: Prompt (passthrough or bang-shell)
+    Idle --> Idle: slash / empty bang / Rewind / SetMode
     Idle --> ShuttingDown: Shutdown
 
     Running --> Cancelling: Cancel { matching turn_id }
@@ -291,9 +314,9 @@ stateDiagram-v2
 
 Idle slash commands do not enter `Running`. They emit `StateChanged` and/or `Notification` and stay `Idle`.
 
-A bang-shell `StartTurn` enters `Running` like an agent turn (so Cancel and queuing work) but emits `AppEventKind::Shell` instead of `AgentEvent`. The agent is not called. On finish the runtime appends a `<local-shell>` user message and persists; it does not emit `HistoryChanged` on the live path.
+A bang-shell `Prompt` enters `Running` like an agent turn (so Cancel and queuing work) but emits `AppEventKind::Shell` instead of `AgentEvent`. The agent is not called. On finish the runtime appends a `<local-shell>` user message and persists; it does not emit `HistoryChanged` on the live path.
 
-`Cancel` while idle is a no-op. `Cancel { turn_id }` only applies if it matches the active turn.
+While `Running`, `SetMode` and `/model` apply immediately and the phase stays `Running`. Other `Prompt`s and `Rewind` wait in `pending`. `Cancel` while idle is a no-op. `Cancel { turn_id }` only applies if it matches the active turn.
 
 ---
 
@@ -352,7 +375,7 @@ sequenceDiagram
     participant Runtime
     participant Agent
 
-    TUI->>Runtime: StartTurn("fix foo")
+    TUI->>Runtime: Prompt("fix foo")
     Runtime->>Runtime: TurnId::next()
     Runtime->>Runtime: phase = Running(id)
     Runtime->>Agent: run(input, ctx, sink)
@@ -371,7 +394,7 @@ sequenceDiagram
     participant Runtime
     participant Agent
 
-    TUI->>Runtime: Cancel { turn_id }
+    TUI->>Runtime: Control(Cancel { turn_id })
     Runtime->>Runtime: phase = Cancelling(id)
     Runtime->>Agent: cancellation.cancel()
     Agent-->>TUI: TurnCancelled
@@ -381,12 +404,14 @@ sequenceDiagram
 ## Slash (no turn)
 
 ```text
-StartTurn("/model gpt-4o")
-  → SetModel
+Prompt("/model gpt-4o")
+  → slash /model
   → StateChanged(ModelChanged)
   → Notification("model switched…")
   → phase stays Idle
 ```
+
+The same `Prompt("/model …")` during `Running` does not wait: `RouterHandle` validates, `TurnContext` updates, `StateChanged` + `Notification` fire, and the in-flight turn picks up the new model at its next step.
 
 `prompt()` waits for `TurnCompleted`/`Cancelled`/`Failed`, or `Shell` Finished/Failed, or for `Notification`/`Exited` when no turn started.
 
@@ -398,7 +423,7 @@ sequenceDiagram
     participant Runtime
     participant Shell
 
-    TUI->>Runtime: StartTurn("!ls")
+    TUI->>Runtime: Prompt("!ls")
     Runtime->>Runtime: TurnId::next()
     Runtime->>Runtime: phase = Running(id)
     Runtime-->>TUI: Shell(Started)
@@ -418,15 +443,18 @@ The TUI shows the typed `!` line as a user row and the last 100 output lines as 
 2. Every `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running` or `Cancelling`. Agent envelopes are not emitted for bang-shell.
 3. Each agent turn emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`. Each bang-shell request emits exactly one `Shell::Started` and exactly one of `Finished | Failed`.
 4. `ToolFinished` is always preceded by `ToolStarted` for the same `ToolCallId`.
+5. While `Running` or `Cancelling`, only `Cancel`, `SetMode`, `/model`, and `Shutdown` are applied immediately. Everything else waits in `pending`.
 
 Runtime is a single app actor. It is not the `oven-host` crate:
 
 ```rust
 struct Runtime {
     agent: Agent,
+    router: RouterHandle,  // independent of `&mut agent`
     state: AppState,
     session: Option<SessionStore>,
     config: AppConfig,
+    pending: VecDeque<AppCommand>,
 }
 ```
 
@@ -438,4 +466,4 @@ impl Runtime {
 }
 ```
 
-`runtime/mod.rs` owns select, command dispatch, and `start_turn` / `cancel_turn` / `persist_turn`. `builder.rs` owns construction.
+`runtime/mod.rs` owns select, command dispatch, mid-turn `/model`, the `pending` queue, and `start_turn` / `cancel_turn` / `persist_turn`. `builder.rs` owns construction.

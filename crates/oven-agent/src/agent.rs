@@ -1,3 +1,5 @@
+use std::sync::{Arc, RwLock};
+
 use futures::StreamExt;
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, Provider, ReasoningEffort, Request, Response, Role,
@@ -15,11 +17,18 @@ use crate::todo::{self, TodoList};
 use crate::tools::Tool;
 use crate::turn::{TurnContext, TurnOutput};
 
+/// A router shared between an `Agent` and callers that need to read it
+/// (e.g. to validate a model switch) without the exclusive `&mut Agent`
+/// access a running turn holds. Reading clones the inner `Arc<Router>`
+/// snapshot (cheap, safe to hold across `.await`); mutating goes through
+/// [`Agent::update_router`].
+pub type RouterHandle = Arc<RwLock<Arc<Router>>>;
+
 /// The conversation driver. Holds tools and dispatches tool calls returned by
 /// the provider until the provider replies without tool calls.
 pub struct Agent {
     id: AgentId,
-    pub(crate) router: Router,
+    router: RouterHandle,
     pub(crate) tools: Vec<Box<dyn Tool>>,
     pub(crate) history: History,
     model: ModelId,
@@ -36,7 +45,7 @@ impl Agent {
     pub fn new(router: Router, tools: Vec<Box<dyn Tool>>) -> Self {
         Self {
             id: AgentId::next(),
-            router,
+            router: Arc::new(RwLock::new(Arc::new(router))),
             tools,
             history: History::new(),
             model: ModelId::new("default"),
@@ -72,12 +81,31 @@ impl Agent {
         self.reasoning_effort
     }
 
-    pub fn router(&self) -> &Router {
-        &self.router
+    /// A snapshot of the current router. Cheap to clone and safe to hold
+    /// across `.await` points, unlike a lock guard.
+    pub fn router(&self) -> Arc<Router> {
+        self.router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
-    pub fn router_mut(&mut self) -> &mut Router {
-        &mut self.router
+    /// A handle to the shared router, independent of `&Agent`/`&mut Agent`.
+    /// Lets a caller validate or read the router while a turn holds the
+    /// agent's exclusive `&mut` borrow.
+    pub fn router_handle(&self) -> RouterHandle {
+        Arc::clone(&self.router)
+    }
+
+    /// Mutates the router in place (e.g. `/setup` registering a new
+    /// provider). Requires `&mut Agent`, so this only ever runs when no
+    /// turn holds the agent, which guarantees no [`Agent::router`] snapshot
+    /// is outstanding for `Arc::get_mut` to contend with.
+    pub fn update_router(&mut self, f: impl FnOnce(&mut Router)) {
+        let mut guard = self.router.write().unwrap_or_else(|e| e.into_inner());
+        let router =
+            Arc::get_mut(&mut guard).expect("router mutated while a snapshot was outstanding");
+        f(router);
     }
 
     pub fn set_model(&mut self, model: impl Into<ModelId>) {
@@ -267,8 +295,9 @@ impl Agent {
         sink: &mut impl EventSink,
     ) -> Result<Response, AgentError> {
         let req = self.build_request();
+        let router = self.router();
 
-        match self.router.stream(&req).await {
+        match router.stream(&req).await {
             Ok(mut stream) => {
                 let mut collector = StreamCollector::new();
                 while let Some(event) = stream.next().await {
@@ -297,7 +326,7 @@ impl Agent {
                 Ok(collector.finish()?)
             }
             Err(_) => {
-                let response = Provider::complete(&self.router, &req).await?;
+                let response = Provider::complete(&*router, &req).await?;
                 if !response.has_tool_use() {
                     let thinking = response.thinking();
                     if !thinking.is_empty() {
@@ -321,6 +350,7 @@ impl Agent {
         ctx: &TurnContext,
     ) -> Result<Option<String>, AgentError> {
         self.mode = ctx.mode();
+        (self.model, self.reasoning_effort) = ctx.model();
         let response = self.complete_response(sink).await?;
 
         self.history
@@ -420,6 +450,7 @@ impl Agent {
             }
         };
         self.mode = ctx.mode();
+        (self.model, self.reasoning_effort) = ctx.model();
 
         match &result {
             Ok(_) => {}
@@ -469,12 +500,24 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn turn_ctx() -> TurnContext {
-        TurnContext::new(TurnId::next(), CancellationToken::new(), AgentMode::Default)
+        TurnContext::new(
+            TurnId::next(),
+            CancellationToken::new(),
+            AgentMode::Default,
+            ModelId::new("default"),
+            None,
+        )
     }
 
     async fn run_text(agent: &mut Agent, input: &str) -> String {
         let mut sink = NullSink;
-        let ctx = TurnContext::new(TurnId::next(), CancellationToken::new(), agent.mode());
+        let ctx = TurnContext::new(
+            TurnId::next(),
+            CancellationToken::new(),
+            agent.mode(),
+            agent.model().clone(),
+            agent.reasoning_effort(),
+        );
         agent.run(input, &ctx, &mut sink).await.unwrap().text()
     }
 
@@ -727,7 +770,13 @@ mod tests {
         let err = agent
             .run(
                 "hi",
-                &TurnContext::new(TurnId::next(), cancel, AgentMode::Default),
+                &TurnContext::new(
+                    TurnId::next(),
+                    cancel,
+                    AgentMode::Default,
+                    ModelId::new("default"),
+                    None,
+                ),
                 &mut sink,
             )
             .await
@@ -795,7 +844,13 @@ mod tests {
         let err = agent
             .run(
                 "hi",
-                &TurnContext::new(TurnId::next(), cancel, AgentMode::Default),
+                &TurnContext::new(
+                    TurnId::next(),
+                    cancel,
+                    AgentMode::Default,
+                    ModelId::new("default"),
+                    None,
+                ),
                 &mut sink,
             )
             .await

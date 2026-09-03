@@ -11,7 +11,7 @@ use crate::config::ProviderConfig;
 
 pub use clear::Clear;
 pub use exit::Exit;
-pub use model::Model;
+pub(crate) use model::{Model, ModelDirective};
 pub use plan::Plan;
 pub use setup::Setup;
 
@@ -94,6 +94,21 @@ impl SlashRegistry {
             .ok_or_else(|| AppError::Runtime(format!("unknown command: /{name}")))?;
         command.execute(agent, args)
     }
+
+    /// Returns the registered command name `input` invokes, without
+    /// executing it. Lets callers classify text as a control command
+    /// (e.g. to acknowledge it was queued) without needing `&mut Agent`.
+    pub fn recognized_name<'a>(&self, input: &'a str) -> Option<&'a str> {
+        let name = input
+            .trim_start()
+            .strip_prefix('/')?
+            .split_whitespace()
+            .next()?;
+        self.commands
+            .iter()
+            .any(|c| c.name() == name)
+            .then_some(name)
+    }
 }
 
 impl Default for SlashRegistry {
@@ -162,6 +177,15 @@ mod tests {
         let mut agent = fresh_agent();
         let err = reg.parse_and_run(&mut agent, "/nope").unwrap_err();
         assert!(err.to_string().contains("unknown command"));
+    }
+
+    #[test]
+    fn recognized_name_matches_registered_command_with_or_without_args() {
+        let reg = SlashRegistry::with_builtin();
+        assert_eq!(reg.recognized_name("/model gpt-4o"), Some("model"));
+        assert_eq!(reg.recognized_name("/model"), Some("model"));
+        assert_eq!(reg.recognized_name("/nope"), None);
+        assert_eq!(reg.recognized_name("hello there"), None);
     }
 
     #[test]
