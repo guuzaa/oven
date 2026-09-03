@@ -608,7 +608,7 @@ impl Runtime {
                 let mut recs = self.agent.history_records();
                 if found.is_some() {
                     recs.push(Record::TodoList {
-                        timestamp: now_ms(),
+                        timestamp: oven_host::now_ms(),
                         items: restored.items.clone(),
                     });
                 }
@@ -747,19 +747,12 @@ pub(crate) fn spawn_runtime(
     )
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 pub(crate) fn persist_todo_snapshot(
     store: &SessionStore,
     todos: &TodoList,
 ) -> Result<(), SessionError> {
     store.current().append_records(&[Record::TodoList {
-        timestamp: now_ms(),
+        timestamp: oven_host::now_ms(),
         items: todos.items.clone(),
     }])
 }

@@ -1,5 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
+use oven_host::now_ms;
 use oven_llm::{Message, Role, Usage};
 use serde::{Deserialize, Serialize};
 
@@ -45,14 +44,6 @@ pub struct SessionMeta {
     pub root: String,
     /// Unix milliseconds when the session first got content.
     pub created_at: u64,
-}
-
-/// Current wall-clock time as Unix milliseconds.
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Conversation history with API-reported token tracking.
