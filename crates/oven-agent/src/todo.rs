@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use oven_llm::{ContentBlock, Message};
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +26,11 @@ pub struct TodoList {
     pub items: Vec<TodoItem>,
 }
 
+#[derive(Deserialize)]
+struct TodoWriteArgs {
+    todos: Vec<TodoItem>,
+}
+
 impl TodoList {
     pub const MAX_ITEMS: usize = 40;
     pub const MAX_CONTENT: usize = 200;
@@ -34,61 +41,41 @@ impl TodoList {
     }
 
     pub fn parse(value: &serde_json::Value) -> Result<Self, String> {
-        let todos = value
-            .get("todos")
-            .ok_or_else(|| "todo_write: missing 'todos' array".to_string())?;
-        let arr = todos
-            .as_array()
-            .ok_or_else(|| "todo_write: 'todos' must be an array".to_string())?;
-        if arr.len() > Self::MAX_ITEMS {
+        let args = TodoWriteArgs::deserialize(value).map_err(|e| format!("todo_write: {e}"))?;
+        Self::validate(args.todos)
+    }
+
+    fn validate(items: Vec<TodoItem>) -> Result<Self, String> {
+        if items.len() > Self::MAX_ITEMS {
             return Err(format!(
                 "todo_write: too many items (max {})",
                 Self::MAX_ITEMS
             ));
         }
-        let mut items = Vec::with_capacity(arr.len());
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         let mut in_progress = 0usize;
-        for (i, v) in arr.iter().enumerate() {
-            let id = v
-                .get("id")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| format!("todo_write: item {i}: missing 'id' string"))?;
-            if id.is_empty() {
+        for item in &items {
+            if item.id.is_empty() {
                 return Err("todo_write: empty id".into());
             }
-            if id.chars().count() > Self::MAX_ID {
+            if item.id.chars().count() > Self::MAX_ID {
                 return Err(format!("todo_write: id too long (max {})", Self::MAX_ID));
             }
-            if !seen.insert(id) {
-                return Err(format!("todo_write: duplicate id '{id}'"));
+            if !seen.insert(item.id.as_str()) {
+                return Err(format!("todo_write: duplicate id '{}'", item.id));
             }
-            let content = v
-                .get("content")
-                .and_then(|x| x.as_str())
-                .ok_or_else(|| format!("todo_write: item {i}: missing 'content' string"))?;
-            if content.is_empty() {
+            if item.content.is_empty() {
                 return Err("todo_write: empty content".into());
             }
-            if content.chars().count() > Self::MAX_CONTENT {
+            if item.content.chars().count() > Self::MAX_CONTENT {
                 return Err(format!(
                     "todo_write: content too long (max {})",
                     Self::MAX_CONTENT
                 ));
             }
-            let status = match v.get("status") {
-                Some(s) => serde_json::from_value::<TodoStatus>(s.clone())
-                    .map_err(|_| "todo_write: invalid status".to_string())?,
-                None => return Err("todo_write: missing status".into()),
-            };
-            if status == TodoStatus::InProgress {
+            if item.status == TodoStatus::InProgress {
                 in_progress += 1;
             }
-            items.push(TodoItem {
-                id: id.to_string(),
-                content: content.to_string(),
-                status,
-            });
         }
         if in_progress > 1 {
             return Err("todo_write: more than one in_progress item".into());
@@ -188,13 +175,13 @@ mod tests {
     #[test]
     fn parse_missing_todos() {
         let err = TodoList::parse(&json!({"items": []})).unwrap_err();
-        assert!(err.contains("todo_write: missing 'todos' array"));
+        assert!(err.contains("missing field `todos`"));
     }
 
     #[test]
     fn parse_todos_not_array() {
         let err = TodoList::parse(&json!({"todos": "nope"})).unwrap_err();
-        assert!(err.contains("must be an array"));
+        assert!(err.contains("invalid type"));
     }
 
     #[test]
