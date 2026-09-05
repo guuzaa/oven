@@ -6,7 +6,6 @@ pub mod dirs;
 mod event;
 pub mod mcp;
 mod mention;
-mod prompt_template;
 mod provider;
 mod runtime;
 pub mod session;

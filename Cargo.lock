@@ -1938,6 +1938,7 @@ name = "oven-agent"
 version = "0.0.5"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "globset",
  "mockall",
@@ -1959,7 +1960,6 @@ version = "0.0.5"
 dependencies = [
  "async-trait",
  "axum",
- "chrono",
  "futures",
  "http",
  "mockall",

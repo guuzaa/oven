@@ -2,39 +2,6 @@ use oven_llm::{ContentBlock, Message};
 use serde::{Deserialize, Serialize};
 
 use crate::history::Record;
-use crate::mode::AgentMode;
-
-pub const PLAN_MODE_PROMPT: &str = "\
-## Plan Mode
-
-You are in Plan mode. Track multi-step work with the `todo_write` tool.
-
-Rules:
-- Before doing multi-step work, call `todo_write` with the full task list as JSON.
-- At most one item may be `in_progress` at a time (zero is allowed when the
-  list is empty or every item is completed/cancelled).
-- Mark an item `in_progress` before you start it.
-- After a step succeeds or is abandoned, call `todo_write` again with the
-  complete updated list (`completed` or `cancelled`).
-- Do not rewrite ids. Update `status` (and `content` only if the task itself changed).
-- Keep the list short and actionable (prefer ≤ 12 items). Split later if needed.
-- When the list is empty and the user asks for a simple one-shot, answer
-  normally without creating a TODO list.
-- The current list (if any) is appended below by the system; treat it as source of truth.";
-
-pub const PLAN_REMINDER: &str = "\
-## Plan reminder
-The previous step used tools but did not call todo_write.
-Update the list now if any item's status changed. At most one item may be in_progress.";
-
-pub fn compose_system(base: Option<&str>, mode: AgentMode) -> Option<String> {
-    match (base, mode) {
-        (None, AgentMode::Default) => None,
-        (None, AgentMode::Plan) => Some(PLAN_MODE_PROMPT.to_string()),
-        (Some(base), AgentMode::Default) => Some(base.to_string()),
-        (Some(base), AgentMode::Plan) => Some(format!("{base}\n\n{PLAN_MODE_PROMPT}")),
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,23 +111,6 @@ impl TodoList {
         format!("{n} todos ({in_progress} in_progress, {completed} completed)")
     }
 
-    pub fn render_prompt_block(&self) -> String {
-        if self.items.is_empty() {
-            return String::new();
-        }
-        let mut out = String::from("## Current TODO list\n");
-        for item in &self.items {
-            let status = match item.status {
-                TodoStatus::Pending => "pending",
-                TodoStatus::InProgress => "in_progress",
-                TodoStatus::Completed => "completed",
-                TodoStatus::Cancelled => "cancelled",
-            };
-            out.push_str(&format!("- [{status}] `{}` {}\n", item.id, item.content));
-        }
-        out
-    }
-
     pub fn from_history<'a>(messages: impl Iterator<Item = &'a Message>) -> Option<Self> {
         let messages: Vec<_> = messages.collect();
         for m in messages.into_iter().rev() {
@@ -173,6 +123,20 @@ impl TodoList {
             }
         }
         None
+    }
+
+    pub fn render_todo_block(&self) -> String {
+        let mut out = String::from("## Current TODO list\n");
+        for item in &self.items {
+            let status = match item.status {
+                TodoStatus::Pending => "pending",
+                TodoStatus::InProgress => "in_progress",
+                TodoStatus::Completed => "completed",
+                TodoStatus::Cancelled => "cancelled",
+            };
+            out.push_str(&format!("- [{status}] `{}` {}\n", item.id, item.content));
+        }
+        out
     }
 }
 
@@ -194,14 +158,6 @@ mod tests {
     use super::*;
     use oven_llm::Role;
     use serde_json::json;
-
-    fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {
-        TodoItem {
-            id: id.into(),
-            content: content.into(),
-            status,
-        }
-    }
 
     fn todo_use(id: &str, input: serde_json::Value) -> Message {
         Message {
@@ -319,21 +275,6 @@ mod tests {
         let list = TodoList::parse(&json!({"todos": []})).unwrap();
         assert!(list.is_empty());
         assert_eq!(list.summary(), "0 todos (0 in_progress, 0 completed)");
-        assert!(list.render_prompt_block().is_empty());
-    }
-
-    #[test]
-    fn render_prompt_block_lists_status_id_and_content() {
-        let list = TodoList {
-            items: vec![
-                item("impl-mode", "Add AgentMode", TodoStatus::InProgress),
-                item("tui-toggle", "Handle BackTab", TodoStatus::Pending),
-            ],
-        };
-        let block = list.render_prompt_block();
-        assert!(block.starts_with("## Current TODO list\n"));
-        assert!(block.contains("- [in_progress] `impl-mode` Add AgentMode"));
-        assert!(block.contains("- [pending] `tui-toggle` Handle BackTab"));
     }
 
     #[test]
@@ -406,22 +347,5 @@ mod tests {
         }];
         let restored = restore_todos(&records, std::iter::once(&write));
         assert_eq!(restored.items[0].status, TodoStatus::InProgress);
-    }
-
-    #[test]
-    fn compose_system_default_vs_plan() {
-        assert_eq!(compose_system(None, AgentMode::Default), None);
-        assert_eq!(
-            compose_system(None, AgentMode::Plan).as_deref(),
-            Some(PLAN_MODE_PROMPT)
-        );
-        assert_eq!(
-            compose_system(Some("base"), AgentMode::Default).as_deref(),
-            Some("base")
-        );
-        assert_eq!(
-            compose_system(Some("base"), AgentMode::Plan),
-            Some(format!("base\n\n{PLAN_MODE_PROMPT}"))
-        );
     }
 }

@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oven_agent::{Agent, Record, Skill, SkillReadTool, TodoWriteTool, Tool};
+use oven_agent::{
+    Agent, InstructionDoc, Record, Skill, SkillReadTool, TodoWriteTool, Tool, load_instructions,
+};
 #[cfg(test)]
 use oven_llm::Provider;
 use oven_llm::{Role, Router};
@@ -13,7 +15,6 @@ use crate::dirs;
 use crate::event::AppId;
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
-use crate::prompt_template::{InstructionDoc, load_instructions, system_prompt};
 use crate::runtime::{hydrate_session, spawn_runtime};
 use crate::session::{Session, canonical_root};
 use crate::{SkillRegistry, ToolRegistry};
@@ -165,11 +166,11 @@ impl AppBuilder {
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
         tools.push(Box::new(TodoWriteTool));
         let mut agent = Agent::new(router, tools);
-        agent.set_system(system_prompt(
+        agent.apply_prompt(
             &self.root,
             &self.instructions,
             self.skills.merged_system_prompt(),
-        ));
+        );
         if let Some(effort) = self
             .config
             .active_provider_config()

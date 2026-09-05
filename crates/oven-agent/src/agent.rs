@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use futures::StreamExt;
@@ -12,8 +13,9 @@ use crate::event::{AgentEvent, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
 use crate::identity::{AgentId, ToolCallId};
 use crate::mode::AgentMode;
+use crate::prompt_template::{self, InstructionDoc};
 use crate::sink::EventSink;
-use crate::todo::{self, TodoList};
+use crate::todo::TodoList;
 use crate::tools::Tool;
 use crate::turn::{TurnContext, TurnOutput};
 
@@ -118,6 +120,15 @@ impl Agent {
 
     pub fn set_system(&mut self, content: impl Into<String>) {
         self.system = Some(content.into());
+    }
+
+    pub fn apply_prompt(
+        &mut self,
+        root: &Path,
+        instructions: &[InstructionDoc],
+        skills: Option<String>,
+    ) {
+        self.system = Some(prompt_template::system_prompt(root, instructions, skills));
     }
 
     pub fn set_mode(&mut self, mode: AgentMode) {
@@ -232,24 +243,12 @@ impl Agent {
                 messages.push(m.clone());
             }
         }
-        system = todo::compose_system(system.as_deref(), mode);
-        if !todos.is_empty() {
-            match system.as_mut() {
-                Some(s) => {
-                    s.push_str("\n\n");
-                    s.push_str(&todos.render_prompt_block());
-                }
-                None => system = Some(todos.render_prompt_block()),
-            }
-        }
-        if let Some(s) = system.as_mut()
-            && mode == AgentMode::Plan
-            && self.todo_dirty
-            && !todos.is_empty()
-        {
-            s.push_str("\n\n");
-            s.push_str(todo::PLAN_REMINDER);
-        }
+        system = prompt_template::compose_todo_system(
+            system.as_deref(),
+            mode,
+            todos,
+            mode == AgentMode::Plan && self.todo_dirty && !todos.is_empty(),
+        );
         Request {
             model: self.model.clone(),
             system,
@@ -1195,7 +1194,7 @@ mod tests {
         run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 1);
-        assert!(system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(system_of(&reqs[0]).contains("# Plan Mode"));
         assert!(system_of(&reqs[0]).contains("base"));
         assert!(!system_of(&reqs[0]).contains("## Current TODO list"));
         assert!(tool_names(&reqs[0]).contains(&"todo_write"));
@@ -1209,7 +1208,7 @@ mod tests {
         run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 1);
-        assert!(!system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(!system_of(&reqs[0]).contains("# Plan Mode"));
         assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
         assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
     }
@@ -1224,7 +1223,7 @@ mod tests {
         run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
         assert!(system_of(&reqs[0]).contains("## Current TODO list"));
-        assert!(!system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(!system_of(&reqs[0]).contains("# Plan Mode"));
         assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
         assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
     }
@@ -1261,9 +1260,9 @@ mod tests {
 
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 2);
-        assert!(!system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(!system_of(&reqs[0]).contains("# Plan Mode"));
         assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
-        assert!(system_of(&reqs[1]).contains("## Plan Mode"));
+        assert!(system_of(&reqs[1]).contains("# Plan Mode"));
         assert!(tool_names(&reqs[1]).contains(&"todo_write"));
     }
 
@@ -1285,7 +1284,7 @@ mod tests {
 
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 2);
-        assert!(system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(system_of(&reqs[0]).contains("# Plan Mode"));
         assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
         assert!(system_of(&reqs[1]).contains("## Plan reminder"));
         assert!(system_of(&reqs[1]).contains("## Current TODO list"));
@@ -1328,7 +1327,7 @@ mod tests {
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 1);
         assert!(system_of(&reqs[0]).contains("from history"));
-        assert!(system_of(&reqs[0]).contains("## Plan Mode"));
+        assert!(system_of(&reqs[0]).contains("# Plan Mode"));
         assert!(tool_names(&reqs[0]).contains(&"todo_write"));
     }
 
@@ -1355,7 +1354,7 @@ mod tests {
         assert_eq!(reqs.len(), 3);
         assert!(system_of(&reqs[1]).contains("## Plan reminder"));
         assert!(system_of(&reqs[2]).contains("## Current TODO list"));
-        assert!(!system_of(&reqs[2]).contains("## Plan Mode"));
+        assert!(!system_of(&reqs[2]).contains("# Plan Mode"));
         assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
         assert!(!tool_names(&reqs[2]).contains(&"todo_write"));
     }
@@ -1384,7 +1383,7 @@ mod tests {
         assert!(system_of(&reqs[1]).contains("## Plan reminder"));
         assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
         assert!(system_of(&reqs[2]).contains("## Current TODO list"));
-        assert!(system_of(&reqs[2]).contains("## Plan Mode"));
+        assert!(system_of(&reqs[2]).contains("# Plan Mode"));
     }
 
     #[tokio::test]

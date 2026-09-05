@@ -31,3 +31,9 @@
 - `cargo clippy --all-targets 2>&1 | rg "warning|error"` to static-check code style 
 - `cargo fmt` to format code style
 - `OVEN_MODEL=claude-3-5-haiku-20241022 OVEN_BASE_URL="https://api.moonshot.cn/anthropic/v1/" ./target/release/oven .` to run
+
+# Architectures
+- `oven-agent`: agent loop and tools
+- `oven-host`: host system interaction infrastructure
+- `oven-app`: app layer; service composition, mcp, slash commands
+- `oven-tui`: entry point; render events and state; send commands

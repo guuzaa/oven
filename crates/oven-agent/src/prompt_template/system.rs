@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use super::instructions::InstructionDoc;
-use crate::session::canonical_root;
 
 const BASE_PROMPT: &str = include_str!("system_prompt.md");
 
@@ -39,6 +38,13 @@ fn env_block(root: &Path) -> String {
         platform(),
         today(),
     )
+}
+
+fn canonical_root(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[inline]

@@ -120,7 +120,6 @@ mod tests {
         let tmp = tempdir::TempDir::new("inst-unreadable").unwrap();
         let root = tmp.path().join("ws");
         std::fs::create_dir_all(&root).unwrap();
-        // A directory named AGENTS.md is not readable as a file.
         std::fs::create_dir_all(root.join("AGENTS.md")).unwrap();
         std::fs::write(root.join("CLAUDE.md"), "rules\n").unwrap();
 
