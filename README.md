@@ -95,6 +95,11 @@ Config lives in `.oven.toml` at the project root, or globally at
 ```toml
 tools = ["file_read", "file_write", "bash"]
 
+# Fraction of the model's context window that triggers automatic history
+# compaction after a turn completes. 0 disables auto-compaction; /compact
+# still works. Ignored when the active model's window size is unknown.
+compact_threshold = 0.8
+
 [provider]
 name = "deepseek"
 
@@ -125,8 +130,12 @@ reasoning_effort = "low"
 Type a prompt and press Enter to send. While running, `Esc` cancels; when
 idle, `Esc` rewinds the last exchange and restores your message. `Ctrl-C`
 quits, `Shift+Tab` toggles plan mode. The TUI shows the current todo list,
-model, and working directory; mouse selection copies automatically. After
-exiting, the session id is printed so you can resume with `--session <id>`.
+model, and working directory; mouse selection copies automatically. When
+the context window fills up, history is compacted into a summary
+automatically (or on demand via `/compact`). Thinking blocks and tool
+results collapse to one line — double-click to expand or collapse them,
+and each turn ends with a `Worked for Xs` separator. After exiting, the
+session id is printed so you can resume with `--session <id>`.
 
 ## Slash commands
 
@@ -137,6 +146,7 @@ exiting, the session id is printed so you can resume with `--session <id>`.
 | `/model` | Switch model: `/model <id> [none\|low\|medium\|high]` |
 | `/setup` | Configure provider: `/setup name=... api_key=...` |
 | `/plan`  | Toggle plan mode: `/plan [on\|off]` |
+| `/compact`  | Compact conversation history into a summary; auto-compaction triggers at `compact_threshold`. |
 
 ## Build from source
 

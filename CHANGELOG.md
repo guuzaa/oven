@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.6] - 2026-09-06
+
+### Added
+- `/compact` slash command and auto-compaction when history nears the model's context window
+- New `oven-host` crate for host system interaction: process execution, command-output decoding, path confinement, and directory walking
+- Collapsible tool results, toggled like thinking blocks
+- Thinking block hover with double-click collapse
+- Tool bursts grouped by action with detail summaries
+- Turn elapsed time shown after each turn (`Worked for Xs`); thought elapsed time
+- Mouse scrolling across multiple lines in the textarea
+
+### Changed
+- Split `AppCommand` into `Prompt` and `Control`; slash state changes and `Rewind` queue behind a running turn
+- Move the system prompt module into `oven-agent`
+- Parse `TodoWrite` args with serde
+- Unify transcript viewport anchoring and trim redundant TUI state
+
+### Fixed
+- Garbled shell output on Windows
+- Refresh the file list when using `@` to mention files
+
 ## [0.0.5] - 2026-09-01
 
 ### Added
