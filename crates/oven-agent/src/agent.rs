@@ -8,6 +8,8 @@ use oven_llm::{
     ToolChoice, Usage,
 };
 
+use oven_host::now_ms;
+
 use crate::error::AgentError;
 use crate::event::{AgentEvent, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
@@ -166,7 +168,9 @@ impl Agent {
         self.history.messages()
     }
 
-    pub fn history_timed(&self) -> impl ExactSizeIterator<Item = (&Message, u64)> + '_ {
+    pub fn history_timed(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&Message, u64, Option<u64>)> + '_ {
         self.history.iter_timed()
     }
 
@@ -296,25 +300,28 @@ impl Agent {
     async fn complete_response(
         &mut self,
         sink: &mut impl EventSink,
-    ) -> Result<Response, AgentError> {
+    ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
         let req = self.build_request();
         let router = self.router();
 
         match router.stream(&req).await {
             Ok(mut stream) => {
                 let mut collector = StreamCollector::new();
+                let mut thinking = ThinkingSpan::default();
                 while let Some(event) = stream.next().await {
                     match event {
                         Err(e) => return Err(e.into()),
                         Ok(event) => {
                             if let LlmStreamEvent::ContentBlockDelta { delta, .. } = &event {
                                 match delta {
-                                    Delta::ThinkingDelta { thinking } if !thinking.is_empty() => {
+                                    Delta::ThinkingDelta { thinking: text } if !text.is_empty() => {
+                                        thinking.note();
                                         sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
-                                            text: thinking.clone(),
+                                            text: text.clone(),
                                         }));
                                     }
                                     Delta::TextDelta { text } if !text.is_empty() => {
+                                        thinking.close();
                                         sink.emit(AgentEvent::Stream(StreamEvent::TextDelta {
                                             text: text.clone(),
                                         }));
@@ -326,7 +333,8 @@ impl Agent {
                         }
                     }
                 }
-                Ok(collector.finish()?)
+                thinking.close();
+                Ok((collector.finish()?, thinking.finish()))
             }
             Err(_) => {
                 let response = Provider::complete(&*router, &req).await?;
@@ -342,7 +350,7 @@ impl Agent {
                         sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
                     }
                 }
-                Ok(response)
+                Ok((response, None))
             }
         }
     }
@@ -354,10 +362,13 @@ impl Agent {
     ) -> Result<Option<String>, AgentError> {
         self.mode = ctx.mode();
         (self.model, self.reasoning_effort) = ctx.model();
-        let response = self.complete_response(sink).await?;
+        let (response, thinking) = self.complete_response(sink).await?;
 
         self.history
             .push(Message::assistant(response.content.clone()));
+        if let Some((started_at, duration_ms)) = thinking {
+            self.history.record_thinking(started_at, duration_ms);
+        }
         if let Some(usage) = &response.usage {
             self.history.record_usage(usage);
         }
@@ -479,6 +490,33 @@ impl Agent {
     #[inline]
     pub fn last_turn_usage(&self) -> Usage {
         self.history.last_turn_usage()
+    }
+}
+
+#[derive(Default)]
+struct ThinkingSpan {
+    started_at: Option<u64>,
+    ended_at: Option<u64>,
+}
+
+impl ThinkingSpan {
+    fn note(&mut self) {
+        if self.started_at.is_none() {
+            self.started_at = Some(now_ms());
+        }
+    }
+
+    fn close(&mut self) {
+        if self.started_at.is_some() && self.ended_at.is_none() {
+            self.ended_at = Some(now_ms());
+        }
+    }
+
+    fn finish(mut self) -> Option<(u64, u64)> {
+        self.close();
+        let start = self.started_at?;
+        let duration_ms = self.ended_at.unwrap_or(start).saturating_sub(start);
+        (duration_ms > 0).then_some((start, duration_ms))
     }
 }
 
@@ -835,8 +873,8 @@ mod tests {
         };
         let timed: Vec<(Role, u64)> = agent
             .history_timed()
-            .filter(|(m, _)| m.role != Role::System)
-            .map(|(m, ts)| (m.role, ts))
+            .filter(|(m, _, _)| m.role != Role::System)
+            .map(|(m, ts, _)| (m.role, ts))
             .collect();
         assert_eq!(timed.len(), 2);
         let persisted = timed[1].1.saturating_sub(timed[0].1);

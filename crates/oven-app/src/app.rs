@@ -147,13 +147,15 @@ impl App {
         self.state.borrow().history.clone()
     }
 
-    pub fn history_timed(&self) -> Vec<(Message, u64)> {
+    pub fn history_timed(&self) -> Vec<(Message, u64, Option<u64>)> {
         let state = self.state.borrow();
         state
             .history
             .iter()
             .cloned()
             .zip(state.history_timestamps.iter().copied())
+            .zip(state.history_thinking_ms.iter().copied())
+            .map(|((message, timestamp), thinking_ms)| (message, timestamp, thinking_ms))
             .collect()
     }
 

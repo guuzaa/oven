@@ -128,6 +128,7 @@ impl Session {
                 .filter_map(|r| match r {
                     Record::Message { message, .. } => Some(message),
                     Record::TokenUsage { .. }
+                    | Record::Thinking { .. }
                     | Record::SessionMeta(_)
                     | Record::TodoList { .. } => None,
                 })
@@ -334,6 +335,16 @@ fn read_first_line(path: &Path) -> Result<Option<String>, SessionError> {
 
 /// Parse one JSONL line into records.
 ///
+/// Keep in sync with `oven_agent::Record` variants. Unknown tags are skipped
+/// so a newer session file still loads on this version.
+const KNOWN_RECORD_TYPES: &[&str] = &[
+    "message",
+    "token_usage",
+    "thinking",
+    "session_meta",
+    "todo_list",
+];
+
 /// 1. Invalid JSON → Err.
 /// 2. Object with a known `type` tag → deserialize as `Record` (malformed = Err).
 /// 3. Object with an unknown `type` tag → skip.
@@ -341,11 +352,10 @@ fn read_first_line(path: &Path) -> Result<Option<String>, SessionError> {
 fn parse_line(line: &str) -> Result<Vec<Record>, serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(line)?;
     if let Some(tag) = value.get("type").and_then(|t| t.as_str()) {
-        return match tag {
-            "message" | "token_usage" | "session_meta" | "todo_list" => {
-                serde_json::from_value(value).map(|r| vec![r])
-            }
-            _ => Ok(vec![]),
+        return if KNOWN_RECORD_TYPES.contains(&tag) {
+            serde_json::from_value(value).map(|r| vec![r])
+        } else {
+            Ok(vec![])
         };
     }
     match serde_json::from_value::<RecordLine>(value.clone()) {
@@ -615,6 +625,33 @@ mod tests {
 
         assert!(tmp.path().join("cwd_latest.json").exists());
         assert!(!tmp.path().join("cwd_latest.json.tmp").exists());
+    }
+
+    #[test]
+    fn thinking_records_roundtrip_and_are_dropped_from_messages() {
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").unwrap();
+        session
+            .append_records(&[
+                message_record(1, Message::user_text("q")),
+                message_record(40, Message::assistant(vec![ContentBlock::text("a")])),
+                Record::Thinking {
+                    timestamp: 12,
+                    duration_ms: 1_500,
+                },
+            ])
+            .unwrap();
+
+        let loaded = session.load_records().unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert!(matches!(
+            &loaded[2],
+            Record::Thinking {
+                timestamp: 12,
+                duration_ms: 1_500
+            }
+        ));
+        assert_eq!(session.load().unwrap().len(), 2);
     }
 
     #[test]

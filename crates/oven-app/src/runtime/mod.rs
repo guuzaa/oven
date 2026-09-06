@@ -511,7 +511,8 @@ impl Runtime {
         self.state.model = self.agent.model().to_string();
         self.state.reasoning_effort = self.agent.reasoning_effort();
         self.state.history = self.agent.history().cloned().collect();
-        self.state.history_timestamps = self.agent.history_timed().map(|(_, ts)| ts).collect();
+        self.state.history_timestamps = self.agent.history_timed().map(|(_, ts, _)| ts).collect();
+        self.state.history_thinking_ms = self.agent.history_timed().map(|(_, _, th)| th).collect();
         self.state.todos = self.agent.todos().clone();
         self.state.last_turn_usage = self.agent.last_turn_usage();
         self.state.context_tokens = context_tokens(&self.agent);

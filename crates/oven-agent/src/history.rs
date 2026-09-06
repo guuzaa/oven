@@ -29,6 +29,9 @@ pub enum Record {
         #[serde(flatten)]
         usage: Usage,
     },
+    /// Thinking span for the preceding assistant message. `timestamp` is when
+    /// thinking started; `duration_ms` is wall time until thinking ended.
+    Thinking { timestamp: u64, duration_ms: u64 },
     /// Session-level metadata, written as the first line of a session file.
     SessionMeta(SessionMeta),
     TodoList {
@@ -60,6 +63,9 @@ pub struct SessionMeta {
 pub struct History {
     messages: Vec<(Message, Timestamp)>,
     turn_usage: Vec<(Usage, Timestamp)>,
+    /// Per-message thinking span `(duration_ms, started_at)`, aligned with
+    /// `messages`. `None` when that message had no timed thinking.
+    thinking: Vec<Option<(u64, Timestamp)>>,
     revision: u64,
     meta: Option<SessionMeta>,
 }
@@ -69,6 +75,7 @@ impl History {
         Self {
             messages: Vec::new(),
             turn_usage: Vec::new(),
+            thinking: Vec::new(),
             revision: 0,
             meta: None,
         }
@@ -79,16 +86,19 @@ impl History {
             self.turn_usage.push((Usage::default(), 0));
         }
         self.messages.push((m, now_ms()));
+        self.thinking.push(None);
     }
 
     pub fn insert_system(&mut self, m: Message) {
         self.messages.insert(0, (m, now_ms()));
+        self.thinking.insert(0, None);
     }
 
     pub fn clear(&mut self) {
         self.revision += 1;
         self.messages.clear();
         self.turn_usage.clear();
+        self.thinking.clear();
         self.meta = None;
     }
 
@@ -115,6 +125,7 @@ impl History {
         self.revision += 1;
         self.messages.clear();
         self.turn_usage.clear();
+        self.thinking.clear();
         self.meta = None;
         for record in records {
             match record {
@@ -123,6 +134,7 @@ impl History {
                         self.turn_usage.push((Usage::default(), 0));
                     }
                     self.messages.push((message, timestamp));
+                    self.thinking.push(None);
                 }
                 Record::TokenUsage { timestamp, usage } => match self.turn_usage.last_mut() {
                     Some(last) => {
@@ -131,6 +143,14 @@ impl History {
                     }
                     None => self.turn_usage.push((usage, timestamp)),
                 },
+                Record::Thinking {
+                    timestamp,
+                    duration_ms,
+                } => {
+                    if let Some(slot) = self.thinking.last_mut() {
+                        *slot = Some((duration_ms, timestamp));
+                    }
+                }
                 Record::SessionMeta(meta) => self.meta = Some(meta),
                 Record::TodoList { .. } => {}
             }
@@ -146,6 +166,7 @@ impl History {
             .iter()
             .rposition(|(m, _)| m.role == Role::User)?;
         let removed = self.messages.drain(idx..).next().map(|(m, _)| m)?;
+        let _ = self.thinking.drain(idx..);
         let _ = self.turn_usage.pop();
         Some(removed)
     }
@@ -159,9 +180,24 @@ impl History {
         self.messages.iter().map(|(m, _)| m)
     }
 
-    /// Messages paired with the `Record` timestamps they were stored with.
-    pub fn iter_timed(&self) -> impl ExactSizeIterator<Item = (&Message, u64)> + '_ {
-        self.messages.iter().map(|(m, ts)| (m, *ts))
+    /// Messages paired with the `Record` timestamps they were stored with
+    /// and any thinking duration recorded for that message.
+    pub fn iter_timed(&self) -> impl ExactSizeIterator<Item = (&Message, u64, Option<u64>)> + '_ {
+        self.messages
+            .iter()
+            .zip(self.thinking.iter())
+            .map(|((m, ts), th)| (m, *ts, th.map(|(d, _)| d)))
+    }
+
+    /// Attach a thinking span to the last message. No-op when `duration_ms`
+    /// is zero or history is empty.
+    pub fn record_thinking(&mut self, started_at: u64, duration_ms: u64) {
+        if duration_ms == 0 {
+            return;
+        }
+        if let Some(slot) = self.thinking.last_mut() {
+            *slot = Some((duration_ms, started_at));
+        }
     }
 
     /// Timestamp of the current turn's user message, if any.
@@ -203,7 +239,9 @@ impl History {
     /// original ones, so a rewind that rewrites the file doesn't restamp
     /// older messages.
     pub fn records(&self) -> Vec<Record> {
-        let mut out = Vec::with_capacity(self.messages.len() + self.turn_usage.len() + 1);
+        let mut out = Vec::with_capacity(
+            self.messages.len() + self.turn_usage.len() + self.thinking.len() + 1,
+        );
         if let Some(meta) = &self.meta {
             out.push(Record::SessionMeta(meta.clone()));
         }
@@ -212,11 +250,12 @@ impl History {
             .iter()
             .position(|(m, _)| m.role == Role::User)
             .unwrap_or(self.messages.len());
-        for (message, timestamp) in &self.messages[..first_user] {
+        for (i, (message, timestamp)) in self.messages[..first_user].iter().enumerate() {
             out.push(Record::Message {
                 timestamp: *timestamp,
                 message: message.clone(),
             });
+            self.push_thinking_record(&mut out, i);
         }
         let user_starts: Vec<usize> = self
             .messages
@@ -240,6 +279,7 @@ impl History {
                     timestamp: *timestamp,
                     message: message.clone(),
                 });
+                self.push_thinking_record(&mut out, i);
                 if last_assistant == Some(i)
                     && let Some((usage, timestamp)) = self.turn_usage.get(k)
                     && *usage != Usage::default()
@@ -252,6 +292,15 @@ impl History {
             }
         }
         out
+    }
+
+    fn push_thinking_record(&self, out: &mut Vec<Record>, i: usize) {
+        if let Some((duration_ms, timestamp)) = self.thinking.get(i).copied().flatten() {
+            out.push(Record::Thinking {
+                timestamp,
+                duration_ms,
+            });
+        }
     }
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &Message> + '_ {
@@ -335,6 +384,7 @@ mod tests {
             .map(|r| match r {
                 Record::Message { .. } => "msg",
                 Record::TokenUsage { .. } => "usage",
+                Record::Thinking { .. } => "thinking",
                 Record::SessionMeta(_) => "meta",
                 Record::TodoList { .. } => "todo_list",
             })
@@ -387,6 +437,19 @@ mod tests {
                 ) => {
                     assert_eq!(t1, t2);
                     assert_eq!(i1, i2);
+                }
+                (
+                    Record::Thinking {
+                        timestamp: t1,
+                        duration_ms: d1,
+                    },
+                    Record::Thinking {
+                        timestamp: t2,
+                        duration_ms: d2,
+                    },
+                ) => {
+                    assert_eq!(t1, t2);
+                    assert_eq!(d1, d2);
                 }
                 _ => panic!("record kind mismatch"),
             }
@@ -808,7 +871,117 @@ mod tests {
                 message: Message::assistant_text("a"),
             },
         ]);
-        let timed: Vec<(Role, u64)> = h.iter_timed().map(|(m, ts)| (m.role, ts)).collect();
-        assert_eq!(timed, vec![(Role::User, 7), (Role::Assistant, 9)]);
+        let timed: Vec<(Role, u64, Option<u64>)> =
+            h.iter_timed().map(|(m, ts, th)| (m.role, ts, th)).collect();
+        assert_eq!(
+            timed,
+            vec![(Role::User, 7, None), (Role::Assistant, 9, None)]
+        );
+    }
+
+    #[test]
+    fn thinking_record_roundtrips_on_the_last_message() {
+        let mut h = History::new();
+        h.set_messages_with_records(vec![
+            Record::Message {
+                timestamp: 10,
+                message: Message::user_text("q"),
+            },
+            Record::Message {
+                timestamp: 40,
+                message: Message::assistant(vec![
+                    ContentBlock::thinking("plan"),
+                    ContentBlock::text("a"),
+                ]),
+            },
+        ]);
+        h.record_thinking(12, 1_500);
+        let records = h.records();
+        assert_eq!(record_kinds(&records), vec!["msg", "msg", "thinking"]);
+        let Record::Thinking {
+            timestamp,
+            duration_ms,
+        } = records[2]
+        else {
+            panic!("expected thinking record");
+        };
+        assert_eq!(timestamp, 12);
+        assert_eq!(duration_ms, 1_500);
+
+        let mut restored = History::new();
+        restored.set_messages_with_records(records);
+        let thinking: Vec<Option<u64>> = restored.iter_timed().map(|(_, _, th)| th).collect();
+        assert_eq!(thinking, vec![None, Some(1_500)]);
+    }
+
+    #[test]
+    fn restore_without_thinking_records_leaves_none() {
+        let mut h = History::new();
+        h.set_messages_with_records(vec![
+            Record::Message {
+                timestamp: 1,
+                message: Message::user_text("q"),
+            },
+            Record::Message {
+                timestamp: 2,
+                message: Message::assistant(vec![
+                    ContentBlock::thinking("plan"),
+                    ContentBlock::text("a"),
+                ]),
+            },
+        ]);
+        let thinking: Vec<Option<u64>> = h.iter_timed().map(|(_, _, th)| th).collect();
+        assert_eq!(thinking, vec![None, None]);
+        assert!(
+            !h.records()
+                .iter()
+                .any(|r| matches!(r, Record::Thinking { .. }))
+        );
+    }
+
+    #[test]
+    fn record_thinking_skips_zero_duration() {
+        let mut h = History::new();
+        h.push(Message::assistant_text("a"));
+        h.record_thinking(1, 0);
+        assert!(
+            !h.records()
+                .iter()
+                .any(|r| matches!(r, Record::Thinking { .. }))
+        );
+    }
+
+    #[test]
+    fn rewind_drops_thinking_with_the_turn() {
+        let mut h = History::new();
+        h.set_messages_with_records(vec![
+            Record::Message {
+                timestamp: 1,
+                message: Message::user_text("first"),
+            },
+            Record::Message {
+                timestamp: 2,
+                message: Message::assistant_text("one"),
+            },
+            Record::Thinking {
+                timestamp: 1,
+                duration_ms: 100,
+            },
+            Record::Message {
+                timestamp: 3,
+                message: Message::user_text("second"),
+            },
+            Record::Message {
+                timestamp: 4,
+                message: Message::assistant_text("two"),
+            },
+            Record::Thinking {
+                timestamp: 3,
+                duration_ms: 200,
+            },
+        ]);
+        h.rewind_last_turn();
+        let thinking: Vec<Option<u64>> = h.iter_timed().map(|(_, _, th)| th).collect();
+        assert_eq!(thinking, vec![None, Some(100)]);
     }
 }

@@ -1123,7 +1123,7 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
     let timed = handle.history_timed();
     assert_eq!(timed.len(), handle.history().len());
     assert!(
-        timed.iter().any(|(_, ts)| *ts > 0),
+        timed.iter().any(|(_, ts, _)| *ts > 0),
         "resumed history keeps Record timestamps"
     );
     assert_eq!(

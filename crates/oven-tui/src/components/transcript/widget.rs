@@ -20,9 +20,9 @@ use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_
 use super::tools::{ToolBurst, ToolLabel};
 use super::wrap::{
     MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL, apply_hover,
-    apply_thinking_shimmer, collect_lines, format_elapsed, format_lines, line_display_width,
-    paint_visible, tail_lines, thinking_phase, trim_message, wrap_collapsible_into, wrap_line_into,
-    wrap_row_into,
+    apply_thinking_shimmer, collect_lines, format_elapsed, format_lines, format_thought,
+    line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
+    wrap_collapsible_into, wrap_line_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -47,6 +47,7 @@ pub struct Transcript {
     last_collapsible_click: Option<(usize, Instant)>,
     tool_burst: ToolBurst,
     detail_ids: HashSet<String>,
+    thinking_started: Option<Instant>,
 }
 
 impl Transcript {
@@ -66,6 +67,7 @@ impl Transcript {
             last_collapsible_click: None,
             tool_burst: ToolBurst::default(),
             detail_ids: HashSet::new(),
+            thinking_started: None,
         }
     }
 
@@ -105,7 +107,7 @@ impl Transcript {
         self.replace_from_timed(&timed_messages(messages));
     }
 
-    pub(crate) fn replace_from_timed(&mut self, messages: &[(Message, u64)]) {
+    pub(crate) fn replace_from_timed(&mut self, messages: &[(Message, u64, Option<u64>)]) {
         self.reset();
         self.seed_timed(messages);
     }
@@ -118,9 +120,9 @@ impl Transcript {
         self.seed_timed(&timed_messages(messages));
     }
 
-    pub fn seed_timed(&mut self, messages: &[(Message, u64)]) {
+    pub fn seed_timed(&mut self, messages: &[(Message, u64, Option<u64>)]) {
         let mut turn_started_at: Option<u64> = None;
-        for (m, ts) in messages {
+        for (m, ts, thinking_ms) in messages {
             match m.role {
                 Role::User => {
                     for block in &m.content {
@@ -163,7 +165,10 @@ impl Transcript {
                         match block {
                             ContentBlock::Thinking { thinking } => {
                                 self.close_tool_burst();
-                                self.push_thinking(THOUGHT_LABEL, thinking);
+                                self.push_thinking(
+                                    &format_thought(thinking_ms.unwrap_or(0)),
+                                    thinking,
+                                );
                                 emitted = true;
                             }
                             ContentBlock::Text { text } => {
@@ -254,6 +259,7 @@ impl Transcript {
         self.last_collapsible_click = None;
         self.close_tool_burst();
         self.detail_ids.clear();
+        self.thinking_started = None;
     }
 
     fn close_tool_burst(&mut self) {
@@ -375,6 +381,10 @@ impl Transcript {
     }
 
     fn push_elapsed(&mut self, duration_ms: u64) {
+        if duration_ms == 0 {
+            self.push_turn_end("");
+            return;
+        }
         self.push_turn_end(&format_elapsed(duration_ms));
     }
 
@@ -561,6 +571,11 @@ impl Transcript {
     }
 
     fn finish_thinking(&mut self) {
+        let ms = self
+            .thinking_started
+            .take()
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
         if let Some(Row {
             kind: LineKind::Thinking,
             text,
@@ -568,7 +583,7 @@ impl Transcript {
             ..
         }) = self.rows.last_mut()
         {
-            *text = THOUGHT_LABEL.to_string();
+            *text = format_thought(ms);
             self.rewrap_all();
         }
     }
@@ -694,6 +709,9 @@ impl Component for Transcript {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Stream(StreamEvent::ThinkingDelta { text }) => {
                     self.close_tool_burst();
+                    if self.thinking_started.is_none() {
+                        self.thinking_started = Some(Instant::now());
+                    }
                     self.push_thinking(THINKING_LABEL, text);
                 }
                 AgentEvent::Stream(StreamEvent::TextDelta { text }) => {
@@ -838,8 +856,8 @@ impl Component for Transcript {
 }
 
 #[cfg(test)]
-fn timed_messages(messages: &[Message]) -> Vec<(Message, u64)> {
-    messages.iter().cloned().map(|m| (m, 0)).collect()
+fn timed_messages(messages: &[Message]) -> Vec<(Message, u64, Option<u64>)> {
+    messages.iter().cloned().map(|m| (m, 0, None)).collect()
 }
 
 fn turn_elapsed(started_at: Option<u64>, ended_at: u64) -> u64 {

@@ -20,7 +20,7 @@ use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 use super::widget::Transcript;
 use super::wrap::{
     MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer, format_elapsed, format_lines,
-    tail_lines,
+    format_thought, tail_lines,
 };
 
 const ELAPSED_0: &str = "Worked for 0s";
@@ -32,6 +32,8 @@ const ELAPSED_1_2S: &str = "Worked for 1.2s";
 const ELAPSED_1_5S: &str = "Worked for 1.5s";
 const ELAPSED_1M: &str = "Worked for 1m 0s";
 const ELAPSED_1M_1S: &str = "Worked for 1m 1s";
+const THOUGHT_1_5S: &str = "Thought for 1.5s";
+const THOUGHT_1M_1S: &str = "Thought for 1m 1s";
 
 fn wide(t: &mut Transcript) {
     t.area.width = 80;
@@ -400,7 +402,7 @@ fn cancelled_appends_elapsed() {
         kinds_of(&t),
         vec![LineKind::User, LineKind::System, LineKind::Separator]
     );
-    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some(ELAPSED_0));
+    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some(""));
 }
 
 #[test]
@@ -580,6 +582,24 @@ fn seed_collapses_consecutive_thinking() {
             .body(),
         "onetwo"
     );
+    assert_eq!(
+        t.rows.last().map(|r| r.text.as_str()),
+        Some(""),
+        "legacy sessions without timestamps keep a plain separator"
+    );
+}
+
+#[test]
+fn seed_without_thinking_record_keeps_thought_label() {
+    let mut t = Transcript::new();
+    t.seed_timed(&[(
+        Message::assistant(vec![ContentBlock::Thinking {
+            thinking: "plan".into(),
+        }]),
+        1_000,
+        None,
+    )]);
+    assert_eq!(t.rows[0].text, THOUGHT_LABEL);
 }
 
 #[test]
@@ -625,19 +645,21 @@ fn seed_separates_complete_turns_not_tool_followup() {
 fn seed_timed_shows_turn_elapsed_from_timestamps() {
     let mut t = Transcript::new();
     t.seed_timed(&[
-        (Message::user_text("one"), 1_000),
+        (Message::user_text("one"), 1_000, None),
         (
             Message::assistant(vec![ContentBlock::Text {
                 text: "first".into(),
             }]),
             2_500,
+            None,
         ),
-        (Message::user_text("two"), 3_000),
+        (Message::user_text("two"), 3_000, None),
         (
             Message::assistant(vec![ContentBlock::Text {
                 text: "second".into(),
             }]),
             4_200,
+            None,
         ),
     ]);
     let elapsed: Vec<&str> = t
@@ -647,6 +669,23 @@ fn seed_timed_shows_turn_elapsed_from_timestamps() {
         .map(|r| r.text.as_str())
         .collect();
     assert_eq!(elapsed, vec![ELAPSED_1_5S, ELAPSED_1_2S]);
+}
+
+#[test]
+fn seed_timed_shows_thought_duration() {
+    let mut t = Transcript::new();
+    t.seed_timed(&[(
+        Message::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "plan".into(),
+            },
+            ContentBlock::Text { text: "ok".into() },
+        ]),
+        2_500,
+        Some(1_500),
+    )]);
+    assert_eq!(t.rows[0].kind, LineKind::Thinking);
+    assert_eq!(t.rows[0].text, THOUGHT_1_5S);
 }
 
 #[test]
@@ -886,6 +925,10 @@ fn format_elapsed_units() {
     assert_eq!(format_elapsed(1_500), ELAPSED_1_5S);
     assert_eq!(format_elapsed(60_000), ELAPSED_1M);
     assert_eq!(format_elapsed(61_000), ELAPSED_1M_1S);
+    assert_eq!(format_thought(0), THOUGHT_LABEL);
+    assert_eq!(format_thought(99), THOUGHT_LABEL);
+    assert_eq!(format_thought(1_500), THOUGHT_1_5S);
+    assert_eq!(format_thought(61_000), THOUGHT_1M_1S);
 }
 
 #[test]

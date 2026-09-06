@@ -22,8 +22,9 @@ const MS_PER_TENTH: u64 = 100;
 const TENTHS_PER_SECOND: u64 = 10;
 const MS_PER_MINUTE: u64 = 60_000;
 const WORKED_FOR: &str = "Worked for";
+const THOUGHT_FOR: &str = "Thought for";
 
-pub(super) fn format_elapsed(ms: u64) -> String {
+fn format_duration(ms: u64) -> String {
     let mins = ms / MS_PER_MINUTE;
     let rest = ms % MS_PER_MINUTE;
     let secs = if mins == 0 {
@@ -39,15 +40,27 @@ pub(super) fn format_elapsed(ms: u64) -> String {
         (rest / MS_PER_SECOND).to_string()
     };
     if mins == 0 {
-        format!("{WORKED_FOR} {secs}s")
+        format!("{secs}s")
     } else {
-        format!("{WORKED_FOR} {mins}m {secs}s")
+        format!("{mins}m {secs}s")
     }
 }
 
-pub(super) fn thinking_display_label(text: &str) -> &'static str {
-    if text == THINKING_LABEL {
-        THINKING_LABEL
+pub(super) fn format_elapsed(ms: u64) -> String {
+    format!("{WORKED_FOR} {}", format_duration(ms))
+}
+
+pub(super) fn format_thought(ms: u64) -> String {
+    if ms < MS_PER_TENTH {
+        THOUGHT_LABEL.to_string()
+    } else {
+        format!("{THOUGHT_FOR} {}", format_duration(ms))
+    }
+}
+
+pub(super) fn thinking_display_label(text: &str) -> &str {
+    if text == THINKING_LABEL || text.starts_with(THOUGHT_FOR) {
+        text
     } else {
         THOUGHT_LABEL
     }

@@ -14,6 +14,9 @@ pub struct AppState {
     pub history: Vec<Message>,
     /// Unix-ms timestamps parallel to `history`, taken from `Record`.
     pub history_timestamps: Vec<u64>,
+    /// Thinking duration in ms parallel to `history`; `None` if that message
+    /// had no timed thinking.
+    pub history_thinking_ms: Vec<Option<u64>>,
     pub todos: TodoList,
     pub last_turn_usage: Usage,
     /// Prompt-side tokens of the last response in the current turn; approximates
@@ -40,7 +43,8 @@ impl AppState {
             provider,
             configured_providers,
             history: agent.history().cloned().collect(),
-            history_timestamps: agent.history_timed().map(|(_, ts)| ts).collect(),
+            history_timestamps: agent.history_timed().map(|(_, ts, _)| ts).collect(),
+            history_thinking_ms: agent.history_timed().map(|(_, _, th)| th).collect(),
             todos: agent.todos().clone(),
             last_turn_usage: agent.last_turn_usage(),
             context_tokens: context_tokens(agent),
