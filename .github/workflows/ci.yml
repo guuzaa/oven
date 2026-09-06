@@ -25,14 +25,14 @@ jobs:
           toolchain: "1.92.0"
           components: rustfmt, clippy
 
-      - name: Check formatting
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt -- --check
-
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Check formatting
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt -- --check
 
       - name: Build on ${{ matrix.os }}
         run: cargo build
