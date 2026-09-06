@@ -47,6 +47,10 @@ pub fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
+pub fn elapsed() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
 pub fn accent() -> Style {
     Style::default().fg(Color::Cyan)
 }

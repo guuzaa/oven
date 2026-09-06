@@ -78,7 +78,7 @@ impl Ui {
 
     #[inline]
     fn load_transcript(&mut self) {
-        self.transcript.seed(&self.app.history());
+        self.transcript.seed_timed(&self.app.history_timed());
     }
 
     pub async fn run(mut self) -> io::Result<()> {
@@ -176,7 +176,9 @@ impl Ui {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Turn(TurnEvent::Started) => self.state.busy = true,
                 AgentEvent::Turn(
-                    TurnEvent::Completed { .. } | TurnEvent::Cancelled | TurnEvent::Failed { .. },
+                    TurnEvent::Completed { .. }
+                    | TurnEvent::Cancelled { .. }
+                    | TurnEvent::Failed { .. },
                 ) => self.state.busy = false,
                 _ => {}
             },
@@ -192,7 +194,8 @@ impl Ui {
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::ModeChanged { mode } => self.state.mode = *mode,
                 StateChange::HistoryChanged { .. } => {
-                    self.transcript.replace_from(&self.app.history());
+                    self.transcript
+                        .replace_from_timed(&self.app.history_timed());
                     self.rewinding = false;
                 }
                 _ => {}

@@ -230,7 +230,7 @@ fn is_turn_completed(ev: &AppEvent) -> bool {
 fn is_turn_cancelled(ev: &AppEvent) -> bool {
     matches!(
         ev.kind,
-        AppEventKind::Agent(ref env) if matches!(env.event, AgentEvent::Turn(TurnEvent::Cancelled))
+        AppEventKind::Agent(ref env) if matches!(env.event, AgentEvent::Turn(TurnEvent::Cancelled { .. }))
     )
 }
 
@@ -1120,6 +1120,12 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
     let mock2 = MockProvider::new(vec![text_response("three")]);
     let session = Session::open(&dir, "s1").unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
+    let timed = handle.history_timed();
+    assert_eq!(timed.len(), handle.history().len());
+    assert!(
+        timed.iter().any(|(_, ts)| *ts > 0),
+        "resumed history keeps Record timestamps"
+    );
     assert_eq!(
         (
             handle.last_turn_usage().input_tokens,
@@ -2358,7 +2364,9 @@ fn assert_one_started_one_terminal(envs: &[&AgentEventEnvelope]) {
             matches!(
                 e.event,
                 AgentEvent::Turn(
-                    TurnEvent::Completed { .. } | TurnEvent::Cancelled | TurnEvent::Failed { .. }
+                    TurnEvent::Completed { .. }
+                        | TurnEvent::Cancelled { .. }
+                        | TurnEvent::Failed { .. }
                 )
             )
         })
@@ -2369,7 +2377,9 @@ fn assert_one_started_one_terminal(envs: &[&AgentEventEnvelope]) {
         matches!(
             envs.last().map(|e| &e.event),
             Some(AgentEvent::Turn(
-                TurnEvent::Completed { .. } | TurnEvent::Cancelled | TurnEvent::Failed { .. }
+                TurnEvent::Completed { .. }
+                    | TurnEvent::Cancelled { .. }
+                    | TurnEvent::Failed { .. }
             ))
         ),
         "last agent event must be terminal"
@@ -2498,7 +2508,7 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
     assert_one_started_one_terminal(&envs);
     assert!(matches!(
         envs.last().map(|e| &e.event),
-        Some(AgentEvent::Turn(TurnEvent::Cancelled))
+        Some(AgentEvent::Turn(TurnEvent::Cancelled { .. }))
     ));
     handle.shutdown().await;
 }

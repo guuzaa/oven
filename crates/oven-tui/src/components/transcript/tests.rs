@@ -19,8 +19,19 @@ use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
 use super::widget::Transcript;
 use super::wrap::{
-    MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer, format_lines, tail_lines,
+    MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer, format_elapsed, format_lines,
+    tail_lines,
 };
+
+const ELAPSED_0: &str = "Worked for 0s";
+const ELAPSED_0_1S: &str = "Worked for 0.1s";
+const ELAPSED_0_3S: &str = "Worked for 0.3s";
+const ELAPSED_0_9S: &str = "Worked for 0.9s";
+const ELAPSED_1S: &str = "Worked for 1s";
+const ELAPSED_1_2S: &str = "Worked for 1.2s";
+const ELAPSED_1_5S: &str = "Worked for 1.5s";
+const ELAPSED_1M: &str = "Worked for 1m 0s";
+const ELAPSED_1M_1S: &str = "Worked for 1m 1s";
 
 fn wide(t: &mut Transcript) {
     t.area.width = 80;
@@ -312,13 +323,18 @@ fn thinking(text: &str) -> AppEvent {
 }
 
 fn completed() -> AppEvent {
+    completed_in(0)
+}
+
+fn completed_in(duration_ms: u64) -> AppEvent {
     agent(AgentEvent::Turn(TurnEvent::Completed {
         usage: oven_llm::Usage::default(),
+        duration_ms,
     }))
 }
 
 fn cancelled() -> AppEvent {
-    agent(AgentEvent::Turn(TurnEvent::Cancelled))
+    agent(AgentEvent::Turn(TurnEvent::Cancelled { duration_ms: 0 }))
 }
 
 fn kinds_of(t: &Transcript) -> Vec<LineKind> {
@@ -326,15 +342,16 @@ fn kinds_of(t: &Transcript) -> Vec<LineKind> {
 }
 
 #[test]
-fn done_appends_separator_after_answer() {
+fn done_appends_elapsed_after_answer() {
     let mut t = Transcript::new();
     t.push_user("q");
     t.on_event(&text_delta("a"));
-    t.on_event(&completed());
+    t.on_event(&completed_in(1_500));
     assert_eq!(
         kinds_of(&t),
         vec![LineKind::User, LineKind::Text, LineKind::Separator]
     );
+    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some(ELAPSED_1_5S));
 }
 
 #[test]
@@ -375,7 +392,7 @@ fn separator_comes_after_tool_followup_not_between() {
 }
 
 #[test]
-fn cancelled_appends_separator() {
+fn cancelled_appends_elapsed() {
     let mut t = Transcript::new();
     t.push_user("q");
     t.on_event(&cancelled());
@@ -383,6 +400,7 @@ fn cancelled_appends_separator() {
         kinds_of(&t),
         vec![LineKind::User, LineKind::System, LineKind::Separator]
     );
+    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some(ELAPSED_0));
 }
 
 #[test]
@@ -604,6 +622,34 @@ fn seed_separates_complete_turns_not_tool_followup() {
 }
 
 #[test]
+fn seed_timed_shows_turn_elapsed_from_timestamps() {
+    let mut t = Transcript::new();
+    t.seed_timed(&[
+        (Message::user_text("one"), 1_000),
+        (
+            Message::assistant(vec![ContentBlock::Text {
+                text: "first".into(),
+            }]),
+            2_500,
+        ),
+        (Message::user_text("two"), 3_000),
+        (
+            Message::assistant(vec![ContentBlock::Text {
+                text: "second".into(),
+            }]),
+            4_200,
+        ),
+    ]);
+    let elapsed: Vec<&str> = t
+        .rows
+        .iter()
+        .filter(|r| r.kind == LineKind::Separator)
+        .map(|r| r.text.as_str())
+        .collect();
+    assert_eq!(elapsed, vec![ELAPSED_1_5S, ELAPSED_1_2S]);
+}
+
+#[test]
 fn live_tools_aggregate_counts_and_failures() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(
@@ -806,15 +852,40 @@ fn seed_failed_tool_counts_without_result() {
 }
 
 #[test]
-fn separator_renders_full_width_rule() {
+fn elapsed_renders_duration_text() {
     let mut t = Transcript::new();
     wide(&mut t);
     t.push_user("q");
     t.on_event(&text_delta("a"));
-    t.on_event(&completed());
+    t.on_event(&completed_in(1_500));
+    let last = t.wrapped.last().expect("wrapped elapsed");
+    let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.contains(ELAPSED_1_5S), "{text:?}");
+    assert_eq!(last.spans[1].style.fg, theme::elapsed().fg);
+}
+
+#[test]
+fn empty_separator_renders_full_width_rule() {
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.push_row(LineKind::System, "context compacted");
+    t.push_row(LineKind::Separator, "");
     let last = t.wrapped.last().expect("wrapped separator");
     let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
     assert_eq!(text.chars().filter(|c| *c == SEPARATOR_GLYPH).count(), 80);
+}
+
+#[test]
+fn format_elapsed_units() {
+    assert_eq!(format_elapsed(0), ELAPSED_0);
+    assert_eq!(format_elapsed(99), ELAPSED_0);
+    assert_eq!(format_elapsed(100), ELAPSED_0_1S);
+    assert_eq!(format_elapsed(342), ELAPSED_0_3S);
+    assert_eq!(format_elapsed(999), ELAPSED_0_9S);
+    assert_eq!(format_elapsed(1_000), ELAPSED_1S);
+    assert_eq!(format_elapsed(1_500), ELAPSED_1_5S);
+    assert_eq!(format_elapsed(60_000), ELAPSED_1M);
+    assert_eq!(format_elapsed(61_000), ELAPSED_1M_1S);
 }
 
 #[test]

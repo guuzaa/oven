@@ -147,6 +147,16 @@ impl App {
         self.state.borrow().history.clone()
     }
 
+    pub fn history_timed(&self) -> Vec<(Message, u64)> {
+        let state = self.state.borrow();
+        state
+            .history
+            .iter()
+            .cloned()
+            .zip(state.history_timestamps.iter().copied())
+            .collect()
+    }
+
     pub fn todos(&self) -> TodoList {
         self.state.borrow().todos.clone()
     }
@@ -179,8 +189,8 @@ impl App {
                         text.push_str(&t);
                     }
                     AgentEvent::Turn(TurnEvent::Completed { .. }) => return Ok(text),
-                    AgentEvent::Turn(TurnEvent::Cancelled) => return Ok(text),
-                    AgentEvent::Turn(TurnEvent::Failed { error }) => {
+                    AgentEvent::Turn(TurnEvent::Cancelled { .. }) => return Ok(text),
+                    AgentEvent::Turn(TurnEvent::Failed { error, .. }) => {
                         return Err(AppError::Runtime(error.message));
                     }
                     _ => {}

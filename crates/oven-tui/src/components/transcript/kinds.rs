@@ -34,7 +34,8 @@ impl LineKind {
             LineKind::ToolResult(true) | LineKind::ShellResult(true) => theme::ok(),
             LineKind::ToolResult(false) | LineKind::ShellResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
-            LineKind::System | LineKind::Separator => theme::dim(),
+            LineKind::System => theme::dim(),
+            LineKind::Separator => theme::elapsed(),
         }
     }
 

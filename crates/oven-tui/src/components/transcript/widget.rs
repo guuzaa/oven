@@ -20,8 +20,9 @@ use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_
 use super::tools::{ToolBurst, ToolLabel};
 use super::wrap::{
     MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL, apply_hover,
-    apply_thinking_shimmer, collect_lines, format_lines, line_display_width, paint_visible,
-    tail_lines, thinking_phase, trim_message, wrap_collapsible_into, wrap_line_into, wrap_row_into,
+    apply_thinking_shimmer, collect_lines, format_elapsed, format_lines, line_display_width,
+    paint_visible, tail_lines, thinking_phase, trim_message, wrap_collapsible_into, wrap_line_into,
+    wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -99,16 +100,27 @@ impl Transcript {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_from(&mut self, messages: &[Message]) {
+        self.replace_from_timed(&timed_messages(messages));
+    }
+
+    pub(crate) fn replace_from_timed(&mut self, messages: &[(Message, u64)]) {
         self.reset();
-        self.seed(messages);
+        self.seed_timed(messages);
     }
 
     /// Pre-fill the transcript from a persisted session's messages when
     /// resuming. Renders the same row kinds the live event stream produces;
     /// images are skipped since they cannot be drawn in a terminal.
+    #[cfg(test)]
     pub fn seed(&mut self, messages: &[Message]) {
-        for m in messages {
+        self.seed_timed(&timed_messages(messages));
+    }
+
+    pub fn seed_timed(&mut self, messages: &[(Message, u64)]) {
+        let mut turn_started_at: Option<u64> = None;
+        for (m, ts) in messages {
             match m.role {
                 Role::User => {
                     for block in &m.content {
@@ -119,6 +131,7 @@ impl Transcript {
                                     self.push_shell_command(&sh.command);
                                     self.push_shell_output(&sh.output, sh.ok());
                                 } else {
+                                    turn_started_at = Some(*ts);
                                     self.push_row(LineKind::User, text);
                                 }
                             }
@@ -170,7 +183,7 @@ impl Transcript {
                         }
                     }
                     if emitted && !has_tool {
-                        self.push_separator();
+                        self.push_elapsed(turn_elapsed(turn_started_at, *ts));
                     }
                 }
                 Role::System => {}
@@ -305,7 +318,6 @@ impl Transcript {
         let text = match kind {
             LineKind::Thinking => THOUGHT_LABEL.to_string(),
             LineKind::ShellResult(_) => tail_lines(text, MAX_SHELL_DISPLAY_LINES),
-            LineKind::Separator => String::new(),
             _ => text.to_string(),
         };
         self.push_row_with_detail(kind, text, None);
@@ -359,13 +371,21 @@ impl Transcript {
     }
 
     fn push_separator(&mut self) {
+        self.push_turn_end("");
+    }
+
+    fn push_elapsed(&mut self, duration_ms: u64) {
+        self.push_turn_end(&format_elapsed(duration_ms));
+    }
+
+    fn push_turn_end(&mut self, text: &str) {
         if matches!(
             self.rows.last().map(|r| r.kind),
             Some(LineKind::Separator) | None
         ) {
             return;
         }
-        self.push_row(LineKind::Separator, "");
+        self.push_row(LineKind::Separator, text);
     }
 
     fn take_stream(&mut self) -> (LineKind, String) {
@@ -698,13 +718,13 @@ impl Component for Transcript {
                 }
                 AgentEvent::Tool(ToolEvent::OutputDelta { .. }) => {}
                 AgentEvent::Turn(TurnEvent::Started) => {}
-                AgentEvent::Turn(TurnEvent::Completed { .. }) => {
+                AgentEvent::Turn(TurnEvent::Completed { duration_ms, .. }) => {
                     self.close_tool_burst();
                     self.finish_thinking();
                     self.flush_streaming();
-                    self.push_separator();
+                    self.push_elapsed(*duration_ms);
                 }
-                AgentEvent::Turn(TurnEvent::Cancelled) => {
+                AgentEvent::Turn(TurnEvent::Cancelled { duration_ms }) => {
                     self.close_tool_burst();
                     self.finish_thinking();
                     if !self.streaming.is_empty() {
@@ -714,14 +734,14 @@ impl Component for Transcript {
                         }
                     }
                     self.push_row(LineKind::System, "cancelled");
-                    self.push_separator();
+                    self.push_elapsed(*duration_ms);
                 }
-                AgentEvent::Turn(TurnEvent::Failed { error }) => {
+                AgentEvent::Turn(TurnEvent::Failed { error, duration_ms }) => {
                     self.close_tool_burst();
                     self.finish_thinking();
                     self.flush_streaming();
                     self.push_row(LineKind::Error, &error.message);
-                    self.push_separator();
+                    self.push_elapsed(*duration_ms);
                 }
                 AgentEvent::TodosChanged { .. } => {}
             },
@@ -815,4 +835,15 @@ impl Component for Transcript {
         }
         paint_visible(f, area, visible);
     }
+}
+
+#[cfg(test)]
+fn timed_messages(messages: &[Message]) -> Vec<(Message, u64)> {
+    messages.iter().cloned().map(|m| (m, 0)).collect()
+}
+
+fn turn_elapsed(started_at: Option<u64>, ended_at: u64) -> u64 {
+    started_at
+        .map(|start| ended_at.saturating_sub(start))
+        .unwrap_or(0)
 }

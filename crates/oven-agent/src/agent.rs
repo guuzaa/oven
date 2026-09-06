@@ -166,6 +166,10 @@ impl Agent {
         self.history.messages()
     }
 
+    pub fn history_timed(&self) -> impl ExactSizeIterator<Item = (&Message, u64)> + '_ {
+        self.history.iter_timed()
+    }
+
     pub fn history_revision(&self) -> u64 {
         self.history.revision()
     }
@@ -427,7 +431,11 @@ impl Agent {
                 match self.step(sink, ctx).await {
                     Ok(Some(final_text)) => {
                         let usage = self.last_turn_usage();
-                        sink.emit(AgentEvent::Turn(TurnEvent::Completed { usage }));
+                        let duration_ms = self.history.elapsed_ms();
+                        sink.emit(AgentEvent::Turn(TurnEvent::Completed {
+                            usage,
+                            duration_ms,
+                        }));
                         return Ok(TurnOutput {
                             response: Message::assistant_text(final_text),
                             usage,
@@ -451,13 +459,17 @@ impl Agent {
         self.mode = ctx.mode();
         (self.model, self.reasoning_effort) = ctx.model();
 
+        let duration_ms = self.history.elapsed_ms();
         match &result {
             Ok(_) => {}
             Err(e) if e.is_cancelled() => {
-                sink.emit(AgentEvent::Turn(TurnEvent::Cancelled));
+                sink.emit(AgentEvent::Turn(TurnEvent::Cancelled { duration_ms }));
             }
             Err(e) => {
-                sink.emit(AgentEvent::Turn(TurnEvent::Failed { error: e.clone() }));
+                sink.emit(AgentEvent::Turn(TurnEvent::Failed {
+                    error: e.clone(),
+                    duration_ms,
+                }));
             }
         }
         result
@@ -533,7 +545,9 @@ mod tests {
         matches!(
             event,
             AgentEvent::Turn(
-                TurnEvent::Completed { .. } | TurnEvent::Cancelled | TurnEvent::Failed { .. }
+                TurnEvent::Completed { .. }
+                    | TurnEvent::Cancelled { .. }
+                    | TurnEvent::Failed { .. }
             )
         )
     }
@@ -786,7 +800,7 @@ mod tests {
             sink.events,
             vec![
                 AgentEvent::Turn(TurnEvent::Started),
-                AgentEvent::Turn(TurnEvent::Cancelled),
+                AgentEvent::Turn(TurnEvent::Cancelled { duration_ms: 0 }),
             ]
         );
     }
@@ -808,6 +822,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_duration_ms_matches_history_timestamps() {
+        let mock = MockProvider::new(vec![text_response("ok")]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+        let mut sink = VecEventSink::default();
+        run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        let Some(AgentEvent::Turn(TurnEvent::Completed { duration_ms, .. })) = sink.events.last()
+        else {
+            panic!("expected Completed");
+        };
+        let timed: Vec<(Role, u64)> = agent
+            .history_timed()
+            .filter(|(m, _)| m.role != Role::System)
+            .map(|(m, ts)| (m.role, ts))
+            .collect();
+        assert_eq!(timed.len(), 2);
+        let persisted = timed[1].1.saturating_sub(timed[0].1);
+        const DURATION_SLACK_MS: u64 = 5_000;
+        assert!(
+            *duration_ms >= persisted,
+            "duration_ms={duration_ms} persisted={persisted}"
+        );
+        assert!(
+            duration_ms.saturating_sub(persisted) < DURATION_SLACK_MS,
+            "duration_ms={duration_ms} persisted={persisted}"
+        );
+    }
+
+    #[tokio::test]
     async fn completed_usage_is_the_last_turn_not_session_total() {
         let mock = MockProvider::new(vec![text_response("one"), text_response("two")]);
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
@@ -825,7 +869,7 @@ mod tests {
         assert_eq!(out2.usage.output_tokens, 5);
         assert_eq!(agent.last_turn_usage().input_tokens, 10);
         match sink.events.last() {
-            Some(AgentEvent::Turn(TurnEvent::Completed { usage })) => {
+            Some(AgentEvent::Turn(TurnEvent::Completed { usage, .. })) => {
                 assert_eq!(usage.input_tokens, 10);
                 assert_eq!(usage.output_tokens, 5);
             }
@@ -858,7 +902,7 @@ mod tests {
         assert_valid_event_sequence(&sink.events);
         assert!(matches!(
             sink.events.last(),
-            Some(AgentEvent::Turn(TurnEvent::Cancelled))
+            Some(AgentEvent::Turn(TurnEvent::Cancelled { .. }))
         ));
     }
 

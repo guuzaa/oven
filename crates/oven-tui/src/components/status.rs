@@ -213,7 +213,7 @@ impl Component for StatusBar {
     fn on_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Agent(env) => {
-                if let AgentEvent::Turn(TurnEvent::Completed { usage }) = &env.event {
+                if let AgentEvent::Turn(TurnEvent::Completed { usage, .. }) = &env.event {
                     self.usage = *usage;
                 }
             }
@@ -416,6 +416,7 @@ mod tests {
         };
         bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
             usage,
+            duration_ms: 0,
         })));
         assert_eq!(bar.usage, usage);
     }
@@ -430,6 +431,7 @@ mod tests {
                 cache_read_tokens: 0,
                 reasoning_tokens: 0,
             },
+            duration_ms: 0,
         })));
         bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
             usage: Usage {
@@ -438,6 +440,7 @@ mod tests {
                 cache_read_tokens: 0,
                 reasoning_tokens: 0,
             },
+            duration_ms: 0,
         })));
         assert_eq!(bar.usage.input_tokens, 20);
         assert_eq!(bar.usage.output_tokens, 8);

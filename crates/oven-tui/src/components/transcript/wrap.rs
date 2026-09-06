@@ -17,6 +17,33 @@ pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 pub(super) const THINKING_LABEL: &str = "Thinking...";
 pub(super) const THOUGHT_LABEL: &str = "Thought";
 pub(super) const RESULT_LABEL: &str = "Result";
+const MS_PER_SECOND: u64 = 1000;
+const MS_PER_TENTH: u64 = 100;
+const TENTHS_PER_SECOND: u64 = 10;
+const MS_PER_MINUTE: u64 = 60_000;
+const WORKED_FOR: &str = "Worked for";
+
+pub(super) fn format_elapsed(ms: u64) -> String {
+    let mins = ms / MS_PER_MINUTE;
+    let rest = ms % MS_PER_MINUTE;
+    let secs = if mins == 0 {
+        let tenths = rest / MS_PER_TENTH;
+        let whole = tenths / TENTHS_PER_SECOND;
+        let frac = tenths % TENTHS_PER_SECOND;
+        if frac == 0 {
+            whole.to_string()
+        } else {
+            format!("{whole}.{frac}")
+        }
+    } else {
+        (rest / MS_PER_SECOND).to_string()
+    };
+    if mins == 0 {
+        format!("{WORKED_FOR} {secs}s")
+    } else {
+        format!("{WORKED_FOR} {mins}m {secs}s")
+    }
+}
 
 pub(super) fn thinking_display_label(text: &str) -> &'static str {
     if text == THINKING_LABEL {
@@ -121,7 +148,13 @@ pub(super) fn wrap_row_into(
         out.push(Line::from(""));
     }
     if kind == LineKind::Separator {
-        out.push(separator_line(width));
+        if text.is_empty() {
+            out.push(separator_line(width));
+        } else {
+            for line in format_lines(kind, text) {
+                wrap_line_into(out, &line, width);
+            }
+        }
         return;
     }
     for line in format_lines(kind, text) {
@@ -221,7 +254,9 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
             part.to_string()
         };
         let body_span = match kind {
-            LineKind::Diff | LineKind::Shell => Span::styled(body, line_style),
+            LineKind::Diff | LineKind::Shell | LineKind::Separator => {
+                Span::styled(body, line_style)
+            }
             _ => Span::raw(body),
         };
         lines.push(Line::from(vec![

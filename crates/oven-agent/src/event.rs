@@ -24,9 +24,9 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEvent {
     Started,
-    Completed { usage: Usage },
-    Cancelled,
-    Failed { error: AgentError },
+    Completed { usage: Usage, duration_ms: u64 },
+    Cancelled { duration_ms: u64 },
+    Failed { error: AgentError, duration_ms: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

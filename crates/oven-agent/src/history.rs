@@ -159,6 +159,43 @@ impl History {
         self.messages.iter().map(|(m, _)| m)
     }
 
+    /// Messages paired with the `Record` timestamps they were stored with.
+    pub fn iter_timed(&self) -> impl ExactSizeIterator<Item = (&Message, u64)> + '_ {
+        self.messages.iter().map(|(m, ts)| (m, *ts))
+    }
+
+    /// Timestamp of the current turn's user message, if any.
+    pub fn last_user_timestamp(&self) -> Option<u64> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|(m, _)| m.role == Role::User)
+            .map(|(_, ts)| *ts)
+    }
+
+    /// Wall-clock elapsed milliseconds of the current turn: `now` minus the
+    /// user message timestamp persisted on that `Record`.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.last_user_timestamp()
+            .map(|start| now_ms().saturating_sub(start))
+            .unwrap_or(0)
+    }
+
+    /// Persisted duration of the last user turn: last message timestamp minus
+    /// the user message timestamp. `None` when there is no user turn.
+    pub fn last_turn_duration_ms(&self) -> Option<u64> {
+        let idx = self
+            .messages
+            .iter()
+            .rposition(|(m, _)| m.role == Role::User)?;
+        let start = self.messages[idx].1;
+        let end = self.messages[idx..]
+            .last()
+            .map(|(_, ts)| *ts)
+            .unwrap_or(start);
+        Some(end.saturating_sub(start))
+    }
+
     /// The conversation as persistence-ready records: every message plus a
     /// `TokenUsage` record right after the final assistant message of each
     /// turn that produced a response. Zero-usage turns emit no record, and a
@@ -687,5 +724,91 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, Record::TodoList { .. }))
         );
+    }
+
+    #[test]
+    fn last_turn_duration_uses_message_timestamps() {
+        let mut h = History::new();
+        h.set_messages_with_records(vec![
+            Record::Message {
+                timestamp: 1_000,
+                message: Message::user_text("q"),
+            },
+            Record::Message {
+                timestamp: 2_500,
+                message: Message::assistant_text("a"),
+            },
+        ]);
+        assert_eq!(h.last_user_timestamp(), Some(1_000));
+        assert_eq!(h.last_turn_duration_ms(), Some(1_500));
+    }
+
+    #[test]
+    fn last_turn_duration_none_without_user() {
+        let h = History::new();
+        assert_eq!(h.last_user_timestamp(), None);
+        assert_eq!(h.last_turn_duration_ms(), None);
+        assert_eq!(h.elapsed_ms(), 0);
+    }
+
+    #[test]
+    fn last_turn_duration_zero_when_only_user_message() {
+        let mut h = History::new();
+        h.set_messages_with_records(vec![Record::Message {
+            timestamp: 40,
+            message: Message::user_text("q"),
+        }]);
+        assert_eq!(h.last_turn_duration_ms(), Some(0));
+    }
+
+    #[test]
+    fn records_roundtrip_preserves_turn_duration() {
+        let mut h = History::new();
+        h.set_messages_with_records(vec![
+            Record::Message {
+                timestamp: 10,
+                message: Message::user_text("first"),
+            },
+            Record::Message {
+                timestamp: 40,
+                message: Message::assistant_text("one"),
+            },
+            Record::TokenUsage {
+                timestamp: 40,
+                usage: usage(3),
+            },
+            Record::Message {
+                timestamp: 50,
+                message: Message::user_text("second"),
+            },
+            Record::Message {
+                timestamp: 90,
+                message: Message::assistant_text("two"),
+            },
+        ]);
+        assert_eq!(h.last_turn_duration_ms(), Some(40));
+
+        let mut restored = History::new();
+        restored.set_messages_with_records(h.records());
+        assert_eq!(restored.last_turn_duration_ms(), Some(40));
+        restored.rewind_last_turn();
+        assert_eq!(restored.last_turn_duration_ms(), Some(30));
+    }
+
+    #[test]
+    fn iter_timed_pairs_messages_with_record_timestamps() {
+        let mut h = History::new();
+        h.set_messages_with_records(vec![
+            Record::Message {
+                timestamp: 7,
+                message: Message::user_text("q"),
+            },
+            Record::Message {
+                timestamp: 9,
+                message: Message::assistant_text("a"),
+            },
+        ]);
+        let timed: Vec<(Role, u64)> = h.iter_timed().map(|(m, ts)| (m.role, ts)).collect();
+        assert_eq!(timed, vec![(Role::User, 7), (Role::Assistant, 9)]);
     }
 }

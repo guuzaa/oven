@@ -12,6 +12,8 @@ pub struct AppState {
     pub provider: ProviderConfig,
     pub configured_providers: Vec<String>,
     pub history: Vec<Message>,
+    /// Unix-ms timestamps parallel to `history`, taken from `Record`.
+    pub history_timestamps: Vec<u64>,
     pub todos: TodoList,
     pub last_turn_usage: Usage,
     /// Prompt-side tokens of the last response in the current turn; approximates
@@ -38,6 +40,7 @@ impl AppState {
             provider,
             configured_providers,
             history: agent.history().cloned().collect(),
+            history_timestamps: agent.history_timed().map(|(_, ts)| ts).collect(),
             todos: agent.todos().clone(),
             last_turn_usage: agent.last_turn_usage(),
             context_tokens: context_tokens(agent),
