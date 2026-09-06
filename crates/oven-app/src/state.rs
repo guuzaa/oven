@@ -14,6 +14,11 @@ pub struct AppState {
     pub history: Vec<Message>,
     pub todos: TodoList,
     pub last_turn_usage: Usage,
+    /// Prompt-side tokens of the last response in the current turn; approximates
+    /// the current context size. Zero until a turn completes.
+    pub context_tokens: u32,
+    /// Context window of the active model, when known.
+    pub context_window: Option<u32>,
     pub session: SessionState,
     pub models: Vec<(String, String)>,
 }
@@ -35,10 +40,29 @@ impl AppState {
             history: agent.history().cloned().collect(),
             todos: agent.todos().clone(),
             last_turn_usage: agent.last_turn_usage(),
+            context_tokens: context_tokens(agent),
+            context_window: context_window(agent),
             session,
             models: Vec::new(),
         }
     }
+}
+
+/// Prompt-side tokens (input + cache reads) of the last response in the
+/// current turn.
+pub(crate) fn context_tokens(agent: &Agent) -> u32 {
+    let usage = agent.last_turn_usage();
+    usage.input_tokens.saturating_add(usage.cache_read_tokens)
+}
+
+/// Context window of the agent's active model, when the router knows it.
+pub(crate) fn context_window(agent: &Agent) -> Option<u32> {
+    use oven_llm::Provider;
+    agent
+        .router()
+        .resolve_model(agent.model())
+        .map(|info| info.context_window)
+        .filter(|window| *window > 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +121,10 @@ pub enum StateChange {
     },
     UsageChanged {
         usage: Usage,
+    },
+    ContextChanged {
+        tokens: u32,
+        window: Option<u32>,
     },
     ProviderChanged {
         provider: ProviderConfig,

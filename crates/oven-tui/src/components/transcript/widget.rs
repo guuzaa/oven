@@ -796,6 +796,12 @@ impl Component for Transcript {
                     self.push_shell_output(body, false);
                 }
             },
+            AppEventKind::Compaction(ev) => {
+                if matches!(ev, oven_app::CompactionEvent::Completed { .. }) {
+                    self.push_row(LineKind::System, "context compacted");
+                    self.push_separator();
+                }
+            }
             AppEventKind::StateChanged(_) => {}
             AppEventKind::Exited => {}
             AppEventKind::Notification { .. } => {}

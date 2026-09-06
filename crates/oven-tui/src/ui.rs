@@ -6,8 +6,8 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ControlCommand, ShellEvent,
-    StateChange, StateEvent, TurnEvent,
+    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, CompactionEvent, ControlCommand,
+    ShellEvent, StateChange, StateEvent, TurnEvent,
 };
 use tokio::sync::mpsc;
 
@@ -48,6 +48,10 @@ impl Ui {
             .canonicalize()
             .unwrap_or_else(|_| app.root().to_owned());
         let last_turn_usage = app.last_turn_usage();
+        let (context_tokens, context_window) = {
+            let state = app.state();
+            (state.context_tokens, state.context_window)
+        };
         let todos = app.todos();
         let configured = app.configured_providers();
         let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
@@ -64,7 +68,8 @@ impl Ui {
             pending: Vec::new(),
             transcript: Transcript::new(),
             status: StatusBar::new(model, &root, last_turn_usage)
-                .with_effort(provider.reasoning_effort),
+                .with_effort(provider.reasoning_effort)
+                .with_context(context_tokens, context_window),
             input,
             queue: QueueWidget::new(),
             todos: TodosWidget::new(todos),
@@ -181,6 +186,9 @@ impl Ui {
                     self.state.busy = false;
                 }
             },
+            AppEventKind::Compaction(ev) => {
+                self.state.busy = matches!(ev, CompactionEvent::Started);
+            }
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::ModeChanged { mode } => self.state.mode = *mode,
                 StateChange::HistoryChanged { .. } => {

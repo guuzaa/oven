@@ -1,5 +1,5 @@
 use oven_agent::RetryingProvider;
-use oven_llm::{Provider, ProviderBuilder, ProviderKind, ProviderName, Router};
+use oven_llm::{ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Router};
 
 use crate::AppError;
 use crate::config::{AppConfig, ProviderConfig};
@@ -78,6 +78,11 @@ pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider
         Some(kind) => ProviderBuilder::new(kind),
         None => ProviderBuilder::provider(),
     };
+    for (id, params) in &provider.models {
+        let mut info = ModelInfo::minimal(id, provider_name.clone());
+        info.context_window = params.context_window.unwrap_or_default();
+        builder = builder.add_model(info);
+    }
     builder = builder.provider_name(provider_name).api_key(api_key);
     if let Some(u) = &base_url {
         builder = builder.base_url(u);
@@ -88,6 +93,7 @@ pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ModelParams;
     use oven_llm::{ModelId, RouterError};
 
     #[test]
@@ -101,5 +107,51 @@ mod tests {
             router.provider(&ModelId::from("anything")),
             Err(RouterError::NoProviderRegistered)
         ));
+    }
+
+    #[test]
+    fn configured_model_params_resolve_via_provider() {
+        let provider = ProviderConfig {
+            name: Some("myproxy".into()),
+            base_url: Some("https://example.com/v1".into()),
+            api_key: Some("k".into()),
+            model: Some("my-model".into()),
+            models: [(
+                "my-model".to_string(),
+                ModelParams {
+                    context_window: Some(200_000),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let client = build_client(&provider).unwrap();
+        let info = client
+            .resolve_model(&ModelId::from("my-model"))
+            .expect("configured model should resolve");
+        assert_eq!(info.context_window, 200_000);
+    }
+
+    #[test]
+    fn configured_model_params_override_preset_catalog() {
+        let provider = ProviderConfig {
+            name: Some("deepseek".into()),
+            api_key: Some("k".into()),
+            models: [(
+                "deepseek-v4-flash".to_string(),
+                ModelParams {
+                    context_window: Some(42_000),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        let client = build_client(&provider).unwrap();
+        let info = client
+            .resolve_model(&ModelId::from("deepseek-v4-flash"))
+            .expect("preset model should resolve");
+        assert_eq!(info.context_window, 42_000);
     }
 }

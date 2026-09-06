@@ -27,9 +27,22 @@ pub enum AppEventKind {
     Agent(AgentEventEnvelope),
     StateChanged(StateEvent),
     Shell(ShellEvent),
+    Compaction(CompactionEvent),
     Notification { text: String },
     Error { message: String },
     Exited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionEvent {
+    Started,
+    Completed {
+        before_tokens: u32,
+        after_tokens: u32,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +90,10 @@ impl AppEvent {
 
     pub fn shell(event: ShellEvent) -> Self {
         Self::new(AppEventKind::Shell(event))
+    }
+
+    pub fn compaction(event: CompactionEvent) -> Self {
+        Self::new(AppEventKind::Compaction(event))
     }
 
     pub fn agent(event: AgentEvent) -> Self {

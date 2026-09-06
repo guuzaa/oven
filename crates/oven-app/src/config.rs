@@ -34,6 +34,17 @@ pub struct ProviderConfig {
     pub protocol: Option<ProviderKind>,
     pub api_key: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Metadata for models served by this provider, keyed by wire id.
+    /// Overrides the static catalog when the ids collide, and is the only
+    /// source of window sizes for custom vendors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub models: BTreeMap<String, ModelParams>,
+}
+
+/// User-declared model metadata (`[providers.<slug>.models."<wire-id>"]`).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModelParams {
+    pub context_window: Option<u32>,
 }
 
 impl ProviderConfig {
@@ -185,23 +196,26 @@ impl ProviderConfig {
 
     /// Overlay `Some` fields from `overlay` onto `self`.
     pub fn merge_fields(&mut self, overlay: &ProviderConfig) {
-        if let Some(n) = overlay.name.clone() {
-            self.name = Some(n);
+        if let Some(n) = &overlay.name {
+            self.name = Some(n.into());
         }
-        if let Some(m) = overlay.model.clone() {
-            self.model = Some(m);
+        if let Some(m) = &overlay.model {
+            self.model = Some(m.into());
         }
-        if let Some(u) = overlay.base_url.clone() {
-            self.base_url = Some(u);
+        if let Some(u) = &overlay.base_url {
+            self.base_url = Some(u.into());
         }
         if let Some(p) = overlay.protocol {
             self.protocol = Some(p);
         }
-        if let Some(k) = overlay.api_key.clone() {
-            self.api_key = Some(k);
+        if let Some(k) = &overlay.api_key {
+            self.api_key = Some(k.into());
         }
         if let Some(e) = overlay.reasoning_effort {
             self.reasoning_effort = Some(e);
+        }
+        for (id, params) in &overlay.models {
+            self.models.insert(id.clone(), *params);
         }
         self.normalize();
     }
@@ -222,6 +236,9 @@ impl ProviderConfig {
         }
         if self.api_key.is_none() {
             self.api_key = src.api_key.clone();
+        }
+        if self.models.is_empty() {
+            self.models = src.models.clone();
         }
         self.normalize();
     }
@@ -259,6 +276,11 @@ pub struct AppConfig {
     pub max_retries: u32,
     #[serde(default = "default_base_backoff_ms")]
     pub base_backoff_ms: u64,
+    /// Fraction of the model's context window that triggers automatic
+    /// history compaction after a turn completes. `0` disables it. Has no
+    /// effect when the active model's window size is unknown.
+    #[serde(default = "default_compact_threshold")]
+    pub compact_threshold: f64,
     /// Tools to mount, by name (`file_read`, `file_write`, `bash`). Empty
     /// means the built-in default set.
     pub tools: Vec<String>,
@@ -283,6 +305,8 @@ struct RawAppConfig {
     max_retries: u32,
     #[serde(default = "default_base_backoff_ms")]
     base_backoff_ms: u64,
+    #[serde(default = "default_compact_threshold")]
+    compact_threshold: f64,
     #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
@@ -303,6 +327,7 @@ impl<'de> Deserialize<'de> for AppConfig {
             request_timeout_secs: raw.request_timeout_secs,
             max_retries: raw.max_retries,
             base_backoff_ms: raw.base_backoff_ms,
+            compact_threshold: raw.compact_threshold,
             tools: raw.tools,
             mcps: raw.mcps,
         };
@@ -354,6 +379,9 @@ fn default_max_retries() -> u32 {
 fn default_base_backoff_ms() -> u64 {
     500
 }
+fn default_compact_threshold() -> f64 {
+    0.8
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -373,6 +401,7 @@ impl Default for AppConfig {
             request_timeout_secs: default_request_timeout_secs(),
             max_retries: default_max_retries(),
             base_backoff_ms: default_base_backoff_ms(),
+            compact_threshold: default_compact_threshold(),
             tools: Vec::new(),
             mcps: BTreeMap::new(),
         }
@@ -407,6 +436,9 @@ impl AppConfig {
         }
         if overlay.base_backoff_ms != default_base_backoff_ms() {
             self.base_backoff_ms = overlay.base_backoff_ms;
+        }
+        if overlay.compact_threshold != default_compact_threshold() {
+            self.compact_threshold = overlay.compact_threshold;
         }
         for name in overlay.tools {
             if !self.tools.contains(&name) {
@@ -591,6 +623,36 @@ mod tests {
             cfg.active_provider_config().unwrap().model.as_deref(),
             Some("edited")
         );
+    }
+
+    #[test]
+    fn model_params_parse_merge_and_roundtrip() {
+        let cfg: AppConfig = toml::from_str(
+            "[provider]\nname = \"myproxy\"\n[providers.myproxy.models.\"my-model\"]\ncontext_window = 200000\n",
+        )
+        .unwrap();
+        let provider = cfg.active_provider_config().unwrap();
+        assert_eq!(provider.models["my-model"].context_window, Some(200_000));
+
+        let mut base = ProviderConfig::default();
+        base.merge_fields(provider);
+        assert_eq!(base.models["my-model"].context_window, Some(200_000));
+
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let reparsed: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(reparsed, cfg);
+    }
+
+    #[test]
+    fn compact_threshold_defaults_and_merges() {
+        let cfg: AppConfig = toml::from_str("[provider]\nname = \"deepseek\"\n").unwrap();
+        assert_eq!(cfg.compact_threshold, 0.8);
+
+        let mut base = AppConfig::default();
+        let overlay: AppConfig =
+            toml::from_str("compact_threshold = 0.5\n[provider]\nname = \"deepseek\"\n").unwrap();
+        base.merge(overlay);
+        assert_eq!(base.compact_threshold, 0.5);
     }
 
     #[test]

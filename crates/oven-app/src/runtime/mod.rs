@@ -17,15 +17,16 @@ use tokio::sync::{mpsc, watch};
 use crate::App;
 use crate::command::{AppCommand, ControlCommand};
 use crate::config::{AppConfig, ProviderConfig};
-use crate::event::{AppEventKind, AppId, EventBus, ShellEvent};
+use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
 use crate::session::{Session, SessionError, SessionStore, record_recent};
 use crate::shell;
 use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
-use crate::state::{AppPhase, AppState, SessionState, StateChange};
+use crate::state::{AppPhase, AppState, SessionState, StateChange, context_tokens, context_window};
 
 const EMPTY_SHELL: &str = "empty shell command";
 const QUEUED_NOTICE_SUFFIX: &str = "queued: will apply once the current reply finishes";
 const REWIND_QUEUED_NOTICE: &str = "rewind queued: will apply once the current reply finishes";
+const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Control {
@@ -242,6 +243,10 @@ impl Runtime {
         }
 
         self.sync_state();
+        self.emit_context_changed();
+        if result.is_ok() && self.should_auto_compact() {
+            self.compact_history().await;
+        }
         self.state.phase = AppPhase::Idle;
         self.publish();
         Control::Continue
@@ -400,6 +405,103 @@ impl Runtime {
         self.events.emit_error(message);
     }
 
+    /// Refresh the context fields from the agent and notify subscribers.
+    fn emit_context_changed(&mut self) {
+        self.state.context_tokens = context_tokens(&self.agent);
+        self.state.context_window = context_window(&self.agent);
+        self.emit_state(StateChange::ContextChanged {
+            tokens: self.state.context_tokens,
+            window: self.state.context_window,
+        });
+    }
+
+    fn should_auto_compact(&self) -> bool {
+        let threshold = self.config.compact_threshold;
+        if threshold <= 0.0 {
+            return false;
+        }
+        let Some(window) = context_window(&self.agent) else {
+            return false;
+        };
+        f64::from(context_tokens(&self.agent)) >= threshold * f64::from(window)
+    }
+
+    /// Compact the conversation into a summary and start a fresh session
+    /// file holding only the summary. Shared by `/compact` and the
+    /// auto-compaction trigger; failures leave the history untouched.
+    async fn compact_history(&mut self) {
+        if self.agent.history().len() == 0 {
+            self.emit(AppEventKind::Notification {
+                text: NOTHING_TO_COMPACT_NOTICE.into(),
+            });
+            return;
+        }
+        self.emit(AppEventKind::Compaction(CompactionEvent::Started));
+        match self.agent.compact().await {
+            Ok(stats) => {
+                self.switch_session();
+                if let Some(store) = &self.session {
+                    self.agent.ensure_session_meta(store.root.clone());
+                }
+                self.persist_compacted();
+                self.sync_state();
+                self.publish();
+                self.emit_state(StateChange::HistoryChanged {
+                    revision: self.agent.history_revision(),
+                });
+                self.emit_state(StateChange::UsageChanged {
+                    usage: self.state.last_turn_usage,
+                });
+                self.emit_context_changed();
+                self.emit_state(StateChange::SessionChanged {
+                    session_id: self.state.session.id.clone(),
+                });
+                self.emit(AppEventKind::Compaction(CompactionEvent::Completed {
+                    before_tokens: stats.before_tokens,
+                    after_tokens: stats.after_tokens,
+                }));
+                self.emit(AppEventKind::Notification {
+                    text: format_compacted(stats.before_tokens, stats.after_tokens),
+                });
+            }
+            Err(e) => {
+                self.emit(AppEventKind::Compaction(CompactionEvent::Failed {
+                    error: e.message.clone(),
+                }));
+                self.emit_error(format!("compact failed: {}", e.message));
+            }
+        }
+    }
+
+    /// Write the compacted history (summary message) into the freshly
+    /// switched session file.
+    fn persist_compacted(&mut self) {
+        self.persisted_rev = self.agent.history_revision();
+        self.persisted_prefix = 0;
+        let mut errors = Vec::new();
+        if let Some(store) = &self.session {
+            let recs = self.agent.history_records();
+            match store.current().overwrite(&recs) {
+                Ok(()) => {
+                    store.mark_content(true);
+                    self.persisted_prefix = recs.len();
+                    if let Err(e) = record_recent_path(store) {
+                        errors.push(e.to_string());
+                    }
+                }
+                Err(e) => errors.push(e.to_string()),
+            }
+            if !self.agent.todos().is_empty()
+                && let Err(e) = persist_todo_snapshot(store, self.agent.todos())
+            {
+                errors.push(e.to_string());
+            }
+        }
+        for error in errors {
+            self.emit_error(error);
+        }
+    }
+
     pub(crate) fn publish(&self) {
         let _ = self.state_tx.send(self.state.clone());
     }
@@ -411,6 +513,8 @@ impl Runtime {
         self.state.history = self.agent.history().cloned().collect();
         self.state.todos = self.agent.todos().clone();
         self.state.last_turn_usage = self.agent.last_turn_usage();
+        self.state.context_tokens = context_tokens(&self.agent);
+        self.state.context_window = context_window(&self.agent);
         self.state.session.id = self.session.as_ref().and_then(SessionStore::session_id);
     }
 
@@ -428,6 +532,7 @@ impl Runtime {
                 self.emit(AppEventKind::Notification { text });
             }
             CommandOutcome::Cleared => self.clear_session(),
+            CommandOutcome::Compact => self.compact_history().await,
             CommandOutcome::Exit => {
                 self.emit(AppEventKind::Notification {
                     text: "goodbye".into(),
@@ -468,6 +573,7 @@ impl Runtime {
         self.emit_state(StateChange::UsageChanged {
             usage: self.state.last_turn_usage,
         });
+        self.emit_context_changed();
         self.emit_state(StateChange::SessionChanged {
             session_id: self.state.session.id.clone(),
         });
@@ -488,6 +594,7 @@ impl Runtime {
             model: outcome.model.clone(),
             reasoning_effort: outcome.reasoning_effort,
         });
+        self.emit_context_changed();
         let saved = self.save_provider_overlay(&outcome.overlay);
         let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
         if let Some(path) = saved {
@@ -571,6 +678,7 @@ impl Runtime {
                     model: model.clone(),
                     reasoning_effort: self.agent.reasoning_effort(),
                 });
+                self.emit_context_changed();
                 let router = self.agent.router();
                 let (models, auth_error) =
                     refresh_model_choices(router.as_ref(), &model, &self.config).await;
@@ -625,6 +733,7 @@ impl Runtime {
         self.emit_state(StateChange::UsageChanged {
             usage: self.state.last_turn_usage,
         });
+        self.emit_context_changed();
         self.emit_state(StateChange::HistoryChanged {
             revision: self.agent.history_revision(),
         });
@@ -731,6 +840,10 @@ fn resolve_model_switch(
         reasoning_effort,
         overlay,
     }
+}
+
+fn format_compacted(before_tokens: u32, after_tokens: u32) -> String {
+    format!("context compacted: {before_tokens} → {after_tokens} tokens")
 }
 
 fn format_model_switched(model: &str, reasoning_effort: Option<ReasoningEffort>) -> String {

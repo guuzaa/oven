@@ -1,6 +1,6 @@
 use crate::command::{AppCommand, ControlCommand};
 use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
-use crate::event::{AppEvent, AppEventKind, AppId, ShellEvent};
+use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent};
 use crate::session::{Session, canonical_root};
 use crate::state::{AppPhase, StateChange, StateEvent};
 use crate::{App, AppBuilder};
@@ -162,6 +162,64 @@ fn recorder() -> Arc<Mutex<Vec<String>>> {
     Arc::new(Mutex::new(Vec::new()))
 }
 
+/// Mock provider that also advertises a model catalog entry with a context
+/// window, so context-based paths (auto-compaction, ctx state) activate.
+struct WindowedProvider {
+    inner: MockProvider,
+    info: ModelInfo,
+}
+
+impl WindowedProvider {
+    fn new(context_window: u32, responses: Vec<Response>) -> Self {
+        let mut info = ModelInfo::minimal("default", ProviderName::Custom("mock".into()));
+        info.context_window = context_window;
+        Self {
+            inner: MockProvider::new(responses),
+            info,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for WindowedProvider {
+    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        self.inner.complete(req).await
+    }
+
+    async fn stream(
+        &self,
+        req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        self.inner.stream(req).await
+    }
+
+    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+        Some(&self.info)
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("mock".into())
+    }
+}
+
+fn response_with_usage(text: &str, input: u32, output: u32) -> Response {
+    let mut response = text_response(text);
+    response.usage = Some(Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: 0,
+        reasoning_tokens: 0,
+    });
+    response
+}
+
+fn compaction_of(ev: &AppEvent) -> Option<&CompactionEvent> {
+    match &ev.kind {
+        AppEventKind::Compaction(event) => Some(event),
+        _ => None,
+    }
+}
+
 fn is_turn_completed(ev: &AppEvent) -> bool {
     matches!(
         ev.kind,
@@ -310,7 +368,10 @@ async fn handle_exposes_slash_commands() {
         .iter()
         .map(|(n, _)| n.as_str())
         .collect();
-    assert_eq!(names, ["clear", "exit", "model", "setup", "plan"]);
+    assert_eq!(
+        names,
+        ["clear", "compact", "exit", "model", "setup", "plan"]
+    );
     assert!(handle.slash_commands().iter().all(|(_, d)| !d.is_empty()));
 
     handle.shutdown().await;
@@ -487,6 +548,141 @@ async fn slash_clear_emits_history_cleared_and_resets_usage() {
     let usage = done_usage.expect("usage after /clear");
     assert_eq!(usage.input_tokens, 0);
     assert_eq!(usage.output_tokens, 0);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn slash_compact_replaces_history_and_switches_session() {
+    let tmp = tempdir::TempDir::new("app-runtime-compact").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mock = MockProvider::new(vec![text_response("one"), text_response("the summary")]);
+    let session = Session::open(&dir, "s1").unwrap();
+    let handle = spawn_app_session(&app, Box::new(mock), session).await;
+
+    assert_eq!(handle.prompt("hello").await.unwrap(), "one");
+    assert_eq!(handle.session_id().as_deref(), Some("s1"));
+
+    let mut rx = handle.subscribe();
+    let out = handle.prompt("/compact").await.unwrap();
+    assert_eq!(out, "context compacted: 10 \u{2192} 5 tokens");
+
+    let mut saw_started = false;
+    let mut completed = None;
+    while let Ok(ev) = rx.try_recv() {
+        match compaction_of(&ev) {
+            Some(CompactionEvent::Started) => saw_started = true,
+            Some(CompactionEvent::Completed {
+                before_tokens,
+                after_tokens,
+            }) => completed = Some((*before_tokens, *after_tokens)),
+            _ => {}
+        }
+    }
+    assert!(saw_started);
+    assert_eq!(completed, Some((10, 5)));
+
+    let history = handle.history();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].role, Role::User);
+
+    let new_id = handle.session_id().expect("session id after compact");
+    assert_ne!(new_id, "s1");
+    let records = Session::open(&dir, &new_id)
+        .unwrap()
+        .load_records()
+        .unwrap();
+    assert!(records.iter().any(|r| matches!(
+        r,
+        Record::Message { message, .. } if message.role == Role::User
+    )));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn slash_compact_on_empty_history_notifies_without_provider_call() {
+    let tmp = tempdir::TempDir::new("app-runtime-compact-empty").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+    assert_eq!(
+        handle.prompt("/compact").await.unwrap(),
+        "nothing to compact"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_compact_keeps_history_and_reports_error() {
+    let tmp = tempdir::TempDir::new("app-runtime-compact-fail").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![text_response("one")]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+
+    assert_eq!(handle.prompt("hello").await.unwrap(), "one");
+    let err = handle.prompt("/compact").await.unwrap_err();
+    assert!(err.to_string().contains("compact failed"), "got: {err}");
+    assert_eq!(handle.history().len(), 2);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_compact_triggers_when_context_exceeds_threshold() {
+    let tmp = tempdir::TempDir::new("app-runtime-autocompact").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let provider = WindowedProvider::new(
+        100,
+        vec![
+            response_with_usage("one", 90, 5),
+            response_with_usage("the summary", 90, 5),
+        ],
+    );
+    let handle = spawn_app(&app, Box::new(provider)).await;
+
+    let mut rx = handle.subscribe();
+    assert_eq!(handle.prompt("hello").await.unwrap(), "one");
+
+    let completed = tokio::time::timeout(settle_timeout(), async {
+        loop {
+            let ev = rx.recv().await.expect("event stream open");
+            if let Some(CompactionEvent::Completed {
+                before_tokens,
+                after_tokens,
+            }) = compaction_of(&ev)
+            {
+                return (*before_tokens, *after_tokens);
+            }
+        }
+    })
+    .await
+    .expect("auto-compaction should complete");
+    assert_eq!(completed, (90, 5));
+    assert_eq!(handle.history().len(), 1);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn auto_compact_skipped_when_window_unknown() {
+    let tmp = tempdir::TempDir::new("app-runtime-autocompact-skip").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![
+        response_with_usage("one", 1_000_000, 5),
+        text_response("two"),
+    ]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+
+    let mut rx = handle.subscribe();
+    assert_eq!(handle.prompt("first").await.unwrap(), "one");
+    assert_eq!(handle.prompt("second").await.unwrap(), "two");
+
+    while let Ok(ev) = rx.try_recv() {
+        assert!(
+            compaction_of(&ev).is_none(),
+            "no compaction should run without a known context window"
+        );
+    }
+    assert_eq!(handle.history().len(), 4);
     handle.shutdown().await;
 }
 

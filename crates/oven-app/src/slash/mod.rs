@@ -1,4 +1,5 @@
 mod clear;
+mod compact;
 mod exit;
 mod model;
 mod plan;
@@ -10,6 +11,7 @@ use crate::AppError;
 use crate::config::ProviderConfig;
 
 pub use clear::Clear;
+pub use compact::Compact;
 pub use exit::Exit;
 pub(crate) use model::{Model, ModelDirective};
 pub use plan::Plan;
@@ -19,6 +21,7 @@ pub use setup::Setup;
 pub enum CommandOutcome {
     Reply(String),
     Cleared,
+    Compact,
     Exit,
     ModelChanged {
         model: String,
@@ -53,6 +56,7 @@ impl SlashRegistry {
     pub fn with_builtin() -> Self {
         let mut r = Self::new();
         r.register(Box::new(Clear));
+        r.register(Box::new(Compact));
         r.register(Box::new(Exit));
         r.register(Box::new(Model));
         r.register(Box::new(Setup));
@@ -192,8 +196,9 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 5);
+        assert_eq!(cmds.len(), 6);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, d)| n == "compact" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
         assert!(cmds.iter().any(|(n, d)| n == "model" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "setup" && !d.is_empty()));

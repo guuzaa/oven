@@ -48,10 +48,9 @@ pub struct SessionMeta {
 
 /// Conversation history with API-reported token tracking.
 ///
-/// Usage accounting accumulates every provider response of a user turn
+/// Usage accounting stores the final provider response of each user turn
 /// (`turn_usage`). A single `TokenUsage` record is persisted after the
-/// turn's final assistant message, holding that sum, so the in-memory total
-/// always equals the sum of the persisted usage records.
+/// turn's final assistant message.
 ///
 /// The `revision` is bumped whenever the message list is structurally replaced
 /// (`clear` / `set_messages_with_records`). The App layer
@@ -110,9 +109,8 @@ impl History {
 
     /// Replace the entire history from a persisted session: messages and the
     /// `TokenUsage` records that follow each turn's final assistant message.
-    /// The cumulative total is recomputed as the sum of the per-turn usage,
-    /// so a resumed session keeps its counters. If a turn carries several
-    /// usage records (legacy files), they are summed.
+    /// If a turn carries several usage records (legacy files), the last one is
+    /// used.
     pub fn set_messages_with_records(&mut self, records: Vec<Record>) {
         self.revision += 1;
         self.messages.clear();
@@ -128,7 +126,7 @@ impl History {
                 }
                 Record::TokenUsage { timestamp, usage } => match self.turn_usage.last_mut() {
                     Some(last) => {
-                        last.0 += usage;
+                        last.0 = usage;
                         last.1 = timestamp;
                     }
                     None => self.turn_usage.push((usage, timestamp)),
@@ -237,14 +235,13 @@ impl History {
         self.turn_usage.last().map(|(u, _)| *u).unwrap_or_default()
     }
 
-    /// Record a provider response's usage. Accumulates the response into the
-    /// current turn.
+    /// Record a provider response's usage as the current turn's latest usage.
     pub fn record_usage(&mut self, usage: &Usage) {
         if self.turn_usage.is_empty() {
             self.turn_usage.push((Usage::default(), 0));
         }
         let last = self.turn_usage.last_mut().expect("usage bucket exists");
-        last.0 += *usage;
+        last.0 = *usage;
         last.1 = self.messages.last().map(|(_, ts)| *ts).unwrap_or(0);
     }
 }
@@ -379,14 +376,14 @@ mod tests {
     }
 
     #[test]
-    fn record_usage_accumulates_every_response() {
+    fn record_usage_keeps_only_the_latest_response() {
         let mut h = History::new();
         h.push(Message::user_text("hi"));
         h.record_usage(&usage(100));
         assert_eq!(h.last_turn_usage().input_tokens, 100);
 
         h.record_usage(&usage(150));
-        assert_eq!(h.last_turn_usage().input_tokens, 250);
+        assert_eq!(h.last_turn_usage().input_tokens, 150);
     }
 
     #[test]
@@ -457,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn rewind_rolls_back_the_turn_accumulated_usage() {
+    fn rewind_rolls_back_the_last_usage_of_the_removed_turn() {
         let mut h = History::new();
         h.push(Message::user_text("first"));
         h.push(Message::assistant(vec![ContentBlock::text("one")]));
@@ -472,7 +469,7 @@ mod tests {
         h.record_usage(&usage(100));
         h.push(Message::assistant(vec![ContentBlock::text("two")]));
         h.record_usage(&usage(50));
-        assert_eq!(usage_inputs(&h), vec![10, 150]);
+        assert_eq!(usage_inputs(&h), vec![10, 50]);
 
         h.rewind_last_turn();
         assert_eq!(h.last_turn_usage().input_tokens, 10);
@@ -533,7 +530,7 @@ mod tests {
                 "msg", "msg", "msg", "msg", "usage", // second turn incl. tool chain
             ]
         );
-        assert_eq!(usage_inputs(&h), vec![100, 125]);
+        assert_eq!(usage_inputs(&h), vec![100, 75]);
 
         // Each usage record shares the timestamp of the assistant message it
         // follows.
@@ -620,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_sums_usage_records_of_a_turn() {
+    fn restore_keeps_the_last_usage_record_of_a_turn() {
         let records = vec![
             Record::Message {
                 timestamp: 1,
@@ -645,7 +642,7 @@ mod tests {
         ];
         let mut h = History::new();
         h.set_messages_with_records(records);
-        assert_eq!(usage_inputs(&h), vec![150]);
+        assert_eq!(usage_inputs(&h), vec![50]);
     }
 
     #[test]

@@ -12,6 +12,11 @@ max_retries = 2
 # Initial backoff between retries, in ms. Doubles per attempt (exponential).
 base_backoff_ms = 500
 
+# Fraction of the model's context window that triggers automatic history
+# compaction after a turn completes. 0 disables auto-compaction; /compact
+# still works. Ignored when the active model's window size is unknown.
+compact_threshold = 0.8
+
 # Tools to mount. Empty means the built-in default set
 # (file_read, file_write, bash).
 # tools = ["file_read", "file_write", "bash"]
@@ -35,6 +40,10 @@ name = "deepseek"
 # Explicit API key. If unset, the OVEN_API_KEY env var is used.
 # api_key = "sk-..."
 # reasoning_effort = "medium"
+# Model metadata, keyed by wire id. Overrides the built-in catalog and is
+# required for custom vendors if you want ctx% display and auto-compaction.
+# [providers.deepseek.models."deepseek-v4-flash"]
+# context_window = 1000000
 # [providers.xai]
 # api_key = "xai-..."
 # reasoning_effort = "low"

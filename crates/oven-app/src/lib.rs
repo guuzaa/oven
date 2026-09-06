@@ -17,7 +17,7 @@ mod tools;
 pub use app::{App, AppError};
 pub use builder::AppBuilder;
 pub use command::{AppCommand, ControlCommand};
-pub use event::{AppEvent, AppEventKind, AppId, ShellEvent};
+pub use event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent};
 pub use mcp::McpServerConfig;
 pub use mention::FileMentions;
 pub use oven_agent::{

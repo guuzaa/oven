@@ -2,7 +2,10 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
-use oven_app::{AgentEvent, AgentMode, AppEvent, AppEventKind, StateChange, StateEvent, TurnEvent};
+use oven_app::{
+    AgentEvent, AgentMode, AppEvent, AppEventKind, CompactionEvent, StateChange, StateEvent,
+    TurnEvent,
+};
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -26,13 +29,16 @@ pub enum StatusHint {
     Modal,
 }
 
-/// Single status row below the input: model [effort] · mode · root · usage.
-/// Optional slash-command reply is drawn on the row(s) beneath it.
+/// Single status row below the input: model [effort] · mode · root · usage
+/// [· ctx%]. Optional slash-command reply is drawn on the row(s) beneath it.
 pub struct StatusBar {
     model: String,
     effort: Option<ReasoningEffort>,
     root: String,
     usage: Usage,
+    context_tokens: u32,
+    context_window: Option<u32>,
+    compacting: bool,
     reply: Option<String>,
     reply_until: Option<Instant>,
     flash_until: Option<Instant>,
@@ -45,6 +51,9 @@ impl StatusBar {
             effort: None,
             root: display_path(root),
             usage,
+            context_tokens: 0,
+            context_window: None,
+            compacting: false,
             reply: None,
             reply_until: None,
             flash_until: None,
@@ -53,6 +62,12 @@ impl StatusBar {
 
     pub fn with_effort(mut self, effort: Option<ReasoningEffort>) -> Self {
         self.effort = effort;
+        self
+    }
+
+    pub fn with_context(mut self, tokens: u32, window: Option<u32>) -> Self {
+        self.context_tokens = tokens;
+        self.context_window = window;
         self
     }
 
@@ -160,6 +175,13 @@ impl StatusBar {
         spans.push(Span::styled(" · ", gray));
         spans.push(Span::styled(self.root.clone(), theme::path()));
         spans.extend(usage_spans(&self.usage, gray));
+        if self.compacting {
+            spans.push(Span::styled(" · ", gray));
+            spans.push(Span::styled("compacting context…", theme::accent()));
+        } else if let Some(pct) = context_percent(self.context_tokens, self.context_window) {
+            spans.push(Span::styled(" · ", gray));
+            spans.push(Span::styled(format!("ctx {pct}%"), gray));
+        }
         let hint = match hint {
             StatusHint::Slash => "tab fill · enter · esc",
             StatusHint::Modal => "enter · esc",
@@ -210,8 +232,15 @@ impl Component for StatusBar {
                     self.model = model.clone();
                     self.effort = *reasoning_effort;
                 }
+                StateChange::ContextChanged { tokens, window } => {
+                    self.context_tokens = *tokens;
+                    self.context_window = *window;
+                }
                 _ => {}
             },
+            AppEventKind::Compaction(event) => {
+                self.compacting = matches!(event, CompactionEvent::Started);
+            }
             AppEventKind::Notification { text } => {
                 self.set_reply(text.clone());
             }
@@ -240,6 +269,13 @@ fn usage_spans(total: &Usage, gray: Style) -> Vec<Span<'static>> {
             Span::styled(format_usage(total), gray),
         ]
     }
+}
+
+/// Percentage of the context window in use; `None` hides the segment (no
+/// window known, or nothing measured yet).
+fn context_percent(tokens: u32, window: Option<u32>) -> Option<u32> {
+    let window = window.filter(|w| *w > 0)?;
+    (tokens > 0).then(|| (u64::from(tokens) * 100 / u64::from(window)) as u32)
 }
 
 fn format_usage(u: &Usage) -> String {
@@ -573,6 +609,66 @@ mod tests {
             usage: Usage::default(),
         }));
         assert!(bar.reply.is_none());
+    }
+
+    #[test]
+    fn context_changed_shows_ctx_percent() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        bar.on_event(&AppEvent::state_changed(StateChange::ContextChanged {
+            tokens: 42_000,
+            window: Some(100_000),
+        }));
+        let state = State::new();
+        let (row, _) = draw_status_bar_row(&mut bar, &state);
+        assert!(row.contains("ctx 42%"), "status bar was {row:?}");
+    }
+
+    #[test]
+    fn ctx_percent_hidden_without_window_or_tokens() {
+        assert_eq!(context_percent(0, Some(100)), None);
+        assert_eq!(context_percent(50, None), None);
+        assert_eq!(context_percent(50, Some(0)), None);
+        assert_eq!(context_percent(50, Some(100)), Some(50));
+
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        bar.on_event(&AppEvent::state_changed(StateChange::ContextChanged {
+            tokens: 42_000,
+            window: None,
+        }));
+        let state = State::new();
+        let (row, _) = draw_status_bar_row(&mut bar, &state);
+        assert!(!row.contains("ctx"), "status bar was {row:?}");
+    }
+
+    #[test]
+    fn compaction_events_toggle_compacting_segment() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        bar.on_event(&AppEvent::new(AppEventKind::Compaction(
+            CompactionEvent::Started,
+        )));
+        let state = State::new();
+        let (row, _) = draw_status_bar_row(&mut bar, &state);
+        assert!(row.contains("compacting context"), "status bar was {row:?}");
+
+        bar.on_event(&AppEvent::new(AppEventKind::Compaction(
+            CompactionEvent::Completed {
+                before_tokens: 100,
+                after_tokens: 10,
+            },
+        )));
+        let (row, _) = draw_status_bar_row(&mut bar, &state);
+        assert!(!row.contains("compacting"), "status bar was {row:?}");
+
+        bar.on_event(&AppEvent::new(AppEventKind::Compaction(
+            CompactionEvent::Started,
+        )));
+        bar.on_event(&AppEvent::new(AppEventKind::Compaction(
+            CompactionEvent::Failed {
+                error: "boom".into(),
+            },
+        )));
+        let (row, _) = draw_status_bar_row(&mut bar, &state);
+        assert!(!row.contains("compacting"), "status bar was {row:?}");
     }
 
     fn draw_status_bar_row(

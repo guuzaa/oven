@@ -228,7 +228,7 @@ impl Agent {
             .collect()
     }
 
-    fn build_request(&self) -> Request {
+    pub(crate) fn build_request(&self) -> Request {
         let tools = self.llm_tools();
         let mut system = self.system.clone();
         let todos = &self.todos;

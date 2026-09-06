@@ -1,4 +1,5 @@
 mod agent;
+mod compact;
 mod error;
 mod event;
 mod history;
@@ -14,6 +15,7 @@ mod tools;
 mod turn;
 
 pub use agent::{Agent, RouterHandle};
+pub use compact::{CompactStats, NOTHING_TO_COMPACT};
 pub use error::AgentError;
 pub use event::{
     AgentEvent, AgentEventEnvelope, StreamEvent, ToolEvent, ToolOutputStream, ToolResult, TurnEvent,
