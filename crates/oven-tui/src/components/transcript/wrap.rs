@@ -13,10 +13,10 @@ use super::super::collapsible::Collapsible;
 use super::super::theme;
 use super::kinds::{LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH};
 
-pub(super) const MAX_RESULT_LINES: usize = 6;
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 pub(super) const THINKING_LABEL: &str = "Thinking...";
 pub(super) const THOUGHT_LABEL: &str = "Thought";
+pub(super) const RESULT_LABEL: &str = "Result";
 
 pub(super) fn thinking_display_label(text: &str) -> &'static str {
     if text == THINKING_LABEL {
@@ -102,16 +102,6 @@ fn thinking_shade(t: f32) -> Color {
     Color::Rgb(v, v, v)
 }
 
-pub(super) fn truncate_result(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= MAX_RESULT_LINES {
-        return text.to_string();
-    }
-    let mut out = lines[..MAX_RESULT_LINES].join("\n");
-    out.push_str(&format!("\n… {} more", lines.len() - MAX_RESULT_LINES));
-    out
-}
-
 pub(super) fn tail_lines(text: &str, max: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= max {
@@ -160,8 +150,9 @@ pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-pub(super) fn wrap_collapsible_thinking_into(
+pub(super) fn wrap_collapsible_into(
     out: &mut Vec<Line<'static>>,
+    kind: LineKind,
     title: &str,
     collapsible: &Collapsible,
     width: usize,
@@ -169,14 +160,14 @@ pub(super) fn wrap_collapsible_thinking_into(
     if !out.is_empty() {
         out.push(Line::from(""));
     }
-    let style = theme::thinking();
+    let style = kind.style();
     let marker = if collapsible.is_expanded() {
         "⌄ "
     } else {
         "› "
     };
     let header = Line::from(vec![
-        Span::styled(LineKind::Thinking.gutter().to_string(), style),
+        Span::styled(kind.gutter().to_string(), style),
         Span::styled(format!("{marker}{title}"), style),
     ]);
     wrap_line_into(out, &header, width);

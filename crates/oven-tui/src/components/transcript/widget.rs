@@ -19,9 +19,9 @@ use super::kinds::{LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::{ToolBurst, ToolLabel};
 use super::wrap::{
-    MAX_SHELL_DISPLAY_LINES, THINKING_LABEL, THOUGHT_LABEL, apply_hover, apply_thinking_shimmer,
-    collect_lines, format_lines, line_display_width, paint_visible, tail_lines, thinking_phase,
-    trim_message, truncate_result, wrap_collapsible_thinking_into, wrap_line_into, wrap_row_into,
+    MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL, apply_hover,
+    apply_thinking_shimmer, collect_lines, format_lines, line_display_width, paint_visible,
+    tail_lines, thinking_phase, trim_message, wrap_collapsible_into, wrap_line_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -32,7 +32,7 @@ const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 pub struct Transcript {
     pub(super) rows: Vec<Row>,
     pub(super) wrapped: Vec<Line<'static>>,
-    thinking_headers: Vec<Option<usize>>,
+    collapsible_headers: Vec<Option<usize>>,
     streaming: String,
     stream_kind: LineKind,
     wrapped_stream: Vec<Line<'static>>,
@@ -51,9 +51,9 @@ pub struct Transcript {
     pub(super) select_anchor: Option<SelPos>,
     select_head: Option<SelPos>,
     pub(super) dragging: bool,
-    pressed_thinking_header: Option<usize>,
-    hovered_thinking: Option<usize>,
-    last_thinking_click: Option<(usize, Instant)>,
+    pressed_collapsible: Option<usize>,
+    hovered_collapsible: Option<usize>,
+    last_collapsible_click: Option<(usize, Instant)>,
     tool_burst: ToolBurst,
     detail_ids: HashSet<String>,
 }
@@ -63,7 +63,7 @@ impl Transcript {
         Self {
             rows: Vec::new(),
             wrapped: Vec::new(),
-            thinking_headers: Vec::new(),
+            collapsible_headers: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
             wrapped_stream: Vec::new(),
@@ -76,9 +76,9 @@ impl Transcript {
             select_anchor: None,
             select_head: None,
             dragging: false,
-            pressed_thinking_header: None,
-            hovered_thinking: None,
-            last_thinking_click: None,
+            pressed_collapsible: None,
+            hovered_collapsible: None,
+            last_collapsible_click: None,
             tool_burst: ToolBurst::default(),
             detail_ids: HashSet::new(),
         }
@@ -208,7 +208,7 @@ impl Transcript {
         let body = trim_message(&tool_result);
         if is_error || !body.is_empty() {
             self.push_row(
-                LineKind::ToolResult(is_error),
+                LineKind::ToolResult(!is_error),
                 if body.is_empty() {
                     "(no output)"
                 } else {
@@ -255,13 +255,13 @@ impl Transcript {
     pub(super) fn reset(&mut self) {
         self.rows.clear();
         self.wrapped.clear();
-        self.thinking_headers.clear();
+        self.collapsible_headers.clear();
         self.clear_stream();
         self.pinned = true;
         self.top = 0;
         self.clear_selection();
-        self.hovered_thinking = None;
-        self.last_thinking_click = None;
+        self.hovered_collapsible = None;
+        self.last_collapsible_click = None;
         self.close_tool_burst();
         self.detail_ids.clear();
     }
@@ -329,7 +329,6 @@ impl Transcript {
     fn replace_last_row(&mut self, kind: LineKind, text: &str) {
         let text = match kind {
             LineKind::Thinking => THOUGHT_LABEL.to_string(),
-            LineKind::ToolResult(_) => truncate_result(text),
             LineKind::ShellResult(_) => tail_lines(text, MAX_SHELL_DISPLAY_LINES),
             LineKind::Separator => String::new(),
             _ => text.to_string(),
@@ -346,9 +345,12 @@ impl Transcript {
     }
 
     pub(super) fn push_row(&mut self, kind: LineKind, text: &str) {
+        if matches!(kind, LineKind::ToolResult(_)) {
+            self.push_row_with_detail(kind, RESULT_LABEL.to_string(), Some(Collapsible::new(text)));
+            return;
+        }
         let text = match kind {
             LineKind::Thinking => THOUGHT_LABEL.to_string(),
-            LineKind::ToolResult(_) => truncate_result(text),
             LineKind::ShellResult(_) => tail_lines(text, MAX_SHELL_DISPLAY_LINES),
             LineKind::Separator => String::new(),
             _ => text.to_string(),
@@ -393,17 +395,15 @@ impl Transcript {
             None
         };
         self.rows.push(row);
-        self.thinking_headers.push(header);
+        self.collapsible_headers.push(header);
         self.keep_following();
     }
 
     fn wrap_row_into(out: &mut Vec<Line<'static>>, row: &Row, width: usize) -> Option<usize> {
         let start = out.len();
-        if row.kind == LineKind::Thinking
-            && let Some(collapsible) = &row.collapsible
-        {
+        if let Some(collapsible) = &row.collapsible {
             let header = start + usize::from(start > 0);
-            wrap_collapsible_thinking_into(out, &row.text, collapsible, width);
+            wrap_collapsible_into(out, row.kind, &row.text, collapsible, width);
             Some(header)
         } else {
             wrap_row_into(out, row.kind, &row.text, width);
@@ -455,7 +455,7 @@ impl Transcript {
         }
         for row in &self.rows[start..end] {
             let header = Self::wrap_row_into(&mut self.wrapped, row, self.width);
-            self.thinking_headers.push(header);
+            self.collapsible_headers.push(header);
         }
     }
 
@@ -475,7 +475,7 @@ impl Transcript {
 
     pub(super) fn rewrap_all(&mut self) {
         self.wrapped.clear();
-        self.thinking_headers.clear();
+        self.collapsible_headers.clear();
         if self.tool_burst.row_open && !self.rows.is_empty() {
             let last = self.rows.len() - 1;
             self.wrap_rows(0, last);
@@ -492,7 +492,7 @@ impl Transcript {
         self.select_anchor = None;
         self.select_head = None;
         self.dragging = false;
-        self.pressed_thinking_header = None;
+        self.pressed_collapsible = None;
     }
 
     fn begin_selection(&mut self, column: u16, row: u16) {
@@ -572,23 +572,23 @@ impl Transcript {
         }
     }
 
-    fn thinking_header_at(&self, column: u16, row: u16) -> Option<usize> {
+    fn collapsible_header_at(&self, column: u16, row: u16) -> Option<usize> {
         let line = self.pos_at(column, row).line;
-        self.thinking_headers
+        self.collapsible_headers
             .iter()
             .position(|header| *header == Some(line))
     }
 
     fn update_hover(&mut self, in_area: bool, column: u16, row: u16) -> bool {
         let hovered = in_area
-            .then(|| self.thinking_header_at(column, row))
+            .then(|| self.collapsible_header_at(column, row))
             .flatten();
-        let changed = self.hovered_thinking != hovered;
-        self.hovered_thinking = hovered;
+        let changed = self.hovered_collapsible != hovered;
+        self.hovered_collapsible = hovered;
         changed
     }
 
-    fn toggle_thinking(&mut self, row: usize) {
+    fn toggle_collapsible(&mut self, row: usize) {
         if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
             collapsible.toggle();
             self.rewrap_all();
@@ -617,7 +617,7 @@ impl Transcript {
                 collapsible: Some(_),
             }) if text == THINKING_LABEL
         )
-        .then(|| self.thinking_headers.last().copied().flatten())
+        .then(|| self.collapsible_headers.last().copied().flatten())
         .flatten()
     }
 
@@ -679,21 +679,21 @@ impl Component for Transcript {
                 KeyResult::Handled
             }
             MouseEventKind::Down(MouseButton::Left) if in_area => {
-                let header = self.thinking_header_at(mouse.column, mouse.row);
+                let header = self.collapsible_header_at(mouse.column, mouse.row);
                 if let Some(row) = header
-                    && let Some((last, at)) = self.last_thinking_click
+                    && let Some((last, at)) = self.last_collapsible_click
                     && last == row
                     && at.elapsed() <= DOUBLE_CLICK_TIMEOUT
                 {
-                    self.last_thinking_click = None;
-                    self.toggle_thinking(row);
+                    self.last_collapsible_click = None;
+                    self.toggle_collapsible(row);
                     self.clear_selection();
                     return KeyResult::Handled;
                 }
                 if header.is_none() {
-                    self.last_thinking_click = None;
+                    self.last_collapsible_click = None;
                 }
-                self.pressed_thinking_header = header;
+                self.pressed_collapsible = header;
                 self.begin_selection(mouse.column, mouse.row);
                 KeyResult::Handled
             }
@@ -710,15 +710,15 @@ impl Component for Transcript {
             }
             MouseEventKind::Up(MouseButton::Left) if self.dragging => {
                 self.update_selection(mouse.column, mouse.row);
-                let header = self.pressed_thinking_header;
+                let header = self.pressed_collapsible;
                 let selected = self.normalized_sel().is_some();
                 if self.end_selection() {
                     KeyResult::Action(Action::Notify("Copied!".into()))
                 } else {
                     if !selected {
-                        self.last_thinking_click = header.map(|row| (row, Instant::now()));
+                        self.last_collapsible_click = header.map(|row| (row, Instant::now()));
                     } else {
-                        self.last_thinking_click = None;
+                        self.last_collapsible_click = None;
                     }
                     KeyResult::Handled
                 }
@@ -843,8 +843,8 @@ impl Component for Transcript {
         {
             *line = apply_thinking_shimmer(line, thinking_phase());
         }
-        if let Some(row) = self.hovered_thinking
-            && let Some(Some(header)) = self.thinking_headers.get(row)
+        if let Some(row) = self.hovered_collapsible
+            && let Some(Some(header)) = self.collapsible_headers.get(row)
             && *header >= start
             && let Some(line) = visible.get_mut(header - start)
         {

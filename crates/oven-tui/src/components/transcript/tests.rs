@@ -8,6 +8,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::component::{Action, Component, KeyResult, State};
@@ -18,8 +19,7 @@ use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
 use super::widget::Transcript;
 use super::wrap::{
-    MAX_RESULT_LINES, MAX_SHELL_DISPLAY_LINES, apply_thinking_shimmer, format_lines, tail_lines,
-    truncate_result,
+    MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer, format_lines, tail_lines,
 };
 
 fn wide(t: &mut Transcript) {
@@ -62,17 +62,6 @@ fn thinking_shimmer_preserves_label_and_shifts() {
     assert_eq!(body, THINKING_LABEL);
     assert_eq!(a.spans.len(), 1 + THINKING_LABEL.chars().count());
     assert_ne!(a.spans[1].style.fg, b.spans[1].style.fg);
-}
-
-#[test]
-fn truncate_result_caps_lines() {
-    let text = (0..10)
-        .map(|i| format!("l{i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let out = truncate_result(&text);
-    assert!(out.ends_with("… 4 more"));
-    assert_eq!(out.lines().count(), MAX_RESULT_LINES + 1);
 }
 
 #[test]
@@ -414,6 +403,58 @@ fn thinking_delta_shows_label_not_content() {
 }
 
 #[test]
+fn tool_result_double_click_toggles_detail() {
+    const OUTPUT: &str = "updated\nmore lines of output";
+
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(10, "todo_write", todo_input()));
+    t.on_event(&tool_end(10, true, OUTPUT));
+    ready(&mut t, Rect::new(0, 0, 80, 10));
+
+    let detail = t.rows[1].collapsible.as_ref().expect("tool result detail");
+    assert_eq!(detail.body(), OUTPUT);
+    assert!(!detail.is_expanded());
+    assert!(
+        t.wrapped
+            .iter()
+            .all(|line| !line_text(line).contains("more lines of output"))
+    );
+
+    let header_y = t
+        .wrapped
+        .iter()
+        .position(|line| line_text(line).contains(RESULT_LABEL))
+        .expect("result header") as u16;
+    double_click(&mut t, 2, header_y);
+
+    assert!(
+        t.rows[1]
+            .collapsible
+            .as_ref()
+            .expect("tool result detail")
+            .is_expanded()
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains("more lines of output"))
+    );
+
+    t.handle_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 2, header_y),
+        &State::new(),
+    );
+    double_click(&mut t, 2, header_y);
+    assert!(
+        !t.rows[1]
+            .collapsible
+            .as_ref()
+            .expect("tool result detail")
+            .is_expanded()
+    );
+}
+
+#[test]
 fn thinking_double_click_toggles_detail() {
     const THINKING: &str = "inspect the implementation";
 
@@ -432,16 +473,7 @@ fn thinking_double_click_toggles_detail() {
             .any(|span| span.content.contains(THINKING))
     }));
 
-    for kind in [
-        MouseEventKind::Down(MouseButton::Left),
-        MouseEventKind::Up(MouseButton::Left),
-        MouseEventKind::Down(MouseButton::Left),
-    ] {
-        assert!(matches!(
-            t.handle_mouse(mouse(kind, 2, 0), &State::new()),
-            KeyResult::Handled
-        ));
-    }
+    double_click(&mut t, 2, 0);
 
     assert!(
         t.rows[0]
@@ -460,13 +492,7 @@ fn thinking_double_click_toggles_detail() {
         mouse(MouseEventKind::Up(MouseButton::Left), 2, 0),
         &State::new(),
     );
-    for kind in [
-        MouseEventKind::Down(MouseButton::Left),
-        MouseEventKind::Up(MouseButton::Left),
-        MouseEventKind::Down(MouseButton::Left),
-    ] {
-        t.handle_mouse(mouse(kind, 2, 0), &State::new());
-    }
+    double_click(&mut t, 2, 0);
     assert!(
         !t.rows[0]
             .collapsible
@@ -638,7 +664,10 @@ fn todo_write_keeps_detail_and_result() {
         t.rows[0].text,
         "todo_write · 1 todos (0 in_progress, 0 completed)"
     );
-    assert_eq!(t.rows[1].text, "updated");
+    assert_eq!(t.rows[1].text, RESULT_LABEL);
+    let result = t.rows[1].collapsible.as_ref().expect("tool result detail");
+    assert_eq!(result.body(), "updated");
+    assert!(!result.is_expanded());
 }
 
 #[test]
@@ -731,13 +760,21 @@ fn seed_todo_write_keeps_result() {
     ]);
     assert_eq!(
         kinds_of(&t),
-        vec![LineKind::Tool, LineKind::ToolResult(false)]
+        vec![LineKind::Tool, LineKind::ToolResult(true)]
     );
     assert_eq!(
         t.rows[0].text,
         "todo_write · 1 todos (0 in_progress, 0 completed)"
     );
-    assert_eq!(t.rows[1].text, "updated");
+    assert_eq!(t.rows[1].text, RESULT_LABEL);
+    assert_eq!(
+        t.rows[1]
+            .collapsible
+            .as_ref()
+            .expect("tool result detail")
+            .body(),
+        "updated"
+    );
 }
 
 #[test]
@@ -846,6 +883,23 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         column,
         row,
         modifiers: crossterm::event::KeyModifiers::NONE,
+    }
+}
+
+fn line_text(line: &Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+fn double_click(t: &mut Transcript, column: u16, row: u16) {
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::Down(MouseButton::Left),
+    ] {
+        assert!(matches!(
+            t.handle_mouse(mouse(kind, column, row), &State::new()),
+            KeyResult::Handled
+        ));
     }
 }
 
