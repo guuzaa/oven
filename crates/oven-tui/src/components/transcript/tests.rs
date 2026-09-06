@@ -23,7 +23,7 @@ use super::wrap::{
 };
 
 fn wide(t: &mut Transcript) {
-    t.width = 80;
+    t.area.width = 80;
     t.rewrap_all();
 }
 
@@ -136,29 +136,28 @@ fn tool_result_gutters() {
 fn streaming_does_not_yank_scrolled_view() {
     let mut t = Transcript::new();
     wide(&mut t);
-    t.view_height = 3;
+    t.area.height = 3;
     fill(&mut t, 10);
     t.scroll_up(2);
     let anchored = t.top;
-    assert!(!t.pinned);
+    assert!(anchored.is_some());
     t.push_stream(LineKind::Text, "more");
     assert_eq!(t.top, anchored, "reading position must not move");
-    assert!(!t.pinned);
 }
 
 #[test]
 fn streaming_follows_when_pinned() {
     let mut t = Transcript::new();
     wide(&mut t);
-    t.view_height = 3;
+    t.area.height = 3;
     fill(&mut t, 10);
-    assert!(t.pinned);
+    assert!(t.top.is_none());
     t.push_stream(LineKind::Text, "more");
-    assert!(t.pinned);
+    assert!(t.top.is_none());
     t.rewrap_stream();
     assert_eq!(
         t.current_top(),
-        t.total_lines().saturating_sub(t.view_height)
+        t.total_lines().saturating_sub(t.area.height as usize)
     );
 }
 
@@ -166,12 +165,12 @@ fn streaming_follows_when_pinned() {
 fn scroll_down_returns_to_bottom() {
     let mut t = Transcript::new();
     wide(&mut t);
-    t.view_height = 3;
+    t.area.height = 3;
     fill(&mut t, 10);
     t.scroll_up(5);
-    assert!(!t.pinned);
+    assert!(t.top.is_some());
     t.scroll_down(5);
-    assert!(t.pinned);
+    assert!(t.top.is_none());
 }
 
 #[test]
@@ -856,24 +855,21 @@ fn page_keys_scroll_by_viewport() {
 
     let mut t = Transcript::new();
     wide(&mut t);
-    t.view_height = 5;
+    t.area.height = 5;
     fill(&mut t, 20);
     let bottom = t.total_lines().saturating_sub(5);
     let page = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
     t.handle_key(page, &State::new());
-    assert!(!t.pinned);
-    assert_eq!(t.top, bottom.saturating_sub(5));
+    assert_eq!(t.top, Some(bottom.saturating_sub(5)));
     t.handle_key(
         KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE),
         &State::new(),
     );
-    assert!(t.pinned);
+    assert!(t.top.is_none());
 }
 
 fn ready(t: &mut Transcript, area: Rect) {
     t.area = area;
-    t.width = area.width as usize;
-    t.view_height = area.height as usize;
     t.rewrap_all();
 }
 

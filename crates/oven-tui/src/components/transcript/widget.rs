@@ -28,30 +28,20 @@ const MOUSE_SCROLL_STEP: u16 = 3;
 const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
+const NO_OUTPUT: &str = "(no output)";
 
 pub struct Transcript {
     pub(super) rows: Vec<Row>,
     pub(super) wrapped: Vec<Line<'static>>,
-    collapsible_headers: Vec<Option<usize>>,
     streaming: String,
     stream_kind: LineKind,
     wrapped_stream: Vec<Line<'static>>,
-    stream_dirty: bool,
-    /// Content width (excluding borders) used by the cached wrap; 0 until
-    /// the first draw.
-    pub(super) width: usize,
-    /// Viewport: when `pinned` the view follows the newest content; when the
-    /// user scrolled up, `top` is the absolute wrapped-line index of the
-    /// first visible line and stays put while new content arrives.
-    pub(super) pinned: bool,
-    pub(super) top: usize,
-    /// Viewport height from the last draw, used by scroll commands.
-    pub(super) view_height: usize,
+    /// None follows newest content; Some is an anchored wrapped-line index.
+    pub(super) top: Option<usize>,
     pub(super) area: Rect,
     pub(super) select_anchor: Option<SelPos>,
     select_head: Option<SelPos>,
     pub(super) dragging: bool,
-    pressed_collapsible: Option<usize>,
     hovered_collapsible: Option<usize>,
     last_collapsible_click: Option<(usize, Instant)>,
     tool_burst: ToolBurst,
@@ -63,20 +53,14 @@ impl Transcript {
         Self {
             rows: Vec::new(),
             wrapped: Vec::new(),
-            collapsible_headers: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
             wrapped_stream: Vec::new(),
-            stream_dirty: false,
-            width: 0,
-            pinned: true,
-            top: 0,
-            view_height: 0,
+            top: None,
             area: Rect::default(),
             select_anchor: None,
             select_head: None,
             dragging: false,
-            pressed_collapsible: None,
             hovered_collapsible: None,
             last_collapsible_click: None,
             tool_burst: ToolBurst::default(),
@@ -97,12 +81,14 @@ impl Transcript {
     pub fn push_shell_output(&mut self, output: &str, ok: bool) {
         self.close_tool_burst();
         let trimmed = trim_message(output);
-        let body = if trimmed.is_empty() {
-            "(no output)".to_string()
-        } else {
-            trimmed
-        };
-        self.push_row(LineKind::ShellResult(ok), &body);
+        self.push_row(
+            LineKind::ShellResult(ok),
+            if trimmed.is_empty() {
+                NO_OUTPUT
+            } else {
+                &trimmed
+            },
+        );
     }
 
     pub(crate) fn last_user_text(&self) -> Option<String> {
@@ -194,71 +180,62 @@ impl Transcript {
     }
 
     fn push_tool_result(&mut self, is_error: bool, content: &[ContentBlock]) {
-        let tool_result = content
+        let output = content
             .iter()
-            .filter_map(|block| {
-                if let ContentBlock::Text { text } = block {
-                    Some(text.as_str())
-                } else {
-                    None
-                }
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
             })
-            .collect::<Vec<&str>>()
+            .collect::<Vec<_>>()
             .join("\n");
-        let body = trim_message(&tool_result);
-        if is_error || !body.is_empty() {
-            self.push_row(
-                LineKind::ToolResult(!is_error),
-                if body.is_empty() {
-                    "(no output)"
-                } else {
-                    body.as_str()
-                },
-            );
+        self.push_result_row(!is_error, &output);
+    }
+
+    fn push_result_row(&mut self, ok: bool, output: &str) {
+        let body = trim_message(output);
+        if ok && body.is_empty() {
+            return;
         }
+        self.push_row(
+            LineKind::ToolResult(ok),
+            if body.is_empty() { NO_OUTPUT } else { &body },
+        );
     }
 
     pub(super) fn total_lines(&self) -> usize {
         self.wrapped.len() + self.wrapped_stream.len()
     }
 
-    pub(super) fn current_top(&self) -> usize {
-        if self.pinned {
-            self.total_lines().saturating_sub(self.view_height)
-        } else {
-            self.top
-        }
+    fn width(&self) -> usize {
+        self.area.width as usize
     }
 
-    /// Keep the viewport anchored: a pinned view follows the newest content,
-    /// a scrolled-up view keeps its absolute position.
-    fn keep_following(&mut self) {
-        if self.pinned {
-            self.top = self.total_lines().saturating_sub(self.view_height);
-        }
+    fn height(&self) -> usize {
+        self.area.height as usize
+    }
+
+    pub(super) fn current_top(&self) -> usize {
+        self.top
+            .unwrap_or_else(|| self.total_lines().saturating_sub(self.height()))
     }
 
     pub(super) fn scroll_up(&mut self, n: u16) {
-        self.top = self.current_top().saturating_sub(n as usize);
-        self.pinned = false;
+        self.top = Some(self.current_top().saturating_sub(n as usize));
     }
 
     pub(super) fn scroll_down(&mut self, n: u16) {
         let total = self.total_lines();
-        let height = self.view_height.max(1);
+        let height = self.height().max(1);
         let max_top = total.saturating_sub(height);
         let top = self.current_top().saturating_add(n as usize).min(max_top);
-        self.top = top;
-        self.pinned = top.saturating_add(height) >= total;
+        self.top = (top.saturating_add(height) < total).then_some(top);
     }
 
     pub(super) fn reset(&mut self) {
         self.rows.clear();
         self.wrapped.clear();
-        self.collapsible_headers.clear();
         self.clear_stream();
-        self.pinned = true;
-        self.top = 0;
+        self.top = None;
         self.clear_selection();
         self.hovered_collapsible = None;
         self.last_collapsible_click = None;
@@ -289,15 +266,7 @@ impl Transcript {
 
     fn note_tool_end(&mut self, call_id: &str, ok: bool, output: &str) {
         if self.detail_ids.remove(call_id) {
-            let body = trim_message(output);
-            if !ok || !body.is_empty() {
-                let body = if body.is_empty() {
-                    "(no output)".to_string()
-                } else {
-                    body
-                };
-                self.push_row(LineKind::ToolResult(ok), &body);
-            }
+            self.push_result_row(ok, output);
             return;
         }
         if self.tool_burst.finish(call_id, !ok) && !ok {
@@ -318,30 +287,14 @@ impl Transcript {
     fn upsert_tool_summary(&mut self) {
         let text = self.tool_burst.summary();
         if self.tool_burst.row_open {
-            self.replace_last_row(LineKind::Tool, &text);
+            if let Some(last) = self.rows.last_mut() {
+                last.text = text;
+            }
+            self.rewrap_all();
         } else {
-            self.tool_burst.wrap_at = self.wrapped.len();
             self.push_row(LineKind::Tool, &text);
             self.tool_burst.row_open = true;
         }
-    }
-
-    fn replace_last_row(&mut self, kind: LineKind, text: &str) {
-        let text = match kind {
-            LineKind::Thinking => THOUGHT_LABEL.to_string(),
-            LineKind::ShellResult(_) => tail_lines(text, MAX_SHELL_DISPLAY_LINES),
-            LineKind::Separator => String::new(),
-            _ => text.to_string(),
-        };
-        if let Some(last) = self.rows.last_mut() {
-            last.kind = kind;
-            last.text = text.clone();
-        }
-        self.wrapped.truncate(self.tool_burst.wrap_at);
-        if self.width > 0 {
-            wrap_row_into(&mut self.wrapped, kind, &text, self.width);
-        }
-        self.keep_following();
     }
 
     pub(super) fn push_row(&mut self, kind: LineKind, text: &str) {
@@ -363,12 +316,12 @@ impl Transcript {
             kind: LineKind::Thinking,
             text: current_title,
             collapsible: Some(collapsible),
+            ..
         }) = self.rows.last_mut()
         {
             *current_title = title.to_string();
             collapsible.append(text);
             self.rewrap_all();
-            self.keep_following();
             return;
         }
         self.push_row_with_detail(
@@ -384,19 +337,13 @@ impl Transcript {
         text: String,
         collapsible: Option<Collapsible>,
     ) {
-        let row = Row {
+        self.rows.push(Row {
             kind,
             text,
             collapsible,
-        };
-        let header = if self.width > 0 {
-            Self::wrap_row_into(&mut self.wrapped, &row, self.width)
-        } else {
-            None
-        };
-        self.rows.push(row);
-        self.collapsible_headers.push(header);
-        self.keep_following();
+            header: None,
+        });
+        self.wrap_row(self.rows.len() - 1);
     }
 
     fn wrap_row_into(out: &mut Vec<Line<'static>>, row: &Row, width: usize) -> Option<usize> {
@@ -421,19 +368,24 @@ impl Transcript {
         self.push_row(LineKind::Separator, "");
     }
 
-    fn flush_streaming(&mut self) {
-        let body = trim_message(&std::mem::take(&mut self.streaming));
+    fn take_stream(&mut self) -> (LineKind, String) {
         self.wrapped_stream.clear();
-        self.stream_dirty = false;
+        (
+            self.stream_kind,
+            trim_message(&std::mem::take(&mut self.streaming)),
+        )
+    }
+
+    fn flush_streaming(&mut self) {
+        let (kind, body) = self.take_stream();
         if !body.is_empty() {
-            self.push_row(self.stream_kind, &body);
+            self.push_row(kind, &body);
         }
     }
 
     fn clear_stream(&mut self) {
         self.streaming.clear();
         self.wrapped_stream.clear();
-        self.stream_dirty = false;
     }
 
     pub(super) fn push_stream(&mut self, kind: LineKind, text: &str) {
@@ -445,45 +397,41 @@ impl Transcript {
         }
         self.stream_kind = kind;
         self.streaming.push_str(text);
-        self.stream_dirty = true;
-        self.keep_following();
+    }
+
+    fn wrap_row(&mut self, idx: usize) {
+        let width = self.width();
+        let header = if width == 0 {
+            None
+        } else {
+            Self::wrap_row_into(&mut self.wrapped, &self.rows[idx], width)
+        };
+        self.rows[idx].header = header;
     }
 
     fn wrap_rows(&mut self, start: usize, end: usize) {
-        if self.width == 0 {
-            return;
-        }
-        for row in &self.rows[start..end] {
-            let header = Self::wrap_row_into(&mut self.wrapped, row, self.width);
-            self.collapsible_headers.push(header);
+        for i in start..end {
+            self.wrap_row(i);
         }
     }
 
     pub(super) fn rewrap_stream(&mut self) {
         self.wrapped_stream.clear();
-        self.stream_dirty = false;
-        if self.width == 0 || self.streaming.is_empty() {
+        let width = self.width();
+        if width == 0 || self.streaming.is_empty() {
             return;
         }
         if !self.wrapped.is_empty() {
             self.wrapped_stream.push(Line::from(""));
         }
         for line in format_lines(self.stream_kind, &self.streaming) {
-            wrap_line_into(&mut self.wrapped_stream, &line, self.width);
+            wrap_line_into(&mut self.wrapped_stream, &line, width);
         }
     }
 
     pub(super) fn rewrap_all(&mut self) {
         self.wrapped.clear();
-        self.collapsible_headers.clear();
-        if self.tool_burst.row_open && !self.rows.is_empty() {
-            let last = self.rows.len() - 1;
-            self.wrap_rows(0, last);
-            self.tool_burst.wrap_at = self.wrapped.len();
-            self.wrap_rows(last, self.rows.len());
-        } else {
-            self.wrap_rows(0, self.rows.len());
-        }
+        self.wrap_rows(0, self.rows.len());
         self.rewrap_stream();
         self.clear_selection();
     }
@@ -492,7 +440,6 @@ impl Transcript {
         self.select_anchor = None;
         self.select_head = None;
         self.dragging = false;
-        self.pressed_collapsible = None;
     }
 
     fn begin_selection(&mut self, column: u16, row: u16) {
@@ -574,9 +521,7 @@ impl Transcript {
 
     fn collapsible_header_at(&self, column: u16, row: u16) -> Option<usize> {
         let line = self.pos_at(column, row).line;
-        self.collapsible_headers
-            .iter()
-            .position(|header| *header == Some(line))
+        self.rows.iter().position(|r| r.header == Some(line))
     }
 
     fn update_hover(&mut self, in_area: bool, column: u16, row: u16) -> bool {
@@ -592,7 +537,6 @@ impl Transcript {
         if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
             collapsible.toggle();
             self.rewrap_all();
-            self.keep_following();
         }
     }
 
@@ -601,6 +545,7 @@ impl Transcript {
             kind: LineKind::Thinking,
             text,
             collapsible: Some(_),
+            ..
         }) = self.rows.last_mut()
         {
             *text = THOUGHT_LABEL.to_string();
@@ -609,15 +554,17 @@ impl Transcript {
     }
 
     fn live_thinking_header(&self) -> Option<usize> {
+        let last = self.rows.last()?;
         matches!(
-            self.rows.last(),
-            Some(Row {
+            last,
+            Row {
                 kind: LineKind::Thinking,
                 text,
                 collapsible: Some(_),
-            }) if text == THINKING_LABEL
+                ..
+            } if text == THINKING_LABEL
         )
-        .then(|| self.collapsible_headers.last().copied().flatten())
+        .then_some(last.header)
         .flatten()
     }
 
@@ -651,11 +598,11 @@ impl Component for Transcript {
     fn handle_key(&mut self, key: KeyEvent, _state: &State) -> KeyResult {
         match key.code {
             KeyCode::PageUp => {
-                self.scroll_up(self.view_height.max(1) as u16);
+                self.scroll_up(self.height().max(1) as u16);
                 KeyResult::Handled
             }
             KeyCode::PageDown => {
-                self.scroll_down(self.view_height.max(1) as u16);
+                self.scroll_down(self.height().max(1) as u16);
                 KeyResult::Handled
             }
             _ => KeyResult::Ignored,
@@ -690,10 +637,7 @@ impl Component for Transcript {
                     self.clear_selection();
                     return KeyResult::Handled;
                 }
-                if header.is_none() {
-                    self.last_collapsible_click = None;
-                }
-                self.pressed_collapsible = header;
+                self.last_collapsible_click = header.map(|row| (row, Instant::now()));
                 self.begin_selection(mouse.column, mouse.row);
                 KeyResult::Handled
             }
@@ -710,16 +654,14 @@ impl Component for Transcript {
             }
             MouseEventKind::Up(MouseButton::Left) if self.dragging => {
                 self.update_selection(mouse.column, mouse.row);
-                let header = self.pressed_collapsible;
                 let selected = self.normalized_sel().is_some();
-                if self.end_selection() {
+                let copied = self.end_selection();
+                if copied || selected {
+                    self.last_collapsible_click = None;
+                }
+                if copied {
                     KeyResult::Action(Action::Notify("Copied!".into()))
                 } else {
-                    if !selected {
-                        self.last_collapsible_click = header.map(|row| (row, Instant::now()));
-                    } else {
-                        self.last_collapsible_click = None;
-                    }
                     KeyResult::Handled
                 }
             }
@@ -766,10 +708,7 @@ impl Component for Transcript {
                     self.close_tool_burst();
                     self.finish_thinking();
                     if !self.streaming.is_empty() {
-                        let kind = self.stream_kind;
-                        let partial = trim_message(&std::mem::take(&mut self.streaming));
-                        self.wrapped_stream.clear();
-                        self.stream_dirty = false;
+                        let (kind, partial) = self.take_stream();
                         if !partial.is_empty() {
                             self.push_row(kind, &format!("{partial}…"));
                         }
@@ -815,26 +754,22 @@ impl Component for Transcript {
     }
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
+        let resized = area.width != self.area.width;
         self.area = area;
-        let width = area.width as usize;
-        if width != self.width {
-            self.width = width;
+        if resized {
             self.rewrap_all();
-        } else if self.stream_dirty {
+        } else if !self.streaming.is_empty() {
             self.rewrap_stream();
         }
 
         let height = area.height as usize;
-        self.view_height = height;
         let total = self.total_lines();
         let max_top = total.saturating_sub(height);
-        if !self.pinned {
-            self.top = self.top.min(max_top);
-            if self.top.saturating_add(height) >= total {
-                self.pinned = true;
-            }
+        if let Some(top) = self.top {
+            let top = top.min(max_top);
+            self.top = (top.saturating_add(height) < total).then_some(top);
         }
-        let start = if self.pinned { max_top } else { self.top };
+        let start = self.top.unwrap_or(max_top);
         let end = start.saturating_add(height).min(total);
         let mut visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
         if let Some(header) = self.live_thinking_header()
@@ -844,11 +779,11 @@ impl Component for Transcript {
             *line = apply_thinking_shimmer(line, thinking_phase());
         }
         if let Some(row) = self.hovered_collapsible
-            && let Some(Some(header)) = self.collapsible_headers.get(row)
-            && *header >= start
+            && let Some(header) = self.rows.get(row).and_then(|r| r.header)
+            && header >= start
             && let Some(line) = visible.get_mut(header - start)
         {
-            *line = apply_hover(line, width);
+            *line = apply_hover(line, self.width());
         }
         if self.is_live_text()
             && end == total

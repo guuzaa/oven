@@ -58,4 +58,5 @@ pub(super) struct Row {
     pub kind: LineKind,
     pub text: String,
     pub collapsible: Option<Collapsible>,
+    pub header: Option<usize>,
 }

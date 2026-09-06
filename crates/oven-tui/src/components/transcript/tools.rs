@@ -29,7 +29,6 @@ pub(super) struct ToolBurst {
     pending: HashMap<String, ToolLabel>,
     entries: Vec<ToolEntry>,
     pub row_open: bool,
-    pub wrap_at: usize,
 }
 
 struct ToolEntry {
