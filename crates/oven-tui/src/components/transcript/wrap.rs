@@ -221,9 +221,14 @@ pub(super) fn wrap_collapsible_into(
         return;
     }
     for part in collapsible.body().lines() {
+        let body_style = if kind == LineKind::Diff {
+            diff_line_style(part, style)
+        } else {
+            style
+        };
         let line = Line::from(vec![
             Span::styled(LINE_INDENT.to_string(), style),
-            Span::styled(format!("{LINE_INDENT}{part}"), style),
+            Span::styled(format!("{LINE_INDENT}{part}"), body_style),
         ]);
         wrap_line_into(out, &line, width);
     }
@@ -253,11 +258,7 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
             LINE_INDENT
         };
         let line_style = if kind == LineKind::Diff {
-            match part.chars().next() {
-                Some('+') => theme::diff_added(),
-                Some('-') => theme::diff_removed(),
-                _ => style,
-            }
+            diff_line_style(part, style)
         } else {
             style
         };
@@ -333,6 +334,14 @@ pub(super) fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>,
             body_span(chunk.to_string(), body_style),
         ]));
         rest = next;
+    }
+}
+
+fn diff_line_style(part: &str, fallback: Style) -> Style {
+    match part.chars().next() {
+        Some('+') => theme::diff_added(),
+        Some('-') => theme::diff_removed(),
+        _ => fallback,
     }
 }
 

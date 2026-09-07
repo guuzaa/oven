@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
-use super::kinds::{LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH};
+use super::kinds::{LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH};
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
@@ -324,6 +324,10 @@ fn thinking(text: &str) -> AppEvent {
     }))
 }
 
+fn started() -> AppEvent {
+    agent(AgentEvent::Turn(TurnEvent::Started))
+}
+
 fn completed() -> AppEvent {
     completed_in(0)
 }
@@ -341,6 +345,13 @@ fn cancelled() -> AppEvent {
 
 fn kinds_of(t: &Transcript) -> Vec<LineKind> {
     t.rows.iter().map(|r| r.kind).collect()
+}
+
+fn all_details_collapsed(t: &Transcript) -> bool {
+    t.rows
+        .iter()
+        .filter_map(|row| row.collapsible.as_ref())
+        .all(|detail| !detail.is_expanded())
 }
 
 #[test]
@@ -432,11 +443,11 @@ fn tool_result_double_click_toggles_detail() {
 
     let detail = t.rows[1].collapsible.as_ref().expect("tool result detail");
     assert_eq!(detail.body(), OUTPUT);
-    assert!(!detail.is_expanded());
+    assert!(detail.is_expanded());
     assert!(
         t.wrapped
             .iter()
-            .all(|line| !line_text(line).contains("more lines of output"))
+            .any(|line| line_text(line).contains("more lines of output"))
     );
 
     let header_y = t
@@ -447,7 +458,7 @@ fn tool_result_double_click_toggles_detail() {
     double_click(&mut t, 2, header_y);
 
     assert!(
-        t.rows[1]
+        !t.rows[1]
             .collapsible
             .as_ref()
             .expect("tool result detail")
@@ -456,7 +467,7 @@ fn tool_result_double_click_toggles_detail() {
     assert!(
         t.wrapped
             .iter()
-            .any(|line| line_text(line).contains("more lines of output"))
+            .all(|line| !line_text(line).contains("more lines of output"))
     );
 
     t.handle_mouse(
@@ -465,7 +476,7 @@ fn tool_result_double_click_toggles_detail() {
     );
     double_click(&mut t, 2, header_y);
     assert!(
-        !t.rows[1]
+        t.rows[1]
             .collapsible
             .as_ref()
             .expect("tool result detail")
@@ -480,14 +491,13 @@ fn thinking_double_click_toggles_detail() {
     let mut t = Transcript::new();
     t.on_event(&thinking(THINKING));
     t.on_event(&completed());
-    ready(&mut t, Rect::new(0, 0, 80, 5));
+    ready(&mut t, Rect::new(0, 0, 80, 8));
 
     let detail = t.rows[0].collapsible.as_ref().expect("thinking detail");
     assert_eq!(detail.body(), THINKING);
-    assert!(!detail.is_expanded());
-    assert!(t.wrapped.iter().all(|line| {
-        !line
-            .spans
+    assert!(detail.is_expanded());
+    assert!(t.wrapped.iter().any(|line| {
+        line.spans
             .iter()
             .any(|span| span.content.contains(THINKING))
     }));
@@ -495,14 +505,15 @@ fn thinking_double_click_toggles_detail() {
     double_click(&mut t, 2, 0);
 
     assert!(
-        t.rows[0]
+        !t.rows[0]
             .collapsible
             .as_ref()
             .expect("thinking detail")
             .is_expanded()
     );
-    assert!(t.wrapped.iter().any(|line| {
-        line.spans
+    assert!(t.wrapped.iter().all(|line| {
+        !line
+            .spans
             .iter()
             .any(|span| span.content.contains(THINKING))
     }));
@@ -513,12 +524,112 @@ fn thinking_double_click_toggles_detail() {
     );
     double_click(&mut t, 2, 0);
     assert!(
-        !t.rows[0]
+        t.rows[0]
             .collapsible
             .as_ref()
             .expect("thinking detail")
             .is_expanded()
     );
+}
+
+#[test]
+fn next_message_collapses_previous_details() {
+    let mut t = Transcript::new();
+    t.on_event(&thinking("plan"));
+    assert!(t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, "edited"));
+    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+    assert!(t.rows[1].collapsible.as_ref().unwrap().is_expanded());
+
+    t.on_event(&text_delta("done"));
+    assert!(!t.rows[1].collapsible.as_ref().unwrap().is_expanded());
+}
+
+#[test]
+fn expanding_during_generation_stays_open() {
+    let mut t = Transcript::new();
+    t.on_event(&thinking("plan"));
+    t.on_event(&text_delta("ans"));
+    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+
+    t.rows[0]
+        .collapsible
+        .as_mut()
+        .expect("thinking detail")
+        .toggle();
+    t.on_event(&text_delta("wer"));
+    t.on_event(&completed());
+    assert!(
+        t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
+        "manual expand must survive later tokens in the same message"
+    );
+}
+
+#[test]
+fn manual_expand_survives_next_thinking() {
+    let mut t = Transcript::new();
+    t.on_event(&thinking("one"));
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, "edited"));
+    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+
+    t.rows[0]
+        .collapsible
+        .as_mut()
+        .expect("thinking detail")
+        .toggle();
+    t.on_event(&thinking("two"));
+
+    assert!(t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+    assert!(
+        t.rows
+            .last()
+            .unwrap()
+            .collapsible
+            .as_ref()
+            .unwrap()
+            .is_expanded()
+    );
+}
+
+#[test]
+fn last_detail_stays_open_until_next_message() {
+    let mut t = Transcript::new();
+    t.on_event(&thinking("plan"));
+    t.on_event(&completed());
+    t.on_event(&started());
+    assert!(
+        t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
+        "turn end is not a following message"
+    );
+
+    t.push_user("next");
+    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+}
+
+#[test]
+fn seed_collapsibles_stay_collapsed() {
+    let mut t = Transcript::new();
+    t.seed(&[
+        Message::assistant(vec![
+            ContentBlock::Thinking {
+                thinking: "one".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "e1".into(),
+                name: "file_edit".into(),
+                input: file_edit_input(),
+            },
+        ]),
+        Message::tool_result(
+            "e1",
+            "edited src/main.rs: replaced 1 occurrence(s), 3 bytes -> 3 bytes",
+            false,
+        ),
+    ]);
+    assert!(all_details_collapsed(&t));
 }
 
 #[test]
@@ -735,6 +846,187 @@ fn todo_input() -> serde_json::Value {
     })
 }
 
+fn file_edit_input() -> serde_json::Value {
+    serde_json::json!({
+        "path": "src/main.rs",
+        "old_string": "old",
+        "new_string": "new"
+    })
+}
+
+fn file_write_input() -> serde_json::Value {
+    serde_json::json!({
+        "path": "out.txt",
+        "content": "line one\nline two"
+    })
+}
+
+#[test]
+fn file_edit_collapses_diff_without_size_result() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(
+        1,
+        true,
+        "edited src/main.rs: replaced 1 occurrence(s), 3 bytes -> 3 bytes",
+    ));
+    assert_eq!(kinds_of(&t), vec![LineKind::Diff]);
+    assert_eq!(t.rows[0].text, "Edit src/main.rs");
+    let detail = t.rows[0].collapsible.as_ref().expect("diff detail");
+    assert_eq!(detail.body(), "- old\n+ new");
+    assert!(detail.is_expanded());
+}
+
+#[test]
+fn file_write_collapses_diff_without_size_result() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(2, "file_write", file_write_input()));
+    t.on_event(&tool_end(2, true, "wrote 17 bytes to out.txt"));
+    assert_eq!(kinds_of(&t), vec![LineKind::Diff]);
+    assert_eq!(t.rows[0].text, "Write out.txt");
+    let detail = t.rows[0].collapsible.as_ref().expect("diff detail");
+    assert_eq!(detail.body(), "+ line one\n+ line two");
+    assert!(detail.is_expanded());
+}
+
+#[test]
+fn file_edit_failure_keeps_result() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, false, "old_string not found"));
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::Diff, LineKind::ToolResult(false)]
+    );
+    assert_eq!(t.rows[1].text, RESULT_LABEL);
+    assert_eq!(
+        t.rows[1]
+            .collapsible
+            .as_ref()
+            .expect("tool result detail")
+            .body(),
+        "old_string not found"
+    );
+}
+
+#[test]
+fn seed_file_edit_collapses_diff_without_size_result() {
+    let mut t = Transcript::new();
+    t.seed(&[
+        Message::assistant(vec![ContentBlock::ToolUse {
+            id: "e1".into(),
+            name: "file_edit".into(),
+            input: file_edit_input(),
+        }]),
+        Message::tool_result(
+            "e1",
+            "edited src/main.rs: replaced 1 occurrence(s), 3 bytes -> 3 bytes",
+            false,
+        ),
+    ]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Diff]);
+    assert_eq!(t.rows[0].text, "Edit src/main.rs");
+    assert_eq!(
+        t.rows[0].collapsible.as_ref().expect("diff detail").body(),
+        "- old\n+ new"
+    );
+    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+}
+
+#[test]
+fn diff_double_click_toggles_detail() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, "edited"));
+    ready(&mut t, Rect::new(0, 0, 80, 10));
+
+    let detail = t.rows[0].collapsible.as_ref().expect("diff detail");
+    assert!(detail.is_expanded());
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains("- old"))
+    );
+
+    let header_y = t
+        .wrapped
+        .iter()
+        .position(|line| line_text(line).contains("Edit src/main.rs"))
+        .expect("diff header") as u16;
+    double_click(&mut t, 2, header_y);
+
+    assert!(
+        !t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("diff detail")
+            .is_expanded()
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .all(|line| !line_text(line).contains("- old"))
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 2, header_y),
+        &State::new(),
+    );
+    double_click(&mut t, 2, header_y);
+    assert!(
+        t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("diff detail")
+            .is_expanded()
+    );
+    let removed = t
+        .wrapped
+        .iter()
+        .find(|line| line_text(line).contains("- old"))
+        .expect("removed line");
+    let added = t
+        .wrapped
+        .iter()
+        .find(|line| line_text(line).contains("+ new"))
+        .expect("added line");
+    assert_eq!(removed.spans[0].content.as_ref(), LINE_INDENT);
+    assert_eq!(added.spans[0].content.as_ref(), LINE_INDENT);
+    assert!(
+        removed.spans[1]
+            .content
+            .as_ref()
+            .starts_with(&format!("{LINE_INDENT}- old")),
+        "diff body should nest under the header"
+    );
+    assert!(
+        added.spans[1]
+            .content
+            .as_ref()
+            .starts_with(&format!("{LINE_INDENT}+ new"))
+    );
+    assert_eq!(
+        removed.spans[1].style.bg,
+        Some(ratatui::style::Color::LightRed)
+    );
+    assert_eq!(
+        added.spans[1].style.bg,
+        Some(ratatui::style::Color::LightGreen)
+    );
+
+    t.handle_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 2, header_y),
+        &State::new(),
+    );
+    double_click(&mut t, 2, header_y);
+    assert!(
+        !t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("diff detail")
+            .is_expanded()
+    );
+}
+
 #[test]
 fn todo_write_keeps_detail_and_result() {
     let mut t = Transcript::new();
@@ -751,7 +1043,7 @@ fn todo_write_keeps_detail_and_result() {
     assert_eq!(t.rows[1].text, RESULT_LABEL);
     let result = t.rows[1].collapsible.as_ref().expect("tool result detail");
     assert_eq!(result.body(), "updated");
-    assert!(!result.is_expanded());
+    assert!(result.is_expanded());
 }
 
 #[test]
@@ -859,6 +1151,7 @@ fn seed_todo_write_keeps_result() {
             .body(),
         "updated"
     );
+    assert!(!t.rows[1].collapsible.as_ref().unwrap().is_expanded());
 }
 
 #[test]

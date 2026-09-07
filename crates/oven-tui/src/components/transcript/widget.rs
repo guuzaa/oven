@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::super::collapsible::Collapsible;
@@ -46,7 +46,7 @@ pub struct Transcript {
     hovered_collapsible: Option<usize>,
     last_collapsible_click: Option<(usize, Instant)>,
     tool_burst: ToolBurst,
-    detail_ids: HashSet<String>,
+    detail_ids: HashMap<String, bool>,
     thinking_started: Option<Instant>,
 }
 
@@ -66,7 +66,7 @@ impl Transcript {
             hovered_collapsible: None,
             last_collapsible_click: None,
             tool_burst: ToolBurst::default(),
-            detail_ids: HashSet::new(),
+            detail_ids: HashMap::new(),
             thinking_started: None,
         }
     }
@@ -195,6 +195,7 @@ impl Transcript {
             }
         }
         self.close_tool_burst();
+        self.collapse_open();
     }
 
     fn push_tool_result(&mut self, is_error: bool, content: &[ContentBlock]) {
@@ -269,7 +270,7 @@ impl Transcript {
     fn note_tool_start(&mut self, call_id: &str, view: &ToolView) {
         if !view.collapse {
             self.close_tool_burst();
-            self.detail_ids.insert(call_id.to_string());
+            self.detail_ids.insert(call_id.to_string(), view.diff);
             let kind = if view.diff {
                 LineKind::Diff
             } else {
@@ -284,8 +285,10 @@ impl Transcript {
     }
 
     fn note_tool_end(&mut self, call_id: &str, ok: bool, output: &str) {
-        if self.detail_ids.remove(call_id) {
-            self.push_result_row(ok, output);
+        if let Some(is_diff) = self.detail_ids.remove(call_id) {
+            if !is_diff || !ok {
+                self.push_result_row(ok, output);
+            }
             return;
         }
         if self.tool_burst.finish(call_id, !ok) && !ok {
@@ -294,8 +297,10 @@ impl Transcript {
     }
 
     fn note_seed_result(&mut self, tool_use_id: &str, is_error: bool, content: &[ContentBlock]) {
-        if self.detail_ids.remove(tool_use_id) {
-            self.push_tool_result(is_error, content);
+        if let Some(is_diff) = self.detail_ids.remove(tool_use_id) {
+            if !is_diff || is_error {
+                self.push_tool_result(is_error, content);
+            }
             return;
         }
         if self.tool_burst.finish(tool_use_id, is_error) && is_error {
@@ -317,16 +322,20 @@ impl Transcript {
     }
 
     pub(super) fn push_row(&mut self, kind: LineKind, text: &str) {
-        if matches!(kind, LineKind::ToolResult(_)) {
-            self.push_row_with_detail(kind, RESULT_LABEL.to_string(), Some(Collapsible::new(text)));
-            return;
-        }
-        let text = match kind {
-            LineKind::Thinking => THOUGHT_LABEL.to_string(),
-            LineKind::ShellResult(_) => tail_lines(text, MAX_SHELL_DISPLAY_LINES),
-            _ => text.to_string(),
+        let (text, collapsible) = match kind {
+            LineKind::ToolResult(_) => (RESULT_LABEL.to_string(), Some(Collapsible::new(text))),
+            LineKind::Thinking => (THOUGHT_LABEL.to_string(), None),
+            LineKind::ShellResult(_) => (tail_lines(text, MAX_SHELL_DISPLAY_LINES), None),
+            LineKind::Diff => {
+                let (title, body) = match text.split_once('\n') {
+                    Some((title, body)) => (title.to_string(), body.to_string()),
+                    None => (text.to_string(), String::new()),
+                };
+                (title, Some(Collapsible::new(body)))
+            }
+            _ => (text.to_string(), None),
         };
-        self.push_row_with_detail(kind, text, None);
+        self.push_row_with_detail(kind, text, collapsible);
     }
 
     fn push_thinking(&mut self, title: &str, text: &str) {
@@ -355,6 +364,13 @@ impl Transcript {
         text: String,
         collapsible: Option<Collapsible>,
     ) {
+        if kind != LineKind::Separator {
+            self.collapse_open();
+        }
+        self.append_row(kind, text, collapsible);
+    }
+
+    fn append_row(&mut self, kind: LineKind, text: String, collapsible: Option<Collapsible>) {
         self.rows.push(Row {
             kind,
             text,
@@ -362,6 +378,18 @@ impl Transcript {
             header: None,
         });
         self.wrap_row(self.rows.len() - 1);
+    }
+
+    fn collapse_open(&mut self) {
+        let mut changed = false;
+        for row in &mut self.rows {
+            if let Some(collapsible) = row.collapsible.as_mut() {
+                changed |= collapsible.collapse();
+            }
+        }
+        if changed {
+            self.rewrap_all();
+        }
     }
 
     fn wrap_row_into(out: &mut Vec<Line<'static>>, row: &Row, width: usize) -> Option<usize> {
@@ -409,7 +437,7 @@ impl Transcript {
     fn flush_streaming(&mut self) {
         let (kind, body) = self.take_stream();
         if !body.is_empty() {
-            self.push_row(kind, &body);
+            self.append_row(kind, body, None);
         }
     }
 
@@ -424,6 +452,9 @@ impl Transcript {
         }
         if !self.streaming.is_empty() && self.stream_kind != kind {
             self.flush_streaming();
+        }
+        if self.streaming.is_empty() {
+            self.collapse_open();
         }
         self.stream_kind = kind;
         self.streaming.push_str(text);
@@ -748,7 +779,7 @@ impl Component for Transcript {
                     if !self.streaming.is_empty() {
                         let (kind, partial) = self.take_stream();
                         if !partial.is_empty() {
-                            self.push_row(kind, &format!("{partial}…"));
+                            self.append_row(kind, format!("{partial}…"), None);
                         }
                     }
                     self.push_row(LineKind::System, "cancelled");
