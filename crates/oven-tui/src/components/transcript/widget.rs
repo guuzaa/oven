@@ -293,8 +293,14 @@ impl Transcript {
             }
             return;
         }
-        if self.tool_burst.finish(call_id, !ok) && !ok {
-            self.upsert_tool_summary();
+        if self.tool_burst.finish(call_id, !ok) {
+            if !ok {
+                self.upsert_tool_summary();
+            }
+            return;
+        }
+        if !ok {
+            self.push_row(LineKind::System, output);
         }
     }
 
