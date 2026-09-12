@@ -3,7 +3,6 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::theme;
 use super::kinds::LINE_PREFIX_WIDTH;
-use super::wrap::split_at_width;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct SelPos {
@@ -37,23 +36,24 @@ pub(super) fn extract_line_range(line: &Line<'_>, from_col: usize, to_col: usize
     slice_cols(&body, from, to)
 }
 
-fn skip_width(s: &str, n: usize) -> &str {
-    let mut width = 0;
-    for (i, ch) in s.char_indices() {
-        if width >= n {
-            return &s[i..];
-        }
-        width += ch.width().unwrap_or(0);
-    }
-    ""
-}
-
 pub(super) fn slice_cols(s: &str, start: usize, end: usize) -> String {
+    let mut out = String::new();
     if start >= end {
-        return String::new();
+        return out;
     }
-    let rest = skip_width(s, start);
-    split_at_width(rest, end - start).0.to_string()
+    
+    let mut col = 0;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if col + cw > start && col < end {
+            out.push(ch);
+        }
+        col += cw;
+        if col >= end {
+            break;
+        }
+    }
+    out
 }
 
 pub(super) fn highlight_line(
@@ -77,11 +77,21 @@ pub(super) fn highlight_line(
             spans.push(span.clone());
             continue;
         }
-        let local_from = from_col.saturating_sub(span_start);
-        let local_to = to_col.min(span_end).saturating_sub(span_start);
-        let before = slice_cols(text, 0, local_from);
-        let mid = slice_cols(text, local_from, local_to);
-        let after = slice_cols(text, local_to, w);
+        let mut before = String::new();
+        let mut mid = String::new();
+        let mut after = String::new();
+        let mut x = span_start;
+        for ch in text.chars() {
+            let cw = ch.width().unwrap_or(0);
+            if x + cw <= from_col {
+                before.push(ch);
+            } else if x >= to_col {
+                after.push(ch);
+            } else {
+                mid.push(ch);
+            }
+            x += cw;
+        }
         if !before.is_empty() {
             spans.push(Span::styled(before, span.style));
         }
@@ -95,21 +105,20 @@ pub(super) fn highlight_line(
     Line::from(spans)
 }
 
+#[cfg(not(test))]
 pub(super) fn copy_to_clipboard(text: &str) -> bool {
     if text.is_empty() {
         return false;
     }
-    #[cfg(test)]
-    {
-        true
-    }
-    #[cfg(not(test))]
-    {
-        arboard::Clipboard::new()
-            .and_then(|mut c| c.set_text(text))
-            .is_ok()
-            || osc52_copy(text)
-    }
+    arboard::Clipboard::new()
+        .and_then(|mut c| c.set_text(text))
+        .is_ok()
+        || osc52_copy(text)
+}
+
+#[cfg(test)]
+pub(super) fn copy_to_clipboard(_text: &str) -> bool {
+    true
 }
 
 #[cfg(not(test))]

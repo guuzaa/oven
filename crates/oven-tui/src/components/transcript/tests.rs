@@ -20,7 +20,7 @@ use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 use super::widget::Transcript;
 use super::wrap::{
     MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer, format_elapsed, format_lines,
-    format_thought, tail_lines,
+    format_thought, line_display_width, tail_lines,
 };
 
 const ELAPSED_0: &str = "Worked for 0s";
@@ -1337,9 +1337,14 @@ fn double_click(t: &mut Transcript, column: u16, row: u16) {
 #[test]
 fn slice_cols_by_display_width() {
     assert_eq!(slice_cols("hello", 1, 4), "ell");
+    assert_eq!(slice_cols("hello", 3, 3), "");
     assert_eq!(slice_cols("你好", 0, 2), "你");
     assert_eq!(slice_cols("你好", 2, 4), "好");
-    assert_eq!(slice_cols("hello", 3, 3), "");
+    assert_eq!(slice_cols("你好", 1, 2), "你");
+    assert_eq!(slice_cols("你好", 1, 3), "你好");
+    assert_eq!(slice_cols("한글", 1, 2), "한");
+    assert_eq!(slice_cols("한글", 1, 3), "한글");
+    assert_eq!(slice_cols("こんにちは", 1, 3), "こん");
 }
 
 #[test]
@@ -1457,6 +1462,59 @@ fn mouse_selects_wide_chars() {
 }
 
 #[test]
+fn mouse_selects_wide_chars_from_trailing_cell() {
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, "你好");
+    ready(&mut t, Rect::new(0, 0, 80, 5));
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 4, 0),
+        &State::new(),
+    );
+    assert_eq!(t.selected_text().as_deref(), Some("你"));
+}
+
+#[test]
+fn selecting_cjk_does_not_expand_drawn_line() {
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, "你好世界");
+    ready(&mut t, Rect::new(0, 0, 20, 3));
+    let mut terminal = Terminal::new(TestBackend::new(20, 3)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let glyphs = |row: String| {
+        row.chars()
+            .filter(|c| !c.is_whitespace() && *c != '∙')
+            .collect::<String>()
+    };
+    let before = {
+        let buf = terminal.backend().buffer();
+        glyphs((0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect())
+    };
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 8, 0),
+        &State::new(),
+    );
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let after = {
+        let buf = terminal.backend().buffer();
+        glyphs((0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect())
+    };
+    assert_eq!(after, before, "selection must not duplicate CJK glyphs");
+    assert_eq!(after, "你好世界");
+}
+
+#[test]
 fn mouse_selects_wrapped_lines() {
     let mut t = Transcript::new();
     t.push_row(LineKind::Text, "abcdefgh");
@@ -1510,6 +1568,31 @@ fn highlight_line_marks_range() {
     assert_eq!(hi.spans[0].content.as_ref(), LineKind::Text.gutter());
     assert_eq!(hi.spans[1].content.as_ref(), "hello");
     assert_eq!(hi.spans[1].style, theme::selection());
+}
+
+#[test]
+fn highlight_wide_chars_are_not_duplicated() {
+    let line = format_lines(LineKind::Text, "한글中文").pop().unwrap();
+    let original = line_text(&line);
+    let width = line_display_width(&line);
+    for from in 0..width {
+        for to in from + 1..=width {
+            let hi = highlight_line(&line, from, to);
+            assert_eq!(line_text(&hi), original, "from={from} to={to}");
+            assert_eq!(line_display_width(&hi), width, "from={from} to={to}");
+        }
+    }
+}
+
+#[test]
+fn highlight_mid_cjk_cell_keeps_whole_glyph() {
+    let line = format_lines(LineKind::Text, "你好").pop().unwrap();
+    let hi = highlight_line(&line, 3, 4);
+    assert_eq!(line_text(&hi), line_text(&line));
+    assert_eq!(hi.spans[1].content.as_ref(), "你");
+    assert_eq!(hi.spans[1].style, theme::selection());
+    assert_eq!(hi.spans[2].content.as_ref(), "好");
+    assert_eq!(hi.spans[2].style, ratatui::style::Style::default());
 }
 
 #[test]
