@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
@@ -148,7 +149,7 @@ impl InputView {
             self.model_picker.paste(text);
             return;
         }
-        self.textarea.insert_str(text);
+        self.textarea.insert_str(normalize_pasted(text));
         self.refresh_popups();
     }
 
@@ -492,6 +493,13 @@ fn draw_composer_border(f: &mut Frame<'_>, area: Rect, style: Style) -> Rect {
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
+}
+
+fn normalize_pasted(text: &str) -> Cow<'_, str> {
+    if !text.contains('\r') {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
 fn new_textarea() -> TextArea<'static> {
@@ -893,6 +901,20 @@ mod tests {
         view.set_text("line one\nline two");
         assert_eq!(view.textarea.lines(), &["line one", "line two"]);
         assert_eq!(view.textarea.cursor(), (1, 8));
+    }
+
+    #[test]
+    fn paste_normalizes_line_endings() {
+        for (src, expected) in [
+            ("a\nb", ["a", "b"].as_slice()),
+            ("a\r\nb", ["a", "b"].as_slice()),
+            ("a\rb", ["a", "b"].as_slice()),
+            ("a\n\nb", ["a", "", "b"].as_slice()),
+        ] {
+            let mut view = view();
+            view.paste(src);
+            assert_eq!(view.textarea.lines(), expected, "{src:?}");
+        }
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub(super) fn slice_cols(s: &str, start: usize, end: usize) -> String {
     if start >= end {
         return out;
     }
-    
+
     let mut col = 0;
     for ch in s.chars() {
         let cw = ch.width().unwrap_or(0);
