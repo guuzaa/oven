@@ -5,9 +5,8 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use oven_agent::{
-    Agent, AgentEvent, AgentEventEnvelope, AgentMode, ApprovalDecision, ApprovalRequestId,
-    CancellationToken, ChannelEventSink, Record, RouterHandle, TodoList, ToolApproval, ToolCallId,
-    ToolEvent, ToolView, TurnContext, TurnId, restore_todos,
+    Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink, Record,
+    RouterHandle, TodoList, ToolApproval, TurnContext, TurnId, restore_todos,
 };
 use oven_host::run_shell_command;
 use oven_llm::{
@@ -325,89 +324,12 @@ impl Runtime {
         self.publish();
     }
 
-    async fn await_shell_approval(
-        &mut self,
-        turn_id: TurnId,
-        command: &str,
-        cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
-    ) -> Option<Control> {
-        let request_id = ApprovalRequestId::next();
-        let call_id = ToolCallId::next();
-        let view = ToolView {
-            summary: format!("Ran {command}"),
-            collapse: true,
-            diff: false,
-        };
-        self.state.phase = AppPhase::AwaitingToolApproval {
-            turn_id,
-            request: PendingToolApproval {
-                request_id,
-                call_id,
-                name: "bash".into(),
-                view: view.clone(),
-            },
-        };
-        self.publish();
-        self.events.emit(AppEventKind::Agent(AgentEventEnvelope {
-            seq: 0,
-            agent_id: self.agent.id(),
-            turn_id,
-            event: AgentEvent::Tool(ToolEvent::ApprovalRequested {
-                request_id,
-                call_id,
-                name: "bash".into(),
-                view,
-            }),
-        }));
-
-        loop {
-            match cmd_rx.recv().await {
-                None | Some(AppCommand::Shutdown) => {
-                    self.state.phase = AppPhase::ShuttingDown;
-                    self.publish();
-                    return Some(Control::Shutdown);
-                }
-                Some(AppCommand::Control(ControlCommand::RespondToolApproval {
-                    request_id: id,
-                    decision: ApprovalDecision::Approved,
-                })) if id == request_id => return None,
-                Some(AppCommand::Control(ControlCommand::RespondToolApproval {
-                    request_id: id,
-                    decision: ApprovalDecision::Rejected,
-                })) if id == request_id => {
-                    self.state.phase = AppPhase::Idle;
-                    self.publish();
-                    self.emit(AppEventKind::Notification {
-                        text: "shell command was not run: permission declined".into(),
-                    });
-                    return Some(Control::Continue);
-                }
-                Some(AppCommand::Control(ControlCommand::Cancel { turn_id: id }))
-                    if id == turn_id =>
-                {
-                    self.state.phase = AppPhase::Idle;
-                    self.publish();
-                    return Some(Control::Continue);
-                }
-                Some(AppCommand::Control(ControlCommand::Cancel { .. }))
-                | Some(AppCommand::Control(ControlCommand::RespondToolApproval { .. })) => {}
-                Some(AppCommand::Control(ControlCommand::SetMode { mode })) => self.set_mode(mode),
-                Some(cmd) => defer_command(cmd, &self.slash, &mut self.events, &mut self.pending),
-            }
-        }
-    }
-
     pub(crate) async fn run_shell(
         &mut self,
         command: String,
         cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
     ) -> Control {
         let turn_id = TurnId::next();
-        if self.agent.mode() == AgentMode::Ask
-            && let Some(control) = self.await_shell_approval(turn_id, &command, cmd_rx).await
-        {
-            return control;
-        }
         self.state.phase = AppPhase::Running { turn_id };
         self.publish();
         self.emit(AppEventKind::Shell(ShellEvent::Started {

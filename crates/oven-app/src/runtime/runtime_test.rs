@@ -2602,6 +2602,27 @@ async fn bang_shell_does_not_call_provider() {
 }
 
 #[tokio::test]
+async fn ask_mode_bang_shell_runs_without_approval() {
+    let tmp = tempdir::TempDir::new("app-runtime-shell-ask").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+    handle
+        .send(AppCommand::Control(ControlCommand::SetMode {
+            mode: AgentMode::Ask,
+        }))
+        .unwrap();
+
+    let out = handle.prompt("!echo hi").await.unwrap();
+    assert!(out.contains("hi"), "{out}");
+    assert!(handle.state().phase.is_idle());
+    assert_eq!(handle.state().mode, AgentMode::Ask);
+    let parsed = LocalShell::try_parse(&user_texts(&handle.history())[0]).expect("envelope");
+    assert_eq!(parsed.command, "echo hi");
+    assert_eq!(parsed.exit_code, Some(0));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn empty_bang_does_not_push_history() {
     let tmp = tempdir::TempDir::new("app-runtime-shell-empty").unwrap();
     let app = AppBuilder::new(tmp.path());
