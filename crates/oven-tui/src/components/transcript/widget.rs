@@ -74,11 +74,13 @@ impl Transcript {
     pub fn push_user(&mut self, text: &str) {
         self.close_tool_burst();
         self.push_row(LineKind::User, text);
+        self.top = None;
     }
 
     pub fn push_shell_command(&mut self, command: &str) {
         self.close_tool_burst();
         self.push_row(LineKind::Shell, command);
+        self.top = None;
     }
 
     pub fn push_shell_output(&mut self, output: &str, ok: bool) {

@@ -187,6 +187,34 @@ fn scroll_down_returns_to_bottom() {
 }
 
 #[test]
+fn user_input_pins_to_bottom() {
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.area.height = 3;
+    fill(&mut t, 10);
+    t.scroll_up(5);
+    assert!(t.top.is_some());
+    t.push_user("hello");
+    assert!(t.top.is_none());
+    assert_eq!(
+        t.current_top(),
+        t.total_lines().saturating_sub(t.area.height as usize)
+    );
+}
+
+#[test]
+fn shell_command_pins_to_bottom() {
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.area.height = 3;
+    fill(&mut t, 10);
+    t.scroll_up(5);
+    assert!(t.top.is_some());
+    t.push_shell_command("ls");
+    assert!(t.top.is_none());
+}
+
+#[test]
 fn tool_end_updates_summary_without_result_row() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(
