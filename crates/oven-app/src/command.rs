@@ -1,4 +1,4 @@
-use oven_agent::{AgentMode, TurnId};
+use oven_agent::{AgentMode, ApprovalDecision, ApprovalRequestId, TurnId};
 
 /// Commands sent from a frontend to the runtime task.
 ///
@@ -20,7 +20,15 @@ pub enum AppCommand {
 /// is free.
 #[derive(Debug, Clone)]
 pub enum ControlCommand {
-    Cancel { turn_id: TurnId },
-    SetMode { mode: AgentMode },
+    Cancel {
+        turn_id: TurnId,
+    },
+    SetMode {
+        mode: AgentMode,
+    },
+    RespondToolApproval {
+        request_id: ApprovalRequestId,
+        decision: ApprovalDecision,
+    },
     Rewind,
 }

@@ -752,6 +752,14 @@ impl Component for Transcript {
                     self.finish_thinking();
                     self.push_stream(LineKind::Text, text);
                 }
+                AgentEvent::Tool(ToolEvent::ApprovalRequested { view, .. }) => {
+                    self.finish_thinking();
+                    self.flush_streaming();
+                    self.push_row(
+                        LineKind::System,
+                        &format!("approval required: {}", view.summary),
+                    );
+                }
                 AgentEvent::Tool(ToolEvent::Started { call_id, view, .. }) => {
                     self.finish_thinking();
                     self.flush_streaming();
@@ -763,6 +771,7 @@ impl Component for Transcript {
                         ToolResult::Failed { output, error } => {
                             (false, output.as_deref().unwrap_or(error))
                         }
+                        ToolResult::Rejected { reason } => (false, reason.as_str()),
                         ToolResult::Cancelled => (false, "cancelled"),
                     };
                     self.note_tool_end(&call_id.0.to_string(), ok, output);

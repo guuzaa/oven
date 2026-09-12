@@ -10,11 +10,12 @@ use oven_llm::{
 
 use oven_host::now_ms;
 
+use crate::approval::{ApprovalDecision, ApprovalRequestId};
 use crate::error::AgentError;
 use crate::event::{AgentEvent, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
 use crate::identity::{AgentId, ToolCallId};
-use crate::mode::AgentMode;
+use crate::mode::{AgentMode, ToolAccess};
 use crate::prompt_template::{self, InstructionDoc};
 use crate::sink::EventSink;
 use crate::todo::TodoList;
@@ -54,7 +55,7 @@ impl Agent {
             history: History::new(),
             model: ModelId::new("default"),
             system: None,
-            mode: AgentMode::Default,
+            mode: AgentMode::Agent,
             todos: TodoList::default(),
             reasoning_effort: None,
             max_iters: 100,
@@ -228,6 +229,7 @@ impl Agent {
         self.tools
             .iter()
             .filter(|t| !t.caps().plan_only || mode == AgentMode::Plan)
+            .filter(|t| !matches!(mode.tool_access(t.caps().permission), ToolAccess::Hidden))
             .map(|t| oven_llm::Tool {
                 name: t.name().to_string(),
                 description: Some(t.description().to_string()),
@@ -355,6 +357,37 @@ impl Agent {
         }
     }
 
+    async fn run_tool(
+        &mut self,
+        name: &str,
+        input: &serde_json::Value,
+        ctx: &TurnContext,
+        writes_todos: bool,
+        wrote_todo: &mut bool,
+        sink: &mut impl EventSink,
+    ) -> ToolResult {
+        match self.dispatch(name, input, ctx).await {
+            Ok(output) => {
+                if writes_todos && let Ok(list) = TodoList::parse(input) {
+                    self.todos = list.clone();
+                    self.todo_written_this_turn = true;
+                    *wrote_todo = true;
+                    sink.emit(AgentEvent::TodosChanged { todos: list });
+                }
+                ToolResult::Success {
+                    output: truncate(&output, 1_500_000),
+                }
+            }
+            Err(error) => {
+                let output = truncate(&format!("error: {error}"), 1_500_000);
+                ToolResult::Failed {
+                    error: error.to_string(),
+                    output: Some(output),
+                }
+            }
+        }
+    }
+
     async fn step(
         &mut self,
         sink: &mut impl EventSink,
@@ -384,35 +417,55 @@ impl Agent {
                 continue;
             };
             let view = crate::tools::present_tool(name, input);
-            let writes_todos = self
-                .tools
-                .iter()
-                .find(|tool| tool.name() == name)
-                .is_some_and(|tool| tool.caps().writes_todos);
+            let tool = self.tools.iter().find(|tool| tool.name() == name);
+            let writes_todos = tool.is_some_and(|tool| tool.caps().writes_todos);
+            let access = tool.map(|tool| ctx.mode().tool_access(tool.caps().permission));
             let call_id = ToolCallId::next();
-            sink.emit(AgentEvent::Tool(ToolEvent::Started {
-                call_id,
-                name: name.clone(),
-                view,
-            }));
-            let result = match self.dispatch(name, input, ctx).await {
-                Ok(r) => {
-                    if writes_todos && let Ok(list) = TodoList::parse(input) {
-                        self.todos = list.clone();
-                        self.todo_written_this_turn = true;
-                        wrote_todo = true;
-                        sink.emit(AgentEvent::TodosChanged { todos: list });
-                    }
-                    ToolResult::Success {
-                        output: truncate(&r, 1_500_000),
+            let result = match access {
+                None => ToolResult::Failed {
+                    error: format!("unknown tool: {name}"),
+                    output: Some(format!("unknown tool: {name}")),
+                },
+                Some(ToolAccess::Hidden) => ToolResult::Rejected {
+                    reason: format!("tool '{name}' is unavailable in Ask mode"),
+                },
+                Some(ToolAccess::RequiresApproval) => {
+                    let request_id = ApprovalRequestId::next();
+                    sink.emit(AgentEvent::Tool(ToolEvent::ApprovalRequested {
+                        request_id,
+                        call_id,
+                        name: name.clone(),
+                        view: view.clone(),
+                    }));
+                    match ctx
+                        .request_approval(request_id, call_id, name.clone(), view.clone())
+                        .await
+                    {
+                        Some(ApprovalDecision::Approved) => {
+                            sink.emit(AgentEvent::Tool(ToolEvent::Started {
+                                call_id,
+                                name: name.clone(),
+                                view,
+                            }));
+                            self.run_tool(name, input, ctx, writes_todos, &mut wrote_todo, sink)
+                                .await
+                        }
+                        Some(ApprovalDecision::Rejected) => ToolResult::Rejected {
+                            reason:
+                                "tool execution was not performed: the user declined permission"
+                                    .into(),
+                        },
+                        None => return Err(AgentError::cancelled()),
                     }
                 }
-                Err(e) => {
-                    let output = truncate(&format!("error: {e}"), 1_500_000);
-                    ToolResult::Failed {
-                        error: e.to_string(),
-                        output: Some(output),
-                    }
+                Some(ToolAccess::Allowed) => {
+                    sink.emit(AgentEvent::Tool(ToolEvent::Started {
+                        call_id,
+                        name: name.clone(),
+                        view,
+                    }));
+                    self.run_tool(name, input, ctx, writes_todos, &mut wrote_todo, sink)
+                        .await
                 }
             };
             let summary = result.output().to_string();
@@ -535,7 +588,7 @@ mod tests {
     use crate::TurnId;
     use crate::identity::ToolCallId;
     use crate::sink::{NullSink, VecEventSink};
-    use crate::tools::{FileReadTool, FileWriteTool};
+    use crate::tools::{BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool};
     use crate::turn::TurnContext;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
@@ -552,7 +605,7 @@ mod tests {
         TurnContext::new(
             TurnId::next(),
             CancellationToken::new(),
-            AgentMode::Default,
+            AgentMode::Agent,
             ModelId::new("default"),
             None,
         )
@@ -752,6 +805,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_rejects_hidden_write_tool_without_writing() {
+        let tmp = tmp_dir();
+        let mock = MockProvider::new(vec![
+            tool_response(
+                "call_1",
+                "file_write",
+                json!({"path": "created.txt", "content": "unexpected"}),
+            ),
+            text_response("explained"),
+        ]);
+        let mut agent = Agent::new(
+            router_with(Box::new(mock)),
+            vec![Box::new(FileWriteTool::new(tmp.path()))],
+        );
+        agent.set_mode(AgentMode::Ask);
+
+        assert_eq!(run_text(&mut agent, "write it").await, "explained");
+        assert!(!tmp.path().join("created.txt").exists());
+        assert!(
+            agent
+                .history
+                .iter()
+                .any(|message| content_has(message, "unavailable in Ask mode"))
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_requires_approval_before_running_bash() {
+        let tmp = tmp_dir();
+        let marker = tmp.path().join("approved.txt");
+        let command = if cfg!(windows) {
+            "Set-Content approved.txt approved"
+        } else {
+            "printf approved > approved.txt"
+        };
+        let mock = MockProvider::new(vec![
+            tool_response("call_1", "bash", json!({"command": command})),
+            text_response("done"),
+        ]);
+        let mut agent = Agent::new(
+            router_with(Box::new(mock)),
+            vec![Box::new(BashTool::new(tmp.path()))],
+        );
+        agent.set_mode(AgentMode::Ask);
+        let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = TurnContext::new(
+            TurnId::next(),
+            CancellationToken::new(),
+            AgentMode::Ask,
+            ModelId::new("default"),
+            None,
+        )
+        .with_approval_sender(approval_tx);
+        let mut sink = NullSink;
+        let turn = agent.run("run it", &ctx, &mut sink);
+        tokio::pin!(turn);
+
+        let approval = tokio::select! {
+            approval = approval_rx.recv() => approval.unwrap(),
+            _ = &mut turn => panic!("turn completed before requesting approval"),
+        };
+        assert_eq!(approval.name, "bash");
+        assert!(!marker.exists());
+        approval.responder.send(ApprovalDecision::Approved).unwrap();
+
+        assert_eq!(turn.await.unwrap().text(), "done");
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "approved");
+    }
+
+    #[tokio::test]
     async fn event_sequence_for_tool_calling_turn() {
         let tmp = tmp_dir();
         let root = tmp.path();
@@ -824,7 +947,7 @@ mod tests {
                 &TurnContext::new(
                     TurnId::next(),
                     cancel,
-                    AgentMode::Default,
+                    AgentMode::Agent,
                     ModelId::new("default"),
                     None,
                 ),
@@ -928,7 +1051,7 @@ mod tests {
                 &TurnContext::new(
                     TurnId::next(),
                     cancel,
-                    AgentMode::Default,
+                    AgentMode::Agent,
                     ModelId::new("default"),
                     None,
                 ),
@@ -1103,6 +1226,31 @@ mod tests {
             "Default must hide todo_write: {:?}",
             seen[0]
         );
+    }
+
+    #[tokio::test]
+    async fn ask_request_hides_write_tools_but_keeps_bash() {
+        let tmp = tmp_dir();
+        let (mock, names) = CaptureTools::new();
+        let mut agent = Agent::new(
+            router_with(Box::new(mock)),
+            vec![
+                Box::new(FileReadTool::new(tmp.path())),
+                Box::new(FileEditTool::new(tmp.path())),
+                Box::new(FileWriteTool::new(tmp.path())),
+                Box::new(BashTool::new(tmp.path())),
+                Box::new(TodoWriteTool),
+            ],
+        );
+        agent.set_mode(AgentMode::Ask);
+        run_text(&mut agent, "hi").await;
+        let names = names.lock().unwrap().clone();
+        assert_eq!(names.len(), 1);
+        assert!(names[0].iter().any(|name| name == "file_read"));
+        assert!(names[0].iter().any(|name| name == "bash"));
+        assert!(!names[0].iter().any(|name| name == "file_edit"));
+        assert!(!names[0].iter().any(|name| name == "file_write"));
+        assert!(!names[0].iter().any(|name| name == "todo_write"));
     }
 
     #[tokio::test]
@@ -1325,7 +1473,7 @@ mod tests {
         *mock.release.lock().unwrap() = Some(release_rx);
 
         let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
-        assert_eq!(agent.mode(), AgentMode::Default);
+        assert_eq!(agent.mode(), AgentMode::Agent);
 
         let mut sink = NullSink;
         let ctx = turn_ctx();
@@ -1429,7 +1577,7 @@ mod tests {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "read it").await;
-        agent.set_mode(AgentMode::Default);
+        agent.set_mode(AgentMode::Agent);
         run_text(&mut agent, "next").await;
 
         let reqs = seen.lock().unwrap().clone();

@@ -25,7 +25,7 @@ impl SlashCommand for Plan {
                 mode: AgentMode::Plan,
             }),
             "off" => Ok(CommandOutcome::ModeChanged {
-                mode: AgentMode::Default,
+                mode: AgentMode::Agent,
             }),
             _ => Err(AppError::Runtime("usage: /plan [on|off]".to_string())),
         }
@@ -117,7 +117,7 @@ mod tests {
         assert!(matches!(
             out,
             CommandOutcome::ModeChanged {
-                mode: AgentMode::Default
+                mode: AgentMode::Agent
             }
         ));
     }

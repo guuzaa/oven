@@ -27,7 +27,7 @@ pub use grep::GrepTool;
 pub use skill_read::SkillReadTool;
 pub use todo_write::TodoWriteTool;
 pub(crate) use view::labeled;
-pub use view::{ToolCaps, ToolView, present_tool};
+pub use view::{ToolCaps, ToolPermission, ToolView, present_tool};
 
 #[async_trait]
 pub trait Tool: Send + Sync {

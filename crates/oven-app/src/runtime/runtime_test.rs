@@ -1955,7 +1955,7 @@ async fn set_mode_applies_during_in_flight_turn() {
     };
 
     let agent = agent_from(Box::new(provider));
-    assert_eq!(agent.mode(), AgentMode::Default);
+    assert_eq!(agent.mode(), AgentMode::Agent);
     let handle = spawn_runtime(
         AppId::next(),
         agent,
@@ -2012,6 +2012,70 @@ fn tool_response(id: &str, name: &str, input: serde_json::Value) -> Response {
             reasoning_tokens: 0,
         }),
     }
+}
+
+#[tokio::test]
+async fn repro_ask_mode_bash_requests_approval() {
+    let tmp = tempdir::TempDir::new("app-runtime-approval").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "c1",
+            "bash",
+            serde_json::json!({"command": "printf approved > approved.txt"}),
+        ),
+        text_response("done"),
+    ]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+    let mut rx = handle.subscribe();
+    handle
+        .send(AppCommand::Control(ControlCommand::SetMode {
+            mode: AgentMode::Ask,
+        }))
+        .unwrap();
+    handle.send(AppCommand::Prompt("run it".into())).unwrap();
+
+    let mut request_id = None;
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::Agent(env) = &ev.kind {
+            if let AgentEvent::Tool(oven_agent::ToolEvent::ApprovalRequested {
+                request_id: id,
+                ..
+            }) = &env.event
+            {
+                request_id = Some(*id);
+                break;
+            }
+            if let AgentEvent::Turn(TurnEvent::Completed { .. }) = &env.event {
+                panic!("turn completed without requesting approval");
+            }
+        }
+    }
+    let request_id = request_id.expect("approval requested");
+    assert!(
+        matches!(handle.state().phase, AppPhase::AwaitingToolApproval { .. }),
+        "phase: {:?}",
+        handle.state().phase
+    );
+    handle
+        .send(AppCommand::Control(ControlCommand::RespondToolApproval {
+            request_id,
+            decision: oven_agent::ApprovalDecision::Approved,
+        }))
+        .unwrap();
+
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::Agent(env) = &ev.kind
+            && matches!(env.event, AgentEvent::Turn(TurnEvent::Completed { .. }))
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("approved.txt")).unwrap(),
+        "approved"
+    );
+    handle.shutdown().await;
 }
 
 fn last_jsonl_line(path: &Path) -> String {

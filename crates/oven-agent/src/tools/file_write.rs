@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, require_str, resolve_within};
+use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileWriteTool {
@@ -47,6 +47,12 @@ impl Tool for FileWriteTool {
     }
     fn view(&self, input: &Value) -> ToolView {
         Self::view_input(input)
+    }
+    fn caps(&self) -> ToolCaps {
+        ToolCaps {
+            permission: ToolPermission::Write,
+            ..Default::default()
+        }
     }
     fn description(&self) -> &str {
         "Write text content to a file, creating parent directories as needed. Overwrites."

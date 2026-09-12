@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolCaps, ToolView};
+use super::{Tool, ToolCaps, ToolPermission, ToolView};
 use crate::error::AgentError;
 use crate::todo::TodoList;
 
@@ -38,6 +38,7 @@ impl Tool for TodoWriteTool {
         ToolCaps {
             plan_only: true,
             writes_todos: true,
+            permission: ToolPermission::Write,
         }
     }
 

@@ -22,9 +22,19 @@ impl ToolView {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolPermission {
+    #[default]
+    Read,
+    Write,
+    Execute,
+    External,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ToolCaps {
     pub plan_only: bool,
     pub writes_todos: bool,
+    pub permission: ToolPermission,
 }
 
 pub fn present_tool(name: &str, input: &Value) -> ToolView {

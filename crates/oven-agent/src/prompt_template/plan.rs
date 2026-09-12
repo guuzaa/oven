@@ -2,6 +2,7 @@ use crate::mode::AgentMode;
 use crate::todo::TodoList;
 
 pub const PLAN_MODE_PROMPT: &str = include_str!("plan.md");
+pub const ASK_MODE_PROMPT: &str = include_str!("ask.md");
 
 pub const PLAN_REMINDER: &str = "\
 ## Plan reminder
@@ -15,10 +16,12 @@ pub fn compose_todo_system(
     remind: bool,
 ) -> Option<String> {
     let mut system = match (base, mode) {
-        (None, AgentMode::Default) => None,
+        (None, AgentMode::Agent) => None,
         (None, AgentMode::Plan) => Some(PLAN_MODE_PROMPT.to_string()),
-        (Some(base), AgentMode::Default) => Some(base.to_string()),
+        (None, AgentMode::Ask) => Some(ASK_MODE_PROMPT.to_string()),
+        (Some(base), AgentMode::Agent) => Some(base.to_string()),
         (Some(base), AgentMode::Plan) => Some(format!("{base}\n\n{PLAN_MODE_PROMPT}")),
+        (Some(base), AgentMode::Ask) => Some(format!("{base}\n\n{ASK_MODE_PROMPT}")),
     };
     if !todos.is_empty() {
         let block = todos.render_todo_block();
@@ -53,7 +56,7 @@ mod tests {
     #[test]
     fn compose_system_default_vs_plan() {
         assert_eq!(
-            compose_todo_system(None, AgentMode::Default, &TodoList::default(), false),
+            compose_todo_system(None, AgentMode::Agent, &TodoList::default(), false),
             None
         );
         assert_eq!(
@@ -61,13 +64,8 @@ mod tests {
             Some(PLAN_MODE_PROMPT)
         );
         assert_eq!(
-            compose_todo_system(
-                Some("base"),
-                AgentMode::Default,
-                &TodoList::default(),
-                false
-            )
-            .as_deref(),
+            compose_todo_system(Some("base"), AgentMode::Agent, &TodoList::default(), false)
+                .as_deref(),
             Some("base")
         );
         assert_eq!(
@@ -92,13 +90,8 @@ mod tests {
 
     #[test]
     fn empty_list_adds_no_todo_block() {
-        let out = compose_todo_system(
-            Some("base"),
-            AgentMode::Default,
-            &TodoList::default(),
-            false,
-        )
-        .unwrap();
+        let out = compose_todo_system(Some("base"), AgentMode::Agent, &TodoList::default(), false)
+            .unwrap();
         assert_eq!(out, "base");
         assert!(!out.contains("## Current TODO list"));
     }
@@ -121,7 +114,7 @@ mod tests {
     #[test]
     fn reminder_not_injected_when_system_would_be_empty() {
         assert_eq!(
-            compose_todo_system(None, AgentMode::Default, &TodoList::default(), true),
+            compose_todo_system(None, AgentMode::Agent, &TodoList::default(), true),
             None
         );
     }

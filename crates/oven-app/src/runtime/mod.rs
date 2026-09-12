@@ -5,8 +5,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use oven_agent::{
-    Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink, Record,
-    RouterHandle, TodoList, TurnContext, TurnId, restore_todos,
+    Agent, AgentEvent, AgentEventEnvelope, AgentMode, ApprovalDecision, ApprovalRequestId,
+    CancellationToken, ChannelEventSink, Record, RouterHandle, TodoList, ToolApproval, ToolCallId,
+    ToolEvent, ToolView, TurnContext, TurnId, restore_todos,
 };
 use oven_host::run_shell_command;
 use oven_llm::{
@@ -21,7 +22,10 @@ use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
 use crate::session::{Session, SessionError, SessionStore, record_recent};
 use crate::shell;
 use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
-use crate::state::{AppPhase, AppState, SessionState, StateChange, context_tokens, context_window};
+use crate::state::{
+    AppPhase, AppState, PendingToolApproval, SessionState, StateChange, context_tokens,
+    context_window,
+};
 
 const EMPTY_SHELL: &str = "empty shell command";
 const QUEUED_NOTICE_SUFFIX: &str = "queued: will apply once the current reply finishes";
@@ -119,6 +123,7 @@ impl Runtime {
                 self.set_mode(mode);
                 Control::Continue
             }
+            AppCommand::Control(ControlCommand::RespondToolApproval { .. }) => Control::Continue,
             AppCommand::Control(ControlCommand::Rewind) => {
                 self.rewind();
                 Control::Continue
@@ -157,6 +162,8 @@ impl Runtime {
 
         let cancel = CancellationToken::new();
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+        let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ToolApproval>();
+        let mut pending_approval = None;
         let mut sink = ChannelEventSink::new(agent_tx, self.agent.id(), turn_id);
         let ctx = TurnContext::new(
             turn_id,
@@ -164,7 +171,8 @@ impl Runtime {
             self.agent.mode(),
             self.agent.model().clone(),
             self.agent.reasoning_effort(),
-        );
+        )
+        .with_approval_sender(approval_tx);
 
         let result = {
             let turn = self.agent.run(input, &ctx, &mut sink);
@@ -188,6 +196,17 @@ impl Runtime {
                                 cancel_turn(&mut self.state, &self.state_tx, turn_id, &cancel);
                             }
                             Some(AppCommand::Control(ControlCommand::Cancel { .. })) => {}
+                            Some(AppCommand::Control(ControlCommand::RespondToolApproval { request_id, decision })) => {
+                                if pending_approval
+                                    .as_ref()
+                                    .is_some_and(|approval: &ToolApproval| approval.request_id == request_id)
+                                    && let Some(approval) = pending_approval.take()
+                                {
+                                    let _ = approval.responder.send(decision);
+                                    self.state.phase = AppPhase::Running { turn_id };
+                                    let _ = self.state_tx.send(self.state.clone());
+                                }
+                            }
                             Some(AppCommand::Control(ControlCommand::SetMode { mode })) => {
                                 ctx.set_mode(mode);
                                 self.state.mode = mode;
@@ -212,6 +231,21 @@ impl Runtime {
                                     &mut self.pending,
                                 ),
                             },
+                        }
+                    }
+                    approval = approval_rx.recv() => {
+                        if let Some(approval) = approval {
+                            self.state.phase = AppPhase::AwaitingToolApproval {
+                                turn_id,
+                                request: PendingToolApproval {
+                                    request_id: approval.request_id,
+                                    call_id: approval.call_id,
+                                    name: approval.name.clone(),
+                                    view: approval.view.clone(),
+                                },
+                            };
+                            let _ = self.state_tx.send(self.state.clone());
+                            pending_approval = Some(approval);
                         }
                     }
                     ev = agent_rx.recv() => {
@@ -291,12 +325,89 @@ impl Runtime {
         self.publish();
     }
 
+    async fn await_shell_approval(
+        &mut self,
+        turn_id: TurnId,
+        command: &str,
+        cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
+    ) -> Option<Control> {
+        let request_id = ApprovalRequestId::next();
+        let call_id = ToolCallId::next();
+        let view = ToolView {
+            summary: format!("Ran {command}"),
+            collapse: true,
+            diff: false,
+        };
+        self.state.phase = AppPhase::AwaitingToolApproval {
+            turn_id,
+            request: PendingToolApproval {
+                request_id,
+                call_id,
+                name: "bash".into(),
+                view: view.clone(),
+            },
+        };
+        self.publish();
+        self.events.emit(AppEventKind::Agent(AgentEventEnvelope {
+            seq: 0,
+            agent_id: self.agent.id(),
+            turn_id,
+            event: AgentEvent::Tool(ToolEvent::ApprovalRequested {
+                request_id,
+                call_id,
+                name: "bash".into(),
+                view,
+            }),
+        }));
+
+        loop {
+            match cmd_rx.recv().await {
+                None | Some(AppCommand::Shutdown) => {
+                    self.state.phase = AppPhase::ShuttingDown;
+                    self.publish();
+                    return Some(Control::Shutdown);
+                }
+                Some(AppCommand::Control(ControlCommand::RespondToolApproval {
+                    request_id: id,
+                    decision: ApprovalDecision::Approved,
+                })) if id == request_id => return None,
+                Some(AppCommand::Control(ControlCommand::RespondToolApproval {
+                    request_id: id,
+                    decision: ApprovalDecision::Rejected,
+                })) if id == request_id => {
+                    self.state.phase = AppPhase::Idle;
+                    self.publish();
+                    self.emit(AppEventKind::Notification {
+                        text: "shell command was not run: permission declined".into(),
+                    });
+                    return Some(Control::Continue);
+                }
+                Some(AppCommand::Control(ControlCommand::Cancel { turn_id: id }))
+                    if id == turn_id =>
+                {
+                    self.state.phase = AppPhase::Idle;
+                    self.publish();
+                    return Some(Control::Continue);
+                }
+                Some(AppCommand::Control(ControlCommand::Cancel { .. }))
+                | Some(AppCommand::Control(ControlCommand::RespondToolApproval { .. })) => {}
+                Some(AppCommand::Control(ControlCommand::SetMode { mode })) => self.set_mode(mode),
+                Some(cmd) => defer_command(cmd, &self.slash, &mut self.events, &mut self.pending),
+            }
+        }
+    }
+
     pub(crate) async fn run_shell(
         &mut self,
         command: String,
         cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
     ) -> Control {
         let turn_id = TurnId::next();
+        if self.agent.mode() == AgentMode::Ask
+            && let Some(control) = self.await_shell_approval(turn_id, &command, cmd_rx).await
+        {
+            return control;
+        }
         self.state.phase = AppPhase::Running { turn_id };
         self.publish();
         self.emit(AppEventKind::Shell(ShellEvent::Started {
@@ -791,6 +902,7 @@ fn deferred_notice(cmd: &AppCommand, slash: &SlashRegistry) -> Option<String> {
             .map(|name| format!("/{name} {QUEUED_NOTICE_SUFFIX}")),
         AppCommand::Control(ControlCommand::Cancel { .. })
         | AppCommand::Control(ControlCommand::SetMode { .. })
+        | AppCommand::Control(ControlCommand::RespondToolApproval { .. })
         | AppCommand::Shutdown => None,
     }
 }

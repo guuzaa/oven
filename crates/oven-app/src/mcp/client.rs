@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
-use oven_agent::{AgentError, CancellationToken, Tool};
+use oven_agent::{AgentError, CancellationToken, Tool, ToolCaps, ToolPermission};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ResourceContents};
 use rmcp::service::{RoleClient, RunningService, serve_client};
 use rmcp::transport::TokioChildProcess;
@@ -226,6 +226,13 @@ impl Tool for McpTool {
 
     fn schema(&self) -> Value {
         self.schema.clone()
+    }
+
+    fn caps(&self) -> ToolCaps {
+        ToolCaps {
+            permission: ToolPermission::External,
+            ..Default::default()
+        }
     }
 
     async fn run(

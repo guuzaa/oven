@@ -6,13 +6,15 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, CompactionEvent, ControlCommand,
-    ShellEvent, StateChange, StateEvent, TurnEvent,
+    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ApprovalDecision,
+    ApprovalRequestId, CompactionEvent, ControlCommand, ShellEvent, StateChange, StateEvent,
+    ToolEvent, TurnEvent,
 };
 use tokio::sync::mpsc;
 
 use crate::components::component::{Action, Component, KeyResult, State};
 use crate::components::input::{InputView, Overlay, display_user_input};
+use crate::components::list::{cycle_selected, draw_choice_list};
 use crate::components::paste_burst::{self, Burst};
 use crate::components::queue::QueueWidget;
 use crate::components::shell;
@@ -20,6 +22,14 @@ use crate::components::status::{StatusBar, StatusHint};
 use crate::components::todos::TodosWidget;
 use crate::components::transcript::Transcript;
 use crate::components::{layout, terminal};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::Paragraph;
+
+struct ApprovalPrompt {
+    request_id: ApprovalRequestId,
+    name: String,
+    summary: String,
+}
 
 pub struct Ui {
     app: App,
@@ -35,6 +45,8 @@ pub struct Ui {
     input: InputView,
     queue: QueueWidget,
     todos: TodosWidget,
+    approval: Option<ApprovalPrompt>,
+    approval_selected: usize,
 }
 
 impl Ui {
@@ -73,6 +85,8 @@ impl Ui {
             input,
             queue: QueueWidget::new(),
             todos: TodosWidget::new(todos),
+            approval: None,
+            approval_selected: 0,
         }
     }
 
@@ -179,7 +193,24 @@ impl Ui {
                     TurnEvent::Completed { .. }
                     | TurnEvent::Cancelled { .. }
                     | TurnEvent::Failed { .. },
-                ) => self.state.busy = false,
+                ) => {
+                    self.state.busy = false;
+                    self.approval = None;
+                }
+                AgentEvent::Tool(ToolEvent::ApprovalRequested {
+                    request_id,
+                    name,
+                    view,
+                    ..
+                }) => {
+                    self.approval = Some(ApprovalPrompt {
+                        request_id: *request_id,
+                        name: name.clone(),
+                        summary: view.summary.clone(),
+                    });
+                    self.approval_selected = 0;
+                }
+                AgentEvent::Tool(ToolEvent::Finished { .. }) => self.approval = None,
                 _ => {}
             },
             AppEventKind::Shell(ev) => match ev {
@@ -203,7 +234,9 @@ impl Ui {
             AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {
                 if !matches!(
                     self.app.state().phase,
-                    AppPhase::Running { .. } | AppPhase::Cancelling { .. }
+                    AppPhase::Running { .. }
+                        | AppPhase::AwaitingToolApproval { .. }
+                        | AppPhase::Cancelling { .. }
                 ) {
                     self.state.busy = false;
                 }
@@ -267,6 +300,40 @@ impl Ui {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if let Some(approval) = self.approval.as_ref() {
+            let request_id = approval.request_id;
+            let decision = match key.code {
+                KeyCode::Up => {
+                    cycle_selected(&mut self.approval_selected, 2, true);
+                    return false;
+                }
+                KeyCode::Down => {
+                    cycle_selected(&mut self.approval_selected, 2, false);
+                    return false;
+                }
+                KeyCode::Enter => Some(match self.approval_selected {
+                    0 => ApprovalDecision::Approved,
+                    _ => ApprovalDecision::Rejected,
+                }),
+                KeyCode::Char('y') => Some(ApprovalDecision::Approved),
+                KeyCode::Esc | KeyCode::Char('n') => Some(ApprovalDecision::Rejected),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => None,
+                _ => return false,
+            };
+            if let Some(decision) = decision {
+                let _ = self
+                    .app
+                    .send(AppCommand::Control(ControlCommand::RespondToolApproval {
+                        request_id,
+                        decision,
+                    }));
+                self.approval = None;
+            } else {
+                self.send_cancel();
+            }
+            return false;
+        }
+
         let result = match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 KeyResult::Action(Action::Quit)
@@ -350,12 +417,17 @@ impl Ui {
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
         let area = f.area();
+        let overlay_height = if self.approval.is_some() {
+            APPROVAL_OVERLAY_HEIGHT
+        } else {
+            self.input.overlay_height()
+        };
         let regions = layout::split(
             area,
             self.input.height(area.width),
             self.queue.height(&self.pending),
             self.todos.height(),
-            self.input.overlay_height(),
+            overlay_height,
         );
 
         self.transcript.draw(f, regions.transcript, &self.state);
@@ -367,13 +439,26 @@ impl Ui {
         }
         self.input.draw(f, regions.input, &self.state);
         if let Some(overlay) = regions.overlay {
-            self.input.draw_overlay(f, overlay);
+            match self.approval.as_ref() {
+                Some(approval) => draw_approval(
+                    f,
+                    overlay,
+                    &approval.name,
+                    &approval.summary,
+                    self.approval_selected,
+                ),
+                None => self.input.draw_overlay(f, overlay),
+            }
         }
         self.status.draw_bar(
             f,
             regions.status,
             &self.state,
-            status_hint(self.input.overlay(), self.state.busy),
+            status_hint(
+                self.input.overlay(),
+                self.state.busy,
+                self.approval.is_some(),
+            ),
         );
         self.status.draw_reply_overlay(f, regions.transcript);
     }
@@ -388,7 +473,38 @@ fn is_mode_toggle(key: KeyEvent) -> bool {
         || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
-fn status_hint(overlay: Overlay, busy: bool) -> StatusHint {
+const APPROVAL_OVERLAY_HEIGHT: u16 = 5;
+
+fn draw_approval(
+    f: &mut ratatui::Frame<'_>,
+    area: Rect,
+    name: &str,
+    summary: &str,
+    selected: usize,
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Length(2)])
+        .split(area);
+    f.render_widget(
+        Paragraph::new(format!("permission required · {name}\n{summary}")),
+        rows[0],
+    );
+    draw_choice_list(
+        f,
+        rows[1],
+        [
+            ("Approve", "run this tool"),
+            ("Reject", "do not run this tool"),
+        ],
+        selected,
+    );
+}
+
+fn status_hint(overlay: Overlay, busy: bool, awaiting_approval: bool) -> StatusHint {
+    if awaiting_approval {
+        return StatusHint::Approval;
+    }
     match overlay {
         Overlay::Slash | Overlay::Mention => StatusHint::Slash,
         Overlay::Model | Overlay::Setup => StatusHint::Modal,
@@ -497,11 +613,12 @@ mod tests {
 
     #[test]
     fn status_hint_follows_overlay_then_busy() {
-        assert_eq!(status_hint(Overlay::Slash, true), StatusHint::Slash);
-        assert_eq!(status_hint(Overlay::Setup, false), StatusHint::Modal);
-        assert_eq!(status_hint(Overlay::Model, false), StatusHint::Modal);
-        assert_eq!(status_hint(Overlay::None, true), StatusHint::Busy);
-        assert_eq!(status_hint(Overlay::None, false), StatusHint::Idle);
+        assert_eq!(status_hint(Overlay::Slash, true, false), StatusHint::Slash);
+        assert_eq!(status_hint(Overlay::Setup, false, false), StatusHint::Modal);
+        assert_eq!(status_hint(Overlay::Model, false, false), StatusHint::Modal);
+        assert_eq!(status_hint(Overlay::None, true, false), StatusHint::Busy);
+        assert_eq!(status_hint(Overlay::None, false, false), StatusHint::Idle);
+        assert_eq!(status_hint(Overlay::None, true, true), StatusHint::Approval);
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
