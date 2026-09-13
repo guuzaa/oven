@@ -22,6 +22,12 @@ pub fn sessions_dir() -> Option<PathBuf> {
     oven_home().map(|d| d.join("sessions"))
 }
 
+/// `~/.oven/logs`.
+#[inline]
+pub fn logs_dir() -> Option<PathBuf> {
+    oven_home().map(|d| d.join("logs"))
+}
+
 /// Skill search paths: user-wide `~/.oven/skills` first, then the project's `.oven/skills`.
 /// Later paths override earlier skills with the same id.
 pub fn skill_dirs(root: &Path) -> Vec<PathBuf> {

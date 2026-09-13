@@ -101,6 +101,7 @@ impl Runtime {
                 },
             };
             if let AppCommand::Shutdown = cmd {
+                tracing::debug!(kind = "shutdown", "runtime command");
                 self.shutdown();
                 break;
             }
@@ -115,6 +116,7 @@ impl Runtime {
         cmd: AppCommand,
         rx: &mut mpsc::UnboundedReceiver<AppCommand>,
     ) -> Control {
+        tracing::debug!(kind = command_kind(&cmd), "runtime command");
         match cmd {
             AppCommand::Shutdown => Control::Shutdown,
             AppCommand::Control(ControlCommand::Cancel { .. }) => Control::Continue,
@@ -146,6 +148,9 @@ impl Runtime {
         match self.slash.parse_and_run(&mut self.agent, &input) {
             Ok(CommandOutcome::Passthrough) => {}
             Ok(outcome) => {
+                if let Some(name) = self.slash.recognized_name(&input) {
+                    tracing::info!(name, "slash command");
+                }
                 self.apply_slash(outcome).await;
                 return Control::Continue;
             }
@@ -156,6 +161,12 @@ impl Runtime {
         }
 
         let turn_id = TurnId::next();
+        tracing::info!(
+            turn_id = turn_id.0,
+            mode = self.agent.mode().label(),
+            model = %self.agent.model(),
+            "turn started"
+        );
         self.state.phase = AppPhase::Running { turn_id };
         self.publish();
 
@@ -330,6 +341,7 @@ impl Runtime {
         cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
     ) -> Control {
         let turn_id = TurnId::next();
+        tracing::info!(turn_id = turn_id.0, "shell started");
         self.state.phase = AppPhase::Running { turn_id };
         self.publish();
         self.emit(AppEventKind::Shell(ShellEvent::Started {
@@ -379,6 +391,7 @@ impl Runtime {
         match &shell.error {
             None => {
                 let exit_code = shell.exit_code.unwrap_or(0);
+                tracing::info!(exit_code, "shell finished");
                 self.emit(AppEventKind::Shell(ShellEvent::Finished {
                     command: command.clone(),
                     output: shell.output.clone(),
@@ -386,6 +399,7 @@ impl Runtime {
                 }));
             }
             Some(error) => {
+                tracing::warn!(error = %error, "shell failed");
                 self.emit(AppEventKind::Shell(ShellEvent::Failed {
                     command: command.clone(),
                     error: error.clone(),
@@ -875,6 +889,17 @@ fn resolve_model_switch(
         model,
         reasoning_effort,
         overlay,
+    }
+}
+
+fn command_kind(cmd: &AppCommand) -> &'static str {
+    match cmd {
+        AppCommand::Prompt(_) => "prompt",
+        AppCommand::Control(ControlCommand::Cancel { .. }) => "cancel",
+        AppCommand::Control(ControlCommand::SetMode { .. }) => "set_mode",
+        AppCommand::Control(ControlCommand::RespondToolApproval { .. }) => "tool_approval",
+        AppCommand::Control(ControlCommand::Rewind) => "rewind",
+        AppCommand::Shutdown => "shutdown",
     }
 }
 

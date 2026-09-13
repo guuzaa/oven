@@ -184,6 +184,7 @@ impl AppBuilder {
     /// Start a long-lived app task with no session persistence.
     pub async fn open(&self) -> Result<App, AppError> {
         let agent = self.build_agent().await?;
+        self.log_open(&agent);
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -201,6 +202,7 @@ impl AppBuilder {
     pub async fn open_session(&self, session_id: Option<&str>) -> Result<App, AppError> {
         let Some(dir) = dirs::sessions_dir() else {
             let agent = self.build_interactive_agent().await?;
+            self.log_open(&agent);
             return Ok(spawn_runtime(
                 AppId::next(),
                 agent,
@@ -232,6 +234,7 @@ impl AppBuilder {
         agent.restore_history(records);
         hydrate_session(&mut agent, &prior);
         agent.ensure_session_meta(canonical_root(&self.root));
+        self.log_open(&agent);
         Ok(spawn_runtime(
             AppId::next(),
             agent,
@@ -240,5 +243,15 @@ impl AppBuilder {
             self.config.clone(),
             AppConfig::default_user_config_path(),
         ))
+    }
+
+    fn log_open(&self, agent: &Agent) {
+        tracing::info!(
+            root = %self.root.display(),
+            model = %agent.model(),
+            tool_count = self.tools.len(),
+            mcp_count = self.mcps.len(),
+            "app opened"
+        );
     }
 }

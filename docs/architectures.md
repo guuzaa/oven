@@ -44,8 +44,8 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | --- | --- |
 | `oven-llm` | `Message`, `Usage`, provider I/O |
 | `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, turn execution, tool protocol, `AgentEvent`, `EventSink`, history/todo domain models, provider retry decoration |
-| `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking |
-| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `ControlCommand`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration |
+| `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
+| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `ControlCommand`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, tracing subscriber install |
 | `oven-tui` | render events and state; send commands |
 
 `oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
@@ -71,6 +71,7 @@ oven-tui ──► oven-app ──► oven-agent ──► oven-llm
 | Process execution | `run_shell_command` | Choose command, timeout, cancellation, and event formatting |
 | Output decoding | `decode_command_output` | Render decoded stdout/stderr and exit status |
 | File discovery | `walk_dir`, `WalkEntry` | Apply glob/grep semantics and result limits |
+| Log files | `RotatingFile` | Install the tracing subscriber at process start (`oven-app::log`); emit spans from agent/app |
 
 The host facade deliberately does not know about `AgentError`, `Tool`, `AgentEvent`, `AppEvent`, or `AppState`. This keeps the infrastructure reusable and prevents a dependency cycle.
 

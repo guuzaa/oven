@@ -67,13 +67,22 @@ impl McpConnector for DefaultMcpConnector {
         let mut tools = vec![];
         for (id, cfg) in registry.iter() {
             let has_url = cfg.url.as_deref().is_some_and(|u| !u.trim().is_empty());
+            let kind = if has_url { "http" } else { "stdio" };
             let connected = if has_url {
                 connect_http(id, cfg).await
             } else {
                 connect_stdio(id, cfg, root).await
+            };
+            match connected {
+                Ok(connected) => {
+                    tracing::info!(id, kind, tool_count = connected.len(), "mcp connected");
+                    tools.extend(connected);
+                }
+                Err(e) => {
+                    tracing::warn!(id, kind, error = %e, "mcp connect failed");
+                    return Err(format!("mcp '{id}': {e}"));
+                }
             }
-            .map_err(|e| format!("mcp '{id}': {e}"))?;
-            tools.extend(connected);
         }
         Ok(tools)
     }

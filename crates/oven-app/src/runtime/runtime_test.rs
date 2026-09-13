@@ -1994,6 +1994,20 @@ async fn set_mode_applies_during_in_flight_turn() {
     handle.shutdown().await;
 }
 
+const APPROVED_FILE: &str = "approved.txt";
+const APPROVED_CONTENT: &str = "approved";
+
+fn write_approved_command() -> &'static str {
+    #[cfg(windows)]
+    {
+        "Set-Content -Path approved.txt -Value approved -Encoding ascii -NoNewline"
+    }
+    #[cfg(not(windows))]
+    {
+        "printf approved > approved.txt"
+    }
+}
+
 fn tool_response(id: &str, name: &str, input: serde_json::Value) -> Response {
     Response {
         id: "resp".into(),
@@ -2022,7 +2036,7 @@ async fn repro_ask_mode_bash_requests_approval() {
         tool_response(
             "c1",
             "bash",
-            serde_json::json!({"command": "printf approved > approved.txt"}),
+            serde_json::json!({"command": write_approved_command()}),
         ),
         text_response("done"),
     ]);
@@ -2072,8 +2086,8 @@ async fn repro_ask_mode_bash_requests_approval() {
         }
     }
     assert_eq!(
-        std::fs::read_to_string(tmp.path().join("approved.txt")).unwrap(),
-        "approved"
+        std::fs::read_to_string(tmp.path().join(APPROVED_FILE)).unwrap(),
+        APPROVED_CONTENT
     );
     handle.shutdown().await;
 }

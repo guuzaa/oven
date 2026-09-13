@@ -4,6 +4,7 @@ mod command;
 pub mod config;
 pub mod dirs;
 mod event;
+pub mod log;
 pub mod mcp;
 mod mention;
 mod provider;

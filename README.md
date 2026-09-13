@@ -79,6 +79,10 @@ oven -C /path/to/project
 
 Run `oven --help` for the full CLI.
 
+## Logs
+
+Oven writes a rotating log to `~/.oven/logs/oven.log` (10 MiB per file, one backup). The TUI never prints logs to the terminal. Increase verbosity with `OVEN_LOG=debug` (or `RUST_LOG`).
+
 ## How it works
 
 Oven runs inside your project directory and speaks the OpenAI chat

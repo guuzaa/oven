@@ -153,8 +153,8 @@ impl EventBus {
     }
 
     pub(crate) fn emit_error(&mut self, message: impl Into<String>) {
-        self.emit(AppEventKind::Error {
-            message: message.into(),
-        });
+        let message = message.into();
+        tracing::warn!(error = %message, "app error");
+        self.emit(AppEventKind::Error { message });
     }
 }

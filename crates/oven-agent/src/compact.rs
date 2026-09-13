@@ -55,10 +55,16 @@ impl Agent {
         self.history.push(Message::user_text(format!(
             "{SUMMARY_PREAMBLE}\n\n{summary}"
         )));
-        Ok(CompactStats {
+        let stats = CompactStats {
             before_tokens: usage.input_tokens.saturating_add(usage.cache_read_tokens),
             after_tokens: usage.output_tokens,
-        })
+        };
+        tracing::info!(
+            before_tokens = stats.before_tokens,
+            after_tokens = stats.after_tokens,
+            "history compacted"
+        );
+        Ok(stats)
     }
 }
 

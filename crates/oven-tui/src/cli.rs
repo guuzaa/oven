@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use oven_app::{App, AppBuilder, dirs, session};
+use oven_app::{App, AppBuilder, dirs, log, session};
 
 use crate::ui::Ui;
 
@@ -62,7 +62,10 @@ impl Cli {
                 println!("{resp}");
                 ExitCode::SUCCESS
             }
-            Err(_) => ExitCode::FAILURE,
+            Err(err) => {
+                tracing::error!(error = %err, "query failed");
+                ExitCode::FAILURE
+            }
         }
     }
 
@@ -71,6 +74,7 @@ impl Cli {
         let app = match builder.open_session(session).await {
             Ok(app) => app,
             Err(err) => {
+                tracing::error!(error = %err, "failed to open session");
                 eprintln!("error: {err}");
                 return ExitCode::FAILURE;
             }
@@ -79,6 +83,7 @@ impl Cli {
         match Ui::new(app).run().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
+                tracing::error!(error = %err, "tui failed");
                 eprintln!("error: {err}");
                 ExitCode::FAILURE
             }
@@ -86,10 +91,20 @@ impl Cli {
     }
 
     pub async fn run(&self) -> ExitCode {
+        log::init();
         match self.query.as_deref() {
-            Some(prompt) => self.headless(prompt.trim()).await,
+            Some(prompt) => {
+                tracing::info!(root = %self.dir.display(), headless = true, "oven starting");
+                self.headless(prompt.trim()).await
+            }
             None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
                 let session = self.resolve_session_id();
+                tracing::info!(
+                    root = %self.dir.display(),
+                    session = session.as_deref(),
+                    headless = false,
+                    "oven starting"
+                );
                 self.interactive(session.as_deref()).await
             }
             None => {

@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use futures::StreamExt;
 use oven_llm::{
@@ -303,6 +304,20 @@ impl Agent {
         &mut self,
         sink: &mut impl EventSink,
     ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
+        let started = Instant::now();
+        let result = self.complete_or_stream(sink).await;
+        tracing::debug!(
+            model = %self.model,
+            duration_ms = started.elapsed().as_millis() as u64,
+            "llm request complete"
+        );
+        result
+    }
+
+    async fn complete_or_stream(
+        &mut self,
+        sink: &mut impl EventSink,
+    ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
         let req = self.build_request();
         let router = self.router();
 
@@ -421,6 +436,7 @@ impl Agent {
             let writes_todos = tool.is_some_and(|tool| tool.caps().writes_todos);
             let access = tool.map(|tool| ctx.mode().tool_access(tool.caps().permission));
             let call_id = ToolCallId::next();
+            let started = Instant::now();
             let result = match access {
                 None => ToolResult::Failed {
                     error: format!("unknown tool: {name}"),
@@ -447,6 +463,7 @@ impl Agent {
                                 name: name.clone(),
                                 view,
                             }));
+                            log_tool_started(name, call_id);
                             self.run_tool(name, input, ctx, writes_todos, &mut wrote_todo, sink)
                                 .await
                         }
@@ -464,10 +481,12 @@ impl Agent {
                         name: name.clone(),
                         view,
                     }));
+                    log_tool_started(name, call_id);
                     self.run_tool(name, input, ctx, writes_todos, &mut wrote_todo, sink)
                         .await
                 }
             };
+            log_tool_finished(name, call_id, &result, started);
             let summary = result.output().to_string();
             let is_error = !result.is_success();
             sink.emit(AgentEvent::Tool(ToolEvent::Finished { call_id, result }));
@@ -478,6 +497,7 @@ impl Agent {
         Ok(None)
     }
 
+    #[tracing::instrument(name = "agent.turn", skip_all, fields(turn_id = ctx.turn_id.0, model = %self.model))]
     pub async fn run(
         &mut self,
         input: impl Into<String>,
@@ -525,11 +545,20 @@ impl Agent {
 
         let duration_ms = self.history.elapsed_ms();
         match &result {
-            Ok(_) => {}
+            Ok(output) => {
+                tracing::info!(
+                    duration_ms,
+                    input_tokens = output.usage.input_tokens,
+                    output_tokens = output.usage.output_tokens,
+                    "turn completed"
+                );
+            }
             Err(e) if e.is_cancelled() => {
+                tracing::info!(duration_ms, "turn cancelled");
                 sink.emit(AgentEvent::Turn(TurnEvent::Cancelled { duration_ms }));
             }
             Err(e) => {
+                tracing::warn!(duration_ms, error = %e.message, "turn failed");
                 sink.emit(AgentEvent::Turn(TurnEvent::Failed {
                     error: e.clone(),
                     duration_ms,
@@ -573,6 +602,28 @@ impl ThinkingSpan {
     }
 }
 
+fn log_tool_started(name: &str, call_id: ToolCallId) {
+    tracing::info!(name, call_id = call_id.0, "tool started");
+}
+
+fn log_tool_finished(name: &str, call_id: ToolCallId, result: &ToolResult, started: Instant) {
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let (ok, error) = match result {
+        ToolResult::Success { .. } => (true, None),
+        ToolResult::Failed { error, .. } => (false, Some(error.as_str())),
+        ToolResult::Rejected { reason } => (false, Some(reason.as_str())),
+        ToolResult::Cancelled => (false, Some("cancelled")),
+    };
+    tracing::info!(
+        name,
+        call_id = call_id.0,
+        ok,
+        error,
+        duration_ms,
+        "tool finished"
+    );
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -600,6 +651,20 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
+
+    const APPROVED_FILE: &str = "approved.txt";
+    const APPROVED_CONTENT: &str = "approved";
+
+    fn write_approved_command() -> &'static str {
+        #[cfg(windows)]
+        {
+            "Set-Content -Path approved.txt -Value approved -Encoding ascii -NoNewline"
+        }
+        #[cfg(not(windows))]
+        {
+            "printf approved > approved.txt"
+        }
+    }
 
     fn turn_ctx() -> TurnContext {
         TurnContext::new(
@@ -834,12 +899,8 @@ mod tests {
     #[tokio::test]
     async fn ask_requires_approval_before_running_bash() {
         let tmp = tmp_dir();
-        let marker = tmp.path().join("approved.txt");
-        let command = if cfg!(windows) {
-            "Set-Content -NoNewline approved.txt approved"
-        } else {
-            "printf approved > approved.txt"
-        };
+        let marker = tmp.path().join(APPROVED_FILE);
+        let command = write_approved_command();
         let mock = MockProvider::new(vec![
             tool_response("call_1", "bash", json!({"command": command})),
             text_response("done"),
@@ -871,7 +932,7 @@ mod tests {
         approval.responder.send(ApprovalDecision::Approved).unwrap();
 
         assert_eq!(turn.await.unwrap().text(), "done");
-        assert_eq!(std::fs::read_to_string(marker).unwrap(), "approved");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), APPROVED_CONTENT);
     }
 
     #[tokio::test]

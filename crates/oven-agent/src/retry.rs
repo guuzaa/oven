@@ -53,6 +53,22 @@ impl RetryingProvider {
     }
 }
 
+fn retry_status(err: &ProviderError) -> Option<u16> {
+    match err {
+        ProviderError::Api { status, .. } => Some(*status),
+        _ => None,
+    }
+}
+
+fn log_retry(attempt: u32, backoff: Duration, err: &ProviderError) {
+    tracing::warn!(
+        attempt,
+        backoff_ms = backoff.as_millis() as u64,
+        status = retry_status(err),
+        "retrying provider request"
+    );
+}
+
 fn is_retryable(err: &ProviderError) -> bool {
     match err {
         ProviderError::Transport(_) | ProviderError::RateLimit { .. } => true,
@@ -82,12 +98,11 @@ impl Provider for RetryingProvider {
         let mut last_err: Option<ProviderError> = None;
         for attempt in 0..=self.max_retries {
             if attempt > 0 {
-                let backoff = self.backoff_for(
-                    attempt,
-                    last_err
-                        .as_ref()
-                        .expect("retry attempt must follow a prior error"),
-                );
+                let err = last_err
+                    .as_ref()
+                    .expect("retry attempt must follow a prior error");
+                let backoff = self.backoff_for(attempt, err);
+                log_retry(attempt, backoff, err);
                 sleep(backoff).await;
             }
             match attempt_complete(self.inner.as_ref(), req, self.request_timeout).await {
@@ -111,12 +126,11 @@ impl Provider for RetryingProvider {
         let mut last_err: Option<ProviderError> = None;
         for attempt in 0..=self.max_retries {
             if attempt > 0 {
-                let backoff = self.backoff_for(
-                    attempt,
-                    last_err
-                        .as_ref()
-                        .expect("retry attempt must follow a prior error"),
-                );
+                let err = last_err
+                    .as_ref()
+                    .expect("retry attempt must follow a prior error");
+                let backoff = self.backoff_for(attempt, err);
+                log_retry(attempt, backoff, err);
                 sleep(backoff).await;
             }
             match self.inner.stream(req).await {

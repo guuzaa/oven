@@ -22,6 +22,7 @@ futures = { workspace = true }
 tui-textarea-2 = { workspace = true }
 unicode-width = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 mockall = { workspace = true }
