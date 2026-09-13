@@ -836,7 +836,7 @@ mod tests {
         let tmp = tmp_dir();
         let marker = tmp.path().join("approved.txt");
         let command = if cfg!(windows) {
-            "Set-Content approved.txt approved"
+            "Set-Content -NoNewline approved.txt approved"
         } else {
             "printf approved > approved.txt"
         };
