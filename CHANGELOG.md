@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.7] - 2026-09-14
+
+### Added
+- Ask mode (`Shift+Tab` cycles Agent → Plan → Ask): read-only tools run freely, shell commands need interactive approval, write and MCP tools are hidden
+- Rotating file logs at `~/.oven/logs/oven.log` (10 MiB × 2 files) and tracing across the agent and runtime
+- Auto-collapse thinking and tool details when the next message starts (new details start expanded; session-seeded ones stay collapsed; manual expands stay pinned)
+- Collapsible diff rows for `file_edit` / `file_write` with per-line added/removed styling
+
+### Fixed
+- Normalize `\r\n` and lone `\r` to `\n` when pasting into the composer
+- Treat wide characters as atomic in transcript selection
+- Pin the transcript to the bottom on user input and `!` shell commands
+- Show a reason when a tool is rejected or unavailable
+
 ## [0.0.6] - 2026-09-06
 
 ### Added

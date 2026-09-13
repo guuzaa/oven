@@ -122,9 +122,7 @@ impl Inner {
             }
 
             if let Err(rename_error) = fs::rename(&self.path, &backup) {
-                if has_backup
-                    && let Err(restore_error) = fs::rename(&backup_temp, &backup)
-                {
+                if has_backup && let Err(restore_error) = fs::rename(&backup_temp, &backup) {
                     return Err(io::Error::other(format!(
                         "failed to rotate log file: {rename_error}; failed to restore backup: {restore_error}"
                     )));
