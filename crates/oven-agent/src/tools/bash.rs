@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, labeled, require_str};
+use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str};
 use crate::error::AgentError;
 use oven_host::{CommandError, run_shell_command};
 
@@ -41,6 +41,12 @@ impl Tool for BashTool {
     }
     fn view(&self, input: &Value) -> ToolView {
         Self::view_input(input)
+    }
+    fn caps(&self) -> ToolCaps {
+        ToolCaps {
+            permission: ToolPermission::Execute,
+            ..Default::default()
+        }
     }
     fn description(&self) -> &str {
         "Execute a command with the host shell in the workspace root and return stdout/stderr. Uses PowerShell on Windows and bash (falling back to sh) elsewhere. Use for builds, tests, git, etc."

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, require_str, resolve_within};
+use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileEditTool {
@@ -57,6 +57,12 @@ impl Tool for FileEditTool {
     }
     fn view(&self, input: &Value) -> ToolView {
         Self::view_input(input)
+    }
+    fn caps(&self) -> ToolCaps {
+        ToolCaps {
+            permission: ToolPermission::Write,
+            ..Default::default()
+        }
     }
     fn description(&self) -> &str {
         "Edit a file by replacing text. Replaces the single exact occurrence of \

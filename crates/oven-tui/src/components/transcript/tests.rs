@@ -238,6 +238,29 @@ fn empty_ok_tool_end_renders_nothing() {
 }
 
 #[test]
+fn unmatched_failed_tool_end_pushes_reason() {
+    const REASON: &str = "tool 'file_write' is unavailable in Ask mode";
+    let mut t = Transcript::new();
+    t.on_event(&tool_end(1, false, REASON));
+    assert_eq!(kinds_of(&t), vec![LineKind::System]);
+    assert_eq!(t.rows[0].text, REASON);
+}
+
+#[test]
+fn unmatched_rejected_tool_end_pushes_reason() {
+    const REASON: &str = "tool execution was not performed: the user declined permission";
+    let mut t = Transcript::new();
+    t.on_event(&agent(AgentEvent::Tool(ToolEvent::Finished {
+        call_id: ToolCallId(1),
+        result: ToolResult::Rejected {
+            reason: REASON.into(),
+        },
+    })));
+    assert_eq!(kinds_of(&t), vec![LineKind::System]);
+    assert_eq!(t.rows[0].text, REASON);
+}
+
+#[test]
 fn seed_renders_persisted_messages() {
     let mut t = Transcript::new();
     let messages = vec![

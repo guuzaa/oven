@@ -1,10 +1,14 @@
 use std::sync::{Arc, Mutex};
 
 use oven_llm::{Message, ModelId, ReasoningEffort, Usage};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::approval::{ApprovalDecision, ApprovalSender, ToolApproval};
+use crate::identity::ToolCallId;
 use crate::identity::TurnId;
 use crate::mode::AgentMode;
+use crate::tools::ToolView;
 
 type ModelSelection = (ModelId, Option<ReasoningEffort>);
 
@@ -20,6 +24,7 @@ pub struct TurnContext {
     pub cancellation: CancellationToken,
     mode: Arc<Mutex<AgentMode>>,
     model: Arc<Mutex<ModelSelection>>,
+    approval_sender: Option<ApprovalSender>,
 }
 
 impl TurnContext {
@@ -35,6 +40,39 @@ impl TurnContext {
             cancellation,
             mode: Arc::new(Mutex::new(mode)),
             model: Arc::new(Mutex::new((model, reasoning_effort))),
+            approval_sender: None,
+        }
+    }
+
+    pub fn with_approval_sender(mut self, approval_sender: ApprovalSender) -> Self {
+        self.approval_sender = Some(approval_sender);
+        self
+    }
+
+    pub async fn request_approval(
+        &self,
+        request_id: crate::approval::ApprovalRequestId,
+        call_id: ToolCallId,
+        name: String,
+        view: ToolView,
+    ) -> Option<ApprovalDecision> {
+        let Some(sender) = self.approval_sender.as_ref() else {
+            return Some(ApprovalDecision::Rejected);
+        };
+        let (responder, response) = oneshot::channel();
+        sender
+            .send(ToolApproval {
+                request_id,
+                call_id,
+                name,
+                view,
+                responder,
+            })
+            .ok()?;
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => None,
+            decision = response => decision.ok(),
         }
     }
 

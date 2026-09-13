@@ -67,6 +67,10 @@ pub fn mode() -> Style {
     Style::default().fg(Color::LightMagenta)
 }
 
+pub fn ask_mode() -> Style {
+    Style::default().fg(Color::Green)
+}
+
 pub fn reply() -> Style {
     Style::default().fg(Color::Rgb(255, 140, 0))
 }

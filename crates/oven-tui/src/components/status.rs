@@ -27,6 +27,7 @@ pub enum StatusHint {
     Busy,
     Slash,
     Modal,
+    Approval,
 }
 
 /// Single status row below the input: model [effort] · mode · root · usage
@@ -168,8 +169,9 @@ impl StatusBar {
         }
         spans.push(Span::styled(" · ", gray));
         let mode_style = match state.mode {
-            AgentMode::Default => gray,
+            AgentMode::Agent => gray,
             AgentMode::Plan => theme::mode(),
+            AgentMode::Ask => theme::ask_mode(),
         };
         spans.push(Span::styled(state.mode.label(), mode_style));
         spans.push(Span::styled(" · ", gray));
@@ -185,6 +187,7 @@ impl StatusBar {
         let hint = match hint {
             StatusHint::Slash => "tab fill · enter · esc",
             StatusHint::Modal => "enter · esc",
+            StatusHint::Approval => "enter/y approve · esc/n reject · ctrl-c cancel",
             StatusHint::Busy => "shift-tab mode · esc cancel · enter queue",
             StatusHint::Idle => "shift-tab mode · enter send · alt-enter newline · esc undo",
         };

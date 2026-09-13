@@ -1,4 +1,4 @@
-use oven_agent::{Agent, AgentMode, TodoList, TurnId};
+use oven_agent::{Agent, AgentMode, ApprovalRequestId, TodoList, ToolCallId, ToolView, TurnId};
 use oven_llm::{Message, ReasoningEffort, Usage};
 
 use crate::config::ProviderConfig;
@@ -72,28 +72,49 @@ pub(crate) fn context_window(agent: &Agent) -> Option<u32> {
         .filter(|window| *window > 0)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingToolApproval {
+    pub request_id: ApprovalRequestId,
+    pub call_id: ToolCallId,
+    pub name: String,
+    pub view: ToolView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppPhase {
     Idle,
-    Running { turn_id: TurnId },
-    Cancelling { turn_id: TurnId },
+    Running {
+        turn_id: TurnId,
+    },
+    AwaitingToolApproval {
+        turn_id: TurnId,
+        request: PendingToolApproval,
+    },
+    Cancelling {
+        turn_id: TurnId,
+    },
     ShuttingDown,
 }
 
 impl AppPhase {
-    pub fn turn_id(self) -> Option<TurnId> {
+    pub fn turn_id(&self) -> Option<TurnId> {
         match self {
-            Self::Running { turn_id } | Self::Cancelling { turn_id } => Some(turn_id),
+            Self::Running { turn_id }
+            | Self::AwaitingToolApproval { turn_id, .. }
+            | Self::Cancelling { turn_id } => Some(*turn_id),
             Self::Idle | Self::ShuttingDown => None,
         }
     }
 
-    pub fn is_idle(self) -> bool {
+    pub fn is_idle(&self) -> bool {
         matches!(self, Self::Idle)
     }
 
-    pub fn is_active(self) -> bool {
-        matches!(self, Self::Running { .. } | Self::Cancelling { .. })
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Running { .. } | Self::AwaitingToolApproval { .. } | Self::Cancelling { .. }
+        )
     }
 }
 

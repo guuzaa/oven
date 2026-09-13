@@ -21,10 +21,10 @@ pub use event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent};
 pub use mcp::McpServerConfig;
 pub use mention::FileMentions;
 pub use oven_agent::{
-    AgentEvent, AgentEventEnvelope, AgentId, AgentMode, CancellationToken, Skill, SkillRegistry,
-    StreamEvent, TodoItem, TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView,
-    TurnEvent, TurnId, present_tool,
+    AgentEvent, AgentEventEnvelope, AgentId, AgentMode, ApprovalDecision, ApprovalRequestId,
+    CancellationToken, Skill, SkillRegistry, StreamEvent, TodoItem, TodoList, TodoStatus,
+    ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId, present_tool,
 };
 pub use shell::{LocalShell, ShellInput, display_shell_line};
-pub use state::{AppPhase, AppState, SessionState, StateChange, StateEvent};
+pub use state::{AppPhase, AppState, PendingToolApproval, SessionState, StateChange, StateEvent};
 pub use tools::ToolRegistry;

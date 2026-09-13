@@ -201,6 +201,8 @@ impl InputView {
             theme::shell()
         } else if state.mode == AgentMode::Plan {
             theme::mode()
+        } else if state.mode == AgentMode::Ask {
+            theme::ask_mode()
         } else if self.textarea.lines().iter().any(|line| !line.is_empty()) {
             theme::border_active()
         } else {
@@ -1299,7 +1301,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_uses_mode_border_color() {
+    fn plan_and_ask_modes_use_distinct_border_colors() {
         let mut view = view();
         let (_, idle) = render(&mut view, 40, 3, &State::new());
         assert_eq!(idle[(0, 0)].style().fg, theme::border_idle().fg);
@@ -1318,6 +1320,13 @@ mod tests {
         };
         let (_, buf) = render(&mut view, 40, 3, &busy_plan);
         assert_eq!(buf[(0, 0)].style().fg, theme::mode().fg);
+
+        let ask = State {
+            mode: AgentMode::Ask,
+            ..State::new()
+        };
+        let (_, buf) = render(&mut view, 40, 3, &ask);
+        assert_eq!(buf[(0, 0)].style().fg, theme::ask_mode().fg);
     }
 
     #[test]

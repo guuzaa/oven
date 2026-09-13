@@ -1,5 +1,6 @@
 use oven_llm::Usage;
 
+use crate::approval::ApprovalRequestId;
 use crate::error::AgentError;
 use crate::identity::{AgentId, ToolCallId, TurnId};
 use crate::todo::TodoList;
@@ -37,6 +38,12 @@ pub enum StreamEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolEvent {
+    ApprovalRequested {
+        request_id: ApprovalRequestId,
+        call_id: ToolCallId,
+        name: String,
+        view: ToolView,
+    },
     Started {
         call_id: ToolCallId,
         name: String,
@@ -68,6 +75,9 @@ pub enum ToolResult {
         error: String,
         output: Option<String>,
     },
+    Rejected {
+        reason: String,
+    },
     Cancelled,
 }
 
@@ -80,6 +90,7 @@ impl ToolResult {
         match self {
             Self::Success { output } => output,
             Self::Failed { output, error } => output.as_deref().unwrap_or(error),
+            Self::Rejected { reason } => reason,
             Self::Cancelled => "",
         }
     }
