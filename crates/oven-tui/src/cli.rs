@@ -99,12 +99,7 @@ impl Cli {
             }
             None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
                 let session = self.resolve_session_id();
-                tracing::info!(
-                    root = %self.dir.display(),
-                    session = session.as_deref(),
-                    headless = false,
-                    "oven starting"
-                );
+                tracing::info!(root = %self.dir.display(), headless = false, "oven starting");
                 self.interactive(session.as_deref()).await
             }
             None => {

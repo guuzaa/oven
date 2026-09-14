@@ -7,6 +7,7 @@ use oven_agent::{
 #[cfg(test)]
 use oven_llm::Provider;
 use oven_llm::{Role, Router};
+use tracing::Instrument;
 
 use crate::App;
 use crate::AppError;
@@ -16,7 +17,7 @@ use crate::event::AppId;
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::runtime::{hydrate_session, spawn_runtime};
-use crate::session::{Session, canonical_root};
+use crate::session::{Session, canonical_root, session_span};
 use crate::{SkillRegistry, ToolRegistry};
 
 pub struct AppBuilder {
@@ -222,27 +223,32 @@ impl AppBuilder {
         session_id: Option<&str>,
     ) -> Result<App, AppError> {
         let session = Session::resolve(sessions_dir, session_id)?;
-        let prior = session.load_records()?;
-        let mut agent = self.build_interactive_agent().await?;
-        let records: Vec<_> = prior
-            .iter()
-            .filter(
-                |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
-            )
-            .cloned()
-            .collect();
-        agent.restore_history(records);
-        hydrate_session(&mut agent, &prior);
-        agent.ensure_session_meta(canonical_root(&self.root));
-        self.log_open(&agent);
-        Ok(spawn_runtime(
-            AppId::next(),
-            agent,
-            Some(session),
-            self.root.clone(),
-            self.config.clone(),
-            AppConfig::default_user_config_path(),
-        ))
+        let span = session_span(Some(session.id()));
+        async {
+            let prior = session.load_records()?;
+            let mut agent = self.build_interactive_agent().await?;
+            let records: Vec<_> = prior
+                .iter()
+                .filter(
+                    |r| !matches!(r, Record::Message { message, .. } if message.role == Role::System),
+                )
+                .cloned()
+                .collect();
+            agent.restore_history(records);
+            hydrate_session(&mut agent, &prior);
+            agent.ensure_session_meta(canonical_root(&self.root));
+            self.log_open(&agent);
+            Ok(spawn_runtime(
+                AppId::next(),
+                agent,
+                Some(session),
+                self.root.clone(),
+                self.config.clone(),
+                AppConfig::default_user_config_path(),
+            ))
+        }
+        .instrument(span)
+        .await
     }
 
     fn log_open(&self, agent: &Agent) {

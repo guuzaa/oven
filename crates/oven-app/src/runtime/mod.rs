@@ -14,12 +14,16 @@ use oven_llm::{
     Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Router,
 };
 use tokio::sync::{mpsc, watch};
+use tracing::Instrument;
 
 use crate::App;
 use crate::command::{AppCommand, ControlCommand};
 use crate::config::{AppConfig, ProviderConfig};
 use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
-use crate::session::{Session, SessionError, SessionStore, record_recent};
+use crate::session::{
+    Session, SessionError, SessionStore, current_or_session_span, record_recent,
+    record_session_span,
+};
 use crate::shell;
 use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::state::{
@@ -819,7 +823,10 @@ impl Runtime {
         if let Some(store) = &self.session {
             let id = uuid::Uuid::now_v7().to_string();
             match Session::open(&store.dir, &id) {
-                Ok(next) => store.set_current(next),
+                Ok(next) => {
+                    record_session_span(next.id());
+                    store.set_current(next);
+                }
                 Err(e) => self.emit_error(e.to_string()),
             }
         }
@@ -1060,6 +1067,7 @@ pub(crate) fn spawn_runtime(
         .map(public_provider)
         .unwrap_or_default();
     let configured_providers = config.configured_providers();
+    let span = current_or_session_span(session.as_ref().map(Session::id));
     let (session_store, session_state) = match session {
         Some(s) => {
             let has_content = agent.history().len() != 0;
@@ -1083,9 +1091,7 @@ pub(crate) fn spawn_runtime(
         state,
         state_tx,
     );
-    let join = tokio::spawn(async move {
-        runtime.run(cmd_rx).await;
-    });
+    let join = tokio::spawn(runtime.run(cmd_rx).instrument(span));
     App::new(
         app_id,
         cmd_tx,
