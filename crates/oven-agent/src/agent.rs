@@ -157,6 +157,17 @@ impl Agent {
         self.todo_written_this_turn
     }
 
+    fn dismiss_finished_todos(&mut self, sink: &mut impl EventSink) {
+        if !self.todos.is_finished() {
+            return;
+        }
+        self.todos = TodoList::default();
+        self.todo_written_this_turn = true;
+        sink.emit(AgentEvent::TodosChanged {
+            todos: TodoList::default(),
+        });
+    }
+
     /// Set the reasoning effort for provider calls.
     pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
         self.reasoning_effort = Some(effort);
@@ -510,6 +521,7 @@ impl Agent {
         sink.emit(AgentEvent::Turn(TurnEvent::Started));
 
         self.todo_written_this_turn = false;
+        self.dismiss_finished_todos(sink);
         let turn = async {
             self.history.push(Message::user_text(input));
 
@@ -1616,6 +1628,14 @@ mod tests {
         }
     }
 
+    fn completed_item() -> crate::todo::TodoItem {
+        crate::todo::TodoItem {
+            id: "a".into(),
+            content: "one".into(),
+            status: crate::todo::TodoStatus::Completed,
+        }
+    }
+
     #[tokio::test]
     async fn plan_first_request_has_plan_prompt_and_todo_write() {
         let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
@@ -1657,6 +1677,58 @@ mod tests {
         assert!(!system_of(&reqs[0]).contains("# Plan Mode"));
         assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
         assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
+    }
+
+    #[tokio::test]
+    async fn next_turn_clears_finished_todos() {
+        let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
+        let mut agent = agent_with_todo_write(Box::new(mock));
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![completed_item()],
+        });
+        let mut sink = VecEventSink::default();
+        run_with(&mut agent, "next", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        assert!(agent.todos().is_empty());
+        assert!(agent.todo_written_this_turn());
+        assert!(sink.events.iter().any(|e| matches!(
+            e,
+            AgentEvent::TodosChanged { todos } if todos.is_empty()
+        )));
+        let reqs = seen.lock().unwrap().clone();
+        assert!(!system_of(&reqs[0]).contains("## Current TODO list"));
+    }
+
+    #[tokio::test]
+    async fn next_turn_keeps_open_todos() {
+        let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
+        let mut agent = agent_with_todo_write(Box::new(mock));
+        agent.set_todos(crate::todo::TodoList {
+            items: vec![pending_item()],
+        });
+        run_text(&mut agent, "next").await;
+        assert_eq!(agent.todos().items[0].id, "a");
+        assert!(!agent.todo_written_this_turn());
+        let reqs = seen.lock().unwrap().clone();
+        assert!(system_of(&reqs[0]).contains("## Current TODO list"));
+    }
+
+    #[tokio::test]
+    async fn completing_turn_keeps_finished_list() {
+        let todos = json!({"todos":[{"id":"a","content":"one","status":"completed"}]});
+        let mock = MockProvider::new(vec![
+            tool_response("c1", "todo_write", todos),
+            text_response("done"),
+        ]);
+        let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
+        agent.set_mode(AgentMode::Plan);
+        run_text(&mut agent, "plan it").await;
+        assert_eq!(agent.todos().items.len(), 1);
+        assert_eq!(
+            agent.todos().items[0].status,
+            crate::todo::TodoStatus::Completed
+        );
     }
 
     #[tokio::test]

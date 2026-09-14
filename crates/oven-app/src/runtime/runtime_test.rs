@@ -2423,6 +2423,39 @@ async fn rewind_restores_previous_todo_list() {
 }
 
 #[tokio::test]
+async fn next_prompt_clears_finished_todos() {
+    let tmp = tempdir::TempDir::new("app-runtime-todo-dismiss").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "c1",
+            "todo_write",
+            serde_json::json!({
+                "todos":[{"id":"a","content":"one","status":"completed"}]
+            }),
+        ),
+        text_response("done"),
+        text_response("next"),
+    ]);
+    let session = Session::open(&dir, "s1").unwrap();
+    let handle = spawn_app_session(&app, Box::new(mock), session).await;
+    assert_eq!(handle.prompt("t1").await.unwrap(), "done");
+    assert_eq!(handle.todos().items[0].id, "a");
+    assert_eq!(handle.prompt("t2").await.unwrap(), "next");
+    assert!(handle.todos().is_empty());
+    handle.shutdown().await;
+
+    let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
+    let last_list = records.iter().rev().find_map(|r| match r {
+        Record::TodoList { items, .. } => Some(items.as_slice()),
+        _ => None,
+    });
+    assert!(last_list.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn resume_hydrates_todos_from_snapshot() {
     let tmp = tempdir::TempDir::new("app-runtime-todo-hydrate").unwrap();
     let app = AppBuilder::new(tmp.path());

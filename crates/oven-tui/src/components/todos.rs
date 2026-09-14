@@ -131,6 +131,15 @@ mod tests {
     }
 
     #[test]
+    fn finished_list_stays_visible() {
+        let widget = TodosWidget::new(list(vec![
+            item("a", "done", TodoStatus::Completed),
+            item("b", "dropped", TodoStatus::Cancelled),
+        ]));
+        assert_eq!(widget.height(), 2);
+    }
+
+    #[test]
     fn non_empty_renders_checklist_marks() {
         let widget = TodosWidget::new(sample());
         assert_eq!(widget.height(), 3);

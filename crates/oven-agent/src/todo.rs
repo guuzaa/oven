@@ -40,6 +40,15 @@ impl TodoList {
         self.items.is_empty()
     }
 
+    /// Non-empty and every item is completed or cancelled.
+    pub fn is_finished(&self) -> bool {
+        !self.items.is_empty()
+            && self
+                .items
+                .iter()
+                .all(|item| matches!(item.status, TodoStatus::Completed | TodoStatus::Cancelled))
+    }
+
     pub fn parse(value: &serde_json::Value) -> Result<Self, String> {
         let args = TodoWriteArgs::deserialize(value).map_err(|e| format!("todo_write: {e}"))?;
         Self::validate(args.todos)
@@ -157,6 +166,14 @@ mod tests {
         }
     }
 
+    fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {
+        TodoItem {
+            id: id.into(),
+            content: content.into(),
+            status,
+        }
+    }
+
     #[test]
     fn parse_success() {
         let list = TodoList::parse(&json!({
@@ -262,6 +279,47 @@ mod tests {
         let list = TodoList::parse(&json!({"todos": []})).unwrap();
         assert!(list.is_empty());
         assert_eq!(list.summary(), "0 todos (0 in_progress, 0 completed)");
+    }
+
+    #[test]
+    fn is_finished_requires_items_all_terminal() {
+        assert!(!TodoList::default().is_finished());
+        assert!(
+            !TodoList {
+                items: vec![item("a", "one", TodoStatus::Pending)],
+            }
+            .is_finished()
+        );
+        assert!(
+            !TodoList {
+                items: vec![item("a", "one", TodoStatus::InProgress)],
+            }
+            .is_finished()
+        );
+        assert!(
+            !TodoList {
+                items: vec![
+                    item("a", "one", TodoStatus::Completed),
+                    item("b", "two", TodoStatus::Pending),
+                ],
+            }
+            .is_finished()
+        );
+        assert!(
+            TodoList {
+                items: vec![item("a", "one", TodoStatus::Completed)],
+            }
+            .is_finished()
+        );
+        assert!(
+            TodoList {
+                items: vec![
+                    item("a", "one", TodoStatus::Completed),
+                    item("b", "two", TodoStatus::Cancelled),
+                ],
+            }
+            .is_finished()
+        );
     }
 
     #[test]
