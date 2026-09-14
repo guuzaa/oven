@@ -1,4 +1,6 @@
-use oven_agent::{AgentMode, ApprovalDecision, ApprovalRequestId, TurnId};
+use oven_agent::{
+    AgentMode, ApprovalDecision, ApprovalRequestId, LoopLimitDecision, LoopLimitRequestId, TurnId,
+};
 
 /// Commands sent from a frontend to the runtime task.
 ///
@@ -29,6 +31,10 @@ pub enum ControlCommand {
     RespondToolApproval {
         request_id: ApprovalRequestId,
         decision: ApprovalDecision,
+    },
+    RespondLoopLimit {
+        request_id: LoopLimitRequestId,
+        decision: LoopLimitDecision,
     },
     Rewind,
 }

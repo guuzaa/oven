@@ -2,6 +2,9 @@ use std::fmt;
 
 pub use oven_llm::ProviderError;
 
+pub const MAX_ITERS_EXCEEDED: &str = "agent loop exceeded max iterations";
+const CANCELLED: &str = "cancelled";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentError {
     pub message: String,
@@ -24,12 +27,18 @@ impl AgentError {
 
     pub fn cancelled() -> Self {
         Self {
-            message: "cancelled".to_string(),
+            message: CANCELLED.to_string(),
+        }
+    }
+
+    pub fn max_iters_exceeded() -> Self {
+        Self {
+            message: MAX_ITERS_EXCEEDED.to_string(),
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.message == "cancelled"
+        self.message == CANCELLED
     }
 }
 

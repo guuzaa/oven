@@ -30,6 +30,7 @@ const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 const NO_OUTPUT: &str = "(no output)";
+pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
 
 pub struct Transcript {
     pub(super) rows: Vec<Row>,
@@ -784,6 +785,14 @@ impl Component for Transcript {
                 }
                 AgentEvent::Tool(ToolEvent::OutputDelta { .. }) => {}
                 AgentEvent::Turn(TurnEvent::Started) => {}
+                AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
+                    self.finish_thinking();
+                    self.flush_streaming();
+                    self.push_row(
+                        LineKind::System,
+                        &format!("{LOOP_LIMIT_REACHED} ({max_iters} iterations)"),
+                    );
+                }
                 AgentEvent::Turn(TurnEvent::Completed { duration_ms, .. }) => {
                     self.close_tool_burst();
                     self.finish_thinking();

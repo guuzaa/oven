@@ -1,4 +1,6 @@
-use oven_agent::{Agent, AgentMode, ApprovalRequestId, TodoList, ToolCallId, ToolView, TurnId};
+use oven_agent::{
+    Agent, AgentMode, ApprovalRequestId, LoopLimitRequestId, TodoList, ToolCallId, ToolView, TurnId,
+};
 use oven_llm::{Message, ReasoningEffort, Usage};
 
 use crate::config::ProviderConfig;
@@ -90,6 +92,11 @@ pub enum AppPhase {
         turn_id: TurnId,
         request: PendingToolApproval,
     },
+    AwaitingLoopLimit {
+        turn_id: TurnId,
+        request_id: LoopLimitRequestId,
+        max_iters: usize,
+    },
     Cancelling {
         turn_id: TurnId,
     },
@@ -101,6 +108,7 @@ impl AppPhase {
         match self {
             Self::Running { turn_id }
             | Self::AwaitingToolApproval { turn_id, .. }
+            | Self::AwaitingLoopLimit { turn_id, .. }
             | Self::Cancelling { turn_id } => Some(*turn_id),
             Self::Idle | Self::ShuttingDown => None,
         }
@@ -113,7 +121,10 @@ impl AppPhase {
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            Self::Running { .. } | Self::AwaitingToolApproval { .. } | Self::Cancelling { .. }
+            Self::Running { .. }
+                | Self::AwaitingToolApproval { .. }
+                | Self::AwaitingLoopLimit { .. }
+                | Self::Cancelling { .. }
         )
     }
 }

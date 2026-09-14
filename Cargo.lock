@@ -1944,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "oven-agent"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "oven-app"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "axum",
@@ -1992,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "oven-host"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "ignore",
  "tempdir",
@@ -2021,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "oven-tui"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "arboard",
  "base64 0.23.1",

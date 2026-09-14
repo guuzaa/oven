@@ -11,8 +11,8 @@ use oven_llm::{
 
 use oven_host::now_ms;
 
-use crate::approval::{ApprovalDecision, ApprovalRequestId};
-use crate::error::AgentError;
+use crate::approval::{ApprovalDecision, ApprovalRequestId, LoopLimitDecision, LoopLimitRequestId};
+use crate::error::{AgentError, MAX_ITERS_EXCEEDED};
 use crate::event::{AgentEvent, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
 use crate::identity::{AgentId, ToolCallId};
@@ -22,6 +22,8 @@ use crate::sink::EventSink;
 use crate::todo::TodoList;
 use crate::tools::Tool;
 use crate::turn::{TurnContext, TurnOutput};
+
+const DEFAULT_MAX_ITERS: usize = 100;
 
 /// A router shared between an `Agent` and callers that need to read it
 /// (e.g. to validate a model switch) without the exclusive `&mut Agent`
@@ -59,7 +61,7 @@ impl Agent {
             mode: AgentMode::Agent,
             todos: TodoList::default(),
             reasoning_effort: None,
-            max_iters: 100,
+            max_iters: DEFAULT_MAX_ITERS,
             todo_written_this_turn: false,
             todo_dirty: false,
         }
@@ -511,25 +513,32 @@ impl Agent {
         let turn = async {
             self.history.push(Message::user_text(input));
 
-            for _ in 0..self.max_iters {
-                match self.step(sink, ctx).await {
-                    Ok(Some(final_text)) => {
-                        let usage = self.last_turn_usage();
-                        let duration_ms = self.history.elapsed_ms();
-                        sink.emit(AgentEvent::Turn(TurnEvent::Completed {
-                            usage,
-                            duration_ms,
-                        }));
-                        return Ok(TurnOutput {
-                            response: Message::assistant_text(final_text),
-                            usage,
-                        });
+            loop {
+                for _ in 0..self.max_iters {
+                    match self.step(sink, ctx).await {
+                        Ok(Some(final_text)) => {
+                            let usage = self.last_turn_usage();
+                            let duration_ms = self.history.elapsed_ms();
+                            sink.emit(AgentEvent::Turn(TurnEvent::Completed {
+                                usage,
+                                duration_ms,
+                            }));
+                            return Ok(TurnOutput {
+                                response: Message::assistant_text(final_text),
+                                usage,
+                            });
+                        }
+                        Ok(None) => continue,
+                        Err(e) => return Err(e),
                     }
-                    Ok(None) => continue,
-                    Err(e) => return Err(e),
+                }
+                match self.ask_loop_continue(sink, ctx).await? {
+                    LoopLimitDecision::Continue => {}
+                    LoopLimitDecision::Exit => {
+                        return Err(AgentError::max_iters_exceeded());
+                    }
                 }
             }
-            Err(AgentError::from("agent loop exceeded max iterations"))
         };
 
         let result = {
@@ -566,6 +575,26 @@ impl Agent {
             }
         }
         result
+    }
+
+    async fn ask_loop_continue(
+        &self,
+        sink: &mut impl EventSink,
+        ctx: &TurnContext,
+    ) -> Result<LoopLimitDecision, AgentError> {
+        if !ctx.has_loop_limit_sender() {
+            return Err(AgentError::max_iters_exceeded());
+        }
+        tracing::warn!(max_iters = self.max_iters, "{MAX_ITERS_EXCEEDED}");
+        let request_id = LoopLimitRequestId::next();
+        sink.emit(AgentEvent::Turn(TurnEvent::LoopLimitReached {
+            request_id,
+            max_iters: self.max_iters,
+        }));
+        match ctx.request_loop_continue(request_id, self.max_iters).await {
+            Some(decision) => Ok(decision),
+            None => Err(AgentError::cancelled()),
+        }
     }
 
     /// Token usage of the last user turn.
@@ -1141,6 +1170,117 @@ mod tests {
         assert!(matches!(
             sink.events.last(),
             Some(AgentEvent::Turn(TurnEvent::Failed { .. }))
+        ));
+    }
+
+    fn looping_read_agent(responses: Vec<Response>) -> (Agent, tempdir::TempDir) {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(FileReadTool::new(tmp.path()))];
+        let agent = Agent::new(router_with(Box::new(MockProvider::new(responses))), tools)
+            .with_max_iters(2);
+        (agent, tmp)
+    }
+
+    fn read_note(id: &str) -> Response {
+        tool_response(id, "file_read", json!({"path": "note.txt"}))
+    }
+
+    #[tokio::test]
+    async fn loop_limit_without_sender_fails() {
+        let (mut agent, _tmp) = looping_read_agent(vec![
+            read_note("c1"),
+            read_note("c2"),
+            read_note("c3"),
+            text_response("done"),
+        ]);
+        let mut sink = VecEventSink::default();
+        let err = run_with(&mut agent, "read it", &turn_ctx(), &mut sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
+        assert_valid_event_sequence(&sink.events);
+        assert!(
+            !sink
+                .events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Turn(TurnEvent::LoopLimitReached { .. })))
+        );
+        assert!(matches!(
+            sink.events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Failed { error, .. }))
+                if error.message == crate::MAX_ITERS_EXCEEDED
+        ));
+    }
+
+    #[tokio::test]
+    async fn loop_limit_continue_runs_another_round() {
+        let (mut agent, _tmp) = looping_read_agent(vec![
+            read_note("c1"),
+            read_note("c2"),
+            read_note("c3"),
+            text_response("done"),
+        ]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = turn_ctx().with_loop_limit_sender(tx);
+        let mut sink = VecEventSink::default();
+        let text = {
+            let turn = agent.run("read it", &ctx, &mut sink);
+            tokio::pin!(turn);
+
+            let prompt = tokio::select! {
+                prompt = rx.recv() => prompt.unwrap(),
+                _ = &mut turn => panic!("turn completed before loop limit prompt"),
+            };
+            assert_eq!(prompt.max_iters, 2);
+            prompt.responder.send(LoopLimitDecision::Continue).unwrap();
+            turn.await.unwrap().text()
+        };
+        assert_eq!(text, "done");
+        assert_valid_event_sequence(&sink.events);
+        assert!(sink.events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters: 2, .. })
+        )));
+        assert!(matches!(
+            sink.events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Completed { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn loop_limit_exit_fails() {
+        let (mut agent, _tmp) = looping_read_agent(vec![
+            read_note("c1"),
+            read_note("c2"),
+            read_note("c3"),
+            text_response("done"),
+        ]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = turn_ctx().with_loop_limit_sender(tx);
+        let mut sink = VecEventSink::default();
+        let err = {
+            let turn = agent.run("read it", &ctx, &mut sink);
+            tokio::pin!(turn);
+
+            let prompt = tokio::select! {
+                prompt = rx.recv() => prompt.unwrap(),
+                _ = &mut turn => panic!("turn completed before loop limit prompt"),
+            };
+            prompt.responder.send(LoopLimitDecision::Exit).unwrap();
+            turn.await.unwrap_err()
+        };
+        assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
+        assert_valid_event_sequence(&sink.events);
+        assert!(
+            sink.events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Turn(TurnEvent::LoopLimitReached { .. })))
+        );
+        assert!(matches!(
+            sink.events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Failed { error, .. }))
+                if error.message == crate::MAX_ITERS_EXCEEDED
         ));
     }
 

@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, LocalShell, ShellEvent, StreamEvent, ToolCallId, ToolEvent, ToolResult,
-    TurnEvent, present_tool,
+    AgentEvent, AppEvent, LocalShell, LoopLimitRequestId, ShellEvent, StreamEvent, ToolCallId,
+    ToolEvent, ToolResult, TurnEvent, present_tool,
 };
 use oven_llm::{ContentBlock, Message};
 use ratatui::Terminal;
@@ -17,7 +17,7 @@ use super::kinds::{LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH};
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
-use super::widget::Transcript;
+use super::widget::{LOOP_LIMIT_REACHED, Transcript};
 use super::wrap::{
     MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer, format_elapsed, format_lines,
     format_thought, line_display_width, tail_lines,
@@ -394,6 +394,13 @@ fn cancelled() -> AppEvent {
     agent(AgentEvent::Turn(TurnEvent::Cancelled { duration_ms: 0 }))
 }
 
+fn loop_limit_reached(max_iters: usize) -> AppEvent {
+    agent(AgentEvent::Turn(TurnEvent::LoopLimitReached {
+        request_id: LoopLimitRequestId(1),
+        max_iters,
+    }))
+}
+
 fn kinds_of(t: &Transcript) -> Vec<LineKind> {
     t.rows.iter().map(|r| r.kind).collect()
 }
@@ -453,6 +460,16 @@ fn separator_comes_after_tool_followup_not_between() {
             LineKind::Separator,
         ]
     );
+}
+
+#[test]
+fn loop_limit_reached_appends_system_line() {
+    let mut t = Transcript::new();
+    t.push_user("q");
+    t.on_event(&loop_limit_reached(100));
+    assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::System]);
+    let expected = format!("{LOOP_LIMIT_REACHED} (100 iterations)");
+    assert_eq!(t.rows.last().unwrap().text, expected);
 }
 
 #[test]

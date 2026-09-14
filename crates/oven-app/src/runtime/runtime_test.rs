@@ -2092,6 +2092,86 @@ async fn repro_ask_mode_bash_requests_approval() {
     handle.shutdown().await;
 }
 
+async fn spawn_loop_limit_app(tmp: &tempdir::TempDir) -> App {
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![
+        tool_response("c1", "file_read", serde_json::json!({"path": "note.txt"})),
+        tool_response("c2", "file_read", serde_json::json!({"path": "note.txt"})),
+        tool_response("c3", "file_read", serde_json::json!({"path": "note.txt"})),
+        text_response("done"),
+    ]);
+    let agent = app
+        .build_agent_with_provider(Box::new(mock))
+        .await
+        .unwrap()
+        .with_max_iters(2);
+    spawn_runtime(
+        AppId::next(),
+        agent,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    )
+}
+
+#[tokio::test]
+async fn loop_limit_continue_completes_turn() {
+    let tmp = tempdir::TempDir::new("app-runtime-loop-limit-continue").unwrap();
+    let handle = spawn_loop_limit_app(&tmp).await;
+    let mut rx = handle.subscribe();
+    handle.send(AppCommand::Prompt("read it".into())).unwrap();
+
+    let mut request_id = None;
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::Agent(env) = &ev.kind {
+            match &env.event {
+                AgentEvent::Turn(TurnEvent::LoopLimitReached { request_id: id, .. }) => {
+                    request_id = Some(*id);
+                    break;
+                }
+                AgentEvent::Turn(TurnEvent::Completed { .. } | TurnEvent::Failed { .. }) => {
+                    panic!("turn ended without loop limit prompt");
+                }
+                _ => {}
+            }
+        }
+    }
+    let request_id = request_id.expect("loop limit requested");
+    assert!(
+        matches!(handle.state().phase, AppPhase::AwaitingLoopLimit { .. }),
+        "phase: {:?}",
+        handle.state().phase
+    );
+    handle
+        .send(AppCommand::Control(ControlCommand::RespondLoopLimit {
+            request_id,
+            decision: oven_agent::LoopLimitDecision::Continue,
+        }))
+        .unwrap();
+
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::Agent(env) = &ev.kind
+            && matches!(env.event, AgentEvent::Turn(TurnEvent::Completed { .. }))
+        {
+            break;
+        }
+    }
+    assert!(handle.state().phase.is_idle());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn prompt_exits_loop_limit_without_hanging() {
+    let tmp = tempdir::TempDir::new("app-runtime-loop-limit-prompt").unwrap();
+    let handle = spawn_loop_limit_app(&tmp).await;
+    let err = handle.prompt("read it").await.unwrap_err();
+    assert_eq!(err.to_string(), oven_agent::MAX_ITERS_EXCEEDED);
+    assert!(handle.state().phase.is_idle());
+    handle.shutdown().await;
+}
+
 fn last_jsonl_line(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap()

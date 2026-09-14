@@ -7,14 +7,14 @@ use crossterm::event::{
 use futures::StreamExt;
 use oven_app::{
     AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ApprovalDecision,
-    ApprovalRequestId, CompactionEvent, ControlCommand, ShellEvent, StateChange, StateEvent,
-    ToolEvent, TurnEvent,
+    ApprovalRequestId, CompactionEvent, ControlCommand, LoopLimitDecision, LoopLimitRequestId,
+    ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent,
 };
 use tokio::sync::mpsc;
 
+use crate::components::choice_popup::{ChoicePopup, ChoicePopupAction};
 use crate::components::component::{Action, Component, KeyResult, State};
 use crate::components::input::{InputView, Overlay, display_user_input};
-use crate::components::list::{cycle_selected, draw_choice_list};
 use crate::components::paste_burst::{self, Burst};
 use crate::components::queue::QueueWidget;
 use crate::components::shell;
@@ -22,13 +22,30 @@ use crate::components::status::{StatusBar, StatusHint};
 use crate::components::todos::TodosWidget;
 use crate::components::transcript::Transcript;
 use crate::components::{layout, terminal};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::widgets::Paragraph;
 
-struct ApprovalPrompt {
-    request_id: ApprovalRequestId,
-    name: String,
-    summary: String,
+enum OverlayPrompt {
+    Approval {
+        request_id: ApprovalRequestId,
+        popup: ChoicePopup,
+    },
+    LoopLimit {
+        request_id: LoopLimitRequestId,
+        popup: ChoicePopup,
+    },
+}
+
+impl OverlayPrompt {
+    fn popup(&self) -> &ChoicePopup {
+        match self {
+            Self::Approval { popup, .. } | Self::LoopLimit { popup, .. } => popup,
+        }
+    }
+
+    fn popup_mut(&mut self) -> &mut ChoicePopup {
+        match self {
+            Self::Approval { popup, .. } | Self::LoopLimit { popup, .. } => popup,
+        }
+    }
 }
 
 pub struct Ui {
@@ -45,8 +62,7 @@ pub struct Ui {
     input: InputView,
     queue: QueueWidget,
     todos: TodosWidget,
-    approval: Option<ApprovalPrompt>,
-    approval_selected: usize,
+    prompt: Option<OverlayPrompt>,
 }
 
 impl Ui {
@@ -85,8 +101,7 @@ impl Ui {
             input,
             queue: QueueWidget::new(),
             todos: TodosWidget::new(todos),
-            approval: None,
-            approval_selected: 0,
+            prompt: None,
         }
     }
 
@@ -189,13 +204,22 @@ impl Ui {
             AppEventKind::Exited => self.quit = true,
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Turn(TurnEvent::Started) => self.state.busy = true,
+                AgentEvent::Turn(TurnEvent::LoopLimitReached {
+                    request_id,
+                    max_iters,
+                }) => {
+                    self.prompt = Some(OverlayPrompt::LoopLimit {
+                        request_id: *request_id,
+                        popup: ChoicePopup::loop_limit(*max_iters),
+                    });
+                }
                 AgentEvent::Turn(
                     TurnEvent::Completed { .. }
                     | TurnEvent::Cancelled { .. }
                     | TurnEvent::Failed { .. },
                 ) => {
                     self.state.busy = false;
-                    self.approval = None;
+                    self.prompt = None;
                 }
                 AgentEvent::Tool(ToolEvent::ApprovalRequested {
                     request_id,
@@ -203,14 +227,12 @@ impl Ui {
                     view,
                     ..
                 }) => {
-                    self.approval = Some(ApprovalPrompt {
+                    self.prompt = Some(OverlayPrompt::Approval {
                         request_id: *request_id,
-                        name: name.clone(),
-                        summary: view.summary.clone(),
+                        popup: ChoicePopup::approval(name, &view.summary),
                     });
-                    self.approval_selected = 0;
                 }
-                AgentEvent::Tool(ToolEvent::Finished { .. }) => self.approval = None,
+                AgentEvent::Tool(ToolEvent::Finished { .. }) => self.prompt = None,
                 _ => {}
             },
             AppEventKind::Shell(ev) => match ev {
@@ -236,6 +258,7 @@ impl Ui {
                     self.app.state().phase,
                     AppPhase::Running { .. }
                         | AppPhase::AwaitingToolApproval { .. }
+                        | AppPhase::AwaitingLoopLimit { .. }
                         | AppPhase::Cancelling { .. }
                 ) {
                     self.state.busy = false;
@@ -287,6 +310,40 @@ impl Ui {
         }
     }
 
+    fn submit_prompt(&mut self, idx: usize) {
+        let Some(prompt) = self.prompt.take() else {
+            return;
+        };
+        match prompt {
+            OverlayPrompt::Approval { request_id, .. } => {
+                let decision = if idx == 0 {
+                    ApprovalDecision::Approved
+                } else {
+                    ApprovalDecision::Rejected
+                };
+                let _ = self
+                    .app
+                    .send(AppCommand::Control(ControlCommand::RespondToolApproval {
+                        request_id,
+                        decision,
+                    }));
+            }
+            OverlayPrompt::LoopLimit { request_id, .. } => {
+                let decision = if idx == 0 {
+                    LoopLimitDecision::Continue
+                } else {
+                    LoopLimitDecision::Exit
+                };
+                let _ = self
+                    .app
+                    .send(AppCommand::Control(ControlCommand::RespondLoopLimit {
+                        request_id,
+                        decision,
+                    }));
+            }
+        }
+    }
+
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match self.transcript.handle_mouse(mouse, &self.state) {
             KeyResult::Action(Action::Notify(text)) => {
@@ -300,36 +357,14 @@ impl Ui {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if let Some(approval) = self.approval.as_ref() {
-            let request_id = approval.request_id;
-            let decision = match key.code {
-                KeyCode::Up => {
-                    cycle_selected(&mut self.approval_selected, 2, true);
-                    return false;
+        if let Some(prompt) = self.prompt.as_mut() {
+            match prompt.popup_mut().handle_key(key) {
+                ChoicePopupAction::Handled => {}
+                ChoicePopupAction::Confirm(idx) => self.submit_prompt(idx),
+                ChoicePopupAction::Cancel => {
+                    self.prompt = None;
+                    self.send_cancel();
                 }
-                KeyCode::Down => {
-                    cycle_selected(&mut self.approval_selected, 2, false);
-                    return false;
-                }
-                KeyCode::Enter => Some(match self.approval_selected {
-                    0 => ApprovalDecision::Approved,
-                    _ => ApprovalDecision::Rejected,
-                }),
-                KeyCode::Char('y') => Some(ApprovalDecision::Approved),
-                KeyCode::Esc | KeyCode::Char('n') => Some(ApprovalDecision::Rejected),
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => None,
-                _ => return false,
-            };
-            if let Some(decision) = decision {
-                let _ = self
-                    .app
-                    .send(AppCommand::Control(ControlCommand::RespondToolApproval {
-                        request_id,
-                        decision,
-                    }));
-                self.approval = None;
-            } else {
-                self.send_cancel();
             }
             return false;
         }
@@ -417,10 +452,9 @@ impl Ui {
 
     fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
         let area = f.area();
-        let overlay_height = if self.approval.is_some() {
-            APPROVAL_OVERLAY_HEIGHT
-        } else {
-            self.input.overlay_height()
+        let overlay_height = match self.prompt.as_ref() {
+            Some(prompt) => prompt.popup().height(),
+            None => self.input.overlay_height(),
         };
         let regions = layout::split(
             area,
@@ -439,14 +473,8 @@ impl Ui {
         }
         self.input.draw(f, regions.input, &self.state);
         if let Some(overlay) = regions.overlay {
-            match self.approval.as_ref() {
-                Some(approval) => draw_approval(
-                    f,
-                    overlay,
-                    &approval.name,
-                    &approval.summary,
-                    self.approval_selected,
-                ),
+            match self.prompt.as_ref() {
+                Some(prompt) => prompt.popup().draw(f, overlay),
                 None => self.input.draw_overlay(f, overlay),
             }
         }
@@ -454,11 +482,7 @@ impl Ui {
             f,
             regions.status,
             &self.state,
-            status_hint(
-                self.input.overlay(),
-                self.state.busy,
-                self.approval.is_some(),
-            ),
+            status_hint(self.input.overlay(), self.state.busy, self.prompt.as_ref()),
         );
         self.status.draw_reply_overlay(f, regions.transcript);
     }
@@ -473,37 +497,11 @@ fn is_mode_toggle(key: KeyEvent) -> bool {
         || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
-const APPROVAL_OVERLAY_HEIGHT: u16 = 5;
-
-fn draw_approval(
-    f: &mut ratatui::Frame<'_>,
-    area: Rect,
-    name: &str,
-    summary: &str,
-    selected: usize,
-) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Length(2)])
-        .split(area);
-    f.render_widget(
-        Paragraph::new(format!("permission required · {name}\n{summary}")),
-        rows[0],
-    );
-    draw_choice_list(
-        f,
-        rows[1],
-        [
-            ("Approve", "run this tool"),
-            ("Reject", "do not run this tool"),
-        ],
-        selected,
-    );
-}
-
-fn status_hint(overlay: Overlay, busy: bool, awaiting_approval: bool) -> StatusHint {
-    if awaiting_approval {
-        return StatusHint::Approval;
+fn status_hint(overlay: Overlay, busy: bool, prompt: Option<&OverlayPrompt>) -> StatusHint {
+    match prompt {
+        Some(OverlayPrompt::Approval { .. }) => return StatusHint::Approval,
+        Some(OverlayPrompt::LoopLimit { .. }) => return StatusHint::LoopLimit,
+        None => {}
     }
     match overlay {
         Overlay::Slash | Overlay::Mention => StatusHint::Slash,
@@ -613,12 +611,27 @@ mod tests {
 
     #[test]
     fn status_hint_follows_overlay_then_busy() {
-        assert_eq!(status_hint(Overlay::Slash, true, false), StatusHint::Slash);
-        assert_eq!(status_hint(Overlay::Setup, false, false), StatusHint::Modal);
-        assert_eq!(status_hint(Overlay::Model, false, false), StatusHint::Modal);
-        assert_eq!(status_hint(Overlay::None, true, false), StatusHint::Busy);
-        assert_eq!(status_hint(Overlay::None, false, false), StatusHint::Idle);
-        assert_eq!(status_hint(Overlay::None, true, true), StatusHint::Approval);
+        assert_eq!(status_hint(Overlay::Slash, true, None), StatusHint::Slash);
+        assert_eq!(status_hint(Overlay::Setup, false, None), StatusHint::Modal);
+        assert_eq!(status_hint(Overlay::Model, false, None), StatusHint::Modal);
+        assert_eq!(status_hint(Overlay::None, true, None), StatusHint::Busy);
+        assert_eq!(status_hint(Overlay::None, false, None), StatusHint::Idle);
+        let approval = OverlayPrompt::Approval {
+            request_id: ApprovalRequestId(1),
+            popup: ChoicePopup::approval("bash", "run ls"),
+        };
+        assert_eq!(
+            status_hint(Overlay::None, true, Some(&approval)),
+            StatusHint::Approval
+        );
+        let loop_limit = OverlayPrompt::LoopLimit {
+            request_id: LoopLimitRequestId(1),
+            popup: ChoicePopup::loop_limit(100),
+        };
+        assert_eq!(
+            status_hint(Overlay::None, true, Some(&loop_limit)),
+            StatusHint::LoopLimit
+        );
     }
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {

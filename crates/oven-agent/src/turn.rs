@@ -4,7 +4,10 @@ use oven_llm::{Message, ModelId, ReasoningEffort, Usage};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::approval::{ApprovalDecision, ApprovalSender, ToolApproval};
+use crate::approval::{
+    ApprovalDecision, ApprovalSender, LoopLimitDecision, LoopLimitPrompt, LoopLimitRequestId,
+    LoopLimitSender, ToolApproval,
+};
 use crate::identity::ToolCallId;
 use crate::identity::TurnId;
 use crate::mode::AgentMode;
@@ -25,6 +28,7 @@ pub struct TurnContext {
     mode: Arc<Mutex<AgentMode>>,
     model: Arc<Mutex<ModelSelection>>,
     approval_sender: Option<ApprovalSender>,
+    loop_limit_sender: Option<LoopLimitSender>,
 }
 
 impl TurnContext {
@@ -41,12 +45,22 @@ impl TurnContext {
             mode: Arc::new(Mutex::new(mode)),
             model: Arc::new(Mutex::new((model, reasoning_effort))),
             approval_sender: None,
+            loop_limit_sender: None,
         }
     }
 
     pub fn with_approval_sender(mut self, approval_sender: ApprovalSender) -> Self {
         self.approval_sender = Some(approval_sender);
         self
+    }
+
+    pub fn with_loop_limit_sender(mut self, loop_limit_sender: LoopLimitSender) -> Self {
+        self.loop_limit_sender = Some(loop_limit_sender);
+        self
+    }
+
+    pub fn has_loop_limit_sender(&self) -> bool {
+        self.loop_limit_sender.is_some()
     }
 
     pub async fn request_approval(
@@ -66,6 +80,29 @@ impl TurnContext {
                 call_id,
                 name,
                 view,
+                responder,
+            })
+            .ok()?;
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => None,
+            decision = response => decision.ok(),
+        }
+    }
+
+    pub async fn request_loop_continue(
+        &self,
+        request_id: LoopLimitRequestId,
+        max_iters: usize,
+    ) -> Option<LoopLimitDecision> {
+        let Some(sender) = self.loop_limit_sender.as_ref() else {
+            return Some(LoopLimitDecision::Exit);
+        };
+        let (responder, response) = oneshot::channel();
+        sender
+            .send(LoopLimitPrompt {
+                request_id,
+                max_iters,
                 responder,
             })
             .ok()?;

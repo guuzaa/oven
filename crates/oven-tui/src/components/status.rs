@@ -28,6 +28,7 @@ pub enum StatusHint {
     Slash,
     Modal,
     Approval,
+    LoopLimit,
 }
 
 /// Single status row below the input: model [effort] · mode · root · usage
@@ -188,6 +189,7 @@ impl StatusBar {
             StatusHint::Slash => "tab fill · enter · esc",
             StatusHint::Modal => "enter · esc",
             StatusHint::Approval => "enter/y approve · esc/n reject · ctrl-c cancel",
+            StatusHint::LoopLimit => "enter/y continue · esc/n exit · ctrl-c cancel",
             StatusHint::Busy => "shift-tab mode · esc cancel · enter queue",
             StatusHint::Idle => "shift-tab mode · enter send · alt-enter newline · esc undo",
         };

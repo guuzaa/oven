@@ -16,9 +16,12 @@ mod tools;
 mod turn;
 
 pub use agent::{Agent, RouterHandle};
-pub use approval::{ApprovalDecision, ApprovalRequestId, ApprovalSender, ToolApproval};
+pub use approval::{
+    ApprovalDecision, ApprovalRequestId, ApprovalSender, LoopLimitDecision, LoopLimitPrompt,
+    LoopLimitRequestId, LoopLimitSender, ToolApproval,
+};
 pub use compact::{CompactStats, NOTHING_TO_COMPACT};
-pub use error::AgentError;
+pub use error::{AgentError, MAX_ITERS_EXCEEDED};
 pub use event::{
     AgentEvent, AgentEventEnvelope, StreamEvent, ToolEvent, ToolOutputStream, ToolResult, TurnEvent,
 };

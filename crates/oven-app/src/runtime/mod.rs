@@ -5,8 +5,9 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use oven_agent::{
-    Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink, Record,
-    RouterHandle, TodoList, ToolApproval, TurnContext, TurnId, restore_todos,
+    Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink,
+    LoopLimitPrompt, Record, RouterHandle, TodoList, ToolApproval, TurnContext, TurnId,
+    restore_todos,
 };
 use oven_host::run_shell_command;
 use oven_llm::{
@@ -125,6 +126,7 @@ impl Runtime {
                 Control::Continue
             }
             AppCommand::Control(ControlCommand::RespondToolApproval { .. }) => Control::Continue,
+            AppCommand::Control(ControlCommand::RespondLoopLimit { .. }) => Control::Continue,
             AppCommand::Control(ControlCommand::Rewind) => {
                 self.rewind();
                 Control::Continue
@@ -173,7 +175,9 @@ impl Runtime {
         let cancel = CancellationToken::new();
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
         let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ToolApproval>();
+        let (loop_limit_tx, mut loop_limit_rx) = mpsc::unbounded_channel::<LoopLimitPrompt>();
         let mut pending_approval = None;
+        let mut pending_loop_limit = None;
         let mut sink = ChannelEventSink::new(agent_tx, self.agent.id(), turn_id);
         let ctx = TurnContext::new(
             turn_id,
@@ -182,7 +186,8 @@ impl Runtime {
             self.agent.model().clone(),
             self.agent.reasoning_effort(),
         )
-        .with_approval_sender(approval_tx);
+        .with_approval_sender(approval_tx)
+        .with_loop_limit_sender(loop_limit_tx);
 
         let result = {
             let turn = self.agent.run(input, &ctx, &mut sink);
@@ -213,6 +218,17 @@ impl Runtime {
                                     && let Some(approval) = pending_approval.take()
                                 {
                                     let _ = approval.responder.send(decision);
+                                    self.state.phase = AppPhase::Running { turn_id };
+                                    let _ = self.state_tx.send(self.state.clone());
+                                }
+                            }
+                            Some(AppCommand::Control(ControlCommand::RespondLoopLimit { request_id, decision })) => {
+                                if pending_loop_limit
+                                    .as_ref()
+                                    .is_some_and(|prompt: &LoopLimitPrompt| prompt.request_id == request_id)
+                                    && let Some(prompt) = pending_loop_limit.take()
+                                {
+                                    let _ = prompt.responder.send(decision);
                                     self.state.phase = AppPhase::Running { turn_id };
                                     let _ = self.state_tx.send(self.state.clone());
                                 }
@@ -256,6 +272,17 @@ impl Runtime {
                             };
                             let _ = self.state_tx.send(self.state.clone());
                             pending_approval = Some(approval);
+                        }
+                    }
+                    prompt = loop_limit_rx.recv() => {
+                        if let Some(prompt) = prompt {
+                            self.state.phase = AppPhase::AwaitingLoopLimit {
+                                turn_id,
+                                request_id: prompt.request_id,
+                                max_iters: prompt.max_iters,
+                            };
+                            let _ = self.state_tx.send(self.state.clone());
+                            pending_loop_limit = Some(prompt);
                         }
                     }
                     ev = agent_rx.recv() => {
@@ -839,6 +866,7 @@ fn deferred_notice(cmd: &AppCommand, slash: &SlashRegistry) -> Option<String> {
         AppCommand::Control(ControlCommand::Cancel { .. })
         | AppCommand::Control(ControlCommand::SetMode { .. })
         | AppCommand::Control(ControlCommand::RespondToolApproval { .. })
+        | AppCommand::Control(ControlCommand::RespondLoopLimit { .. })
         | AppCommand::Shutdown => None,
     }
 }
@@ -898,6 +926,7 @@ fn command_kind(cmd: &AppCommand) -> &'static str {
         AppCommand::Control(ControlCommand::Cancel { .. }) => "cancel",
         AppCommand::Control(ControlCommand::SetMode { .. }) => "set_mode",
         AppCommand::Control(ControlCommand::RespondToolApproval { .. }) => "tool_approval",
+        AppCommand::Control(ControlCommand::RespondLoopLimit { .. }) => "loop_limit",
         AppCommand::Control(ControlCommand::Rewind) => "rewind",
         AppCommand::Shutdown => "shutdown",
     }

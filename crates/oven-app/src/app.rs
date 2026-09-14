@@ -1,14 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use oven_agent::AgentError;
-use oven_agent::{AgentEvent, TodoList, TurnEvent};
+use oven_agent::{AgentEvent, LoopLimitDecision, TodoList, TurnEvent};
 use oven_llm::{Message, Usage};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::builder::AppBuilder;
-use crate::command::AppCommand;
+use crate::command::{AppCommand, ControlCommand};
 use crate::config::{ConfigError, ProviderConfig};
 use crate::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
 use crate::session::SessionError;
@@ -194,6 +194,12 @@ impl App {
                     AgentEvent::Turn(TurnEvent::Cancelled { .. }) => return Ok(text),
                     AgentEvent::Turn(TurnEvent::Failed { error, .. }) => {
                         return Err(AppError::Runtime(error.message));
+                    }
+                    AgentEvent::Turn(TurnEvent::LoopLimitReached { request_id, .. }) => {
+                        let _ = self.send(AppCommand::Control(ControlCommand::RespondLoopLimit {
+                            request_id,
+                            decision: LoopLimitDecision::Exit,
+                        }));
                     }
                     _ => {}
                 },

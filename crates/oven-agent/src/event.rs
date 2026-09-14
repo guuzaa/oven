@@ -1,6 +1,6 @@
 use oven_llm::Usage;
 
-use crate::approval::ApprovalRequestId;
+use crate::approval::{ApprovalRequestId, LoopLimitRequestId};
 use crate::error::AgentError;
 use crate::identity::{AgentId, ToolCallId, TurnId};
 use crate::todo::TodoList;
@@ -25,9 +25,21 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEvent {
     Started,
-    Completed { usage: Usage, duration_ms: u64 },
-    Cancelled { duration_ms: u64 },
-    Failed { error: AgentError, duration_ms: u64 },
+    Completed {
+        usage: Usage,
+        duration_ms: u64,
+    },
+    Cancelled {
+        duration_ms: u64,
+    },
+    Failed {
+        error: AgentError,
+        duration_ms: u64,
+    },
+    LoopLimitReached {
+        request_id: LoopLimitRequestId,
+        max_iters: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
