@@ -59,15 +59,6 @@ impl App {
         builder.open().await
     }
 
-    pub async fn open_session(
-        root: impl Into<PathBuf>,
-        session_id: Option<&str>,
-    ) -> Result<Self, AppError> {
-        let mut builder = Self::builder(root);
-        builder.load_config()?;
-        builder.open_session(session_id).await
-    }
-
     pub async fn query(
         root: impl Into<PathBuf>,
         prompt: impl Into<String>,

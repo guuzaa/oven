@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -17,13 +16,13 @@ use crate::event::{AgentEvent, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
 use crate::identity::{AgentId, ToolCallId};
 use crate::mode::{AgentMode, ToolAccess};
-use crate::prompt_template::{self, InstructionDoc};
+use crate::prompt_template;
 use crate::sink::EventSink;
 use crate::todo::TodoList;
 use crate::tools::Tool;
 use crate::turn::{TurnContext, TurnOutput};
 
-const DEFAULT_MAX_ITERS: usize = 100;
+const DEFAULT_MAX_ITERS: usize = 200;
 
 /// A router shared between an `Agent` and callers that need to read it
 /// (e.g. to validate a model switch) without the exclusive `&mut Agent`
@@ -85,6 +84,11 @@ impl Agent {
         &self.model
     }
 
+    pub fn with_system(mut self, content: impl Into<String>) -> Self {
+        self.system = Some(content.into());
+        self
+    }
+
     pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
         self.reasoning_effort
     }
@@ -122,19 +126,6 @@ impl Agent {
 
     pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
         self.reasoning_effort = effort;
-    }
-
-    pub fn set_system(&mut self, content: impl Into<String>) {
-        self.system = Some(content.into());
-    }
-
-    pub fn apply_prompt(
-        &mut self,
-        root: &Path,
-        instructions: &[InstructionDoc],
-        skills: Option<String>,
-    ) {
-        self.system = Some(prompt_template::system_prompt(root, instructions, skills));
     }
 
     pub fn set_mode(&mut self, mode: AgentMode) {
@@ -1341,8 +1332,8 @@ mod tests {
     #[tokio::test]
     async fn set_system_is_reflected_in_request() {
         let (mock, seen) = CaptureSystem::new();
-        let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
-        agent.set_system("hello system");
+        let mut agent =
+            Agent::new(router_with(Box::new(mock)), Vec::new()).with_system("hello system");
         let result = run_text(&mut agent, "hi").await;
         assert_eq!(result, "ok");
         assert_eq!(
@@ -1639,8 +1630,7 @@ mod tests {
     #[tokio::test]
     async fn plan_first_request_has_plan_prompt_and_todo_write() {
         let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
-        let mut agent = agent_with_todo_write(Box::new(mock));
-        agent.set_system("base");
+        let mut agent = agent_with_todo_write(Box::new(mock)).with_system("base");
         agent.set_mode(AgentMode::Plan);
         run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
@@ -1654,8 +1644,7 @@ mod tests {
     #[tokio::test]
     async fn default_request_omits_plan_section_and_todo_write() {
         let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
-        let mut agent = agent_with_todo_write(Box::new(mock));
-        agent.set_system("base");
+        let mut agent = agent_with_todo_write(Box::new(mock)).with_system("base");
         run_text(&mut agent, "hi").await;
         let reqs = seen.lock().unwrap().clone();
         assert_eq!(reqs.len(), 1);

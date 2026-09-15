@@ -166,12 +166,11 @@ impl AppBuilder {
             .map_err(AppError::Mcp)?;
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
         tools.push(Box::new(TodoWriteTool));
-        let mut agent = Agent::new(router, tools);
-        agent.apply_prompt(
+        let mut agent = Agent::new(router, tools).with_system(oven_agent::system_prompt(
             &self.root,
             &self.instructions,
             self.skills.merged_system_prompt(),
-        );
+        ));
         if let Some(effort) = self
             .config
             .active_provider_config()
