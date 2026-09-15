@@ -8,7 +8,9 @@ use oven_app::{App, AppBuilder, dirs, log, session};
 use crate::ui::Ui;
 
 #[derive(Debug, Parser)]
-#[command(name = "oven", version, about = "A toy coding agent for joy only.")]
+#[command(name = "oven", about = "A toy coding agent for joy only.")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (",
+        env!("GIT_HASH"), " ", env!("GIT_COMMIT_DATE"), ")"))]
 pub struct Cli {
     /// Tell oven to use the specified directory as its workspace root
     #[arg(long = "cd", short = 'C', default_value = ".")]
