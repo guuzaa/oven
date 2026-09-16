@@ -1,18 +1,23 @@
 # Changelog
 
-## [0.0.7] - 2026-09-14
+## [0.0.7] - 2026-09-16
 
 ### Added
 - Ask mode (`Shift+Tab` cycles Agent → Plan → Ask): read-only tools run freely, shell commands need interactive approval, write and MCP tools are hidden
 - Rotating file logs at `~/.oven/logs/oven.log` (10 MiB × 2 files) and tracing across the agent and runtime
 - Auto-collapse thinking and tool details when the next message starts (new details start expanded; session-seeded ones stay collapsed; manual expands stay pinned)
 - Collapsible diff rows for `file_edit` / `file_write` with per-line added/removed styling
+- Choice popup when the agent loop reaches its iteration limit, letting the user continue or end the turn
+- `--version` prints the commit hash and release date
 
 ### Fixed
+- Unknown slash commands pass through to the model instead of erroring
 - Normalize `\r\n` and lone `\r` to `\n` when pasting into the composer
 - Treat wide characters as atomic in transcript selection
 - Pin the transcript to the bottom on user input and `!` shell commands
 - Show a reason when a tool is rejected or unavailable
+- Dismiss a finished todo list when the next message is sent
+- Include the last 8 characters of the session id in log entries
 
 ## [0.0.6] - 2026-09-06
 
