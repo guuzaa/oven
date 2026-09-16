@@ -53,19 +53,14 @@ impl SlashCommandPopup {
             self.selected = 0;
             return;
         }
+        let matches = self.matches();
         if !was_open {
-            self.selected = self
-                .matches()
+            self.selected = matches
                 .iter()
                 .position(|&i| self.commands[i].0.to_lowercase() == self.token())
                 .unwrap_or(0);
         }
-        let n = self.matches().len();
-        if n == 0 {
-            self.selected = 0;
-        } else if self.selected >= n {
-            self.selected = n - 1;
-        }
+        self.selected = self.selected.min(matches.len().saturating_sub(1));
     }
 
     /// Index of the currently selected matching command, if any.
@@ -158,6 +153,7 @@ impl SlashCommandPopup {
             return String::new();
         }
         trimmed[1..]
+            .trim_start()
             .split(char::is_whitespace)
             .next()
             .unwrap_or("")

@@ -91,11 +91,9 @@ impl SlashRegistry {
             Some((n, rest)) => (n, rest.trim()),
             None => (body, ""),
         };
-        let command = self
-            .commands
-            .iter()
-            .find(|c| c.name() == name)
-            .ok_or_else(|| AppError::Runtime(format!("unknown command: /{name}")))?;
+        let Some(command) = self.commands.iter().find(|c| c.name() == name) else {
+            return Ok(CommandOutcome::Passthrough);
+        };
         command.execute(agent, args)
     }
 
@@ -176,11 +174,11 @@ mod tests {
     }
 
     #[test]
-    fn unknown_command_errors() {
+    fn passthrough_when_unknown_command() {
         let reg = SlashRegistry::with_builtin();
         let mut agent = fresh_agent();
-        let err = reg.parse_and_run(&mut agent, "/nope").unwrap_err();
-        assert!(err.to_string().contains("unknown command"));
+        let outcome = reg.parse_and_run(&mut agent, "/nope").unwrap();
+        assert!(matches!(outcome, CommandOutcome::Passthrough));
     }
 
     #[test]
