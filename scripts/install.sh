@@ -37,11 +37,20 @@ case "$(uname -m)" in
     ;;
 esac
 
+TARGETS=()
 case "$OS-$ARCH" in
-  linux-x86_64)  TARGET="x86_64-unknown-linux-musl" ;;
-  linux-aarch64) TARGET="aarch64-unknown-linux-musl" ;;
-  darwin-x86_64) TARGET="x86_64-apple-darwin" ;;
-  darwin-aarch64) TARGET="aarch64-apple-darwin" ;;
+  linux-x86_64)
+    TARGETS=("x86_64-unknown-linux-gnu" "x86_64-unknown-linux-musl")
+    ;;
+  linux-aarch64)
+    TARGETS=("aarch64-unknown-linux-gnu" "aarch64-unknown-linux-musl")
+    ;;
+  darwin-x86_64)
+    TARGETS=("x86_64-apple-darwin")
+    ;;
+  darwin-aarch64)
+    TARGETS=("aarch64-apple-darwin")
+    ;;
   *)
     echo "error: no prebuilt binary for $OS-$ARCH" >&2
     exit 1
@@ -68,20 +77,49 @@ case "$TAG" in
   *) TAG="v$TAG" ;;
 esac
 
-ASSET="oven-$TAG-$TARGET.tar.gz"
-URL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
-
 # --- Download and extract -------------------------------------------------
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-echo "Downloading $URL ..."
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$URL" -o "$TMP_DIR/$ASSET"
-elif command -v wget >/dev/null 2>&1; then
-  wget -q "$URL" -O "$TMP_DIR/$ASSET"
-else
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
   echo "error: need either curl or wget to download" >&2
+  exit 1
+fi
+
+TARGET=""
+for candidate in "${TARGETS[@]}"; do
+  # The GNU/Linux release is built against glibc 2.28. Do not select it on
+  # systems with an older glibc, where the musl release is the compatible one.
+  if [[ "$candidate" == *-linux-gnu && "$OS" == "Linux" ]]; then
+    glibc_version="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $NF}' || true)"
+    if [ -z "$glibc_version" ] || ! awk -v version="$glibc_version" '
+      BEGIN {
+        split(version, parts, ".")
+        exit !(parts[1] > 2 || (parts[1] == 2 && parts[2] >= 28))
+      }'; then
+      continue
+    fi
+  fi
+
+  ASSET="oven-$TAG-$candidate.tar.gz"
+  URL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
+  echo "Trying $URL ..."
+  if command -v curl >/dev/null 2>&1; then
+    downloaded=false
+    curl -fsSL "$URL" -o "$TMP_DIR/$ASSET" && downloaded=true
+  else
+    downloaded=false
+    wget -q "$URL" -O "$TMP_DIR/$ASSET" && downloaded=true
+  fi
+  if [ "$downloaded" = true ]; then
+    TARGET="$candidate"
+    break
+  fi
+  rm -f "$TMP_DIR/$ASSET"
+done
+
+if [ -z "$TARGET" ]; then
+  echo "error: no compatible prebuilt binary found for $OS-$ARCH" >&2
   exit 1
 fi
 
