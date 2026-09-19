@@ -2017,6 +2017,7 @@ fn tool_response(id: &str, name: &str, input: serde_json::Value) -> Response {
             id: id.into(),
             name: name.into(),
             input,
+            raw_arguments: None,
         }],
         stop_reason: Some(StopReason::ToolUse),
         usage: Some(Usage {

@@ -184,7 +184,9 @@ impl Transcript {
                                     emitted = true;
                                 }
                             }
-                            ContentBlock::ToolUse { id, name, input } => {
+                            ContentBlock::ToolUse {
+                                id, name, input, ..
+                            } => {
                                 self.note_tool_start(id, &present_tool(name, input));
                                 emitted = true;
                                 has_tool = true;

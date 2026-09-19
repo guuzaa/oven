@@ -432,7 +432,10 @@ impl Agent {
 
         let mut wrote_todo = false;
         for block in response.tool_uses() {
-            let ContentBlock::ToolUse { id, name, input } = block else {
+            let ContentBlock::ToolUse {
+                id, name, input, ..
+            } = block
+            else {
                 continue;
             };
             let view = crate::tools::present_tool(name, input);
@@ -854,6 +857,7 @@ mod tests {
                 id: id.into(),
                 name: name.into(),
                 input,
+                raw_arguments: None,
             }],
             stop_reason: Some(StopReason::ToolUse),
             usage: Some(Usage {

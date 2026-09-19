@@ -162,6 +162,7 @@ mod tests {
                 id: id.into(),
                 name: "todo_write".into(),
                 input,
+                raw_arguments: None,
             }],
         }
     }
