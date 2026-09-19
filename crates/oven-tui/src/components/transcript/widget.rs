@@ -495,7 +495,7 @@ impl Transcript {
             self.wrapped_stream.push(Line::from(""));
         }
         for line in format_lines(self.stream_kind, &self.streaming) {
-            wrap_line_into(&mut self.wrapped_stream, &line, width);
+            wrap_line_into(&mut self.wrapped_stream, &line, width, self.stream_kind);
         }
     }
 

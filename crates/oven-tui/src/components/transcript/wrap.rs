@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::collapsible::Collapsible;
 use super::super::theme;
-use super::kinds::{LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH};
+use super::kinds::{LINE_INDENT, LineKind, MESSAGE_INDENT, SEPARATOR_GLYPH};
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 pub(super) const THINKING_LABEL: &str = "Thinking...";
@@ -165,13 +165,13 @@ pub(super) fn wrap_row_into(
             out.push(separator_line(width));
         } else {
             for line in format_lines(kind, text) {
-                wrap_line_into(out, &line, width);
+                wrap_line_into(out, &line, width, kind);
             }
         }
         return;
     }
     for line in format_lines(kind, text) {
-        wrap_line_into(out, &line, width);
+        wrap_line_into(out, &line, width, kind);
     }
 }
 
@@ -216,7 +216,7 @@ pub(super) fn wrap_collapsible_into(
         Span::styled(kind.gutter().to_string(), style),
         Span::styled(format!("{marker}{title}"), style),
     ]);
-    wrap_line_into(out, &header, width);
+    wrap_line_into(out, &header, width, kind);
     if !collapsible.is_expanded() {
         return;
     }
@@ -227,10 +227,10 @@ pub(super) fn wrap_collapsible_into(
             style
         };
         let line = Line::from(vec![
-            Span::styled(LINE_INDENT.to_string(), style),
+            Span::styled(format!("{MESSAGE_INDENT}{LINE_INDENT}"), style),
             Span::styled(format!("{LINE_INDENT}{part}"), body_style),
         ]);
-        wrap_line_into(out, &line, width);
+        wrap_line_into(out, &line, width, kind);
     }
 }
 
@@ -238,11 +238,12 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
     if kind == LineKind::Thinking {
         let style = kind.style();
         return vec![Line::from(vec![
-            Span::styled(kind.gutter().to_string(), style),
+            Span::styled(line_prefix(kind), style),
             Span::styled(thinking_display_label(text).to_string(), style),
         ])];
     }
-    let prefix = kind.gutter();
+    let first_prefix = line_prefix(kind);
+    let rest_prefix = continuation_prefix(kind, &first_prefix);
     let style = kind.style();
     let mut lines = Vec::new();
     let mut prev_blank = false;
@@ -253,9 +254,9 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         }
         prev_blank = blank;
         let head = if lines.is_empty() {
-            prefix
+            &first_prefix
         } else {
-            LINE_INDENT
+            &rest_prefix
         };
         let line_style = if kind == LineKind::Diff {
             diff_line_style(part, style)
@@ -274,20 +275,25 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
             _ => Span::raw(body),
         };
         lines.push(Line::from(vec![
-            Span::styled(head.to_string(), line_style),
+            Span::styled(head.clone(), line_style),
             body_span,
         ]));
     }
     if lines.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(prefix.to_string(), style),
+            Span::styled(first_prefix, style),
             Span::raw(String::new()),
         ]));
     }
     lines
 }
 
-pub(super) fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>, width: usize) {
+pub(super) fn wrap_line_into(
+    out: &mut Vec<Line<'static>>,
+    line: &Line<'static>,
+    width: usize,
+    kind: LineKind,
+) {
     if width == 0 {
         out.push(line.clone());
         return;
@@ -311,7 +317,7 @@ pub(super) fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>,
             return;
         }
     };
-    let body_width = width.saturating_sub(LINE_PREFIX_WIDTH).max(1);
+    let body_width = width.saturating_sub(prefix.width()).max(1);
     if body.is_empty() {
         out.push(Line::from(vec![
             Span::styled(prefix, style),
@@ -319,21 +325,33 @@ pub(super) fn wrap_line_into(out: &mut Vec<Line<'static>>, line: &Line<'static>,
         ]));
         return;
     }
-    let mut first = true;
+    let continuation = continuation_prefix(kind, &prefix);
+    let mut head = prefix.as_str();
     let mut rest = body.as_str();
     while !rest.is_empty() {
         let (chunk, next) = split_at_width(rest, body_width);
-        let head = if first {
-            first = false;
-            prefix.as_str()
-        } else {
-            LINE_INDENT
-        };
         out.push(Line::from(vec![
             Span::styled(head.to_string(), style),
             body_span(chunk.to_string(), body_style),
         ]));
+        head = continuation.as_str();
         rest = next;
+    }
+}
+
+fn line_prefix(kind: LineKind) -> String {
+    let indent = match kind {
+        LineKind::User => "",
+        _ => MESSAGE_INDENT,
+    };
+    format!("{indent}{}", kind.gutter())
+}
+
+fn continuation_prefix(kind: LineKind, first_prefix: &str) -> String {
+    if kind.gutter_once() {
+        " ".repeat(first_prefix.width())
+    } else {
+        first_prefix.to_string()
     }
 }
 

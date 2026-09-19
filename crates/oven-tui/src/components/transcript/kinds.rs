@@ -5,6 +5,7 @@ use super::super::theme;
 
 pub(super) const LINE_PREFIX_WIDTH: usize = 2;
 pub(super) const LINE_INDENT: &str = "  ";
+pub(super) const MESSAGE_INDENT: &str = " ";
 pub(super) const SEPARATOR_GLYPH: char = '−';
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,13 +40,18 @@ impl LineKind {
         }
     }
 
+    /// Assistant prose draws its gutter on the first line only and aligns the rest under the body.
+    pub(super) fn gutter_once(self) -> bool {
+        self == LineKind::Text
+    }
+
     pub(super) fn gutter(self) -> &'static str {
         match self {
             LineKind::User => "› ",
             LineKind::Shell | LineKind::Tool => "$ ",
             LineKind::Text => "∙ ",
-            LineKind::Thinking => "⋅ ",
-            LineKind::ToolResult(_)
+            LineKind::Thinking
+            | LineKind::ToolResult(_)
             | LineKind::ShellResult(_)
             | LineKind::Diff
             | LineKind::Error

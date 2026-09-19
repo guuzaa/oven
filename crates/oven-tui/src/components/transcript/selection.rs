@@ -12,8 +12,8 @@ pub(super) struct SelPos {
 
 fn line_prefix_width(line: &Line<'_>) -> usize {
     match line.spans.as_slice() {
-        [head, rest @ ..] if !rest.is_empty() && head.content.width() == LINE_PREFIX_WIDTH => {
-            LINE_PREFIX_WIDTH
+        [head, rest @ ..] if !rest.is_empty() && head.content.width() >= LINE_PREFIX_WIDTH => {
+            head.content.width()
         }
         _ => 0,
     }
@@ -21,7 +21,7 @@ fn line_prefix_width(line: &Line<'_>) -> usize {
 
 fn line_body(line: &Line<'_>) -> String {
     match line.spans.as_slice() {
-        [head, rest @ ..] if head.content.width() == LINE_PREFIX_WIDTH => {
+        [head, rest @ ..] if head.content.width() >= LINE_PREFIX_WIDTH => {
             rest.iter().map(|s| s.content.as_ref()).collect()
         }
         spans => spans.iter().map(|s| s.content.as_ref()).collect(),

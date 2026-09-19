@@ -65,6 +65,16 @@ fn thinking_format_hides_content() {
 }
 
 #[test]
+fn thinking_header_has_no_gutter() {
+    let mut t = Transcript::new();
+    t.on_event(&thinking("secret chain"));
+    t.on_event(&text_delta("answer"));
+    wide(&mut t);
+    let header = line_text(&t.wrapped[0]);
+    assert!(header.starts_with("  › "), "{header:?}");
+}
+
+#[test]
 fn thinking_shimmer_preserves_label_and_shifts() {
     let line = format_lines(LineKind::Thinking, THINKING_LABEL)
         .pop()
@@ -106,13 +116,57 @@ fn all_gutters_are_two_wide() {
 #[test]
 fn assistant_gutter_is_bullet() {
     let lines = format_lines(LineKind::Text, "hi");
-    assert_eq!(lines[0].spans[0].content.as_ref(), LineKind::Text.gutter());
+    assert_eq!(lines[0].spans[0].content.as_ref(), " ∙ ");
+}
+
+#[test]
+fn assistant_gutter_is_drawn_once() {
+    let lines = format_lines(LineKind::Text, "first\nsecond");
+    assert_eq!(lines[0].spans[0].content.as_ref(), " ∙ ");
+    assert_eq!(lines[1].spans[0].content.as_ref(), "   ");
+    assert_eq!(
+        lines[0].spans[0].content.width(),
+        lines[1].spans[0].content.width()
+    );
+}
+
+#[test]
+fn wrapped_assistant_gutter_is_drawn_once() {
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, "abcdefgh");
+    ready(&mut t, Rect::new(0, 0, 7, 5));
+    let rows: Vec<String> = t.wrapped.iter().map(line_text).collect();
+    assert_eq!(rows, vec![" ∙ abcd", "   efgh"]);
+}
+
+#[test]
+fn wrapped_streamed_assistant_gutter_is_drawn_once() {
+    const WIDTH: u16 = 7;
+    let mut t = Transcript::new();
+    t.push_stream(LineKind::Text, "abcdefgh");
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, 3)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let row = |y: u16| (0..WIDTH).map(|x| buf[(x, y)].symbol()).collect::<String>();
+    assert!(row(0).starts_with(" ∙ abcd"), "{:?}", row(0));
+    assert!(row(1).starts_with("   efgh"), "{:?}", row(1));
+}
+
+#[test]
+fn wrapped_shell_gutter_repeats() {
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Shell, "abcdefgh");
+    ready(&mut t, Rect::new(0, 0, 7, 5));
+    let rows: Vec<String> = t.wrapped.iter().map(line_text).collect();
+    assert_eq!(rows, vec![" $ abcd", " $ efgh"]);
 }
 
 #[test]
 fn shell_command_gutter_is_dollar() {
     let lines = format_lines(LineKind::Shell, "ls");
-    assert_eq!(lines[0].spans[0].content.as_ref(), LineKind::Shell.gutter());
+    assert_eq!(lines[0].spans[0].content.as_ref(), " $ ");
     assert_eq!(lines[0].spans[0].style.fg, theme::shell().fg);
     assert_eq!(lines[0].spans[1].content.as_ref(), "ls");
     assert_eq!(lines[0].spans[1].style.fg, theme::shell().fg);
@@ -140,9 +194,9 @@ fn diff_lines_have_add_remove_backgrounds() {
 #[test]
 fn tool_result_gutters() {
     let ok = format_lines(LineKind::ToolResult(true), "out");
-    assert_eq!(ok[0].spans[0].content.as_ref(), "  ");
+    assert_eq!(ok[0].spans[0].content.as_ref(), "   ");
     let fail = format_lines(LineKind::ToolResult(false), "boom");
-    assert_eq!(fail[0].spans[0].content.as_ref(), "  ");
+    assert_eq!(fail[0].spans[0].content.as_ref(), "   ");
 }
 
 #[test]
@@ -1057,8 +1111,8 @@ fn diff_double_click_toggles_detail() {
         .iter()
         .find(|line| line_text(line).contains("+ new"))
         .expect("added line");
-    assert_eq!(removed.spans[0].content.as_ref(), LINE_INDENT);
-    assert_eq!(added.spans[0].content.as_ref(), LINE_INDENT);
+    assert_eq!(removed.spans[0].content.as_ref(), "   ");
+    assert_eq!(added.spans[0].content.as_ref(), "   ");
     assert!(
         removed.spans[1]
             .content
@@ -1390,10 +1444,10 @@ fn slice_cols_by_display_width() {
 #[test]
 fn extract_skips_gutter() {
     let line = format_lines(LineKind::Text, "hello").pop().unwrap();
-    assert_eq!(extract_line_range(&line, 0, 7), "hello");
-    assert_eq!(extract_line_range(&line, 2, 7), "hello");
-    assert_eq!(extract_line_range(&line, 2, 5), "hel");
-    assert_eq!(extract_line_range(&line, 0, 2), "");
+    assert_eq!(extract_line_range(&line, 0, 8), "hello");
+    assert_eq!(extract_line_range(&line, 3, 8), "hello");
+    assert_eq!(extract_line_range(&line, 3, 6), "hel");
+    assert_eq!(extract_line_range(&line, 0, 3), "");
 }
 
 #[test]
@@ -1402,11 +1456,11 @@ fn mouse_drag_selects_body_without_gutter() {
     t.push_row(LineKind::Text, "hello");
     ready(&mut t, Rect::new(0, 0, 80, 5));
     t.handle_mouse(
-        mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
         &State::new(),
     );
     t.handle_mouse(
-        mouse(MouseEventKind::Drag(MouseButton::Left), 7, 0),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 8, 0),
         &State::new(),
     );
     assert_eq!(t.selected_text().as_deref(), Some("hello"));
@@ -1418,11 +1472,11 @@ fn mouse_drag_reverse_selects_same_text() {
     t.push_row(LineKind::Text, "hello");
     ready(&mut t, Rect::new(0, 0, 80, 5));
     t.handle_mouse(
-        mouse(MouseEventKind::Down(MouseButton::Left), 7, 0),
+        mouse(MouseEventKind::Down(MouseButton::Left), 8, 0),
         &State::new(),
     );
     t.handle_mouse(
-        mouse(MouseEventKind::Drag(MouseButton::Left), 2, 0),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 3, 0),
         &State::new(),
     );
     assert_eq!(t.selected_text().as_deref(), Some("hello"));
@@ -1435,11 +1489,11 @@ fn mouse_drag_selects_across_rows() {
     t.push_row(LineKind::Text, "world");
     ready(&mut t, Rect::new(0, 0, 80, 5));
     t.handle_mouse(
-        mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
         &State::new(),
     );
     t.handle_mouse(
-        mouse(MouseEventKind::Drag(MouseButton::Left), 7, 2),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 8, 2),
         &State::new(),
     );
     assert_eq!(t.selected_text().as_deref(), Some("hello\n\nworld"));
@@ -1470,15 +1524,15 @@ fn mouse_up_after_selection_emits_copied_reply() {
     t.push_row(LineKind::Text, "hello");
     ready(&mut t, Rect::new(0, 0, 80, 5));
     t.handle_mouse(
-        mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
         &State::new(),
     );
     t.handle_mouse(
-        mouse(MouseEventKind::Drag(MouseButton::Left), 7, 0),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 8, 0),
         &State::new(),
     );
     let up = t.handle_mouse(
-        mouse(MouseEventKind::Up(MouseButton::Left), 7, 0),
+        mouse(MouseEventKind::Up(MouseButton::Left), 8, 0),
         &State::new(),
     );
     assert!(matches!(up, KeyResult::Action(Action::Notify(text)) if text == "Copied!"));
@@ -1558,13 +1612,13 @@ fn selecting_cjk_does_not_expand_drawn_line() {
 fn mouse_selects_wrapped_lines() {
     let mut t = Transcript::new();
     t.push_row(LineKind::Text, "abcdefgh");
-    ready(&mut t, Rect::new(0, 0, 6, 5));
+    ready(&mut t, Rect::new(0, 0, 7, 5));
     t.handle_mouse(
-        mouse(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
         &State::new(),
     );
     t.handle_mouse(
-        mouse(MouseEventKind::Drag(MouseButton::Left), 6, 1),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 7, 1),
         &State::new(),
     );
     assert_eq!(t.selected_text().as_deref(), Some("abcd\nefgh"));
@@ -1603,9 +1657,9 @@ fn mouse_drag_outside_extends_to_end() {
 #[test]
 fn highlight_line_marks_range() {
     let line = format_lines(LineKind::Text, "hello").pop().unwrap();
-    let hi = highlight_line(&line, 2, 7);
+    let hi = highlight_line(&line, 3, 8);
     assert_eq!(hi.spans.len(), 2);
-    assert_eq!(hi.spans[0].content.as_ref(), LineKind::Text.gutter());
+    assert_eq!(hi.spans[0].content.as_ref(), " ∙ ");
     assert_eq!(hi.spans[1].content.as_ref(), "hello");
     assert_eq!(hi.spans[1].style, theme::selection());
 }
@@ -1731,7 +1785,7 @@ fn draw_repaints_every_cell_after_shorter_cjk_line() {
         .draw(|f| t.draw(f, f.area(), &State::new()))
         .unwrap();
     let row: String = (0..20).map(|x| frame.buffer[(x, 0)].symbol()).collect();
-    assert!(row.starts_with("∙ 好"), "{row:?}");
+    assert!(row.starts_with(" ∙ 好"), "{row:?}");
     assert!(
         row[row.find('好').unwrap() + '好'.len_utf8()..]
             .chars()
