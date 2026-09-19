@@ -57,6 +57,11 @@ case "$OS-$ARCH" in
     ;;
 esac
 
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+  echo "error: need either curl or wget to download" >&2
+  exit 1
+fi
+
 # --- Resolve the release tag ----------------------------------------------
 TAG="${1:-${OVEN_VERSION:-}}"
 if [ -z "$TAG" ]; then
@@ -80,11 +85,6 @@ esac
 # --- Download and extract -------------------------------------------------
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-
-if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-  echo "error: need either curl or wget to download" >&2
-  exit 1
-fi
 
 TARGET=""
 for candidate in "${TARGETS[@]}"; do
