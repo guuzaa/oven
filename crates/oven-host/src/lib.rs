@@ -10,4 +10,4 @@ pub use decode::decode_command_output;
 pub use filesystem::{PathError, resolve_within, write};
 pub use rotate::{LOG_MAX_BYTES, LOG_MAX_FILES, RotatingFile};
 pub use time::now_ms;
-pub use walk::{WalkEntry, WalkError, walk_dir};
+pub use walk::{WalkEntry, WalkError, walk_all, walk_dir};

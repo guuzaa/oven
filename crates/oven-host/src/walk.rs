@@ -7,6 +7,7 @@ use thiserror::Error;
 pub struct WalkEntry {
     path: PathBuf,
     is_file: bool,
+    is_dir: bool,
 }
 
 impl WalkEntry {
@@ -17,6 +18,10 @@ impl WalkEntry {
     pub fn is_file(&self) -> bool {
         self.is_file
     }
+
+    pub fn is_dir(&self) -> bool {
+        self.is_dir
+    }
 }
 
 #[derive(Debug, Error)]
@@ -25,7 +30,37 @@ pub struct WalkError {
     message: String,
 }
 
+pub(crate) trait Sealed {}
+impl Sealed for Files {}
+impl Sealed for All {}
+
+pub(crate) trait WalkMode: Sealed {
+    const FILES_ONLY: bool;
+}
+
+#[derive(Debug)]
+pub struct All;
+
+#[derive(Debug)]
+pub struct Files;
+
+impl WalkMode for Files {
+    const FILES_ONLY: bool = true;
+}
+
+impl WalkMode for All {
+    const FILES_ONLY: bool = false;
+}
+
 pub fn walk_dir(root: impl AsRef<Path>) -> impl Iterator<Item = Result<WalkEntry, WalkError>> {
+    walk::<Files>(root)
+}
+
+pub fn walk_all(root: impl AsRef<Path>) -> impl Iterator<Item = Result<WalkEntry, WalkError>> {
+    walk::<All>(root)
+}
+
+fn walk<M: WalkMode>(root: impl AsRef<Path>) -> impl Iterator<Item = Result<WalkEntry, WalkError>> {
     let root = root.as_ref();
     let skip_dot_dirs = !root.join(".gitignore").is_file();
     WalkBuilder::new(root)
@@ -58,17 +93,21 @@ pub fn walk_dir(root: impl AsRef<Path>) -> impl Iterator<Item = Result<WalkEntry
                     is_file: entry
                         .file_type()
                         .is_some_and(|file_type| file_type.is_file()),
+                    is_dir: entry
+                        .file_type()
+                        .is_some_and(|file_type| file_type.is_dir()),
                     path: entry.into_path(),
                 })
                 .map_err(|error| WalkError {
                     message: error.to_string(),
                 })
         })
+        .filter(|entry| !M::FILES_ONLY || entry.as_ref().is_ok_and(WalkEntry::is_file))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::walk_dir;
+    use super::{walk_all, walk_dir};
     use std::fs;
     use std::path::Path;
 
@@ -85,14 +124,32 @@ mod tests {
     }
 
     fn files(root: &Path) -> Vec<String> {
-        let mut files: Vec<_> = walk_dir(root)
+        rel_paths(walk_dir(root), root)
+    }
+
+    fn rel_paths(
+        entries: impl Iterator<Item = Result<super::WalkEntry, super::WalkError>>,
+        root: &Path,
+    ) -> Vec<String> {
+        let mut paths: Vec<_> = entries
             .filter_map(Result::ok)
-            .filter(|entry| entry.is_file())
             .map(|entry| entry.path().strip_prefix(root).unwrap().to_owned())
             .map(|path| path.to_string_lossy().replace('\\', "/"))
             .collect();
-        files.sort();
-        files
+        paths.sort();
+        paths
+    }
+
+    fn dirs(root: &Path) -> Vec<String> {
+        let mut paths: Vec<_> = walk_all(root)
+            .filter_map(Result::ok)
+            .filter(super::WalkEntry::is_dir)
+            .map(|entry| entry.path().strip_prefix(root).unwrap().to_owned())
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .filter(|path| !path.is_empty())
+            .collect();
+        paths.sort();
+        paths
     }
 
     #[test]
@@ -116,5 +173,27 @@ mod tests {
         write(tmp.path(), "keep.txt", "x");
         write(tmp.path(), ".hidden/x.txt", "x");
         assert_eq!(files(tmp.path()), ["keep.txt"]);
+    }
+
+    #[test]
+    fn walk_all_includes_directories_and_root() {
+        let tmp = tmp_dir();
+        write(tmp.path(), "keep.txt", "x");
+        write(tmp.path(), "src/nested/deep.rs", "x");
+        let root = tmp.path();
+        assert_eq!(
+            rel_paths(walk_all(root), root),
+            ["", "keep.txt", "src", "src/nested", "src/nested/deep.rs"]
+        );
+        assert_eq!(dirs(root), ["src", "src/nested"]);
+    }
+
+    #[test]
+    fn walk_all_skips_dot_directories_without_gitignore() {
+        let tmp = tmp_dir();
+        write(tmp.path(), "keep.txt", "x");
+        write(tmp.path(), ".hidden/x.txt", "x");
+        let root = tmp.path();
+        assert_eq!(rel_paths(walk_all(root), root), ["", "keep.txt"]);
     }
 }

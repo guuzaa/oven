@@ -120,12 +120,12 @@ fn scan(root: &Path) -> Vec<String> {
     if !root.is_dir() {
         return Vec::new();
     }
-    let mut files = Vec::new();
-    for entry in oven_host::walk_dir(root) {
+    let mut entries = Vec::new();
+    for entry in oven_host::walk_all(root) {
         let Ok(entry) = entry else {
             continue;
         };
-        if !entry.is_file() {
+        if !entry.is_file() && !entry.is_dir() {
             continue;
         }
         let Ok(rel) = entry.path().strip_prefix(root) else {
@@ -134,10 +134,14 @@ fn scan(root: &Path) -> Vec<String> {
         if rel.as_os_str().is_empty() {
             continue;
         }
-        files.push(rel.to_string_lossy().replace('\\', "/"));
+        let mut path = rel.to_string_lossy().replace('\\', "/");
+        if entry.is_dir() {
+            path.push('/');
+        }
+        entries.push(path);
     }
-    files.sort();
-    files
+    entries.sort();
+    entries
 }
 
 #[cfg(test)]
@@ -192,7 +196,38 @@ mod tests {
         let files = scan(root);
         assert!(files.contains(&"keep.txt".into()), "{files:?}");
         assert!(files.contains(&".secret".into()), "{files:?}");
+        assert!(!files.contains(&".hidden".into()), "{files:?}");
         assert!(!files.contains(&".hidden/x.txt".into()), "{files:?}");
+    }
+
+    #[test]
+    fn scan_lists_directories_with_trailing_slash() {
+        let tmp = tmp_dir();
+        let root = tmp.path();
+        write(root, "src/app.rs", "x");
+        write(root, "src/nested/deep.rs", "x");
+        assert_eq!(
+            scan(root),
+            ["src/", "src/app.rs", "src/nested/", "src/nested/deep.rs"]
+        );
+
+        let mut mentions = FileMentions::open(root);
+        assert_eq!(mentions.search("src")[0], "src/");
+        assert_eq!(mentions.search("nested")[0], "src/nested/");
+        assert_eq!(mentions.search("src/nested/")[0], "src/nested/");
+    }
+
+    #[test]
+    fn rescan_picks_up_created_directory() {
+        let tmp = tmp_dir();
+        let root = tmp.path();
+        let mut mentions = FileMentions::open(root);
+        assert!(mentions.search("docs").is_empty());
+
+        write(root, "docs/guide.md", "x");
+        mentions.rescan();
+        mentions.wait_rescan();
+        assert_eq!(mentions.search("docs")[0], "docs/");
     }
 
     #[test]

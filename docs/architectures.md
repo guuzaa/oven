@@ -70,7 +70,7 @@ oven-tui ──► oven-app ──► oven-agent ──► oven-llm
 | File access | `write` | Choose paths and content; read files and map errors to domain errors |
 | Process execution | `run_shell_command` | Choose command, timeout, cancellation, and event formatting |
 | Output decoding | `decode_command_output` | Render decoded stdout/stderr and exit status |
-| File discovery | `walk_dir`, `WalkEntry` | Apply glob/grep semantics and result limits |
+| File discovery | `walk_dir` (files only), `walk_all` (+ directories), `WalkEntry` | Apply glob/grep semantics and result limits |
 | Log files | `RotatingFile` | Install the tracing subscriber at process start (`oven-app::log`); emit spans from agent/app |
 
 The host facade deliberately does not know about `AgentError`, `Tool`, `AgentEvent`, `AppEvent`, or `AppState`. This keeps the infrastructure reusable and prevents a dependency cycle.

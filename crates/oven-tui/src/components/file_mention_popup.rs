@@ -8,6 +8,8 @@ use ratatui::widgets::Paragraph;
 use super::list::{self, MAX_LIST_ROWS};
 use super::theme;
 
+const DIR_SUFFIX: char = '/';
+
 pub(crate) enum FileMentionPopupAction {
     Handled,
     Fill {
@@ -133,7 +135,7 @@ impl FileMentionPopup {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let path = self.matches.get(self.selected)?;
                 let query = &self.token.as_ref()?.query;
-                if query == path {
+                if query.trim_end_matches(DIR_SUFFIX) == path.trim_end_matches(DIR_SUFFIX) {
                     None
                 } else {
                     self.fill_selected()
@@ -151,10 +153,11 @@ impl FileMentionPopup {
         }
         let before = self.text[..token.start].to_string();
         let after = self.text[token.end..].to_string();
-        let insert = if after.starts_with(|c: char| c.is_whitespace()) {
-            format!("@{path}")
-        } else {
+        let spaced = !path.ends_with(DIR_SUFFIX) && !after.starts_with(|c: char| c.is_whitespace());
+        let insert = if spaced {
             format!("@{path} ")
+        } else {
+            format!("@{path}")
         };
         Some(FileMentionPopupAction::Fill {
             before,

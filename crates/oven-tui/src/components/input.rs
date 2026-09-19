@@ -1207,6 +1207,29 @@ mod tests {
     }
 
     #[test]
+    fn mention_directory_stays_open_for_drill_down() {
+        let mut view = view().with_files(["docs/", "docs/guide.md", "src/lib.rs"]);
+        type_text(&mut view, "@do");
+        view.handle_key(key(KeyCode::Tab), &State::new());
+        assert_eq!(view.textarea.lines()[0], "@docs/");
+        assert!(view.file_mention.is_open());
+
+        type_text(&mut view, "gu");
+        assert_eq!(view.file_mention.matches()[0], "docs/guide.md");
+        view.handle_key(key(KeyCode::Tab), &State::new());
+        assert_eq!(view.textarea.lines()[0], "@docs/guide.md ");
+    }
+
+    #[test]
+    fn mention_enter_fills_directory_without_submitting() {
+        let mut view = view().with_files(["docs/", "docs/guide.md"]);
+        type_text(&mut view, "@do");
+        let result = view.handle_key(key(KeyCode::Enter), &State::new());
+        assert!(matches!(result, KeyResult::Handled));
+        assert_eq!(view.textarea.lines()[0], "@docs/");
+    }
+
+    #[test]
     fn mention_arrows_change_selection() {
         let mut view = mention_view();
         type_text(&mut view, "@");
