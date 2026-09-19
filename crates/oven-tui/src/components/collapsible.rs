@@ -17,6 +17,10 @@ impl Collapsible {
         self.body.push_str(text);
     }
 
+    pub(super) fn replace(&mut self, body: impl Into<String>) {
+        self.body = body.into();
+    }
+
     pub(super) fn body(&self) -> &str {
         &self.body
     }

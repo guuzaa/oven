@@ -1,137 +1,138 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
-use unicode_width::UnicodeWidthStr;
+const TITLE_SEPARATOR: &str = ", ";
+const FAILED_LABEL: &str = "failed";
+const SINGLE_CALL: usize = 1;
 
-use super::wrap::split_at_width;
+#[derive(PartialEq, Eq)]
+enum ToolKind {
+    Searched,
+    Read,
+    Ran,
+    Other(String),
+}
 
-const MAX_TOOL_ARG: usize = 80;
-const MAX_GROUP_DETAILS: usize = 3;
-
-pub(super) struct ToolLabel(String);
-
-impl ToolLabel {
-    pub(super) fn from_summary(summary: &str) -> Self {
-        let normalized = summary.split_whitespace().collect::<Vec<_>>().join(" ");
-        if normalized.width() <= MAX_TOOL_ARG {
-            return Self(normalized);
+impl From<&str> for ToolKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "Search" | "Find" => Self::Searched,
+            "Read" => Self::Read,
+            "Ran" => Self::Ran,
+            _ => Self::Other(value.to_string()),
         }
-        let (chunk, _) = split_at_width(&normalized, MAX_TOOL_ARG.saturating_sub(1));
-        Self(format!("{chunk}…"))
     }
+}
 
-    fn as_str(&self) -> &str {
-        &self.0
+impl ToolKind {
+    fn phrase(&self, count: usize) -> String {
+        let (verb, noun) = match self {
+            Self::Searched => ("Searched", "pattern"),
+            Self::Read => ("Read", "file"),
+            Self::Ran => ("Ran", "command"),
+            Self::Other(action) if count == SINGLE_CALL => return action.clone(),
+            Self::Other(action) => return format!("{action} ×{count}"),
+        };
+        let suffix = if count == SINGLE_CALL { "" } else { "s" };
+        format!("{verb} {count} {noun}{suffix}")
     }
+}
+
+struct ToolGroup {
+    kind: ToolKind,
+    count: usize,
 }
 
 #[derive(Default)]
 pub(super) struct ToolBurst {
-    pending: HashMap<String, ToolLabel>,
-    entries: Vec<ToolEntry>,
-    pub row_open: bool,
-}
-
-struct ToolEntry {
-    action: String,
-    details: Vec<String>,
-    total: usize,
+    pending: HashSet<String>,
+    groups: Vec<ToolGroup>,
+    /// Concrete calls in invocation order, shown when the burst is expanded.
+    calls: Vec<String>,
     failed: usize,
 }
 
 impl ToolBurst {
-    pub(super) fn start(&mut self, call_id: String, label: ToolLabel) {
-        self.bump(label.as_str());
-        self.pending.insert(call_id, label);
+    pub(super) fn start(&mut self, call_id: String, summary: &str) {
+        let label = normalize(summary);
+        let kind = action_of(&label).into();
+        if let Some(group) = self.groups.iter_mut().find(|group| group.kind == kind) {
+            group.count += 1;
+        } else {
+            self.groups.push(ToolGroup {
+                kind,
+                count: SINGLE_CALL,
+            });
+        }
+        self.calls.push(label);
+        self.pending.insert(call_id);
     }
 
     pub(super) fn finish(&mut self, call_id: &str, failed: bool) -> bool {
-        let Some(label) = self.pending.remove(call_id) else {
+        if !self.pending.remove(call_id) {
             return false;
-        };
-        if failed {
-            self.bump_failed(label.as_str());
         }
+        self.failed += usize::from(failed);
         true
     }
 
-    fn bump(&mut self, label: &str) {
-        let (action, detail) = split_tool_label(label);
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.action == action) {
-            entry.total += 1;
-            if !detail.is_empty()
-                && entry.details.len() < MAX_GROUP_DETAILS
-                && !entry.details.iter().any(|existing| existing == detail)
-            {
-                entry.details.push(detail.to_string());
-            }
-        } else {
-            self.entries.push(ToolEntry {
-                action: action.to_string(),
-                details: if detail.is_empty() {
-                    Vec::new()
-                } else {
-                    vec![detail.to_string()]
-                },
-                total: 1,
-                failed: 0,
-            });
+    pub(super) fn title(&self) -> String {
+        let mut parts: Vec<String> = self
+            .groups
+            .iter()
+            .map(|group| group.kind.phrase(group.count))
+            .collect();
+        if self.failed > 0 {
+            parts.push(format!("{} {FAILED_LABEL}", self.failed));
         }
+        parts.join(TITLE_SEPARATOR)
     }
 
-    fn bump_failed(&mut self, label: &str) {
-        let (action, _) = split_tool_label(label);
-        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.action == action) {
-            entry.failed += 1;
-        }
-    }
-
-    pub(super) fn summary(&self) -> String {
-        format_tool_summary(&self.entries)
+    pub(super) fn body(&self) -> String {
+        self.calls.join("\n")
     }
 }
 
-fn split_tool_label(label: &str) -> (&str, &str) {
-    label.split_once(' ').unwrap_or((label, ""))
+fn normalize(summary: &str) -> String {
+    summary.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn format_tool_summary(entries: &[ToolEntry]) -> String {
-    let mut parts: Vec<String> = entries
-        .iter()
-        .map(|entry| {
-            let details = entry.details.join(" · ");
-            match (entry.total, details.is_empty()) {
-                (1, true) => entry.action.clone(),
-                (1, false) => format!("{} {details}", entry.action),
-                (_, true) => format!("{} ×{}", entry.action, entry.total),
-                (_, false) => format!("{} ×{} ({details})", entry.action, entry.total),
-            }
-        })
-        .collect();
-    let failed: usize = entries.iter().map(|entry| entry.failed).sum();
-    if failed > 0 {
-        parts.push(format!("{failed} failed"));
-    }
-    parts.join(" · ")
+fn action_of(label: &str) -> &str {
+    label.split_once(' ').map_or(label, |(action, _)| action)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolBurst, ToolLabel};
+    use super::ToolBurst;
 
     #[test]
-    fn groups_tool_burst_by_action_and_keeps_compact_details() {
+    fn groups_calls_by_kind_with_call_details_as_body() {
         let mut burst = ToolBurst::default();
-        burst.start("1".into(), ToolLabel::from_summary("Search todo in src"));
-        burst.start(
-            "2".into(),
-            ToolLabel::from_summary("Search config\n in src"),
-        );
-        burst.start("3".into(), ToolLabel::from_summary("Read src/main.rs"));
+        burst.start("1".into(), "Search todo in src");
+        burst.start("2".into(), "Search\n config in src");
+        burst.start("3".into(), "Find **/*.rs in src");
+        burst.start("4".into(), "Read src/main.rs");
         assert!(burst.finish("2", true));
 
+        assert_eq!(burst.title(), "Searched 3 patterns, Read 1 file, 1 failed");
         assert_eq!(
-            burst.summary(),
-            "Search ×2 (todo in src · config in src) · Read src/main.rs · 1 failed"
+            burst.body(),
+            "Search todo in src\nSearch config in src\nFind **/*.rs in src\nRead src/main.rs"
         );
+    }
+
+    #[test]
+    fn unknown_tool_carries_its_count_only_when_repeated() {
+        let mut burst = ToolBurst::default();
+        burst.start("1".into(), "web_search");
+        assert_eq!(burst.title(), "web_search");
+        burst.start("2".into(), "web_search");
+        assert_eq!(burst.title(), "web_search ×2");
+    }
+
+    #[test]
+    fn finish_ignores_calls_outside_the_burst() {
+        let mut burst = ToolBurst::default();
+        assert!(!burst.finish("missing", true));
+        assert_eq!(burst.title(), "");
     }
 }

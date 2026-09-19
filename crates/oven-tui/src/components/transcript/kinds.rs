@@ -48,9 +48,10 @@ impl LineKind {
     pub(super) fn gutter(self) -> &'static str {
         match self {
             LineKind::User => "› ",
-            LineKind::Shell | LineKind::Tool => "$ ",
+            LineKind::Shell => "$ ",
             LineKind::Text => "∙ ",
             LineKind::Thinking
+            | LineKind::Tool
             | LineKind::ToolResult(_)
             | LineKind::ShellResult(_)
             | LineKind::Diff

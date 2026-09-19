@@ -17,7 +17,7 @@ use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
 use super::kinds::{LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
-use super::tools::{ToolBurst, ToolLabel};
+use super::tools::ToolBurst;
 use super::wrap::{
     MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL, apply_hover,
     apply_thinking_shimmer, collect_lines, format_elapsed, format_lines, format_thought,
@@ -47,6 +47,7 @@ pub struct Transcript {
     hovered_collapsible: Option<usize>,
     last_collapsible_click: Option<(usize, Instant)>,
     tool_burst: ToolBurst,
+    burst_row: Option<usize>,
     detail_ids: HashMap<String, bool>,
     thinking_started: Option<Instant>,
 }
@@ -67,6 +68,7 @@ impl Transcript {
             hovered_collapsible: None,
             last_collapsible_click: None,
             tool_burst: ToolBurst::default(),
+            burst_row: None,
             detail_ids: HashMap::new(),
             thinking_started: None,
         }
@@ -268,6 +270,7 @@ impl Transcript {
 
     fn close_tool_burst(&mut self) {
         self.tool_burst = ToolBurst::default();
+        self.burst_row = None;
     }
 
     fn note_tool_start(&mut self, call_id: &str, view: &ToolView) {
@@ -282,8 +285,7 @@ impl Transcript {
             self.push_row(kind, &view.summary);
             return;
         }
-        let label = ToolLabel::from_summary(&view.summary);
-        self.tool_burst.start(call_id.to_string(), label);
+        self.tool_burst.start(call_id.to_string(), &view.summary);
         self.upsert_tool_summary();
     }
 
@@ -318,16 +320,21 @@ impl Transcript {
     }
 
     fn upsert_tool_summary(&mut self) {
-        let text = self.tool_burst.summary();
-        if self.tool_burst.row_open {
-            if let Some(last) = self.rows.last_mut() {
-                last.text = text;
+        let title = self.tool_burst.title();
+        let body = self.tool_burst.body();
+        match self.burst_row.and_then(|idx| self.rows.get_mut(idx)) {
+            Some(row) => {
+                row.text = title;
+                if let Some(collapsible) = row.collapsible.as_mut() {
+                    collapsible.replace(body);
+                }
             }
-            self.rewrap_all();
-        } else {
-            self.push_row(LineKind::Tool, &text);
-            self.tool_burst.row_open = true;
+            None => {
+                self.push_row_with_detail(LineKind::Tool, title, Some(Collapsible::new(body)));
+                self.burst_row = Some(self.rows.len() - 1);
+            }
         }
+        self.rewrap_all();
     }
 
     pub(super) fn push_row(&mut self, kind: LineKind, text: &str) {

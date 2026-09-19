@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, LocalShell, LoopLimitRequestId, ShellEvent, StreamEvent, ToolCallId,
-    ToolEvent, ToolResult, TurnEvent, present_tool,
+    AgentEvent, AppEvent, ApprovalRequestId, LocalShell, LoopLimitRequestId, ShellEvent,
+    StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, present_tool,
 };
 use oven_llm::{ContentBlock, Message};
 use ratatui::Terminal;
@@ -279,7 +279,7 @@ fn tool_end_updates_summary_without_result_row() {
     t.on_event(&tool_end(1, false, "boom\n"));
     let row = t.rows.last().unwrap();
     assert_eq!(row.kind, LineKind::Tool);
-    assert_eq!(row.text, "Ran ls · 1 failed");
+    assert_eq!(row.text, "Ran 1 command, 1 failed");
     assert_eq!(t.rows.len(), 1);
 }
 
@@ -359,7 +359,7 @@ fn seed_renders_persisted_messages() {
     );
     assert_eq!(t.rows[0].text, "hello");
     assert_eq!(t.rows[1].text, THOUGHT_LABEL);
-    assert_eq!(t.rows[3].text, "Ran ls");
+    assert_eq!(t.rows[3].text, "Ran 1 command");
 }
 
 #[test]
@@ -490,7 +490,7 @@ fn tool_end_does_not_append_separator() {
     ));
     t.on_event(&tool_end(1, true, "done"));
     assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::Tool,]);
-    assert_eq!(t.rows[1].text, "Ran ls");
+    assert_eq!(t.rows[1].text, "Ran 1 command");
 }
 
 #[test]
@@ -943,7 +943,11 @@ fn live_tools_aggregate_counts_and_failures() {
     ));
     t.on_event(&tool_end(3, true, "hi"));
     assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
-    assert_eq!(t.rows[0].text, "Ran ×2 (ls · pwd) · Read a · 1 failed");
+    assert_eq!(t.rows[0].text, "Ran 2 commands, Read 1 file, 1 failed");
+    assert_eq!(
+        t.rows[0].collapsible.as_ref().expect("burst detail").body(),
+        "Ran ls\nRan pwd\nRead a"
+    );
 }
 
 #[test]
@@ -955,11 +959,100 @@ fn live_tool_end_rewrites_same_summary_row() {
         serde_json::json!({ "command": "ls" }),
     ));
     assert_eq!(t.rows.len(), 1);
-    assert_eq!(t.rows[0].text, "Ran ls");
+    assert_eq!(t.rows[0].text, "Ran 1 command");
     t.on_event(&tool_end(1, false, "boom"));
     assert_eq!(t.rows.len(), 1);
     assert_eq!(t.rows[0].kind, LineKind::Tool);
-    assert_eq!(t.rows[0].text, "Ran ls · 1 failed");
+    assert_eq!(t.rows[0].text, "Ran 1 command, 1 failed");
+}
+
+#[test]
+fn burst_keeps_its_own_row_when_another_row_interleaves() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&tool_end(1, true, "ok"));
+    t.on_event(&agent(AgentEvent::Tool(ToolEvent::ApprovalRequested {
+        request_id: ApprovalRequestId(1),
+        call_id: ToolCallId(2),
+        name: "bash".into(),
+        view: present_tool("bash", &serde_json::json!({ "command": "rm -rf /" })),
+    })));
+    t.on_event(&tool_start(
+        2,
+        "bash",
+        serde_json::json!({ "command": "pwd" }),
+    ));
+    t.on_event(&tool_end(2, true, "ok"));
+
+    assert_eq!(kinds_of(&t), vec![LineKind::Tool, LineKind::System]);
+    assert_eq!(t.rows[0].text, "Ran 2 commands");
+    assert_eq!(
+        t.rows[0].collapsible.as_ref().expect("burst detail").body(),
+        "Ran ls\nRan pwd"
+    );
+    assert_eq!(t.rows[1].text, "approval required: Ran rm -rf /");
+}
+
+#[test]
+fn burst_collapses_once_the_next_row_arrives() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "grep",
+        serde_json::json!({ "pattern": "todo", "path": "src" }),
+    ));
+    t.on_event(&tool_end(1, true, "src/main.rs:1:todo"));
+    assert!(
+        t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("burst detail")
+            .is_expanded()
+    );
+
+    t.on_event(&text_delta("done"));
+    assert!(
+        !t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("burst detail")
+            .is_expanded()
+    );
+}
+
+#[test]
+fn burst_double_click_toggles_call_list() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "file_read",
+        serde_json::json!({ "path": "src/main.rs" }),
+    ));
+    t.on_event(&tool_end(1, true, "hi"));
+    t.on_event(&text_delta("done"));
+    ready(&mut t, Rect::new(0, 0, 80, 10));
+
+    assert!(
+        t.wrapped
+            .iter()
+            .all(|line| !line_text(line).contains("Read src/main.rs"))
+    );
+    let header_y = t
+        .wrapped
+        .iter()
+        .position(|line| line_text(line).contains("Read 1 file"))
+        .expect("burst header") as u16;
+    double_click(&mut t, 2, header_y);
+
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains("Read src/main.rs"))
+    );
 }
 
 fn todo_input() -> serde_json::Value {
@@ -1194,12 +1287,12 @@ fn todo_write_splits_tool_bursts() {
             LineKind::Tool,
         ]
     );
-    assert_eq!(t.rows[0].text, "Ran ls");
+    assert_eq!(t.rows[0].text, "Ran 1 command");
     assert_eq!(
         t.rows[1].text,
         "todo_write · 1 todos (0 in_progress, 0 completed)"
     );
-    assert_eq!(t.rows[3].text, "Ran pwd");
+    assert_eq!(t.rows[3].text, "Ran 1 command");
 }
 
 #[test]
@@ -1239,9 +1332,18 @@ fn restored_tool_trajectory_matches_live_presentation() {
     let live_rows: Vec<_> = live.rows.iter().map(|row| row.text.as_str()).collect();
     let restored_rows: Vec<_> = restored.rows.iter().map(|row| row.text.as_str()).collect();
     assert_eq!(live_rows, restored_rows);
+    assert_eq!(live_rows, vec!["Searched 2 patterns"]);
     assert_eq!(
-        live_rows,
-        vec!["Search ToolEvent in crates (*.rs) · Find **/*.rs in crates"]
+        live.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("burst detail")
+            .body(),
+        restored.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("burst detail")
+            .body()
     );
 }
 
@@ -1302,7 +1404,7 @@ fn seed_failed_tool_counts_without_result() {
         Message::tool_result("c3", "hi", false),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
-    assert_eq!(t.rows[0].text, "Ran ×2 (ls · pwd) · Read a · 1 failed");
+    assert_eq!(t.rows[0].text, "Ran 2 commands, Read 1 file, 1 failed");
 }
 
 #[test]
