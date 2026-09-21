@@ -52,7 +52,9 @@ pub enum StreamEvent {
     },
     /// Closes the thinking window started by the preceding `ThinkingDelta`s.
     /// The agent owns the clock, so the transcript renders this duration
-    /// instead of timing the deltas itself.
+    /// instead of timing the deltas itself. It is emitted the moment the
+    /// reasoning phase ends, ahead of the answer text or the tool call that
+    /// ended it.
     ThinkingDone {
         duration_ms: u64,
     },

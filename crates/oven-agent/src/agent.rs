@@ -342,13 +342,13 @@ impl Agent {
                                         }));
                                     }
                                     Delta::TextDelta { text } if !text.is_empty() => {
-                                        thinking.close();
+                                        thinking.close(sink);
                                         sink.emit(AgentEvent::Stream(StreamEvent::TextDelta {
                                             text: text.clone(),
                                         }));
                                     }
                                     // A streamed tool call ends the reasoning phase.
-                                    Delta::InputJsonDelta { .. } => thinking.close(),
+                                    Delta::InputJsonDelta { .. } => thinking.close(sink),
                                     _ => {}
                                 }
                             }
@@ -356,29 +356,28 @@ impl Agent {
                         }
                     }
                 }
-                let span = thinking.report(sink);
+                let span = thinking.finish(sink);
                 Ok((collector.finish()?, span))
             }
             Err(error) => {
                 tracing::warn!(error = %error, model = %self.model, "stream start failed, falling back to complete");
                 let started = Instant::now();
                 let response = Provider::complete(&*router, &req).await?;
-                let span =
-                    (!response.thinking().is_empty()).then(|| thinking_span(started.elapsed()));
                 let reasoning = response.thinking();
+                let span = (!reasoning.is_empty()).then(|| thinking_span(started.elapsed()));
                 if !reasoning.is_empty() {
                     sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
                         text: reasoning,
                     }));
+                    if let Some((_, duration_ms)) = span {
+                        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDone {
+                            duration_ms,
+                        }));
+                    }
                 }
                 let text = response.text();
                 if !text.is_empty() {
                     sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
-                }
-                if let Some((_, duration_ms)) = span {
-                    sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDone {
-                        duration_ms,
-                    }));
                 }
                 Ok((response, span))
             }
@@ -632,25 +631,32 @@ impl ThinkingSpan {
         }
     }
 
-    fn close(&mut self) {
-        if self.started_at.is_some() && self.ended_at.is_none() {
-            self.ended_at = Some(now_ms());
+    /// Ends the reasoning phase and reports its duration to the transcript, so
+    /// the window closes before the answer or tool call that ended it streams.
+    /// No-op once closed, or when the phase was too short to time.
+    fn close(&mut self, sink: &mut impl EventSink) {
+        if self.started_at.is_none() || self.ended_at.is_some() {
+            return;
+        }
+        self.ended_at = Some(now_ms());
+        if let Some((_, duration_ms)) = self.span() {
+            sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDone {
+                duration_ms,
+            }));
         }
     }
 
     /// Closes the span, reports it to the transcript and returns it for the
     /// persisted history. Call once per span, after the stream is drained.
-    fn report(&mut self, sink: &mut impl EventSink) -> Option<(u64, u64)> {
-        self.close();
+    fn finish(&mut self, sink: &mut impl EventSink) -> Option<(u64, u64)> {
+        self.close(sink);
+        self.span()
+    }
+
+    fn span(&self) -> Option<(u64, u64)> {
         let start = self.started_at?;
         let duration_ms = self.ended_at.unwrap_or(start).saturating_sub(start);
-        if duration_ms == 0 {
-            return None;
-        }
-        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDone {
-            duration_ms,
-        }));
-        Some((start, duration_ms))
+        (duration_ms > 0).then_some((start, duration_ms))
     }
 }
 
@@ -784,6 +790,20 @@ mod tests {
             is_terminal(events.last().unwrap()),
             "last event must be terminal: {events:?}"
         );
+
+        if let Some(done) = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Stream(StreamEvent::ThinkingDone { .. })))
+        {
+            assert!(
+                !events[..done].iter().any(|e| matches!(
+                    e,
+                    AgentEvent::Stream(StreamEvent::TextDelta { .. })
+                        | AgentEvent::Tool(ToolEvent::Started { .. })
+                )),
+                "the thinking window must close before the answer or tool that ended it: {events:?}"
+            );
+        }
 
         let mut open: Vec<ToolCallId> = Vec::new();
         for event in events {
@@ -1324,6 +1344,36 @@ mod tests {
             .find_map(|(_, _, thinking)| thinking);
         assert_eq!(reported, recorded);
         assert!(reported.is_some_and(|ms| ms >= GAP_MS));
+    }
+
+    #[tokio::test]
+    async fn thinking_span_closes_before_the_tool_it_led_to() {
+        const THINKING: &str = "weighing options";
+        let todos = json!({"todos":[{"id":"a","content":"one","status":"in_progress"}]});
+        let mut call = tool_response("c1", "todo_write", todos);
+        call.content.insert(0, ContentBlock::thinking(THINKING));
+        let mock = MockProvider::new(vec![call, text_response("done")]);
+        let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
+        let mut sink = VecEventSink::default();
+        run_with(&mut agent, "plan it", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+
+        assert_valid_event_sequence(&sink.events);
+        assert!(
+            sink.events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Tool(ToolEvent::Started { .. }))),
+            "the tool must have run: {:?}",
+            sink.events
+        );
+        assert!(
+            sink.events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Stream(StreamEvent::ThinkingDone { .. }))),
+            "the reasoning phase must have been reported: {:?}",
+            sink.events
+        );
     }
 
     #[tokio::test]

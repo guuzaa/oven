@@ -586,6 +586,74 @@ fn thinking_duration_lands_on_its_own_row() {
 }
 
 #[test]
+fn reported_thinking_duration_survives_the_answer() {
+    let mut t = Transcript::new();
+    t.push_user("q");
+    t.on_event(&thinking("planning"));
+    t.on_event(&thinking_done(1_500));
+    t.on_event(&text_delta("answer"));
+    t.on_event(&completed());
+
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Thinking,
+            LineKind::Text,
+            LineKind::Separator
+        ]
+    );
+    assert_eq!(t.rows[1].text, THOUGHT_1_5S);
+}
+
+#[test]
+fn reported_thinking_duration_survives_the_tool_it_led_to() {
+    let mut t = Transcript::new();
+    t.on_event(&thinking("planning"));
+    t.on_event(&thinking_done(1_500));
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+
+    assert_eq!(t.rows[0].text, THOUGHT_1_5S);
+    assert_eq!(t.rows[1].kind, LineKind::Tool);
+}
+
+#[test]
+fn seeded_reasoning_renders_before_the_answer_it_precedes() {
+    let mut t = Transcript::new();
+    t.seed_timed(&[
+        (Message::user_text("q"), 0, None),
+        (
+            Message::assistant(vec![
+                ContentBlock::Text {
+                    text: "answer".into(),
+                },
+                ContentBlock::Thinking {
+                    thinking: "reasoning".into(),
+                },
+            ]),
+            1_000,
+            Some(1_500),
+        ),
+    ]);
+
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Thinking,
+            LineKind::Text,
+            LineKind::Separator
+        ]
+    );
+    assert_eq!(t.rows[1].text, THOUGHT_1_5S);
+    assert_eq!(t.rows[2].text, "answer");
+}
+
+#[test]
 fn tool_result_double_click_toggles_detail() {
     const OUTPUT: &str = "updated\nmore lines of output";
 

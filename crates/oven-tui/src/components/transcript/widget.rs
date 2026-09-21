@@ -166,7 +166,18 @@ impl Transcript {
                 Role::Assistant => {
                     let mut emitted = false;
                     let mut has_tool = false;
-                    for block in &m.content {
+                    // Providers that open the text block first (an empty
+                    // leading `content` delta) persist the reasoning after the
+                    // answer; live events always put reasoning first, so the
+                    // seeded transcript renders the same order.
+                    let is_thinking =
+                        |block: &ContentBlock| matches!(block, ContentBlock::Thinking { .. });
+                    let blocks = m
+                        .content
+                        .iter()
+                        .filter(|block| is_thinking(block))
+                        .chain(m.content.iter().filter(|block| !is_thinking(block)));
+                    for block in blocks {
                         match block {
                             ContentBlock::Thinking { thinking } => {
                                 self.close_tool_burst();
@@ -620,6 +631,8 @@ impl Transcript {
         }
     }
 
+    /// Settles the live thinking row on the label, for reasoning the agent
+    /// never reported a span for (a cancelled or interrupted window).
     fn stop_live_thinking(&mut self) {
         if let Some(row) = self.thinking_row.take() {
             self.rows[row].text = THOUGHT_LABEL.to_string();
@@ -628,9 +641,10 @@ impl Transcript {
     }
 
     /// The agent owns the thinking clock; the transcript only renders the
-    /// duration it reports.
+    /// duration it reports. Reporting retires the row so nothing settles it
+    /// back onto the bare label.
     fn report_thinking_done(&mut self, duration_ms: u64) {
-        if let Some(row) = self.thinking_row {
+        if let Some(row) = self.thinking_row.take() {
             self.rows[row].text = format_thought(Some(duration_ms));
             self.rewrap_all();
         }
