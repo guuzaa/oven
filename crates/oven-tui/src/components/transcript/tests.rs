@@ -32,6 +32,7 @@ const ELAPSED_1_2S: &str = "Worked for 1.2s";
 const ELAPSED_1_5S: &str = "Worked for 1.5s";
 const ELAPSED_1M: &str = "Worked for 1m 0s";
 const ELAPSED_1M_1S: &str = "Worked for 1m 1s";
+const THOUGHT_0: &str = "Thought for 0s";
 const THOUGHT_1_5S: &str = "Thought for 1.5s";
 const THOUGHT_1M_1S: &str = "Thought for 1m 1s";
 
@@ -430,6 +431,12 @@ fn thinking(text: &str) -> AppEvent {
     }))
 }
 
+fn thinking_done(duration_ms: u64) -> AppEvent {
+    agent(AgentEvent::Stream(StreamEvent::ThinkingDone {
+        duration_ms,
+    }))
+}
+
 fn started() -> AppEvent {
     agent(AgentEvent::Turn(TurnEvent::Started))
 }
@@ -553,6 +560,29 @@ fn thinking_delta_shows_label_not_content() {
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
     assert_eq!(t.rows[1].text, "answer");
     assert!(t.rows.iter().all(|r| !r.text.contains("secret")));
+}
+
+#[test]
+fn thinking_label_until_the_agent_reports_the_duration() {
+    let mut t = Transcript::new();
+    t.on_event(&thinking("planning"));
+    assert_eq!(t.rows[0].text, THINKING_LABEL);
+
+    t.on_event(&thinking_done(1_500));
+    assert_eq!(t.rows[0].text, THOUGHT_1_5S);
+    assert_eq!(t.rows[0].collapsible.as_ref().unwrap().body(), "planning");
+}
+
+#[test]
+fn thinking_duration_lands_on_its_own_row() {
+    const NOTICE: &str = "approval required";
+    let mut t = Transcript::new();
+    t.on_event(&thinking("planning"));
+    t.push_row(LineKind::System, NOTICE);
+    t.on_event(&thinking_done(1_500));
+
+    assert_eq!(t.rows[0].text, THOUGHT_1_5S);
+    assert_eq!(t.rows[1].text, NOTICE);
 }
 
 #[test]
@@ -1452,10 +1482,11 @@ fn format_elapsed_units() {
     assert_eq!(format_elapsed(1_500), ELAPSED_1_5S);
     assert_eq!(format_elapsed(60_000), ELAPSED_1M);
     assert_eq!(format_elapsed(61_000), ELAPSED_1M_1S);
-    assert_eq!(format_thought(0), THOUGHT_LABEL);
-    assert_eq!(format_thought(99), THOUGHT_LABEL);
-    assert_eq!(format_thought(1_500), THOUGHT_1_5S);
-    assert_eq!(format_thought(61_000), THOUGHT_1M_1S);
+    assert_eq!(format_thought(None), THOUGHT_LABEL);
+    assert_eq!(format_thought(Some(0)), THOUGHT_0);
+    assert_eq!(format_thought(Some(99)), THOUGHT_0);
+    assert_eq!(format_thought(Some(1_500)), THOUGHT_1_5S);
+    assert_eq!(format_thought(Some(61_000)), THOUGHT_1M_1S);
 }
 
 #[test]

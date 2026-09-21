@@ -50,11 +50,12 @@ pub(super) fn format_elapsed(ms: u64) -> String {
     format!("{WORKED_FOR} {}", format_duration(ms))
 }
 
-pub(super) fn format_thought(ms: u64) -> String {
-    if ms < MS_PER_TENTH {
-        THOUGHT_LABEL.to_string()
-    } else {
-        format!("{THOUGHT_FOR} {}", format_duration(ms))
+/// Header for a thinking row: the duration the agent reported, or a bare label
+/// when the row carries no timed span.
+pub(super) fn format_thought(ms: Option<u64>) -> String {
+    match ms {
+        Some(ms) => format!("{THOUGHT_FOR} {}", format_duration(ms)),
+        None => THOUGHT_LABEL.to_string(),
     }
 }
 

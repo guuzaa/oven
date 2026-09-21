@@ -44,8 +44,18 @@ pub enum TurnEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamEvent {
-    TextDelta { text: String },
-    ThinkingDelta { text: String },
+    TextDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        text: String,
+    },
+    /// Closes the thinking window started by the preceding `ThinkingDelta`s.
+    /// The agent owns the clock, so the transcript renders this duration
+    /// instead of timing the deltas itself.
+    ThinkingDone {
+        duration_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

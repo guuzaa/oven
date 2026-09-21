@@ -49,7 +49,7 @@ pub struct Transcript {
     tool_burst: ToolBurst,
     burst_row: Option<usize>,
     detail_ids: HashMap<String, bool>,
-    thinking_started: Option<Instant>,
+    thinking_row: Option<usize>,
 }
 
 impl Transcript {
@@ -70,7 +70,7 @@ impl Transcript {
             tool_burst: ToolBurst::default(),
             burst_row: None,
             detail_ids: HashMap::new(),
-            thinking_started: None,
+            thinking_row: None,
         }
     }
 
@@ -170,10 +170,7 @@ impl Transcript {
                         match block {
                             ContentBlock::Thinking { thinking } => {
                                 self.close_tool_burst();
-                                self.push_thinking(
-                                    &format_thought(thinking_ms.unwrap_or(0)),
-                                    thinking,
-                                );
+                                self.push_thinking(&format_thought(*thinking_ms), thinking);
                                 emitted = true;
                             }
                             ContentBlock::Text { text } => {
@@ -267,7 +264,7 @@ impl Transcript {
         self.last_collapsible_click = None;
         self.close_tool_burst();
         self.detail_ids.clear();
-        self.thinking_started = None;
+        self.thinking_row = None;
     }
 
     fn close_tool_burst(&mut self) {
@@ -388,6 +385,7 @@ impl Transcript {
         self.append_row(kind, text, collapsible);
     }
 
+    /// Appends the row and tracks it as the thinking row awaiting a duration.
     fn append_row(&mut self, kind: LineKind, text: String, collapsible: Option<Collapsible>) {
         self.rows.push(Row {
             kind,
@@ -396,6 +394,9 @@ impl Transcript {
             header: None,
         });
         self.wrap_row(self.rows.len() - 1);
+        if kind == LineKind::Thinking {
+            self.thinking_row = Some(self.rows.len() - 1);
+        }
     }
 
     fn collapse_open(&mut self) {
@@ -619,37 +620,27 @@ impl Transcript {
         }
     }
 
-    fn finish_thinking(&mut self) {
-        let ms = self
-            .thinking_started
-            .take()
-            .map(|t| t.elapsed().as_millis() as u64)
-            .unwrap_or(0);
-        if let Some(Row {
-            kind: LineKind::Thinking,
-            text,
-            collapsible: Some(_),
-            ..
-        }) = self.rows.last_mut()
-        {
-            *text = format_thought(ms);
+    fn stop_live_thinking(&mut self) {
+        if let Some(row) = self.thinking_row.take() {
+            self.rows[row].text = THOUGHT_LABEL.to_string();
+            self.rewrap_all();
+        }
+    }
+
+    /// The agent owns the thinking clock; the transcript only renders the
+    /// duration it reports.
+    fn report_thinking_done(&mut self, duration_ms: u64) {
+        if let Some(row) = self.thinking_row {
+            self.rows[row].text = format_thought(Some(duration_ms));
             self.rewrap_all();
         }
     }
 
     fn live_thinking_header(&self) -> Option<usize> {
-        let last = self.rows.last()?;
-        matches!(
-            last,
-            Row {
-                kind: LineKind::Thinking,
-                text,
-                collapsible: Some(_),
-                ..
-            } if text == THINKING_LABEL
-        )
-        .then_some(last.header)
-        .flatten()
+        let row = self.thinking_row?;
+        (self.rows[row].text == THINKING_LABEL)
+            .then_some(self.rows[row].header)
+            .flatten()
     }
 
     fn is_live_text(&self) -> bool {
@@ -758,18 +749,18 @@ impl Component for Transcript {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Stream(StreamEvent::ThinkingDelta { text }) => {
                     self.close_tool_burst();
-                    if self.thinking_started.is_none() {
-                        self.thinking_started = Some(Instant::now());
-                    }
                     self.push_thinking(THINKING_LABEL, text);
+                }
+                AgentEvent::Stream(StreamEvent::ThinkingDone { duration_ms }) => {
+                    self.report_thinking_done(*duration_ms);
                 }
                 AgentEvent::Stream(StreamEvent::TextDelta { text }) => {
                     self.close_tool_burst();
-                    self.finish_thinking();
+                    self.stop_live_thinking();
                     self.push_stream(LineKind::Text, text);
                 }
                 AgentEvent::Tool(ToolEvent::ApprovalRequested { view, .. }) => {
-                    self.finish_thinking();
+                    self.stop_live_thinking();
                     self.flush_streaming();
                     self.push_row(
                         LineKind::System,
@@ -777,7 +768,7 @@ impl Component for Transcript {
                     );
                 }
                 AgentEvent::Tool(ToolEvent::Started { call_id, view, .. }) => {
-                    self.finish_thinking();
+                    self.stop_live_thinking();
                     self.flush_streaming();
                     self.note_tool_start(&call_id.0.to_string(), view);
                 }
@@ -795,7 +786,7 @@ impl Component for Transcript {
                 AgentEvent::Tool(ToolEvent::OutputDelta { .. }) => {}
                 AgentEvent::Turn(TurnEvent::Started) => {}
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
-                    self.finish_thinking();
+                    self.stop_live_thinking();
                     self.flush_streaming();
                     self.push_row(
                         LineKind::System,
@@ -804,13 +795,13 @@ impl Component for Transcript {
                 }
                 AgentEvent::Turn(TurnEvent::Completed { duration_ms, .. }) => {
                     self.close_tool_burst();
-                    self.finish_thinking();
+                    self.stop_live_thinking();
                     self.flush_streaming();
                     self.push_elapsed(*duration_ms);
                 }
                 AgentEvent::Turn(TurnEvent::Cancelled { duration_ms }) => {
                     self.close_tool_burst();
-                    self.finish_thinking();
+                    self.stop_live_thinking();
                     if !self.streaming.is_empty() {
                         let (kind, partial) = self.take_stream();
                         if !partial.is_empty() {
@@ -822,7 +813,7 @@ impl Component for Transcript {
                 }
                 AgentEvent::Turn(TurnEvent::Failed { error, duration_ms }) => {
                     self.close_tool_burst();
-                    self.finish_thinking();
+                    self.stop_live_thinking();
                     self.flush_streaming();
                     self.push_row(LineKind::Error, &error.message);
                     self.push_elapsed(*duration_ms);

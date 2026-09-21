@@ -1,5 +1,5 @@
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use oven_llm::{
@@ -347,6 +347,8 @@ impl Agent {
                                             text: text.clone(),
                                         }));
                                     }
+                                    // A streamed tool call ends the reasoning phase.
+                                    Delta::InputJsonDelta { .. } => thinking.close(),
                                     _ => {}
                                 }
                             }
@@ -354,24 +356,31 @@ impl Agent {
                         }
                     }
                 }
-                thinking.close();
-                Ok((collector.finish()?, thinking.finish()))
+                let span = thinking.report(sink);
+                Ok((collector.finish()?, span))
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(error = %error, model = %self.model, "stream start failed, falling back to complete");
+                let started = Instant::now();
                 let response = Provider::complete(&*router, &req).await?;
-                if !response.has_tool_use() {
-                    let thinking = response.thinking();
-                    if !thinking.is_empty() {
-                        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
-                            text: thinking,
-                        }));
-                    }
-                    let text = response.text();
-                    if !text.is_empty() {
-                        sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
-                    }
+                let span =
+                    (!response.thinking().is_empty()).then(|| thinking_span(started.elapsed()));
+                let reasoning = response.thinking();
+                if !reasoning.is_empty() {
+                    sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
+                        text: reasoning,
+                    }));
                 }
-                Ok((response, None))
+                let text = response.text();
+                if !text.is_empty() {
+                    sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
+                }
+                if let Some((_, duration_ms)) = span {
+                    sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDone {
+                        duration_ms,
+                    }));
+                }
+                Ok((response, span))
             }
         }
     }
@@ -629,12 +638,28 @@ impl ThinkingSpan {
         }
     }
 
-    fn finish(mut self) -> Option<(u64, u64)> {
+    /// Closes the span, reports it to the transcript and returns it for the
+    /// persisted history. Call once per span, after the stream is drained.
+    fn report(&mut self, sink: &mut impl EventSink) -> Option<(u64, u64)> {
         self.close();
         let start = self.started_at?;
         let duration_ms = self.ended_at.unwrap_or(start).saturating_sub(start);
-        (duration_ms > 0).then_some((start, duration_ms))
+        if duration_ms == 0 {
+            return None;
+        }
+        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDone {
+            duration_ms,
+        }));
+        Some((start, duration_ms))
     }
+}
+
+/// A whole non-streaming response arrives as one shot: its wall-clock duration
+/// is all the thinking window that can be observed. Sub-millisecond durations
+/// round up so timed thinking is never mistaken for untimed.
+fn thinking_span(elapsed: Duration) -> (u64, u64) {
+    let duration_ms = elapsed.as_millis().max(1) as u64;
+    (now_ms().saturating_sub(duration_ms), duration_ms)
 }
 
 fn log_tool_started(name: &str, call_id: ToolCallId) {
@@ -677,9 +702,9 @@ mod tests {
     use crate::tools::{BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool};
     use crate::turn::TurnContext;
     use async_trait::async_trait;
-    use futures::stream::BoxStream;
+    use futures::stream::{BoxStream, StreamExt, iter};
     use oven_llm::{
-        ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason,
+        Delta, ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason,
         StreamEvent as LlmStreamEvent,
     };
     use serde_json::json;
@@ -832,6 +857,113 @@ mod tests {
         }
     }
 
+    struct SlowComplete {
+        response: Response,
+        delay: Duration,
+    }
+
+    impl SlowComplete {
+        fn new(response: Response, delay: Duration) -> Self {
+            Self { response, delay }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for SlowComplete {
+        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+            tokio::time::sleep(self.delay).await;
+            Ok(self.response.clone())
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "stream disabled in mock".into(),
+            })
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("slow".into())
+        }
+    }
+
+    /// Replays deltas as a provider stream, waiting `delay` between deltas so
+    /// tests can drive a thinking window of a known length.
+    struct ScriptedStream {
+        deltas: Vec<Delta>,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedStream {
+        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "complete disabled in mock".into(),
+            })
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
+            let mut events = vec![Ok(message_start())];
+            for (index, delta) in self.deltas.iter().enumerate() {
+                events.push(Ok(LlmStreamEvent::ContentBlockStart {
+                    index,
+                    block: delta_block(delta),
+                }));
+                events.push(Ok(LlmStreamEvent::ContentBlockDelta {
+                    index,
+                    delta: delta.clone(),
+                }));
+            }
+            events.push(Ok(LlmStreamEvent::MessageStop));
+            let delay = self.delay;
+            Ok(Box::pin(iter(events).then(move |event| async move {
+                tokio::time::sleep(delay).await;
+                event
+            })))
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("scripted".into())
+        }
+    }
+
+    fn delta_block(delta: &Delta) -> ContentBlock {
+        const ACCUMULATED_LATER: &str = "";
+        match delta {
+            Delta::ThinkingDelta { .. } => ContentBlock::thinking(ACCUMULATED_LATER),
+            Delta::TextDelta { .. } => ContentBlock::text(ACCUMULATED_LATER),
+            Delta::InputJsonDelta { .. } => ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "bash".into(),
+                input: json!({}),
+                raw_arguments: None,
+            },
+        }
+    }
+
+    fn message_start() -> LlmStreamEvent {
+        const MESSAGE_ID: &str = "scripted";
+        LlmStreamEvent::MessageStart {
+            id: MESSAGE_ID.into(),
+            model: MESSAGE_ID.into(),
+        }
+    }
+
     fn text_response(text: &str) -> Response {
         Response {
             id: "resp".into(),
@@ -867,6 +999,12 @@ mod tests {
                 reasoning_tokens: 0,
             }),
         }
+    }
+
+    fn thinking_response(thinking: &str, text: &str) -> Response {
+        let mut response = text_response(text);
+        response.content.insert(0, ContentBlock::thinking(thinking));
+        response
     }
 
     fn content_has(m: &Message, needle: &str) -> bool {
@@ -1106,6 +1244,108 @@ mod tests {
         assert!(
             duration_ms.saturating_sub(persisted) < DURATION_SLACK_MS,
             "duration_ms={duration_ms} persisted={persisted}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_complete_times_thinking_and_streams_it() {
+        const THINKING: &str = "weighing options";
+        const ANSWER: &str = "done";
+        const COMPLETE_DELAY_MS: u64 = 20;
+        const MIN_THINKING_MS: u64 = 1;
+        let provider = SlowComplete::new(
+            thinking_response(THINKING, ANSWER),
+            Duration::from_millis(COMPLETE_DELAY_MS),
+        );
+        let mut agent = Agent::new(router_with(Box::new(provider)), Vec::new());
+        let mut sink = VecEventSink::default();
+        let out = run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(out.text(), ANSWER);
+        assert_valid_event_sequence(&sink.events);
+        let reported = sink.events.iter().find_map(|event| match event {
+            AgentEvent::Stream(StreamEvent::ThinkingDone { duration_ms }) => Some(*duration_ms),
+            _ => None,
+        });
+        let recorded = agent
+            .history_timed()
+            .filter(|(m, _, _)| m.role == Role::Assistant)
+            .find_map(|(_, _, thinking)| thinking);
+        assert_eq!(
+            reported, recorded,
+            "the transcript and the persisted thinking span must agree"
+        );
+        assert!(
+            reported.is_some_and(|ms| ms >= MIN_THINKING_MS),
+            "expected timed thinking, got {reported:?}"
+        );
+        let thinking_deltas: Vec<&str> = sink
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Stream(StreamEvent::ThinkingDelta { text }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking_deltas, [THINKING]);
+    }
+
+    #[tokio::test]
+    async fn streamed_thinking_reports_the_same_span_as_it_persists() {
+        const THINKING: &str = "weighing options";
+        const ANSWER: &str = "done";
+        const GAP_MS: u64 = 10;
+        let provider = ScriptedStream {
+            deltas: vec![
+                Delta::ThinkingDelta {
+                    thinking: THINKING.into(),
+                },
+                Delta::TextDelta {
+                    text: ANSWER.into(),
+                },
+            ],
+            delay: Duration::from_millis(GAP_MS),
+        };
+        let mut agent = Agent::new(router_with(Box::new(provider)), Vec::new());
+        let mut sink = VecEventSink::default();
+        let out = run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(out.text(), ANSWER);
+        assert_valid_event_sequence(&sink.events);
+        let reported = sink.events.iter().find_map(|event| match event {
+            AgentEvent::Stream(StreamEvent::ThinkingDone { duration_ms }) => Some(*duration_ms),
+            _ => None,
+        });
+        let recorded = agent
+            .history_timed()
+            .filter(|(m, _, _)| m.role == Role::Assistant)
+            .find_map(|(_, _, thinking)| thinking);
+        assert_eq!(reported, recorded);
+        assert!(reported.is_some_and(|ms| ms >= GAP_MS));
+    }
+
+    #[tokio::test]
+    async fn untimed_stream_emits_no_thinking_done() {
+        let provider = ScriptedStream {
+            deltas: vec![Delta::TextDelta {
+                text: "done".into(),
+            }],
+            delay: Duration::ZERO,
+        };
+        let mut agent = Agent::new(router_with(Box::new(provider)), Vec::new());
+        let mut sink = VecEventSink::default();
+        run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        assert_valid_event_sequence(&sink.events);
+        assert!(
+            !sink
+                .events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Stream(StreamEvent::ThinkingDone { .. }))),
+            "a response without thinking must not report a thinking window"
         );
     }
 

@@ -73,6 +73,20 @@ fn text_response(text: &str) -> Response {
     }
 }
 
+fn timed_thinking_ms(handle: &App) -> Vec<Option<u64>> {
+    handle
+        .history_timed()
+        .into_iter()
+        .map(|(_, _, thinking_ms)| thinking_ms)
+        .collect()
+}
+
+fn thinking_response(thinking: &str, text: &str) -> Response {
+    let mut response = text_response(text);
+    response.content.insert(0, ContentBlock::thinking(thinking));
+    response
+}
+
 struct MockProvider {
     responses: std::sync::Mutex<std::collections::VecDeque<Response>>,
 }
@@ -1160,6 +1174,51 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
         .unwrap();
     wait_rewound(&mut sub).await;
 
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn thinking_duration_survives_a_session_resume() {
+    const THINKING: &str = "weighing options";
+    let tmp = tempdir::TempDir::new("app-runtime-resume-thinking").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mock = MockProvider::new(vec![thinking_response(THINKING, "one")]);
+    let session = Session::open(&dir, "s1").unwrap();
+    let handle = spawn_app_session(&app, Box::new(mock), session).await;
+    assert_eq!(handle.prompt("first").await.unwrap(), "one");
+    assert!(
+        timed_thinking_ms(&handle)
+            .iter()
+            .flatten()
+            .any(|ms| *ms > 0),
+        "a streamless provider must still time its thinking"
+    );
+    handle.shutdown().await;
+
+    assert!(
+        Session::open(&dir, "s1")
+            .unwrap()
+            .load_records()
+            .unwrap()
+            .iter()
+            .any(
+                |record| matches!(record, Record::Thinking { duration_ms, .. } if *duration_ms > 0)
+            ),
+        "the transcript rebuilds thinking time from the persisted record"
+    );
+
+    let session = Session::open(&dir, "s1").unwrap();
+    let handle = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
+    assert!(
+        timed_thinking_ms(&handle)
+            .iter()
+            .flatten()
+            .any(|ms| *ms > 0),
+        "resumed history keeps thinking durations"
+    );
     handle.shutdown().await;
 }
 
