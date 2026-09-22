@@ -3,6 +3,9 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File install.ps1 [TAG]   # e.g. install.ps1 v0.1.0 (defaults to latest release)
 #
+# When no TAG is given and the requested version is already installed, the
+# download is skipped.
+#
 # You can also pin the version with OVEN_VERSION:
 #   $env:OVEN_VERSION='v0.1.0'; powershell -ExecutionPolicy Bypass -File install.ps1
 #
@@ -33,17 +36,66 @@ if ($procArch -eq 'AMD64' -or $procArchWow -eq 'AMD64') {
 }
 
 # --- Resolve the release tag ----------------------------------------------
-if (-not $Tag) { $Tag = $env:OVEN_VERSION }
-if (-not $Tag) {
+$pinnedTag = $Tag
+if (-not $pinnedTag) { $pinnedTag = $env:OVEN_VERSION }
+$resolvedTag = $pinnedTag
+if (-not $resolvedTag) {
     Write-Host 'Resolving the latest release tag...'
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
-    $Tag = $release.tag_name
+    $resolvedTag = $release.tag_name
 }
-if (-not $Tag) {
+if (-not $resolvedTag) {
     throw 'error: could not determine the release tag; pass it explicitly, e.g. install.ps1 v0.1.0'
 }
 
-# Release tags are v-prefixed; accept either form.
+# Release tags are v-prefixed; the installed binary reports a bare version.
+$version = $resolvedTag -replace '^v', ''
+
+if (-not $pinnedTag) {
+    $installedBin = $null
+    $installedVersion = $null
+
+    $candidates = @()
+    $managed = Join-Path $binDir "$binName.exe"
+    if (Test-Path $managed) { $candidates += $managed }
+    $onPath = Get-Command $binName -ErrorAction SilentlyContinue
+    if ($onPath) { $candidates += $onPath.Source }
+
+    foreach ($candidate in $candidates) {
+        try {
+            $line = & $candidate -V 2>&1 | Select-Object -First 1
+        } catch {
+            continue
+        }
+        $parsed = [regex]::Match($line, '^oven\s+(\d+(?:\.\d+)*)')
+        if ($parsed.Success) {
+            $installedBin = $candidate
+            $installedVersion = $parsed.Groups[1].Value
+            break
+        }
+    }
+
+    if ($installedBin -and $installedVersion -eq $version) {
+        Write-Host "oven $version is already installed at $installedBin"
+        $reinstall = $false
+        try {
+            $reply = Read-Host 'Reinstall anyway? [y/N]'
+            $reinstall = ($reply -match '^[Yy]')
+        } catch {
+            $reinstall = $false
+        }
+        if ($reinstall) {
+            Write-Host "Reinstalling oven $version ..."
+        } else {
+            return
+        }
+    } elseif ($installedBin) {
+        Write-Host "Found oven $installedVersion at $installedBin, upgrading to $version ..."
+    }
+}
+
+# Tags are v-prefixed; accept either form.
+$Tag = $resolvedTag
 if ($Tag -notlike 'v*') { $Tag = "v$Tag" }
 
 $asset = "oven-$Tag-$target.zip"

@@ -5,6 +5,9 @@
 # Usage:
 #   ./install.sh [TAG]        # e.g. ./install.sh v0.1.0 (defaults to latest release)
 #
+# When no TAG is given and the requested version is already installed, the
+# download is skipped.
+#
 # You can also pin the version with OVEN_VERSION:
 #   OVEN_VERSION=v0.1.0 ./install.sh
 #
@@ -15,8 +18,21 @@ set -euo pipefail
 
 REPO="guuzaa/oven"
 BIN_NAME="oven"
-INSTALL_DIR="${OVEN_INSTALL_DIR:-$HOME/.oven}"
+INSTALL_DIR="$HOME/.oven"
 BIN_DIR="$INSTALL_DIR/bin"
+
+# Reads from /dev/tty so the one-liner (`curl ... | bash`) still works.
+prompt_yes_no() {
+  local reply=""
+  if [ -r /dev/tty ]; then
+    printf '%s' "$1" > /dev/tty
+    read -r reply < /dev/tty || reply=""
+  fi
+  case "$reply" in
+    y | Y | yes | Yes | YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # --- Detect OS and architecture -------------------------------------------
 case "$(uname -s)" in
@@ -57,17 +73,52 @@ case "$OS-$ARCH" in
     ;;
 esac
 
-if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-  echo "error: need either curl or wget to download" >&2
-  exit 1
-fi
+download() {
+  local url="$1"
+  local output="$2"
+  local curl_status=""
+  local wget_status=""
+
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL "$url" -o "$output"; then
+      return 0
+    else
+      curl_status=$?
+    fi
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    if wget -q "$url" -O "$output"; then
+      return 0
+    else
+      wget_status=$?
+    fi
+  fi
+
+  rm -f "$output"
+  if [ -n "$curl_status" ] && [ -n "$wget_status" ]; then
+    echo "error: failed to download $url (curl exit $curl_status; wget exit $wget_status)" >&2
+  elif [ -n "$curl_status" ]; then
+    echo "error: failed to download $url (curl exit $curl_status; wget is unavailable)" >&2
+  elif [ -n "$wget_status" ]; then
+    echo "error: failed to download $url (curl is unavailable; wget exit $wget_status)" >&2
+  else
+    echo "error: failed to download $url (neither curl nor wget is available)" >&2
+  fi
+  return 1
+}
 
 # --- Resolve the release tag ----------------------------------------------
-TAG="${1:-${OVEN_VERSION:-}}"
+PINNED_TAG="${1:-${OVEN_VERSION:-}}"
+TAG="$PINNED_TAG"
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
 if [ -z "$TAG" ]; then
   echo "Resolving the latest release tag..."
-  TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-    | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+  RELEASE_JSON="$TMP_DIR/latest.json"
+  download "https://api.github.com/repos/$REPO/releases/latest" "$RELEASE_JSON"
+  TAG="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$RELEASE_JSON" \
     | head -1 \
     | cut -d '"' -f 4 || true)"
 fi
@@ -76,16 +127,39 @@ if [ -z "$TAG" ]; then
   exit 1
 fi
 
-# Release tags are v-prefixed; accept either form.
+# Release tags are v-prefixed; the installed binary reports a bare version.
+VERSION="${TAG#v}"
+
+if [ -z "$PINNED_TAG" ]; then
+  INSTALLED_BIN=""
+  if [ -x "$BIN_DIR/$BIN_NAME" ]; then
+    INSTALLED_BIN="$BIN_DIR/$BIN_NAME"
+  elif command -v "$BIN_NAME" >/dev/null 2>&1; then
+    INSTALLED_BIN="$(command -v "$BIN_NAME")"
+  fi
+
+  if [ -n "$INSTALLED_BIN" ]; then
+    INSTALLED_VERSION="$("$INSTALLED_BIN" -V 2>/dev/null | awk '{print $2; exit}' || true)"
+    if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" = "$VERSION" ]; then
+      echo "oven $VERSION is already installed at $INSTALLED_BIN"
+      if prompt_yes_no "Reinstall anyway? [y/N] "; then
+        echo "Reinstalling oven $VERSION ..."
+      else
+        exit 0
+      fi
+    elif [ -n "$INSTALLED_VERSION" ]; then
+      echo "Found oven $INSTALLED_VERSION at $INSTALLED_BIN, upgrading to $VERSION ..."
+    fi
+  fi
+fi
+
+# Tags are v-prefixed; accept either form.
 case "$TAG" in
   v*) ;;
   *) TAG="v$TAG" ;;
 esac
 
 # --- Download and extract -------------------------------------------------
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
-
 TARGET=""
 for candidate in "${TARGETS[@]}"; do
   # The GNU/Linux release is built against glibc 2.28. Do not select it on
@@ -104,18 +178,10 @@ for candidate in "${TARGETS[@]}"; do
   ASSET="oven-$TAG-$candidate.tar.gz"
   URL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
   echo "Trying $URL ..."
-  if command -v curl >/dev/null 2>&1; then
-    downloaded=false
-    curl -fsSL "$URL" -o "$TMP_DIR/$ASSET" && downloaded=true
-  else
-    downloaded=false
-    wget -q "$URL" -O "$TMP_DIR/$ASSET" && downloaded=true
-  fi
-  if [ "$downloaded" = true ]; then
+  if download "$URL" "$TMP_DIR/$ASSET"; then
     TARGET="$candidate"
     break
   fi
-  rm -f "$TMP_DIR/$ASSET"
 done
 
 if [ -z "$TARGET" ]; then
@@ -128,20 +194,16 @@ mkdir -p "$BIN_DIR"
 install -m 755 "$TMP_DIR/oven-$TARGET/$BIN_NAME" "$BIN_DIR/$BIN_NAME"
 
 # --- Add to PATH ----------------------------------------------------------
-RC_FILES=()
-[ -f "$HOME/.bashrc" ] && RC_FILES+=("$HOME/.bashrc")
-[ -f "$HOME/.zshrc" ] && RC_FILES+=("$HOME/.zshrc")
-[ -f "$HOME/.profile" ] && RC_FILES+=("$HOME/.profile")
-if [ "${#RC_FILES[@]}" -eq 0 ]; then
-  RC_FILES+=("$HOME/.profile")
-fi
+case "${SHELL:-}" in
+  */bash) RC_FILE="$HOME/.bashrc" ;;
+  */zsh) RC_FILE="$HOME/.zshrc" ;;
+  *) RC_FILE="$HOME/.profile" ;;
+esac
 
-for rc in "${RC_FILES[@]}"; do
-  if ! grep -q "\.oven/bin" "$rc" 2>/dev/null; then
-    printf '\n# Add %s to PATH (added by oven installer)\nexport PATH="%s:$PATH"\n' "$BIN_NAME" "$BIN_DIR" >> "$rc"
-    echo "Added $BIN_DIR to PATH in $rc"
-  fi
-done
+if ! grep -Fq "$BIN_DIR" "$RC_FILE" 2>/dev/null; then
+  printf '\n# Add %s to PATH (added by oven installer)\nexport PATH="%s:$PATH"\n' "$BIN_NAME" "$BIN_DIR" >> "$RC_FILE"
+  echo "Added $BIN_DIR to PATH in $RC_FILE"
+fi
 
 echo
 echo "oven $TAG installed to $BIN_DIR/$BIN_NAME"
