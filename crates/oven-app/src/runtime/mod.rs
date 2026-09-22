@@ -30,7 +30,7 @@ use crate::shell;
 use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::state::{
     AppPhase, AppState, PendingToolApproval, SessionState, StateChange, context_tokens,
-    context_window,
+    context_tokens_of, context_window, context_window_of,
 };
 
 const EMPTY_SHELL: &str = "empty shell command";
@@ -1032,6 +1032,7 @@ fn apply_model_during_turn(
             );
             state.model.clone_from(&outcome.model);
             state.reasoning_effort = outcome.reasoning_effort;
+            state.context_window = context_window_of(&snapshot, &outcome.model);
             let _ = state_tx.send(state.clone());
             events.emit_state(StateChange::ModelChanged {
                 model: outcome.model.clone(),
@@ -1054,12 +1055,24 @@ fn forward_agent_event(
     state: &mut AppState,
     state_tx: &watch::Sender<AppState>,
 ) {
-    if let AgentEvent::TodosChanged { todos } = &event.event {
-        state.todos = todos.clone();
-        let _ = state_tx.send(state.clone());
-        events.emit_state(StateChange::TodosChanged {
-            todos: todos.clone(),
-        });
+    match &event.event {
+        AgentEvent::TodosChanged { todos } => {
+            state.todos = todos.clone();
+            let _ = state_tx.send(state.clone());
+            events.emit_state(StateChange::TodosChanged {
+                todos: todos.clone(),
+            });
+        }
+        AgentEvent::Usage { usage } => {
+            state.last_turn_usage = *usage;
+            state.context_tokens = context_tokens_of(usage);
+            let _ = state_tx.send(state.clone());
+            events.emit_state(StateChange::ContextChanged {
+                tokens: state.context_tokens,
+                window: state.context_window,
+            });
+        }
+        _ => {}
     }
     events.emit(AppEventKind::Agent(event));
 }

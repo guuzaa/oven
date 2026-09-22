@@ -3,7 +3,7 @@ use std::sync::Arc;
 use oven_agent::{
     Agent, AgentMode, ApprovalRequestId, LoopLimitRequestId, TodoList, ToolCallId, ToolView, TurnId,
 };
-use oven_llm::{Message, ReasoningEffort, Usage};
+use oven_llm::{Message, ModelId, Provider, ReasoningEffort, Router, Usage};
 
 use crate::config::ProviderConfig;
 
@@ -64,18 +64,25 @@ impl AppState {
 /// Prompt-side tokens (input + cache reads) of the last response in the
 /// current turn.
 pub(crate) fn context_tokens(agent: &Agent) -> u32 {
-    let usage = agent.last_turn_usage();
+    context_tokens_of(&agent.last_turn_usage())
+}
+
+/// Prompt-side tokens (input + cache reads) a usage report accounts for.
+pub(crate) fn context_tokens_of(usage: &Usage) -> u32 {
     usage.input_tokens.saturating_add(usage.cache_read_tokens)
+}
+
+/// Context window of `model`, when the router knows it.
+pub(crate) fn context_window_of(router: &Router, model: &str) -> Option<u32> {
+    router
+        .resolve_model(&ModelId::from(model))
+        .map(|info| info.context_window)
+        .filter(|window| *window > 0)
 }
 
 /// Context window of the agent's active model, when the router knows it.
 pub(crate) fn context_window(agent: &Agent) -> Option<u32> {
-    use oven_llm::Provider;
-    agent
-        .router()
-        .resolve_model(agent.model())
-        .map(|info| info.context_window)
-        .filter(|window| *window > 0)
+    context_window_of(&agent.router(), agent.model().as_str())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

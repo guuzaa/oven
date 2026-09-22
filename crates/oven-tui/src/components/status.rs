@@ -220,11 +220,11 @@ impl Component for StatusBar {
 
     fn on_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
-            AppEventKind::Agent(env) => {
-                if let AgentEvent::Turn(TurnEvent::Completed { usage, .. }) = &env.event {
-                    self.usage = *usage;
-                }
-            }
+            AppEventKind::Agent(env) => match &env.event {
+                AgentEvent::Turn(TurnEvent::Completed { usage, .. })
+                | AgentEvent::Usage { usage } => self.usage = *usage,
+                _ => {}
+            },
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::UsageChanged { usage } => {
                     self.usage = *usage;
@@ -427,6 +427,19 @@ mod tests {
             usage,
             duration_ms: 0,
         })));
+        assert_eq!(bar.usage, usage);
+    }
+
+    #[test]
+    fn usage_event_updates_token_usage() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        let usage = Usage {
+            input_tokens: 1234,
+            output_tokens: 56,
+            cache_read_tokens: 789,
+            reasoning_tokens: 10,
+        };
+        bar.on_event(&agent_event(AgentEvent::Usage { usage }));
         assert_eq!(bar.usage, usage);
     }
 

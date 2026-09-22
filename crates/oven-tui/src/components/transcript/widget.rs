@@ -843,6 +843,7 @@ impl Component for Transcript {
                 }
                 AgentEvent::Tool(ToolEvent::OutputDelta { .. })
                 | AgentEvent::Turn(TurnEvent::Started)
+                | AgentEvent::Usage { .. }
                 | AgentEvent::TodosChanged { .. } => {}
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
                     self.stop_live_thinking();

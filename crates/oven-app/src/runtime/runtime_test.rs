@@ -7,6 +7,8 @@ use crate::{App, AppBuilder};
 use crate::{LocalShell, runtime::*};
 use std::borrow::Borrow;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::oneshot;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -571,6 +573,76 @@ async fn slash_clear_emits_history_cleared_and_resets_usage() {
     let usage = done_usage.expect("usage after /clear");
     assert_eq!(usage.input_tokens, 0);
     assert_eq!(usage.output_tokens, 0);
+    handle.shutdown().await;
+}
+
+const FIRST_STEP_USAGE: Usage = Usage {
+    input_tokens: 40,
+    output_tokens: 7,
+    cache_read_tokens: 0,
+    reasoning_tokens: 0,
+};
+
+const LAST_STEP_USAGE: Usage = Usage {
+    input_tokens: 90,
+    output_tokens: 4,
+    cache_read_tokens: 5,
+    reasoning_tokens: 0,
+};
+
+#[tokio::test]
+async fn usage_reaches_subscribers_before_the_turn_completes() {
+    let tmp = tempdir::TempDir::new("app-runtime-usage-stream").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mut first = tool_response("c1", "file_read", serde_json::json!({"path": "note.txt"}));
+    first.usage = Some(FIRST_STEP_USAGE);
+    let mut last = text_response("done");
+    last.usage = Some(LAST_STEP_USAGE);
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![first, last]))).await;
+
+    let mut rx = handle.subscribe();
+    handle
+        .send(AppCommand::Prompt("read note.txt".into()))
+        .unwrap();
+    let mut events = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        let completed = is_turn_completed(&ev);
+        events.push(ev);
+        if completed {
+            break;
+        }
+    }
+
+    let completed_at = events.iter().position(is_turn_completed);
+    let usage_at = events.iter().position(|ev| {
+        matches!(
+            &ev.kind,
+            AppEventKind::Agent(env)
+                if matches!(env.event, AgentEvent::Usage { usage } if usage == FIRST_STEP_USAGE)
+        )
+    });
+    assert!(
+        usage_at < completed_at,
+        "the first step's usage must be reported mid-turn: {usage_at:?} vs {completed_at:?}"
+    );
+
+    let context_at = events.iter().position(|ev| {
+        matches!(
+            &ev.kind,
+            AppEventKind::StateChanged(StateEvent {
+                change: StateChange::ContextChanged { tokens, .. },
+                ..
+            }) if *tokens
+                == FIRST_STEP_USAGE.input_tokens + FIRST_STEP_USAGE.cache_read_tokens
+        )
+    });
+    assert!(
+        context_at < completed_at,
+        "context tokens must follow the reported usage: {context_at:?} vs {completed_at:?}"
+    );
+    assert_eq!(handle.last_turn_usage(), LAST_STEP_USAGE);
+
     handle.shutdown().await;
 }
 
@@ -1972,6 +2044,160 @@ async fn model_slash_switches_immediately_during_turn() {
     assert_eq!(handle.state().model, "mock/gpt-4o-turbo");
 
     drop(release_tx);
+    handle.shutdown().await;
+}
+
+const WINDOW_PROVIDER: &str = "window-mock";
+const MODEL_WITH_SMALL_WINDOW: &str = "gpt-4o";
+const MODEL_WITH_LARGE_WINDOW: &str = "gpt-4o-mini";
+const SMALL_WINDOW: u32 = 128_000;
+const LARGE_WINDOW: u32 = 200_000;
+
+fn windowed_model(model: &str, window: u32) -> ModelInfo {
+    ModelInfo {
+        context_window: window,
+        ..ModelInfo::minimal(model, ProviderName::Custom(WINDOW_PROVIDER.into()))
+    }
+}
+
+/// Provider that answers a tool call first and then blocks inside the second
+/// response, so a test can switch models while the turn is in flight.
+struct GatedWindowProvider {
+    calls: AtomicUsize,
+    models: Vec<ModelInfo>,
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+    gate: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl GatedWindowProvider {
+    fn new(
+        models: Vec<ModelInfo>,
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            models,
+            entered: Mutex::new(Some(entered)),
+            gate: tokio::sync::Mutex::new(Some(release)),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for GatedWindowProvider {
+    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Ok(tool_response(
+                "call_1",
+                "unknown_tool",
+                serde_json::json!({}),
+            ));
+        }
+        if let Some(tx) = self.entered.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        let mut gate = self.gate.lock().await;
+        if let Some(release) = gate.take() {
+            let _ = release.await;
+        }
+        Ok(text_response("done"))
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        self.models.iter().find(|model| model.id == id.wire_id())
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom(WINDOW_PROVIDER.into())
+    }
+}
+
+#[tokio::test]
+async fn mid_turn_model_switch_publishes_the_new_context_window() {
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let models = vec![
+        windowed_model(MODEL_WITH_SMALL_WINDOW, SMALL_WINDOW),
+        windowed_model(MODEL_WITH_LARGE_WINDOW, LARGE_WINDOW),
+    ];
+    let agent = agent_from(Box::new(GatedWindowProvider::new(
+        models, entered_tx, release_rx,
+    )))
+    .with_model(MODEL_WITH_SMALL_WINDOW);
+    let handle = spawn_runtime(
+        AppId::next(),
+        agent,
+        None,
+        PathBuf::from("/tmp"),
+        AppConfig::default(),
+        None,
+    );
+    let mut rx = handle.subscribe();
+
+    handle.send(AppCommand::Prompt("work".into())).unwrap();
+    entered_rx.await.expect("second provider response started");
+
+    handle
+        .send(AppCommand::Prompt(format!(
+            "/model {MODEL_WITH_LARGE_WINDOW} low"
+        )))
+        .unwrap();
+    let mut switched = false;
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(ev)) if is_turn_completed(&ev) => {
+                panic!("turn completed before the mid-turn model switch")
+            }
+            Ok(Some(AppEvent {
+                kind: AppEventKind::Notification { text },
+                ..
+            })) if text.contains("model switched") => {
+                switched = true;
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => panic!("timeout waiting for the mid-turn model switch"),
+        }
+    }
+    assert!(
+        switched,
+        "expected /model to switch during the in-flight turn"
+    );
+
+    let _ = release_tx.send(());
+
+    let mut windows: Vec<u32> = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::StateChanged(StateEvent {
+            change: StateChange::ContextChanged { window, .. },
+            ..
+        }) = &ev.kind
+            && let Some(window) = window
+        {
+            windows.push(*window);
+        }
+        if is_turn_completed(&ev) {
+            break;
+        }
+    }
+
+    assert_eq!(
+        windows,
+        vec![LARGE_WINDOW],
+        "mid-turn usage must report the switched model's window"
+    );
     handle.shutdown().await;
 }
 

@@ -451,6 +451,7 @@ impl Agent {
         }
         if let Some(usage) = &response.usage {
             self.history.record_usage(usage);
+            sink.emit(AgentEvent::Usage { usage: *usage });
         }
 
         if !response.has_tool_use() {
@@ -1488,6 +1489,44 @@ mod tests {
             }
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn usage_is_reported_as_each_response_arrives() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+        let mock = MockProvider::new(vec![
+            tool_response("call_1", "file_read", json!({"path": "note.txt"})),
+            text_response("done"),
+        ]);
+        let tools: Vec<Box<dyn Tool>> = vec![Box::new(FileReadTool::new(tmp.path()))];
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools).with_max_iters(4);
+        let mut sink = VecEventSink::default();
+        run_with(&mut agent, "read note.txt", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+        assert_valid_event_sequence(&sink.events);
+
+        let reported: Vec<Usage> = sink
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Usage { usage } => Some(*usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported.len(), 2, "one report per provider response");
+        assert!(reported.iter().all(|usage| usage.input_tokens == 10));
+
+        let last_usage = sink
+            .events
+            .iter()
+            .rposition(|event| matches!(event, AgentEvent::Usage { .. }));
+        let completed = sink.events.iter().position(is_terminal);
+        assert!(
+            last_usage < completed,
+            "usage must be reported before the turn completes: {last_usage:?} vs {completed:?}"
+        );
     }
 
     #[tokio::test]
