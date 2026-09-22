@@ -137,9 +137,9 @@ quits, `Shift+Tab` toggles plan mode. The TUI shows the current todo list,
 model, and working directory; mouse selection copies automatically. When
 the context window fills up, history is compacted into a summary
 automatically (or on demand via `/compact`). Thinking blocks and tool
-results collapse to one line — double-click to expand or collapse them,
-and each turn ends with a `Worked for Xs` separator. After exiting, the
-session id is printed so you can resume with `--session <id>`.
+results collapse to one line — double-click to expand or collapse them.
+After exiting, the session id is printed so you can resume with
+`--session <id>`.
 
 ## Slash commands
 

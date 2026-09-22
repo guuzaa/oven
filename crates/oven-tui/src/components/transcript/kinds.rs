@@ -6,9 +6,8 @@ use super::super::theme;
 pub(super) const LINE_PREFIX_WIDTH: usize = 2;
 pub(super) const LINE_INDENT: &str = "  ";
 pub(super) const MESSAGE_INDENT: &str = " ";
-pub(super) const COLLAPSED_MARKER: &str = "› ";
-pub(super) const EXPANDED_MARKER: &str = "⌄ ";
-pub(super) const SEPARATOR_GLYPH: char = '−';
+pub(super) const COLLAPSED_MARKER: &str = "▸ ";
+pub(super) const EXPANDED_MARKER: &str = "▾ ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LineKind {
@@ -22,7 +21,6 @@ pub(super) enum LineKind {
     ShellResult(bool),
     Error,
     System,
-    Separator,
 }
 
 impl LineKind {
@@ -38,7 +36,6 @@ impl LineKind {
             LineKind::ToolResult(false) | LineKind::ShellResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
             LineKind::System => theme::dim(),
-            LineKind::Separator => theme::elapsed(),
         }
     }
 
@@ -58,8 +55,7 @@ impl LineKind {
             | LineKind::ShellResult(_)
             | LineKind::Diff
             | LineKind::Error
-            | LineKind::System
-            | LineKind::Separator => "  ",
+            | LineKind::System => "  ",
         }
     }
 }

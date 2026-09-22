@@ -13,25 +13,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
-use super::kinds::{LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, MESSAGE_INDENT, SEPARATOR_GLYPH};
+use super::kinds::{COLLAPSED_MARKER, LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, MESSAGE_INDENT};
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
 use super::widget::{LOOP_LIMIT_REACHED, Transcript};
 use super::wrap::{
     MAX_LIVE_BODY_LINES, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer,
-    format_elapsed, format_lines, format_thought, line_display_width, tail_lines,
+    format_lines, format_thought, line_display_width, tail_lines,
 };
 
-const ELAPSED_0: &str = "Worked for 0s";
-const ELAPSED_0_1S: &str = "Worked for 0.1s";
-const ELAPSED_0_3S: &str = "Worked for 0.3s";
-const ELAPSED_0_9S: &str = "Worked for 0.9s";
-const ELAPSED_1S: &str = "Worked for 1s";
-const ELAPSED_1_2S: &str = "Worked for 1.2s";
-const ELAPSED_1_5S: &str = "Worked for 1.5s";
-const ELAPSED_1M: &str = "Worked for 1m 0s";
-const ELAPSED_1M_1S: &str = "Worked for 1m 1s";
 const THOUGHT_0: &str = "Thought for 0s";
 const THOUGHT_1_5S: &str = "Thought for 1.5s";
 const THOUGHT_1M_1S: &str = "Thought for 1m 1s";
@@ -72,7 +63,8 @@ fn thinking_header_has_no_gutter() {
     t.on_event(&text_delta("answer"));
     wide(&mut t);
     let header = line_text(&t.wrapped[0]);
-    assert!(header.starts_with(" › "), "{header:?}");
+    let marker = format!("{MESSAGE_INDENT}{COLLAPSED_MARKER}");
+    assert!(header.starts_with(&marker), "{header:?}");
 }
 
 #[test]
@@ -103,7 +95,6 @@ fn all_gutters_are_two_wide() {
         LineKind::ShellResult(false),
         LineKind::Error,
         LineKind::System,
-        LineKind::Separator,
     ];
     for kind in kinds {
         assert_eq!(kind.gutter().width(), LINE_PREFIX_WIDTH);
@@ -111,7 +102,6 @@ fn all_gutters_are_two_wide() {
             assert_eq!(ch.width().unwrap_or(0), 1, "{ch:?} must be single-width");
         }
     }
-    assert_eq!(SEPARATOR_GLYPH.width().unwrap_or(0), 1);
 }
 
 #[test]
@@ -485,13 +475,9 @@ fn started() -> AppEvent {
 }
 
 fn completed() -> AppEvent {
-    completed_in(0)
-}
-
-fn completed_in(duration_ms: u64) -> AppEvent {
     agent(AgentEvent::Turn(TurnEvent::Completed {
         usage: oven_llm::Usage::default(),
-        duration_ms,
+        duration_ms: 0,
     }))
 }
 
@@ -518,20 +504,7 @@ fn all_details_collapsed(t: &Transcript) -> bool {
 }
 
 #[test]
-fn done_appends_elapsed_after_answer() {
-    let mut t = Transcript::new();
-    t.push_user("q");
-    t.on_event(&text_delta("a"));
-    t.on_event(&completed_in(1_500));
-    assert_eq!(
-        kinds_of(&t),
-        vec![LineKind::User, LineKind::Text, LineKind::Separator]
-    );
-    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some(ELAPSED_1_5S));
-}
-
-#[test]
-fn tool_end_does_not_append_separator() {
+fn tool_end_adds_no_extra_row() {
     let mut t = Transcript::new();
     t.push_user("q");
     t.on_event(&tool_start(
@@ -545,29 +518,6 @@ fn tool_end_does_not_append_separator() {
 }
 
 #[test]
-fn separator_comes_after_tool_followup_not_between() {
-    let mut t = Transcript::new();
-    t.push_user("q");
-    t.on_event(&tool_start(
-        1,
-        "bash",
-        serde_json::json!({ "command": "ls" }),
-    ));
-    t.on_event(&tool_end(1, true, "done"));
-    t.on_event(&text_delta("ok"));
-    t.on_event(&completed());
-    assert_eq!(
-        kinds_of(&t),
-        vec![
-            LineKind::User,
-            LineKind::Tool,
-            LineKind::Text,
-            LineKind::Separator,
-        ]
-    );
-}
-
-#[test]
 fn loop_limit_reached_appends_system_line() {
     let mut t = Transcript::new();
     t.push_user("q");
@@ -578,15 +528,12 @@ fn loop_limit_reached_appends_system_line() {
 }
 
 #[test]
-fn cancelled_appends_elapsed() {
+fn cancelled_appends_system_line() {
     let mut t = Transcript::new();
     t.push_user("q");
     t.on_event(&cancelled());
-    assert_eq!(
-        kinds_of(&t),
-        vec![LineKind::User, LineKind::System, LineKind::Separator]
-    );
-    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some(""));
+    assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::System]);
+    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some("cancelled"));
 }
 
 #[test]
@@ -596,10 +543,7 @@ fn thinking_delta_shows_label_not_content() {
     t.on_event(&thinking(" more secrets"));
     t.on_event(&text_delta("answer"));
     t.on_event(&completed());
-    assert_eq!(
-        kinds_of(&t),
-        vec![LineKind::Thinking, LineKind::Text, LineKind::Separator]
-    );
+    assert_eq!(kinds_of(&t), vec![LineKind::Thinking, LineKind::Text]);
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
     assert_eq!(t.rows[1].text, "answer");
     assert!(t.rows.iter().all(|r| !r.text.contains("secret")));
@@ -639,12 +583,7 @@ fn reported_thinking_duration_survives_the_answer() {
 
     assert_eq!(
         kinds_of(&t),
-        vec![
-            LineKind::User,
-            LineKind::Thinking,
-            LineKind::Text,
-            LineKind::Separator
-        ]
+        vec![LineKind::User, LineKind::Thinking, LineKind::Text]
     );
     assert_eq!(t.rows[1].text, THOUGHT_1_5S);
 }
@@ -685,12 +624,7 @@ fn seeded_reasoning_renders_before_the_answer_it_precedes() {
 
     assert_eq!(
         kinds_of(&t),
-        vec![
-            LineKind::User,
-            LineKind::Thinking,
-            LineKind::Text,
-            LineKind::Separator
-        ]
+        vec![LineKind::User, LineKind::Thinking, LineKind::Text]
     );
     assert_eq!(t.rows[1].text, THOUGHT_1_5S);
     assert_eq!(t.rows[2].text, "answer");
@@ -945,10 +879,7 @@ fn seed_collapses_consecutive_thinking() {
         },
         ContentBlock::Text { text: "hi".into() },
     ])]);
-    assert_eq!(
-        kinds_of(&t),
-        vec![LineKind::Thinking, LineKind::Text, LineKind::Separator]
-    );
+    assert_eq!(kinds_of(&t), vec![LineKind::Thinking, LineKind::Text]);
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
     assert_eq!(
         t.rows[0]
@@ -957,11 +888,6 @@ fn seed_collapses_consecutive_thinking() {
             .expect("thinking detail")
             .body(),
         "onetwo"
-    );
-    assert_eq!(
-        t.rows.last().map(|r| r.text.as_str()),
-        Some(""),
-        "legacy sessions without timestamps keep a plain separator"
     );
 }
 
@@ -976,76 +902,6 @@ fn seed_without_thinking_record_keeps_thought_label() {
         None,
     )]);
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
-}
-
-#[test]
-fn seed_separates_complete_turns_not_tool_followup() {
-    let mut t = Transcript::new();
-    t.seed(&[
-        Message::user_text("one"),
-        Message::assistant(vec![ContentBlock::Text {
-            text: "first".into(),
-        }]),
-        Message::user_text("two"),
-        Message::assistant(vec![
-            ContentBlock::Text {
-                text: "checking".into(),
-            },
-            ContentBlock::ToolUse {
-                id: "c1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({ "command": "ls" }),
-                raw_arguments: None,
-            },
-        ]),
-        Message::tool_result("c1", "out", false),
-        Message::assistant(vec![ContentBlock::Text {
-            text: "second".into(),
-        }]),
-    ]);
-    assert_eq!(
-        kinds_of(&t),
-        vec![
-            LineKind::User,
-            LineKind::Text,
-            LineKind::Separator,
-            LineKind::User,
-            LineKind::Text,
-            LineKind::Tool,
-            LineKind::Text,
-            LineKind::Separator,
-        ]
-    );
-}
-
-#[test]
-fn seed_timed_shows_turn_elapsed_from_timestamps() {
-    let mut t = Transcript::new();
-    t.seed_timed(&[
-        (Message::user_text("one"), 1_000, None),
-        (
-            Message::assistant(vec![ContentBlock::Text {
-                text: "first".into(),
-            }]),
-            2_500,
-            None,
-        ),
-        (Message::user_text("two"), 3_000, None),
-        (
-            Message::assistant(vec![ContentBlock::Text {
-                text: "second".into(),
-            }]),
-            4_200,
-            None,
-        ),
-    ]);
-    let elapsed: Vec<&str> = t
-        .rows
-        .iter()
-        .filter(|r| r.kind == LineKind::Separator)
-        .map(|r| r.text.as_str())
-        .collect();
-    assert_eq!(elapsed, vec![ELAPSED_1_5S, ELAPSED_1_2S]);
 }
 
 #[test]
@@ -1633,40 +1489,7 @@ fn seed_failed_tool_counts_without_result() {
 }
 
 #[test]
-fn elapsed_renders_duration_text() {
-    let mut t = Transcript::new();
-    wide(&mut t);
-    t.push_user("q");
-    t.on_event(&text_delta("a"));
-    t.on_event(&completed_in(1_500));
-    let last = t.wrapped.last().expect("wrapped elapsed");
-    let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert!(text.contains(ELAPSED_1_5S), "{text:?}");
-    assert_eq!(last.spans[1].style.fg, theme::elapsed().fg);
-}
-
-#[test]
-fn empty_separator_renders_full_width_rule() {
-    let mut t = Transcript::new();
-    wide(&mut t);
-    t.push_row(LineKind::System, "context compacted");
-    t.push_row(LineKind::Separator, "");
-    let last = t.wrapped.last().expect("wrapped separator");
-    let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
-    assert_eq!(text.chars().filter(|c| *c == SEPARATOR_GLYPH).count(), 80);
-}
-
-#[test]
-fn format_elapsed_units() {
-    assert_eq!(format_elapsed(0), ELAPSED_0);
-    assert_eq!(format_elapsed(99), ELAPSED_0);
-    assert_eq!(format_elapsed(100), ELAPSED_0_1S);
-    assert_eq!(format_elapsed(342), ELAPSED_0_3S);
-    assert_eq!(format_elapsed(999), ELAPSED_0_9S);
-    assert_eq!(format_elapsed(1_000), ELAPSED_1S);
-    assert_eq!(format_elapsed(1_500), ELAPSED_1_5S);
-    assert_eq!(format_elapsed(60_000), ELAPSED_1M);
-    assert_eq!(format_elapsed(61_000), ELAPSED_1M_1S);
+fn format_thought_units() {
     assert_eq!(format_thought(None), THOUGHT_LABEL);
     assert_eq!(format_thought(Some(0)), THOUGHT_0);
     assert_eq!(format_thought(Some(99)), THOUGHT_0);

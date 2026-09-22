@@ -11,9 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::collapsible::Collapsible;
 use super::super::theme;
-use super::kinds::{
-    COLLAPSED_MARKER, EXPANDED_MARKER, LINE_INDENT, LineKind, MESSAGE_INDENT, SEPARATOR_GLYPH,
-};
+use super::kinds::{COLLAPSED_MARKER, EXPANDED_MARKER, LINE_INDENT, LineKind, MESSAGE_INDENT};
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 pub(super) const MAX_LIVE_BODY_LINES: usize = 8;
@@ -24,7 +22,6 @@ const MS_PER_SECOND: u64 = 1000;
 const MS_PER_TENTH: u64 = 100;
 const TENTHS_PER_SECOND: u64 = 10;
 const MS_PER_MINUTE: u64 = 60_000;
-const WORKED_FOR: &str = "Worked for";
 const THOUGHT_FOR: &str = "Thought for";
 
 fn format_duration(ms: u64) -> String {
@@ -47,10 +44,6 @@ fn format_duration(ms: u64) -> String {
     } else {
         format!("{mins}m {secs}s")
     }
-}
-
-pub(super) fn format_elapsed(ms: u64) -> String {
-    format!("{WORKED_FOR} {}", format_duration(ms))
 }
 
 /// Header for a thinking row: the duration the agent reported, or a bare label
@@ -186,26 +179,9 @@ pub(super) fn wrap_row_into(
     if !out.is_empty() {
         out.push(Line::from(""));
     }
-    if kind == LineKind::Separator {
-        if text.is_empty() {
-            out.push(separator_line(width));
-        } else {
-            for line in format_lines(kind, text) {
-                wrap_line_into(out, &line, width, kind);
-            }
-        }
-        return;
-    }
     for line in format_lines(kind, text) {
         wrap_line_into(out, &line, width, kind);
     }
-}
-
-fn separator_line(width: usize) -> Line<'static> {
-    Line::from(Span::styled(
-        SEPARATOR_GLYPH.to_string().repeat(width.max(1)),
-        theme::dim(),
-    ))
 }
 
 pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {
@@ -295,9 +271,7 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
             part.to_string()
         };
         let body_span = match kind {
-            LineKind::Diff | LineKind::Shell | LineKind::Separator => {
-                Span::styled(body, line_style)
-            }
+            LineKind::Diff | LineKind::Shell => Span::styled(body, line_style),
             _ => Span::raw(body),
         };
         lines.push(Line::from(vec![
