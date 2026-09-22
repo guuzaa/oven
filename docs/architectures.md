@@ -50,6 +50,8 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 
 `oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
 
+TUI internals are documented in [`oven-tui.md`](./oven-tui.md).
+
 The dependency direction is:
 
 ```text
@@ -125,13 +127,15 @@ pub enum AppCommand {
 pub enum ControlCommand {
     Cancel { turn_id: TurnId },
     SetMode { mode: AgentMode },
+    RespondToolApproval { request_id: ApprovalRequestId, decision: ApprovalDecision },
+    RespondLoopLimit { request_id: LoopLimitRequestId, decision: LoopLimitDecision },
     Rewind,
 }
 ```
 
 `Prompt` and `Control` are structurally distinct so callers never sniff strings. Classification of composer text (chat vs slash vs bang-shell) happens once, inside the runtime, where the slash registry lives.
 
-There is no `SetModel` / `SetProvider` / `ClearSession` command. Those mutations are slash text on `Prompt` (`/model`, `/setup`, `/clear`). The TUI still sends structured `Control` for keyboard cancel, mode toggle, and rewind.
+There is no `SetModel` / `SetProvider` / `ClearSession` command. Those mutations are slash text on `Prompt` (`/model`, `/setup`, `/clear`). The TUI still sends structured `Control` for keyboard cancel, mode toggle, rewind, and approving a tool or a loop-limit prompt.
 
 A `Prompt` whose trimmed body starts with `/` is a slash command. The runtime parses it and either starts an agent turn (`Passthrough`) or applies a state change. Slash commands still arrive as `Prompt("/plan on")`.
 
@@ -146,11 +150,13 @@ A running turn holds `&mut Agent` exclusively. Incoming commands split on whethe
 | `Control::Cancel { matching turn_id }` | cancel immediately |
 | `Control::SetMode` | apply immediately via `TurnContext` + `AppState` |
 | `Prompt("/model …")` | apply immediately via `RouterHandle` + `TurnContext` |
+| `Control::RespondToolApproval` | consumed by the turn's select loop; phase returns to `Running` |
+| `Control::RespondLoopLimit` | consumed by the turn's select loop; continues or fails the turn |
 | `Control::Rewind` | queue; emit `Notification` |
 | other `Prompt` (chat, other slash, bang-shell) | queue; recognized slash names get a `Notification` |
 | `Shutdown` | cancel the turn and exit |
 
-`TurnContext` carries `mode` and `model` behind a lock so those two can change without `&mut Agent`. The agent re-reads them at each step and at turn end. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::update_router`, so it waits.
+`TurnContext` carries `mode` and `model` behind a lock so those two can change without `&mut Agent`. The agent re-reads them at each step and at turn end. `TurnContext` also carries the approval and loop-limit reply channels, so the turn can consume those replies directly instead of going through `pending`. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::update_router`, so it waits.
 
 Queued commands drain after the turn ends, in arrival order. Keyboard mode toggle is `Control::SetMode` and applies live; `/plan` is Prompt slash and therefore waits until the agent is free.
 
@@ -160,7 +166,7 @@ Queued commands drain after the turn ends, in arrival order. Keyboard mode toggl
 
 ## Agent events
 
-Emitted during one LLM turn. History and model stay on the committed `Message` / `AppState`. Todo updates are the exception: the agent emits `TodosChanged` and the runtime mirrors it into `StateChange::TodosChanged`.
+Emitted during one LLM turn. History and model stay on the committed `Message` / `AppState`. Todo and usage updates are the exception: the agent emits `TodosChanged` / `Usage` as soon as a provider response reports them, and the runtime mirrors them into `StateChange::TodosChanged` / the `AppState` usage and context fields.
 
 ```rust
 pub struct AgentEventEnvelope {
@@ -175,20 +181,32 @@ pub enum AgentEvent {
     Stream(StreamEvent),
     Tool(ToolEvent),
     TodosChanged { todos: TodoList },
+    Usage { usage: Usage },
 }
 ```
 
 `seq` is the log position for that turn. It is not a timestamp.
 
 ```text
-TurnEvent     Started | Completed { usage } | Cancelled | Failed { error }
+TurnEvent     Started | Completed { usage, duration_ms }
+              Cancelled { duration_ms } | Failed { error, duration_ms }
+              LoopLimitReached { request_id, max_iters }
 StreamEvent   TextDelta { text } | ThinkingDelta { text }
-ToolEvent     Started { call_id, name, view }
+              ThinkingDone { duration_ms }
+ToolEvent     ApprovalRequested { request_id, call_id, name, view }
+              Started { call_id, name, view }
               OutputDelta { call_id, stream, text }
               Finished { call_id, result }
 ```
 
-`ToolResult` is `Success`, `Failed { error, output }`, or `Cancelled` — not `ok: bool`.
+`ThinkingDone` closes the thinking window the agent timed: it fires the moment
+the reasoning phase ends, ahead of the answer text or the tool call that ended
+it, so the transcript never has to guess a duration. `LoopLimitReached` and
+`ApprovalRequested` park the turn until `Control::RespondLoopLimit` /
+`Control::RespondToolApproval` arrives.
+
+`ToolResult` is `Success`, `Failed { error, output }`, `Rejected { reason }`, or
+`Cancelled` — not `ok: bool`.
 
 Tool input is not on `ToolEvent::Started`. The UI uses `ToolView`. `view.diff` paints `+/-` lines as a file diff. Full arguments live on the committed `Message`.
 
@@ -206,9 +224,16 @@ pub enum AppEventKind {
     Agent(AgentEventEnvelope),
     StateChanged(StateEvent),
     Shell(ShellEvent),
+    Compaction(CompactionEvent),
     Notification { text: String },
     Error { message: String },
     Exited,
+}
+
+pub enum CompactionEvent {
+    Started,
+    Completed { before_tokens: u32, after_tokens: u32 },
+    Failed { error: String },
 }
 
 pub enum ShellEvent {
@@ -225,11 +250,11 @@ Subscribers get a lossless unbounded channel. `App::state()` / `watch_state()` i
 ## Agent API
 
 ```rust
-agent.run(input, TurnContext { turn_id, cancellation, mode, model }, &mut sink)
+agent.run(input, &TurnContext::new(turn_id, cancellation, mode, model, effort), &mut sink)
     -> Result<TurnOutput, AgentError>
 ```
 
-`mode` and `model` are shared (`Arc<Mutex<_>>`) so the runtime can update them while the turn holds `&mut Agent`. The agent copies both onto itself at the start of every step.
+`mode` and `model` are shared (`Arc<Mutex<_>>`) so the runtime can update them while the turn holds `&mut Agent`. The agent copies both onto itself at the start of every step. `TurnContext` also carries the approval and loop-limit reply channels, which is how those replies reach the running turn without needing `&mut Agent`.
 
 The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`.
 
@@ -252,9 +277,16 @@ pub struct AppState {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub provider: ProviderConfig,
     pub configured_providers: Vec<String>,
-    pub history: Vec<Message>,
+    /// Shared handles, so publishing a snapshot costs refcounts, not a copy.
+    pub history: Vec<Arc<Message>>,
+    /// Unix-ms timestamps parallel to `history`, from the session records.
+    pub history_timestamps: Vec<u64>,
+    /// Thinking duration in ms parallel to `history`; `None` when untimed.
+    pub history_thinking_ms: Vec<Option<u64>>,
     pub todos: TodoList,
     pub last_turn_usage: Usage,
+    pub context_tokens: u32,
+    pub context_window: Option<u32>,
     pub session: SessionState,
     pub models: Vec<(String, String)>,
 }
@@ -262,6 +294,8 @@ pub struct AppState {
 pub enum AppPhase {
     Idle,
     Running { turn_id: TurnId },
+    AwaitingToolApproval { turn_id: TurnId, request: PendingToolApproval },
+    AwaitingLoopLimit { turn_id: TurnId, request_id: LoopLimitRequestId, max_iters: usize },
     Cancelling { turn_id: TurnId },
     ShuttingDown,
 }
@@ -271,10 +305,11 @@ pub enum AppPhase {
 
 ```text
 ModelChanged | ModeChanged | TodosChanged | HistoryChanged
-SessionChanged | UsageChanged | ProviderChanged | ModelsChanged
+SessionChanged | UsageChanged | ContextChanged | ProviderChanged
+ModelsChanged
 ```
 
-`UsageChanged` carries `last_turn_usage` — tokens for the most recent agent turn, not a session total. `ProviderChanged` includes `configured_providers` (canonical slugs saved under `[providers.<slug>]`).
+`UsageChanged` carries `last_turn_usage` — tokens for the most recent agent turn, not a session total. `ContextChanged` carries `context_tokens` / `context_window` (prompt-side tokens of the latest response, and the model's window when known). A mid-turn `AgentEvent::Usage` updates the `AppState` usage and context fields and emits `ContextChanged`, while `UsageChanged` is the turn-end delta. `ProviderChanged` includes `configured_providers` (canonical slugs saved under `[providers.<slug>]`).
 
 UI rule: consume state as truth, events as “something happened”.
 
@@ -300,12 +335,23 @@ stateDiagram-v2
     [*] --> Idle
 
     Idle --> Running: Prompt (passthrough or bang-shell)
+    Idle --> AwaitingToolApproval: approval prompt on a parked step
+    Idle --> AwaitingLoopLimit: iteration cap reached
     Idle --> Idle: slash / empty bang / Rewind / SetMode
     Idle --> ShuttingDown: Shutdown
 
     Running --> Cancelling: Cancel { matching turn_id }
     Running --> Idle: TurnCompleted / TurnFailed
     Running --> ShuttingDown: Shutdown
+
+    AwaitingToolApproval --> Running: RespondToolApproval
+    AwaitingToolApproval --> Cancelling: Cancel
+    AwaitingToolApproval --> Idle: TurnFailed / TurnCancelled
+    AwaitingToolApproval --> ShuttingDown: Shutdown
+
+    AwaitingLoopLimit --> Running: RespondLoopLimit (continue)
+    AwaitingLoopLimit --> Idle: TurnFailed / TurnCancelled
+    AwaitingLoopLimit --> ShuttingDown: Shutdown
 
     Cancelling --> Idle: TurnCancelled
     Cancelling --> ShuttingDown: Shutdown
@@ -319,6 +365,8 @@ A bang-shell `Prompt` enters `Running` like an agent turn (so Cancel and queuing
 
 While `Running`, `SetMode` and `/model` apply immediately and the phase stays `Running`. Other `Prompt`s and `Rewind` wait in `pending`. `Cancel` while idle is a no-op. `Cancel { turn_id }` only applies if it matches the active turn.
 
+A step that needs a tool approval or that hits the iteration cap parks the phase on `AwaitingToolApproval` / `AwaitingLoopLimit`; the matching `Control` reply returns it to `Running`, and a reject / exit reply ends the turn.
+
 ---
 
 # Turn event machine
@@ -330,36 +378,50 @@ stateDiagram-v2
     [*] --> Started
 
     Started --> Streaming: TextDelta / ThinkingDelta
+    Started --> ThinkingDone: ThinkingDone
     Started --> Tool: ToolStarted
     Started --> Completed: no tool calls
     Started --> Cancelled: cancel
     Started --> Failed: provider / loop error
 
     Streaming --> Streaming: TextDelta / ThinkingDelta
+    Streaming --> ThinkingDone: ThinkingDone
     Streaming --> Tool: ToolStarted
     Streaming --> Completed: end of assistant text
     Streaming --> Cancelled: cancel
     Streaming --> Failed: error
 
+    ThinkingDone --> Streaming: follow-up text
+    ThinkingDone --> Tool: ToolStarted
+
     Tool --> Tool: OutputDelta / ToolFinished / ToolStarted
+    Tool --> AwaitApproval: ApprovalRequested
+    Tool --> AwaitLoopLimit: LoopLimitReached
     Tool --> Streaming: follow-up text
     Tool --> Completed: final assistant message
     Tool --> Cancelled: cancel
     Tool --> Failed: error
+
+    AwaitApproval --> Tool: RespondToolApproval
+    AwaitLoopLimit --> Tool: RespondLoopLimit (continue)
+    AwaitLoopLimit --> Failed: exit
 
     Completed --> [*]
     Cancelled --> [*]
     Failed --> [*]
 ```
 
+`ThinkingDone` is not a terminal state: it closes the reasoning window the agent timed, before the answer or the tool call that ended it. Approval and loop-limit parks are turn-scoped; the reply arrives as `Control` and the turn resumes.
+
 Typical successful sequence:
 
 ```text
 TurnStarted
   ThinkingDelta*
+  ThinkingDone
   ToolStarted → ToolOutputDelta* → ToolFinished
   TextDelta*
-TurnCompleted
+TurnCompleted { usage, duration_ms }
 ```
 
 Then runtime sets `phase = Idle`. `TurnCompleted` is the fact; `Idle` is the phase.
@@ -441,10 +503,10 @@ The TUI shows the typed `!` line as a user row and the last 100 output lines as 
 # Invariants
 
 1. `Running(turn_id)` means exactly one active request: an agent turn **or** a bang-shell command.
-2. Every `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running` or `Cancelling`. Agent envelopes are not emitted for bang-shell.
+2. Every `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running`, `AwaitingToolApproval`, `AwaitingLoopLimit`, or `Cancelling`. Agent envelopes are not emitted for bang-shell.
 3. Each agent turn emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`. Each bang-shell request emits exactly one `Shell::Started` and exactly one of `Finished | Failed`.
 4. `ToolFinished` is always preceded by `ToolStarted` for the same `ToolCallId`.
-5. While `Running` or `Cancelling`, only `Cancel`, `SetMode`, `/model`, and `Shutdown` are applied immediately. Everything else waits in `pending`.
+5. While `Running` or `Cancelling`, only `Cancel`, `SetMode`, `/model`, the approval / loop-limit replies, and `Shutdown` are applied immediately. Everything else waits in `pending`.
 
 Runtime is a single app actor. It is not the `oven-host` crate:
 
@@ -452,9 +514,16 @@ Runtime is a single app actor. It is not the `oven-host` crate:
 struct Runtime {
     agent: Agent,
     router: RouterHandle,  // independent of `&mut agent`
+    root: PathBuf,
     state: AppState,
+    state_tx: watch::Sender<AppState>,
     session: Option<SessionStore>,
+    user_config_path: Option<PathBuf>,
     config: AppConfig,
+    events: EventBus,
+    slash: SlashRegistry,
+    persisted_messages: usize,  // agent messages already in the session file
+    persisted_rev: u64,         // history revision `persisted_messages` belongs to
     pending: VecDeque<AppCommand>,
 }
 ```
