@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use oven_agent::AgentError;
 use oven_agent::{AgentEvent, LoopLimitDecision, TodoList, TurnEvent};
@@ -134,11 +135,10 @@ impl App {
         &self.root
     }
 
-    pub fn history(&self) -> Vec<Message> {
-        self.state.borrow().history.clone()
-    }
-
-    pub fn history_timed(&self) -> Vec<(Message, u64, Option<u64>)> {
+    /// The conversation with its record timestamps and thinking durations,
+    /// sharing the agent's messages so a transcript re-seed does not copy
+    /// every message.
+    pub fn history_timed_shared(&self) -> Vec<(Arc<Message>, u64, Option<u64>)> {
         let state = self.state.borrow();
         state
             .history

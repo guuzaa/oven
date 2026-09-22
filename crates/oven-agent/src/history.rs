@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use oven_host::now_ms;
 use oven_llm::{Message, Role, Usage};
 use serde::{Deserialize, Serialize};
@@ -61,7 +63,7 @@ pub struct SessionMeta {
 /// session store untouched and resume appending after it.
 #[derive(Debug)]
 pub struct History {
-    messages: Vec<(Message, Timestamp)>,
+    messages: Vec<(Arc<Message>, Timestamp)>,
     turn_usage: Vec<(Usage, Timestamp)>,
     /// Per-message thinking span `(duration_ms, started_at)`, aligned with
     /// `messages`. `None` when that message had no timed thinking.
@@ -85,12 +87,12 @@ impl History {
         if m.role == Role::User {
             self.turn_usage.push((Usage::default(), 0));
         }
-        self.messages.push((m, now_ms()));
+        self.messages.push((Arc::new(m), now_ms()));
         self.thinking.push(None);
     }
 
     pub fn insert_system(&mut self, m: Message) {
-        self.messages.insert(0, (m, now_ms()));
+        self.messages.insert(0, (Arc::new(m), now_ms()));
         self.thinking.insert(0, None);
     }
 
@@ -133,7 +135,7 @@ impl History {
                     if message.role == Role::User {
                         self.turn_usage.push((Usage::default(), 0));
                     }
-                    self.messages.push((message, timestamp));
+                    self.messages.push((Arc::new(message), timestamp));
                     self.thinking.push(None);
                 }
                 Record::TokenUsage { timestamp, usage } => match self.turn_usage.last_mut() {
@@ -165,10 +167,10 @@ impl History {
             .messages
             .iter()
             .rposition(|(m, _)| m.role == Role::User)?;
-        let removed = self.messages.drain(idx..).next().map(|(m, _)| m)?;
+        let removed = self.messages.drain(idx..).next()?;
         let _ = self.thinking.drain(idx..);
         let _ = self.turn_usage.pop();
-        Some(removed)
+        Some(Arc::try_unwrap(removed.0).unwrap_or_else(|arc| (*arc).clone()))
     }
 
     pub fn revision(&self) -> u64 {
@@ -177,6 +179,12 @@ impl History {
 
     /// The conversation messages in order.
     pub fn messages(&self) -> impl ExactSizeIterator<Item = &Message> + '_ {
+        self.messages.iter().map(|(m, _)| &**m)
+    }
+
+    /// The messages as shared handles. A snapshot of the conversation then
+    /// costs one refcount per message instead of copying every message.
+    pub fn shared_messages(&self) -> impl ExactSizeIterator<Item = &Arc<Message>> + '_ {
         self.messages.iter().map(|(m, _)| m)
     }
 
@@ -186,7 +194,7 @@ impl History {
         self.messages
             .iter()
             .zip(self.thinking.iter())
-            .map(|((m, ts), th)| (m, *ts, th.map(|(d, _)| d)))
+            .map(|((m, ts), th)| (&**m, *ts, th.map(|(d, _)| d)))
     }
 
     /// Attach a thinking span to the last message. No-op when `duration_ms`
@@ -239,59 +247,68 @@ impl History {
     /// original ones, so a rewind that rewrites the file doesn't restamp
     /// older messages.
     pub fn records(&self) -> Vec<Record> {
+        self.records_from(0)
+    }
+
+    /// [`records`](Self::records) covering only the messages from index
+    /// `from` onward, so a caller that already persisted the earlier ones
+    /// (the app layer appending after each turn) pays only for what is new.
+    /// A turn whose final assistant message falls past `from` still emits
+    /// its usage record, so the file stays identical to a full rewrite.
+    pub fn records_from(&self, from: usize) -> Vec<Record> {
+        let from = from.min(self.messages.len());
         let mut out = Vec::with_capacity(
-            self.messages.len() + self.turn_usage.len() + self.thinking.len() + 1,
+            self.messages.len() - from + self.turn_usage.len() + self.thinking.len() + 1,
         );
-        if let Some(meta) = &self.meta {
+        if from == 0
+            && let Some(meta) = &self.meta
+        {
             out.push(Record::SessionMeta(meta.clone()));
         }
-        let first_user = self
-            .messages
-            .iter()
-            .position(|(m, _)| m.role == Role::User)
-            .unwrap_or(self.messages.len());
-        for (i, (message, timestamp)) in self.messages[..first_user].iter().enumerate() {
+        let turn_final = self.turn_final_assistants();
+        for (i, (message, timestamp)) in self.messages.iter().enumerate().skip(from) {
             out.push(Record::Message {
                 timestamp: *timestamp,
-                message: message.clone(),
+                message: (**message).clone(),
             });
             self.push_thinking_record(&mut out, i);
-        }
-        let user_starts: Vec<usize> = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(_, (m, _))| m.role == Role::User)
-            .map(|(i, _)| i)
-            .collect();
-        for (k, &start) in user_starts.iter().enumerate() {
-            let end = user_starts
-                .get(k + 1)
-                .copied()
-                .unwrap_or(self.messages.len());
-            let last_assistant = self.messages[start..end]
-                .iter()
-                .rposition(|(m, _)| m.role == Role::Assistant)
-                .map(|j| start + j);
-            for (i, (message, timestamp)) in self.messages[start..end].iter().enumerate() {
-                let i = start + i;
-                out.push(Record::Message {
+            if let Some(turn) = turn_final[i]
+                && let Some((usage, timestamp)) = self.turn_usage.get(turn)
+                && *usage != Usage::default()
+            {
+                out.push(Record::TokenUsage {
                     timestamp: *timestamp,
-                    message: message.clone(),
+                    usage: *usage,
                 });
-                self.push_thinking_record(&mut out, i);
-                if last_assistant == Some(i)
-                    && let Some((usage, timestamp)) = self.turn_usage.get(k)
-                    && *usage != Usage::default()
-                {
-                    out.push(Record::TokenUsage {
-                        timestamp: *timestamp,
-                        usage: *usage,
-                    });
-                }
             }
         }
         out
+    }
+
+    /// The turn each message's usage record belongs to: `Some(turn)` on the
+    /// last assistant message of turn `turn`, `None` on every other message.
+    /// `Role::Tool` messages belong to the turn of the tool call they answer,
+    /// so only a new `Role::User` message closes a turn.
+    fn turn_final_assistants(&self) -> Vec<Option<usize>> {
+        let mut final_of = vec![None; self.messages.len()];
+        let mut turn = None;
+        let mut last_assistant = None;
+        for (i, (message, _)) in self.messages.iter().enumerate() {
+            match message.role {
+                Role::User => {
+                    if let (Some(assistant), Some(turn)) = (last_assistant.take(), turn) {
+                        final_of[assistant] = Some(turn);
+                    }
+                    turn = Some(turn.map_or(0, |turn| turn + 1));
+                }
+                Role::Assistant => last_assistant = Some(i),
+                _ => {}
+            }
+        }
+        if let (Some(assistant), Some(turn)) = (last_assistant, turn) {
+            final_of[assistant] = Some(turn);
+        }
+        final_of
     }
 
     fn push_thinking_record(&self, out: &mut Vec<Record>, i: usize) {
@@ -755,6 +772,44 @@ mod tests {
             panic!("expected message record");
         };
         assert!(*timestamp > 0);
+    }
+
+    #[test]
+    fn records_from_appends_the_same_bytes_as_a_full_rewrite() {
+        let mut h = History::new();
+        h.ensure_session_meta("/ws".into());
+        let mut persisted = Vec::new();
+        let mut cursor = 0;
+        let steps = [
+            ("first", true),
+            ("second", false),
+            ("third", true),
+            ("fourth", false),
+        ];
+        for (index, (text, answers)) in steps.iter().enumerate() {
+            h.push(Message::user_text(*text));
+            if *answers {
+                h.push(Message::assistant_text(format!("reply {index}")));
+                h.record_usage(&usage(10 * index as u32 + 1));
+            }
+            persisted.extend(h.records_from(cursor));
+            cursor = h.len();
+        }
+        assert_records_equal(&persisted, &h.records());
+        assert!(h.records_from(h.len()).is_empty());
+        assert!(h.records_from(h.len() + 10).is_empty());
+    }
+
+    #[test]
+    fn shared_messages_alias_the_stored_messages() {
+        let mut h = History::new();
+        h.push(Message::user_text("hi"));
+        let snapshot: Vec<_> = h.shared_messages().cloned().collect();
+        assert_eq!(snapshot.len(), 1);
+        assert!(
+            Arc::ptr_eq(&snapshot[0], h.shared_messages().next().unwrap()),
+            "a snapshot must alias the stored message, not copy it"
+        );
     }
 
     #[test]

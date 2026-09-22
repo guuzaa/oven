@@ -23,6 +23,10 @@ use crate::tools::Tool;
 use crate::turn::{TurnContext, TurnOutput};
 
 const DEFAULT_MAX_ITERS: usize = 200;
+/// Cap on a tool's output as it enters the conversation, keeping a single
+/// huge `file_read`/`bash` result from being carried (and re-encoded on
+/// every request) forever.
+const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// A router shared between an `Agent` and callers that need to read it
 /// (e.g. to validate a model switch) without the exclusive `&mut Agent`
@@ -174,6 +178,12 @@ impl Agent {
         self.history.messages()
     }
 
+    /// The conversation as shared handles: a snapshot costs one refcount bump
+    /// per message instead of copying every message the app layer renders.
+    pub fn shared_history(&self) -> Vec<Arc<Message>> {
+        self.history.shared_messages().cloned().collect()
+    }
+
     pub fn history_timed(
         &self,
     ) -> impl ExactSizeIterator<Item = (&Message, u64, Option<u64>)> + '_ {
@@ -215,6 +225,13 @@ impl Agent {
     /// persists these as JSONL lines.
     pub fn history_records(&self) -> Vec<Record> {
         self.history.records()
+    }
+
+    /// [`history_records`](Self::history_records) for the messages from index
+    /// `start` onward. The App layer appends only these after each turn, so
+    /// persisting never rescales with the whole conversation.
+    pub fn history_records_from(&self, start: usize) -> Vec<Record> {
+        self.history.records_from(start)
     }
 
     /// Remove the last user turn from the conversation history, returning
@@ -402,11 +419,11 @@ impl Agent {
                     sink.emit(AgentEvent::TodosChanged { todos: list });
                 }
                 ToolResult::Success {
-                    output: truncate(&output, 1_500_000),
+                    output: truncate(&output, MAX_TOOL_OUTPUT_BYTES),
                 }
             }
             Err(error) => {
-                let output = truncate(&format!("error: {error}"), 1_500_000);
+                let output = truncate(&format!("error: {error}"), MAX_TOOL_OUTPUT_BYTES);
                 ToolResult::Failed {
                     error: error.to_string(),
                     output: Some(output),
@@ -690,12 +707,57 @@ fn log_tool_finished(name: &str, call_id: ToolCallId, result: &ToolResult, start
     );
 }
 
+/// Keeps the head and the tail of an oversized output, dropping only the
+/// middle: the opening lines carry context, the closing lines carry the
+/// result (exit status, summary, last diff hunk).
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        let end = s.floor_char_boundary(max);
-        format!("{}\n...[truncated]", &s[..end])
+        return s.to_string();
+    }
+    let head = s.floor_char_boundary(max / 2);
+    let tail_start = s.floor_char_boundary(s.len() - (max - max / 2));
+    format!("{}\n...[truncated]\n{}", &s[..head], &s[tail_start..])
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::{MAX_TOOL_OUTPUT_BYTES, truncate};
+
+    const HEAD: &str = "HEAD";
+    const TAIL: &str = "TAIL";
+    const MARKER: &str = "\n...[truncated]\n";
+
+    #[test]
+    fn short_output_is_returned_unchanged() {
+        assert_eq!(truncate("hello", MAX_TOOL_OUTPUT_BYTES), "hello");
+    }
+
+    #[test]
+    fn oversized_output_keeps_head_and_tail() {
+        let body = format!(
+            "{}{}",
+            HEAD.repeat(MAX_TOOL_OUTPUT_BYTES),
+            TAIL.repeat(MAX_TOOL_OUTPUT_BYTES)
+        );
+        let out = truncate(&body, MAX_TOOL_OUTPUT_BYTES);
+        assert!(
+            out.len() <= MAX_TOOL_OUTPUT_BYTES + MARKER.len(),
+            "cap must bound the stored output: {}",
+            out.len()
+        );
+        assert!(out.starts_with(HEAD), "the head must survive: {out:?}");
+        assert!(out.ends_with(TAIL), "the tail must survive: {out:?}");
+        assert!(out.contains(MARKER));
+    }
+
+    #[test]
+    fn truncation_never_splits_a_character() {
+        let body = "é".repeat(4 * MAX_TOOL_OUTPUT_BYTES);
+        let out = truncate(&body, MAX_TOOL_OUTPUT_BYTES - 1);
+        assert!(out.contains(MARKER));
+        assert!(out.len() <= MAX_TOOL_OUTPUT_BYTES - 1 + MARKER.len());
+        assert!(out.starts_with('é'), "must start on a char boundary");
+        assert!(out.ends_with('é'), "must end on a char boundary");
     }
 }
 

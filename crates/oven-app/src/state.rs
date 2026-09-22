@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use oven_agent::{
     Agent, AgentMode, ApprovalRequestId, LoopLimitRequestId, TodoList, ToolCallId, ToolView, TurnId,
 };
@@ -13,7 +15,9 @@ pub struct AppState {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub provider: ProviderConfig,
     pub configured_providers: Vec<String>,
-    pub history: Vec<Message>,
+    /// Shared handles to the agent's messages: publishing state (and every
+    /// `watch` clone it triggers) then costs refcounts, not the conversation.
+    pub history: Vec<Arc<Message>>,
     /// Unix-ms timestamps parallel to `history`, taken from `Record`.
     pub history_timestamps: Vec<u64>,
     /// Thinking duration in ms parallel to `history`; `None` if that message
@@ -44,7 +48,7 @@ impl AppState {
             reasoning_effort: agent.reasoning_effort(),
             provider,
             configured_providers,
-            history: agent.history().cloned().collect(),
+            history: agent.shared_history(),
             history_timestamps: agent.history_timed().map(|(_, ts, _)| ts).collect(),
             history_thinking_ms: agent.history_timed().map(|(_, _, th)| th).collect(),
             todos: agent.todos().clone(),

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::collapsible::Collapsible;
@@ -114,7 +115,7 @@ impl Transcript {
         self.replace_from_timed(&timed_messages(messages));
     }
 
-    pub(crate) fn replace_from_timed(&mut self, messages: &[(Message, u64, Option<u64>)]) {
+    pub(crate) fn replace_from_timed(&mut self, messages: &[(Arc<Message>, u64, Option<u64>)]) {
         self.reset();
         self.seed_timed(messages);
     }
@@ -127,7 +128,7 @@ impl Transcript {
         self.seed_timed(&timed_messages(messages));
     }
 
-    pub fn seed_timed(&mut self, messages: &[(Message, u64, Option<u64>)]) {
+    pub fn seed_timed(&mut self, messages: &[(Arc<Message>, u64, Option<u64>)]) {
         for (m, _, thinking_ms) in messages {
             match m.role {
                 Role::User => {
@@ -976,6 +977,10 @@ fn result_text(content: &[ContentBlock]) -> String {
 }
 
 #[cfg(test)]
-fn timed_messages(messages: &[Message]) -> Vec<(Message, u64, Option<u64>)> {
-    messages.iter().cloned().map(|m| (m, 0, None)).collect()
+fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)> {
+    messages
+        .iter()
+        .cloned()
+        .map(|m| (Arc::new(m), 0, None))
+        .collect()
 }

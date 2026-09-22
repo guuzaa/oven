@@ -5,6 +5,7 @@ use crate::session::{Session, canonical_root};
 use crate::state::{AppPhase, StateChange, StateEvent};
 use crate::{App, AppBuilder};
 use crate::{LocalShell, runtime::*};
+use std::borrow::Borrow;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -73,9 +74,17 @@ fn text_response(text: &str) -> Response {
     }
 }
 
+fn history(handle: &App) -> Vec<Arc<Message>> {
+    handle
+        .history_timed_shared()
+        .into_iter()
+        .map(|(message, _, _)| message)
+        .collect()
+}
+
 fn timed_thinking_ms(handle: &App) -> Vec<Option<u64>> {
     handle
-        .history_timed()
+        .history_timed_shared()
         .into_iter()
         .map(|(_, _, thinking_ms)| thinking_ms)
         .collect()
@@ -597,7 +606,7 @@ async fn slash_compact_replaces_history_and_switches_session() {
     assert!(saw_started);
     assert_eq!(completed, Some((10, 5)));
 
-    let history = handle.history();
+    let history = history(&handle);
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].role, Role::User);
 
@@ -637,7 +646,7 @@ async fn failed_compact_keeps_history_and_reports_error() {
     assert_eq!(handle.prompt("hello").await.unwrap(), "one");
     let err = handle.prompt("/compact").await.unwrap_err();
     assert!(err.to_string().contains("compact failed"), "got: {err}");
-    assert_eq!(handle.history().len(), 2);
+    assert_eq!(history(&handle).len(), 2);
     handle.shutdown().await;
 }
 
@@ -672,7 +681,7 @@ async fn auto_compact_triggers_when_context_exceeds_threshold() {
     .await
     .expect("auto-compaction should complete");
     assert_eq!(completed, (90, 5));
-    assert_eq!(handle.history().len(), 1);
+    assert_eq!(history(&handle).len(), 1);
     handle.shutdown().await;
 }
 
@@ -696,7 +705,7 @@ async fn auto_compact_skipped_when_window_unknown() {
             "no compaction should run without a known context window"
         );
     }
-    assert_eq!(handle.history().len(), 4);
+    assert_eq!(history(&handle).len(), 4);
     handle.shutdown().await;
 }
 
@@ -1134,8 +1143,8 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
     let mock2 = MockProvider::new(vec![text_response("three")]);
     let session = Session::open(&dir, "s1").unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
-    let timed = handle.history_timed();
-    assert_eq!(timed.len(), handle.history().len());
+    let timed = handle.history_timed_shared();
+    assert_eq!(timed.len(), history(&handle).len());
     assert!(
         timed.iter().any(|(_, ts, _)| *ts > 0),
         "resumed history keeps Record timestamps"
@@ -1152,7 +1161,7 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
         .send(AppCommand::Control(ControlCommand::Rewind))
         .unwrap();
     wait_rewound(&mut sub).await;
-    assert_eq!(user_texts(&handle.history()), vec!["first"]);
+    assert_eq!(user_texts(&history(&handle)), vec!["first"]);
     assert_eq!(
         (
             handle.last_turn_usage().input_tokens,
@@ -1293,7 +1302,7 @@ async fn open_session_creates_uuid_when_id_missing() {
     let mock = MockProvider::new(vec![text_response("one")]);
     let session = Session::resolve(&dir, Some("missing")).unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
-    assert!(handle.history().is_empty(), "fresh session has no history");
+    assert!(history(&handle).is_empty(), "fresh session has no history");
     assert_eq!(handle.prompt("hello").await.unwrap(), "one");
     handle.shutdown().await;
 
@@ -1406,7 +1415,7 @@ async fn open_session_resumes_existing_id() {
     let session = Session::resolve(&dir, Some("s1")).unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
     assert_eq!(handle.session_id().as_deref(), Some("s1"));
-    let resumed = handle.history();
+    let resumed = history(&handle);
     assert_eq!(resumed.iter().filter(|m| m.role == Role::User).count(), 1);
     assert!(resumed.iter().any(|m| {
         m.role == Role::User
@@ -1645,9 +1654,10 @@ async fn clear_updates_recent_index_to_fresh_session() {
     );
 }
 
-fn user_texts(messages: &[Message]) -> Vec<String> {
+fn user_texts<M: Borrow<Message>>(messages: &[M]) -> Vec<String> {
     messages
         .iter()
+        .map(Borrow::borrow)
         .filter(|m| m.role == Role::User)
         .filter_map(|m| match &m.content[0] {
             ContentBlock::Text { text } => Some(text.clone()),
@@ -1689,14 +1699,14 @@ async fn rewind_while_idle_emits_rewound_and_drops_last_exchange() {
         .send(AppCommand::Control(ControlCommand::Rewind))
         .unwrap();
     wait_rewound(&mut sub).await;
-    assert_eq!(user_texts(&handle.history()), vec!["first"]);
+    assert_eq!(user_texts(&history(&handle)), vec!["first"]);
 
     assert_eq!(handle.prompt("third").await.unwrap(), "three");
     handle
         .send(AppCommand::Control(ControlCommand::Rewind))
         .unwrap();
     wait_rewound(&mut sub).await;
-    assert_eq!(user_texts(&handle.history()), vec!["first"]);
+    assert_eq!(user_texts(&history(&handle)), vec!["first"]);
 
     handle.shutdown().await;
 }
@@ -1713,7 +1723,7 @@ async fn rewind_with_nothing_to_remove_emits_none() {
         .send(AppCommand::Control(ControlCommand::Rewind))
         .unwrap();
     wait_rewound(&mut sub).await;
-    assert!(handle.history().is_empty());
+    assert!(history(&handle).is_empty());
     assert_eq!(handle.last_turn_usage(), Usage::default());
 
     handle.shutdown().await;
@@ -1851,7 +1861,7 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
     );
     assert!(rewound, "HistoryChanged must be emitted");
     assert!(
-        handle.history().is_empty(),
+        history(&handle).is_empty(),
         "the whole exchange is rolled back"
     );
     assert_eq!(handle.last_turn_usage(), Usage::default());
@@ -2778,7 +2788,7 @@ async fn bang_shell_does_not_call_provider() {
         "shell should return to idle"
     );
 
-    let history = handle.history();
+    let history = history(&handle);
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].role, Role::User);
     let parsed = LocalShell::try_parse(&user_texts(&history)[0]).expect("envelope");
@@ -2803,7 +2813,7 @@ async fn ask_mode_bang_shell_runs_without_approval() {
     assert!(out.contains("hi"), "{out}");
     assert!(handle.state().phase.is_idle());
     assert_eq!(handle.state().mode, AgentMode::Ask);
-    let parsed = LocalShell::try_parse(&user_texts(&handle.history())[0]).expect("envelope");
+    let parsed = LocalShell::try_parse(&user_texts(&history(&handle))[0]).expect("envelope");
     assert_eq!(parsed.command, "echo hi");
     assert_eq!(parsed.exit_code, Some(0));
     handle.shutdown().await;
@@ -2816,7 +2826,7 @@ async fn empty_bang_does_not_push_history() {
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     let out = handle.prompt("!").await.unwrap();
     assert!(out.contains("empty shell command"), "{out}");
-    assert!(handle.history().is_empty());
+    assert!(history(&handle).is_empty());
     handle.shutdown().await;
 }
 
@@ -2828,7 +2838,7 @@ async fn bang_shell_nonzero_exit_is_finished_not_agent_turn() {
     let mut rx = handle.subscribe();
     handle.send(AppCommand::Prompt("!exit 7".into())).unwrap();
     wait_settled(&mut rx).await;
-    let parsed = LocalShell::try_parse(&user_texts(&handle.history())[0]).unwrap();
+    let parsed = LocalShell::try_parse(&user_texts(&history(&handle))[0]).unwrap();
     assert_eq!(parsed.exit_code, Some(7));
     assert!(
         parsed.output.contains("[exit code: 7]"),
@@ -2866,7 +2876,7 @@ async fn bang_shell_cancel_commits_cancelled_envelope() {
         .unwrap();
     wait_settled(&mut rx).await;
 
-    let parsed = LocalShell::try_parse(&user_texts(&handle.history())[0]).unwrap();
+    let parsed = LocalShell::try_parse(&user_texts(&history(&handle))[0]).unwrap();
     assert_eq!(parsed.command, "sleep 60");
     assert_eq!(parsed.error.as_deref(), Some("cancelled"));
     assert!(handle.state().phase.is_idle());
@@ -2901,13 +2911,13 @@ async fn bang_shell_persists_and_rewinds() {
 
     let session = Session::open(&dir, "s1").unwrap();
     let handle = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
-    assert_eq!(handle.history().len(), 1);
+    assert_eq!(history(&handle).len(), 1);
     let mut sub = handle.subscribe();
     handle
         .send(AppCommand::Control(ControlCommand::Rewind))
         .unwrap();
     wait_rewound(&mut sub).await;
-    assert!(handle.history().is_empty());
+    assert!(history(&handle).is_empty());
     handle.shutdown().await;
 }
 
@@ -2961,7 +2971,7 @@ async fn bang_shell_queues_behind_agent_turn() {
     wait_settled(&mut sub).await;
     wait_settled(&mut sub).await;
 
-    let texts = user_texts(&handle.history());
+    let texts = user_texts(&history(&handle));
     assert_eq!(texts.len(), 2, "{texts:?}");
     assert_eq!(texts[0], "block");
     let parsed = LocalShell::try_parse(&texts[1]).unwrap();

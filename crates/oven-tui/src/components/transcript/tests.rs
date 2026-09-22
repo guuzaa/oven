@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
     AgentEvent, AppEvent, ApprovalRequestId, LocalShell, LoopLimitRequestId, ShellEvent,
@@ -608,16 +610,16 @@ fn reported_thinking_duration_survives_the_tool_it_led_to() {
 fn seeded_reasoning_renders_before_the_answer_it_precedes() {
     let mut t = Transcript::new();
     t.seed_timed(&[
-        (Message::user_text("q"), 0, None),
+        (Arc::new(Message::user_text("q")), 0, None),
         (
-            Message::assistant(vec![
+            Arc::new(Message::assistant(vec![
                 ContentBlock::Text {
                     text: "answer".into(),
                 },
                 ContentBlock::Thinking {
                     thinking: "reasoning".into(),
                 },
-            ]),
+            ])),
             1_000,
             Some(1_500),
         ),
@@ -941,9 +943,9 @@ fn seed_collapses_consecutive_thinking() {
 fn seed_without_thinking_record_keeps_thought_label() {
     let mut t = Transcript::new();
     t.seed_timed(&[(
-        Message::assistant(vec![ContentBlock::Thinking {
+        Arc::new(Message::assistant(vec![ContentBlock::Thinking {
             thinking: "plan".into(),
-        }]),
+        }])),
         1_000,
         None,
     )]);
@@ -954,12 +956,12 @@ fn seed_without_thinking_record_keeps_thought_label() {
 fn seed_timed_shows_thought_duration() {
     let mut t = Transcript::new();
     t.seed_timed(&[(
-        Message::assistant(vec![
+        Arc::new(Message::assistant(vec![
             ContentBlock::Thinking {
                 thinking: "plan".into(),
             },
             ContentBlock::Text { text: "ok".into() },
-        ]),
+        ])),
         2_500,
         Some(1_500),
     )]);

@@ -55,7 +55,9 @@ pub(crate) struct Runtime {
     pub(crate) user_config_path: Option<PathBuf>,
     pub(crate) events: EventBus,
     pub(crate) slash: SlashRegistry,
-    pub(crate) persisted_prefix: usize,
+    /// Messages already written to the current session file; everything past
+    /// it is appended after each turn.
+    pub(crate) persisted_messages: usize,
     pub(crate) persisted_rev: u64,
     pub(crate) pending: VecDeque<AppCommand>,
 }
@@ -72,8 +74,8 @@ impl Runtime {
         state: AppState,
         state_tx: watch::Sender<AppState>,
     ) -> Self {
-        let persisted_prefix = match &session {
-            Some(store) if store.current().path().exists() => agent.history_records().len(),
+        let persisted_messages = match &session {
+            Some(store) if store.current().path().exists() => agent.history().len(),
             _ => 0,
         };
         let persisted_rev = agent.history_revision();
@@ -89,7 +91,7 @@ impl Runtime {
             user_config_path,
             events,
             slash: SlashRegistry::with_builtin(),
-            persisted_prefix,
+            persisted_messages,
             persisted_rev,
             pending: VecDeque::new(),
         }
@@ -333,21 +335,20 @@ impl Runtime {
             Some(store) => {
                 let mut errors = Vec::new();
                 let rev = self.agent.history_revision();
-                let after = self.agent.history_records();
                 if rev != self.persisted_rev {
-                    self.persisted_prefix = 0;
+                    self.persisted_messages = 0;
                     self.persisted_rev = rev;
-                } else if after.len() > self.persisted_prefix {
-                    if let Err(error) = store
-                        .current()
-                        .append_records(&after[self.persisted_prefix..])
-                    {
-                        errors.push(error.to_string());
-                    } else {
-                        store.mark_content(true);
-                        self.persisted_prefix = after.len();
-                        if let Err(error) = record_recent_path(store) {
+                } else {
+                    let pending = self.agent.history_records_from(self.persisted_messages);
+                    if !pending.is_empty() {
+                        if let Err(error) = store.current().append_records(&pending) {
                             errors.push(error.to_string());
+                        } else {
+                            store.mark_content(true);
+                            self.persisted_messages = self.agent.history().len();
+                            if let Err(error) = record_recent_path(store) {
+                                errors.push(error.to_string());
+                            }
                         }
                     }
                 }
@@ -555,14 +556,14 @@ impl Runtime {
     /// switched session file.
     fn persist_compacted(&mut self) {
         self.persisted_rev = self.agent.history_revision();
-        self.persisted_prefix = 0;
+        self.persisted_messages = 0;
         let mut errors = Vec::new();
         if let Some(store) = &self.session {
             let recs = self.agent.history_records();
             match store.current().overwrite(&recs) {
                 Ok(()) => {
                     store.mark_content(true);
-                    self.persisted_prefix = recs.len();
+                    self.persisted_messages = self.agent.history().len();
                     if let Err(e) = record_recent_path(store) {
                         errors.push(e.to_string());
                     }
@@ -588,7 +589,7 @@ impl Runtime {
         self.state.mode = self.agent.mode();
         self.state.model = self.agent.model().to_string();
         self.state.reasoning_effort = self.agent.reasoning_effort();
-        self.state.history = self.agent.history().cloned().collect();
+        self.state.history = self.agent.shared_history();
         self.state.history_timestamps = self.agent.history_timed().map(|(_, ts, _)| ts).collect();
         self.state.history_thinking_ms = self.agent.history_timed().map(|(_, _, th)| th).collect();
         self.state.todos = self.agent.todos().clone();
@@ -640,7 +641,7 @@ impl Runtime {
         if let Some(store) = &self.session {
             self.agent.ensure_session_meta(store.root.clone());
         }
-        self.persisted_prefix = 0;
+        self.persisted_messages = 0;
         self.persisted_rev = self.agent.history_revision();
         self.sync_state();
         self.publish();
@@ -804,7 +805,7 @@ impl Runtime {
             None => true,
         };
         if store_ok {
-            self.persisted_prefix = self.agent.history_records().len();
+            self.persisted_messages = self.agent.history().len();
         }
         self.persisted_rev = self.agent.history_revision();
         self.sync_state();

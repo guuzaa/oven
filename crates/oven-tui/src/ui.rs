@@ -107,7 +107,7 @@ impl Ui {
 
     #[inline]
     fn load_transcript(&mut self) {
-        self.transcript.seed_timed(&self.app.history_timed());
+        self.transcript.seed_timed(&self.app.history_timed_shared());
     }
 
     pub async fn run(mut self) -> io::Result<()> {
@@ -248,7 +248,7 @@ impl Ui {
                 StateChange::ModeChanged { mode } => self.state.mode = *mode,
                 StateChange::HistoryChanged { .. } => {
                     self.transcript
-                        .replace_from_timed(&self.app.history_timed());
+                        .replace_from_timed(&self.app.history_timed_shared());
                     self.rewinding = false;
                 }
                 _ => {}
