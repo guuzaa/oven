@@ -19,12 +19,8 @@ pub enum AgentEvent {
     Turn(TurnEvent),
     Stream(StreamEvent),
     Tool(ToolEvent),
-    TodosChanged {
-        todos: TodoList,
-    },
-    Usage {
-        usage: Usage,
-    },
+    TodosChanged { todos: TodoList },
+    Usage { usage: Usage },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

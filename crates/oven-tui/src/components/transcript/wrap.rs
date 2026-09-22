@@ -16,12 +16,14 @@ use super::kinds::{
 };
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
-pub(super) const MAX_LIVE_BODY_LINES: usize = 8;
+/// Screen rows — counted after wrapping — a body still receiving content may
+/// occupy, so a line that wraps into many rows is capped by the rows it takes,
+/// not by the newline it came from.
+pub(super) const MAX_LIVE_BODY_ROWS: usize = 8;
 pub(super) const THINKING_LABEL: &str = "Thinking...";
 pub(super) const THOUGHT_LABEL: &str = "Thought";
 pub(super) const RESULT_LABEL: &str = "Result";
 const EARLIER_LINES: &str = "earlier lines";
-const EARLIER_CALLS: &str = "earlier calls";
 const MS_PER_SECOND: u64 = 1000;
 const MS_PER_TENTH: u64 = 100;
 const TENTHS_PER_SECOND: u64 = 10;
@@ -31,6 +33,8 @@ const PERIOD: f32 = 1400.0;
 const SHADE_MIN: f32 = 88.0;
 const SHADE_MAX: f32 = 220.0;
 const THOUGHT_FOR: &str = "Thought for";
+/// Rows the … N earlier lines marker occupies inside a live body budget.
+const MARKER_ROWS: usize = 1;
 
 fn format_duration(ms: u64) -> String {
     let mins = ms / MS_PER_MINUTE;
@@ -161,20 +165,12 @@ fn earlier_lines(skipped: usize) -> String {
     format!("… {skipped} {EARLIER_LINES}")
 }
 
-fn earlier_marker(skipped: usize, label: &str, depth: usize) -> Line<'static> {
+fn earlier_lines_marker(skipped: usize) -> Line<'static> {
     let style = theme::dim();
     Line::from(vec![
-        Span::styled(body_prefix(depth), style),
-        Span::styled(format!("… {skipped} {label}"), style),
+        Span::styled(body_prefix(0), style),
+        Span::styled(earlier_lines(skipped), style),
     ])
-}
-
-fn earlier_lines_marker(skipped: usize, depth: usize) -> Line<'static> {
-    earlier_marker(skipped, EARLIER_LINES, depth)
-}
-
-fn earlier_calls_marker(skipped: usize) -> Line<'static> {
-    earlier_marker(skipped, EARLIER_CALLS, 0)
 }
 
 /// Left margin every row at nesting `depth` shares, so bodies line up.
@@ -240,7 +236,7 @@ pub(super) fn wrap_collapsible_into(
     title: &str,
     collapsible: &Collapsible,
     width: usize,
-    live_limit: Option<usize>,
+    live_rows: Option<usize>,
 ) -> Vec<Header> {
     if !out.is_empty() {
         out.push(Line::from(""));
@@ -250,24 +246,43 @@ pub(super) fn wrap_collapsible_into(
         Span::styled(marker_prefix(collapsible, 0), style),
         Span::styled(title.to_string(), style),
     ]);
-    let line = out.len();
-    wrap_line_into(out, &header, width, kind);
     let mut headers = vec![Header {
-        line,
+        line: out.len(),
         path: Vec::new(),
     }];
+    wrap_line_into(out, &header, width, kind);
     if collapsible.is_expanded() {
-        headers.extend(wrap_sections_into(
-            out,
-            collapsible,
-            kind,
-            width,
-            live_limit,
-            0,
-            &[],
-        ));
+        let body = out.len();
+        let mut nested = wrap_sections_into(out, collapsible, kind, width, 0, &[]);
+        if let Some(rows) = live_rows {
+            window_live_body(out, &mut nested, body, rows);
+        }
+        headers.extend(nested);
     }
     headers
+}
+
+/// Keeps a live body within `rows` screen rows, so deltas cannot push older
+/// rows out of the view. Rows dropped from the head — counted after wrapping,
+/// so a single long line may cost many of them — hide behind one marker row.
+fn window_live_body(
+    out: &mut Vec<Line<'static>>,
+    nested: &mut Vec<Header>,
+    body: usize,
+    rows: usize,
+) {
+    let total = out.len() - body;
+    if total <= rows {
+        return;
+    }
+    let skipped = total - rows + MARKER_ROWS;
+    let cut = body + skipped;
+    out.drain(body..cut);
+    out.insert(body, earlier_lines_marker(skipped));
+    nested.retain(|header| header.line >= cut);
+    for header in nested {
+        header.line -= skipped - MARKER_ROWS;
+    }
 }
 
 fn wrap_sections_into(
@@ -275,25 +290,16 @@ fn wrap_sections_into(
     collapsible: &Collapsible,
     kind: LineKind,
     width: usize,
-    live_limit: Option<usize>,
     depth: usize,
     path: &[usize],
 ) -> Vec<Header> {
     let mut headers = Vec::new();
-    let (skipped, sections) = collapsible.visible_sections(live_limit);
-    if skipped > 0 {
-        wrap_line_into(out, &earlier_calls_marker(skipped), width, kind);
-    }
-    for (idx, section) in sections.iter().enumerate() {
+    for (idx, section) in collapsible.sections().iter().enumerate() {
         let mut path = path.to_vec();
-        path.push(skipped + idx);
+        path.push(idx);
         match section {
             Section::Text(text) => {
-                let (dropped, lines) = visible_lines(text, live_limit);
-                if dropped > 0 {
-                    wrap_line_into(out, &earlier_lines_marker(dropped, depth), width, kind);
-                }
-                for part in lines {
+                for part in text.lines() {
                     let style = kind.style();
                     let line = Line::from(vec![
                         Span::styled(body_prefix(depth), style),
@@ -324,7 +330,6 @@ fn wrap_sections_into(
                         detail,
                         *item_kind,
                         width,
-                        live_limit,
                         depth + 1,
                         &path,
                     ));
@@ -333,12 +338,6 @@ fn wrap_sections_into(
         }
     }
     headers
-}
-
-/// Newest `limit` lines of a section that is still growing.
-fn visible_lines(text: &str, limit: Option<usize>) -> (usize, impl Iterator<Item = &str> + '_) {
-    let skipped = limit.map_or(0, |max| text.lines().count().saturating_sub(max));
-    (skipped, text.lines().skip(skipped))
 }
 
 pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {

@@ -20,7 +20,7 @@ use super::kinds::{Header, LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::ToolBurst;
 use super::wrap::{
-    MAX_LIVE_BODY_LINES, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
+    MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
     apply_hover, apply_thinking_shimmer, collect_lines, format_lines, format_thought,
     line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
     wrap_collapsible_into, wrap_line_into, wrap_row_into,
@@ -419,10 +419,10 @@ impl Transcript {
         out: &mut Vec<Line<'static>>,
         row: &Row,
         width: usize,
-        live_limit: Option<usize>,
+        live_rows: Option<usize>,
     ) -> Vec<Header> {
         if let Some(collapsible) = &row.collapsible {
-            wrap_collapsible_into(out, row.kind, &row.text, collapsible, width, live_limit)
+            wrap_collapsible_into(out, row.kind, &row.text, collapsible, width, live_rows)
         } else {
             wrap_row_into(out, row.kind, &row.text, width);
             Vec::new()
@@ -465,20 +465,20 @@ impl Transcript {
 
     fn wrap_row(&mut self, idx: usize) {
         let width = self.width();
-        let live_limit = self.live_body_limit(idx);
+        let live_rows = self.live_body_rows(idx);
         let headers = if width == 0 {
             Vec::new()
         } else {
-            Self::wrap_row_into(&mut self.wrapped, &self.rows[idx], width, live_limit)
+            Self::wrap_row_into(&mut self.wrapped, &self.rows[idx], width, live_rows)
         };
         self.rows[idx].headers = headers;
     }
 
     /// A body that is still growing — live thinking deltas or an open tool burst
-    /// — renders only its newest lines, so it cannot scroll the view upward.
-    fn live_body_limit(&self, idx: usize) -> Option<usize> {
+    /// — renders only its newest screen rows, so it cannot scroll the view up.
+    fn live_body_rows(&self, idx: usize) -> Option<usize> {
         let live = Some(idx) == self.thinking_row || Some(idx) == self.burst_row;
-        live.then_some(MAX_LIVE_BODY_LINES)
+        live.then_some(MAX_LIVE_BODY_ROWS)
     }
 
     fn wrap_rows(&mut self, start: usize, end: usize) {

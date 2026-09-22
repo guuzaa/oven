@@ -70,11 +70,9 @@ impl Collapsible {
         self.pinned = self.expanded;
     }
 
-    /// Newest `limit` sections of a still-growing body, with the count dropped
-    /// from the head, so a growing row cannot scroll the view upward.
-    pub(super) fn visible_sections(&self, limit: Option<usize>) -> (usize, &[Section]) {
-        let skipped = limit.map_or(0, |max| self.sections.len().saturating_sub(max));
-        (skipped, &self.sections[skipped..])
+    /// Every nested item and text block, in order; a nested path indexes this.
+    pub(super) fn sections(&self) -> &[Section] {
+        &self.sections
     }
 
     /// Returns whether it was expanded before collapsing.
@@ -94,17 +92,7 @@ impl Collapsible {
 
 #[cfg(test)]
 mod tests {
-    use super::{Collapsible, Section};
-
-    const LIMIT: usize = 8;
-
-    fn grown(items: usize) -> Collapsible {
-        Collapsible::from_sections(
-            (0..items)
-                .map(|i| Section::Text(format!("s{i}")))
-                .collect::<Vec<_>>(),
-        )
-    }
+    use super::Collapsible;
 
     #[test]
     fn new_starts_expanded() {
@@ -114,27 +102,11 @@ mod tests {
     }
 
     #[test]
-    fn limited_sections_keep_the_tail() {
-        let item = grown(LIMIT + 4);
-        let (skipped, sections) = item.visible_sections(Some(LIMIT));
-        assert_eq!(skipped, 4);
-        assert_eq!(sections.len(), LIMIT);
-        assert!(matches!(sections.last(), Some(Section::Text(text)) if text == "s11"));
-    }
-
-    #[test]
-    fn unlimited_sections_keep_everything() {
-        let item = grown(LIMIT + 2);
-        let (skipped, sections) = item.visible_sections(None);
-        assert_eq!((skipped, sections.len()), (0, LIMIT + 2));
-    }
-
-    #[test]
     fn appended_text_extends_the_last_section() {
         let mut item = Collapsible::new("one");
         item.append(" two");
         assert_eq!(item.body(), "one two");
-        assert_eq!(item.visible_sections(None).1.len(), 1);
+        assert_eq!(item.sections().len(), 1);
     }
 
     #[test]

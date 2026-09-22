@@ -22,7 +22,7 @@ use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
 use super::widget::{LOOP_LIMIT_REACHED, Transcript};
 use super::wrap::{
-    MAX_LIVE_BODY_LINES, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer,
+    MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer,
     format_lines, format_thought, line_display_width, tail_lines,
 };
 
@@ -1103,13 +1103,15 @@ fn burst_double_click_toggles_call_list() {
     );
 }
 
-const EARLIER_4: &str = "… 4 earlier lines";
-const EARLIER_2_CALLS: &str = "… 2 earlier calls";
+const EARLIER_5_LINES: &str = "… 5 earlier lines";
+const EARLIER_3_LINES: &str = "… 3 earlier lines";
+const EARLIER_23_LINES: &str = "… 23 earlier lines";
+const EARLIER_2_LINES: &str = "… 2 earlier lines";
 
 #[test]
 fn live_thinking_body_windows_to_the_newest_lines() {
     let mut t = Transcript::new();
-    stream_thinking(&mut t, MAX_LIVE_BODY_LINES + 4);
+    stream_thinking(&mut t, MAX_LIVE_BODY_ROWS + 4);
     ready(&mut t, Rect::new(0, 0, 80, 24));
     let has = |needle: &str| {
         t.wrapped
@@ -1117,7 +1119,7 @@ fn live_thinking_body_windows_to_the_newest_lines() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(EARLIER_4), "{:?}", t.wrapped);
+    assert!(has(EARLIER_5_LINES), "{:?}", t.wrapped);
     assert!(has("t12"));
     assert!(!has("t04"));
 
@@ -1127,7 +1129,7 @@ fn live_thinking_body_windows_to_the_newest_lines() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_4));
+    assert!(!has(EARLIER_5_LINES));
     assert!(!has("t12"), "no gap is left before the next row");
 
     double_click(&mut t, 2, 0);
@@ -1136,7 +1138,7 @@ fn live_thinking_body_windows_to_the_newest_lines() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_4));
+    assert!(!has(EARLIER_5_LINES));
     assert!(has("t01"));
     assert!(has("t12"));
 }
@@ -1144,7 +1146,7 @@ fn live_thinking_body_windows_to_the_newest_lines() {
 #[test]
 fn open_tool_burst_body_windows_to_the_newest_calls() {
     let mut t = Transcript::new();
-    for i in 1..=(MAX_LIVE_BODY_LINES + 2) as u64 {
+    for i in 1..=(MAX_LIVE_BODY_ROWS + 2) as u64 {
         t.on_event(&tool_start(
             i,
             "bash",
@@ -1158,7 +1160,7 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(EARLIER_2_CALLS), "{:?}", t.wrapped);
+    assert!(has(EARLIER_3_LINES), "{:?}", t.wrapped);
     assert!(has("c10"));
     assert!(!has("c01"));
 
@@ -1168,7 +1170,7 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_2_CALLS));
+    assert!(!has(EARLIER_3_LINES));
     assert!(!has("c10"), "the burst closes once the turn moves on");
 
     let header = t
@@ -1182,7 +1184,7 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_2_CALLS));
+    assert!(!has(EARLIER_3_LINES));
     assert!(has("c01"));
     assert!(has("c10"));
 }
@@ -1190,7 +1192,7 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
 #[test]
 fn live_diff_burst_windows_to_the_newest_calls() {
     let mut t = Transcript::new();
-    for i in 1..=(MAX_LIVE_BODY_LINES + 2) {
+    for i in 1..=(MAX_LIVE_BODY_ROWS + 2) {
         t.on_event(&tool_start(
             i as u64,
             "file_edit",
@@ -1208,7 +1210,7 @@ fn live_diff_burst_windows_to_the_newest_calls() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(EARLIER_2_CALLS), "{:?}", t.wrapped);
+    assert!(has(EARLIER_23_LINES), "{:?}", t.wrapped);
     assert!(has("Edit src/f10.rs"));
     assert!(!has("Edit src/f01.rs"));
     assert!(has("- old"), "a visible item still shows its diff");
@@ -1219,7 +1221,7 @@ fn live_diff_burst_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_2_CALLS));
+    assert!(!has(EARLIER_23_LINES));
     assert!(
         !has("Edit src/f10.rs"),
         "the burst closes once the turn moves on"
@@ -1233,6 +1235,42 @@ fn live_diff_burst_windows_to_the_newest_calls() {
             .any(|line| line_text(line).contains(needle))
     };
     assert!(has("Edit src/f01.rs") && has("Edit src/f10.rs"));
+}
+
+/// Columns an 80-wide body has under its 3-column prefix.
+const WRAP_COLUMNS: usize = 77;
+const TAIL_COLUMNS: usize = 40;
+
+#[test]
+fn live_body_window_counts_wrapped_rows() {
+    let mut t = Transcript::new();
+    let long = "z".repeat(WRAP_COLUMNS * MAX_LIVE_BODY_ROWS + TAIL_COLUMNS);
+    t.on_event(&thinking(&format!("{long}\n")));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+
+    assert_eq!(
+        t.wrapped.len(),
+        1 + MAX_LIVE_BODY_ROWS,
+        "one physical line costs every row it occupies, not just one"
+    );
+    assert!(
+        line_text(&t.wrapped[1]).contains(EARLIER_2_LINES),
+        "{:?}",
+        t.wrapped
+    );
+    let zs = |line: &Line<'_>| line_text(line).matches('z').count();
+    assert_eq!(zs(t.wrapped.last().unwrap()), TAIL_COLUMNS);
+
+    t.on_event(&thinking_done(1_500));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert_eq!(t.wrapped.len(), 1, "a retired row collapses at once");
+
+    double_click(&mut t, 2, 0);
+    assert_eq!(
+        t.wrapped.len(),
+        2 + MAX_LIVE_BODY_ROWS,
+        "the whole body renders once the row stops streaming"
+    );
 }
 
 fn todo_input() -> serde_json::Value {
@@ -1270,8 +1308,7 @@ fn diff_items(t: &Transcript) -> Vec<(String, String)> {
         .collapsible
         .as_ref()
         .expect("burst detail")
-        .visible_sections(None)
-        .1
+        .sections()
         .iter()
         .filter_map(|section| match section {
             Section::Item { title, detail, .. } => Some((title.clone(), detail.body())),
