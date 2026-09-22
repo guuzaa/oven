@@ -1,7 +1,7 @@
 use ratatui::style::Style;
 
-use super::super::collapsible::Collapsible;
 use super::super::theme;
+use super::collapsible::Collapsible;
 
 pub(super) const LINE_PREFIX_WIDTH: usize = 2;
 pub(super) const LINE_INDENT: &str = "  ";
@@ -64,5 +64,15 @@ pub(super) struct Row {
     pub kind: LineKind,
     pub text: String,
     pub collapsible: Option<Collapsible>,
-    pub header: Option<usize>,
+    /// Marker lines, in wrapped-line order: the row's own header first, then
+    /// one per nested item.
+    pub headers: Vec<Header>,
+}
+
+/// A clickable ▸/▾ marker. `path` walks nested items by section index, so an
+/// empty path is the row itself.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Header {
+    pub(super) line: usize,
+    pub(super) path: Vec<usize>,
 }

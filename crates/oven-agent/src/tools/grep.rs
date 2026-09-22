@@ -42,7 +42,7 @@ impl GrepTool {
         ToolView {
             summary,
             collapse: true,
-            diff: false,
+            detail: None,
         }
     }
 

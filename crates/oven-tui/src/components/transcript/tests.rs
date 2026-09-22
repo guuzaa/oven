@@ -13,6 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
+use super::collapsible::Section;
 use super::kinds::{COLLAPSED_MARKER, LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, MESSAGE_INDENT};
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
@@ -746,7 +747,7 @@ fn expanding_a_block_grows_downward_and_keeps_its_header() {
     let detail = t.rows[8].collapsible.as_ref().expect("result detail");
     assert!(!detail.is_expanded(), "a later row collapsed it");
 
-    let header = t.rows[8].header.expect("collapsible header");
+    let header = t.rows[8].headers[0].line;
     let top = t.current_top();
     assert!(t.top.is_none(), "the view follows the bottom");
     assert!(top <= header && header < top + 6, "header is on screen");
@@ -1101,7 +1102,7 @@ fn burst_double_click_toggles_call_list() {
 }
 
 const EARLIER_4: &str = "… 4 earlier lines";
-const EARLIER_2: &str = "… 2 earlier lines";
+const EARLIER_2_CALLS: &str = "… 2 earlier calls";
 
 #[test]
 fn live_thinking_body_windows_to_the_newest_lines() {
@@ -1155,7 +1156,7 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(EARLIER_2), "{:?}", t.wrapped);
+    assert!(has(EARLIER_2_CALLS), "{:?}", t.wrapped);
     assert!(has("c10"));
     assert!(!has("c01"));
 
@@ -1165,7 +1166,7 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_2));
+    assert!(!has(EARLIER_2_CALLS));
     assert!(!has("c10"), "the burst closes once the turn moves on");
 
     let header = t
@@ -1179,9 +1180,57 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_2));
+    assert!(!has(EARLIER_2_CALLS));
     assert!(has("c01"));
     assert!(has("c10"));
+}
+
+#[test]
+fn live_diff_burst_windows_to_the_newest_calls() {
+    let mut t = Transcript::new();
+    for i in 1..=(MAX_LIVE_BODY_LINES + 2) {
+        t.on_event(&tool_start(
+            i as u64,
+            "file_edit",
+            serde_json::json!({
+                "path": format!("src/f{i:02}.rs"),
+                "old_string": "old",
+                "new_string": "new"
+            }),
+        ));
+    }
+    ready(&mut t, Rect::new(0, 0, 80, 40));
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+
+    assert!(has(EARLIER_2_CALLS), "{:?}", t.wrapped);
+    assert!(has("Edit src/f10.rs"));
+    assert!(!has("Edit src/f01.rs"));
+    assert!(has("- old"), "a visible item still shows its diff");
+
+    t.on_event(&completed());
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(!has(EARLIER_2_CALLS));
+    assert!(
+        !has("Edit src/f10.rs"),
+        "the burst closes once the turn moves on"
+    );
+
+    let row = wrapped_row_of(&t, "Edited 10 files");
+    double_click(&mut t, 2, row);
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(has("Edit src/f01.rs") && has("Edit src/f10.rs"));
 }
 
 fn todo_input() -> serde_json::Value {
@@ -1198,6 +1247,14 @@ fn file_edit_input() -> serde_json::Value {
     })
 }
 
+fn file_edit_input_at(path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "path": path,
+        "old_string": "libold",
+        "new_string": "libnew"
+    })
+}
+
 fn file_write_input() -> serde_json::Value {
     serde_json::json!({
         "path": "out.txt",
@@ -1205,56 +1262,114 @@ fn file_write_input() -> serde_json::Value {
     })
 }
 
+/// Diff calls of a burst row as `(item title, item body)` pairs.
+fn diff_items(t: &Transcript) -> Vec<(String, String)> {
+    t.rows[0]
+        .collapsible
+        .as_ref()
+        .expect("burst detail")
+        .visible_sections(None)
+        .1
+        .iter()
+        .filter_map(|section| match section {
+            Section::Item { title, detail, .. } => Some((title.clone(), detail.body())),
+            Section::Text(_) => None,
+        })
+        .collect()
+}
+
+fn wrapped_row_of(t: &Transcript, needle: &str) -> u16 {
+    t.wrapped
+        .iter()
+        .position(|line| line_text(line).contains(needle))
+        .map(|idx| u16::try_from(idx).expect("screen row"))
+        .expect("wrapped line")
+}
+
+const EDIT_SUCCESS: &str = "edited src/main.rs: replaced 1 occurrence(s), 3 bytes -> 3 bytes";
+const EDIT_ERROR: &str = "old_string not found";
+
 #[test]
-fn file_edit_collapses_diff_without_size_result() {
+fn file_edit_aggregates_with_a_nested_diff() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
-    t.on_event(&tool_end(
-        1,
-        true,
-        "edited src/main.rs: replaced 1 occurrence(s), 3 bytes -> 3 bytes",
-    ));
-    assert_eq!(kinds_of(&t), vec![LineKind::Diff]);
-    assert_eq!(t.rows[0].text, "Edit src/main.rs");
-    let detail = t.rows[0].collapsible.as_ref().expect("diff detail");
-    assert_eq!(detail.body(), "- old\n+ new");
-    assert!(detail.is_expanded());
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+
+    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(t.rows[0].text, "Edited 1 file");
+    let burst = t.rows[0].collapsible.as_ref().expect("burst detail");
+    assert!(burst.is_expanded());
+    assert_eq!(burst.body(), "");
+    assert_eq!(
+        diff_items(&t),
+        [("Edit src/main.rs".to_string(), "- old\n+ new".to_string())]
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .all(|line| !line_text(line).contains("replaced 1 occurrence"))
+    );
 }
 
 #[test]
-fn file_write_collapses_diff_without_size_result() {
+fn file_write_aggregates_with_a_nested_diff() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(2, "file_write", file_write_input()));
     t.on_event(&tool_end(2, true, "wrote 17 bytes to out.txt"));
-    assert_eq!(kinds_of(&t), vec![LineKind::Diff]);
-    assert_eq!(t.rows[0].text, "Write out.txt");
-    let detail = t.rows[0].collapsible.as_ref().expect("diff detail");
-    assert_eq!(detail.body(), "+ line one\n+ line two");
-    assert!(detail.is_expanded());
+
+    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(t.rows[0].text, "Wrote 1 file");
+    assert_eq!(
+        diff_items(&t),
+        [(
+            "Write out.txt".to_string(),
+            "+ line one\n+ line two".to_string()
+        )]
+    );
 }
 
 #[test]
-fn file_edit_failure_keeps_result() {
+fn mixed_burst_keeps_calls_in_invocation_order() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
-    t.on_event(&tool_end(1, false, "old_string not found"));
+    t.on_event(&tool_start(
+        2,
+        "bash",
+        serde_json::json!({ "command": "cargo test" }),
+    ));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    t.on_event(&tool_end(2, true, "ok"));
+
+    assert_eq!(t.rows[0].text, "Edited 1 file, Ran 1 command");
     assert_eq!(
-        kinds_of(&t),
-        vec![LineKind::Diff, LineKind::ToolResult(false)]
+        diff_items(&t),
+        [("Edit src/main.rs".to_string(), "- old\n+ new".to_string())]
     );
-    assert_eq!(t.rows[1].text, RESULT_LABEL);
     assert_eq!(
-        t.rows[1]
-            .collapsible
-            .as_ref()
-            .expect("tool result detail")
-            .body(),
-        "old_string not found"
+        t.rows[0].collapsible.as_ref().expect("burst detail").body(),
+        "Ran cargo test"
     );
 }
 
 #[test]
-fn seed_file_edit_collapses_diff_without_size_result() {
+fn failed_edit_counts_and_explains_itself() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, false, EDIT_ERROR));
+
+    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(t.rows[0].text, "Edited 1 file, 1 failed");
+    assert_eq!(
+        diff_items(&t),
+        [(
+            "Edit src/main.rs".to_string(),
+            format!("- old\n+ new\n{EDIT_ERROR}")
+        )]
+    );
+}
+
+#[test]
+fn seed_file_edit_aggregates_with_a_nested_diff() {
     let mut t = Transcript::new();
     t.seed(&[
         Message::assistant(vec![ContentBlock::ToolUse {
@@ -1263,67 +1378,124 @@ fn seed_file_edit_collapses_diff_without_size_result() {
             input: file_edit_input(),
             raw_arguments: None,
         }]),
-        Message::tool_result(
-            "e1",
-            "edited src/main.rs: replaced 1 occurrence(s), 3 bytes -> 3 bytes",
-            false,
-        ),
+        Message::tool_result("e1", EDIT_SUCCESS, false),
     ]);
-    assert_eq!(kinds_of(&t), vec![LineKind::Diff]);
-    assert_eq!(t.rows[0].text, "Edit src/main.rs");
+    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(t.rows[0].text, "Edited 1 file");
     assert_eq!(
-        t.rows[0].collapsible.as_ref().expect("diff detail").body(),
-        "- old\n+ new"
+        diff_items(&t),
+        [("Edit src/main.rs".to_string(), "- old\n+ new".to_string())]
     );
     assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
 }
 
 #[test]
-fn diff_double_click_toggles_detail() {
+fn diff_double_click_toggles_burst_detail() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
-    t.on_event(&tool_end(1, true, "edited"));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    t.on_event(&text_delta("done"));
     ready(&mut t, Rect::new(0, 0, 80, 10));
-
-    let detail = t.rows[0].collapsible.as_ref().expect("diff detail");
-    assert!(detail.is_expanded());
-    assert!(
+    let has = |t: &Transcript| {
         t.wrapped
             .iter()
             .any(|line| line_text(line).contains("- old"))
-    );
+    };
+    assert!(!has(&t), "the burst collapses once the turn moves on");
 
-    let header_y = t
-        .wrapped
-        .iter()
-        .position(|line| line_text(line).contains("Edit src/main.rs"))
-        .expect("diff header") as u16;
-    double_click(&mut t, 2, header_y);
-
-    assert!(
-        !t.rows[0]
-            .collapsible
-            .as_ref()
-            .expect("diff detail")
-            .is_expanded()
-    );
-    assert!(
-        t.wrapped
-            .iter()
-            .all(|line| !line_text(line).contains("- old"))
-    );
-    t.handle_mouse(
-        mouse(MouseEventKind::Up(MouseButton::Left), 2, header_y),
-        &State::new(),
-    );
-    double_click(&mut t, 2, header_y);
+    let row = wrapped_row_of(&t, "Edited 1 file");
+    double_click(&mut t, 2, row);
     assert!(
         t.rows[0]
             .collapsible
             .as_ref()
-            .expect("diff detail")
+            .expect("burst detail")
             .is_expanded()
     );
+    assert!(
+        !has(&t),
+        "a reopened burst lists its diffs as titles, not their contents"
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains("Edit src/main.rs"))
+    );
+
+    let row = wrapped_row_of(&t, "Edit src/main.rs");
+    double_click(&mut t, 2, row);
+    assert!(has(&t));
+
+    let row = wrapped_row_of(&t, "Edit src/main.rs");
+    double_click(&mut t, 2, row);
+    assert!(!has(&t));
+    assert!(
+        t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("burst detail")
+            .is_expanded(),
+        "the burst itself stays expanded"
+    );
+}
+
+#[test]
+fn nested_item_double_click_toggles_only_its_own_diff() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_start(
+        2,
+        "file_edit",
+        file_edit_input_at("src/lib.rs"),
+    ));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    t.on_event(&tool_end(2, true, EDIT_SUCCESS));
+    t.on_event(&text_delta("done"));
+    ready(&mut t, Rect::new(0, 0, 80, 12));
+    let has = |needle: &str, t: &Transcript| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(!has("- old", &t) && !has("- libold", &t));
+
+    let row = wrapped_row_of(&t, "Edited 2 files");
+    double_click(&mut t, 2, row);
+    assert!(
+        !has("- old", &t) && !has("- libold", &t),
+        "items stay folded"
+    );
+    assert!(has("Edit src/main.rs", &t) && has("Edit src/lib.rs", &t));
+
+    let row = wrapped_row_of(&t, "Edit src/main.rs");
+    double_click(&mut t, 2, row);
+    assert!(has("- old", &t), "the clicked item expands");
+    assert!(!has("- libold", &t), "its sibling keeps its own state");
+    assert!(
+        t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("burst detail")
+            .is_expanded(),
+        "the burst itself stays expanded"
+    );
+
+    let row = wrapped_row_of(&t, "Edit src/lib.rs");
+    double_click(&mut t, 2, row);
+    assert!(has("- old", &t) && has("- libold", &t));
+
+    let row = wrapped_row_of(&t, "Edited 2 files");
+    double_click(&mut t, 2, row);
+    assert!(!has("- old", &t) && !has("- libold", &t) && !has("Edit src/main.rs", &t));
+}
+
+#[test]
+fn nested_diff_lines_are_indented_past_their_item_title() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    ready(&mut t, Rect::new(0, 0, 80, 10));
+
     let removed = t
         .wrapped
         .iter()
@@ -1334,9 +1506,9 @@ fn diff_double_click_toggles_detail() {
         .iter()
         .find(|line| line_text(line).contains("+ new"))
         .expect("added line");
-    let indent = format!("{MESSAGE_INDENT}{LINE_INDENT}");
-    assert_eq!(removed.spans[0].content.as_ref(), indent);
-    assert_eq!(added.spans[0].content.as_ref(), indent);
+    let item_indent = format!("{MESSAGE_INDENT}{}{LINE_INDENT}", LINE_INDENT);
+    assert_eq!(removed.spans[0].content.as_ref(), item_indent);
+    assert_eq!(added.spans[0].content.as_ref(), item_indent);
     assert_eq!(removed.spans[1].content.as_ref(), "- old");
     assert_eq!(added.spans[1].content.as_ref(), "+ new");
     assert_eq!(
@@ -1346,19 +1518,6 @@ fn diff_double_click_toggles_detail() {
     assert_eq!(
         added.spans[1].style.bg,
         Some(ratatui::style::Color::LightGreen)
-    );
-
-    t.handle_mouse(
-        mouse(MouseEventKind::Up(MouseButton::Left), 2, header_y),
-        &State::new(),
-    );
-    double_click(&mut t, 2, header_y);
-    assert!(
-        !t.rows[0]
-            .collapsible
-            .as_ref()
-            .expect("diff detail")
-            .is_expanded()
     );
 }
 

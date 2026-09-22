@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::super::collapsible::Collapsible;
+use super::collapsible::Collapsible;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
-use super::kinds::{LineKind, Row};
+use super::kinds::{Header, LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::ToolBurst;
 use super::wrap::{
@@ -44,10 +44,12 @@ pub struct Transcript {
     pub(super) select_anchor: Option<SelPos>,
     select_head: Option<SelPos>,
     pub(super) dragging: bool,
-    hovered_collapsible: Option<usize>,
-    last_collapsible_click: Option<(usize, Instant)>,
+    hovered_collapsible: Option<Header>,
+    last_collapsible_click: Option<(Header, Instant)>,
     tool_burst: ToolBurst,
     burst_row: Option<usize>,
+    /// Calls rendered as their own rows; `true` when they carry a detail
+    /// body, whose success output stays hidden.
     detail_ids: HashMap<String, bool>,
     thinking_row: Option<usize>,
 }
@@ -204,15 +206,7 @@ impl Transcript {
     }
 
     fn push_tool_result(&mut self, is_error: bool, content: &[ContentBlock]) {
-        let output = content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.push_result_row(!is_error, &output);
+        self.push_result_row(!is_error, &result_text(content));
     }
 
     fn push_result_row(&mut self, ok: bool, output: &str) {
@@ -281,29 +275,35 @@ impl Transcript {
     fn note_tool_start(&mut self, call_id: &str, view: &ToolView) {
         if !view.collapse {
             self.close_tool_burst();
-            self.detail_ids.insert(call_id.to_string(), view.diff);
-            let kind = if view.diff {
+            self.detail_ids
+                .insert(call_id.to_string(), view.detail.is_some());
+            let kind = if view.detail.is_some() {
                 LineKind::Diff
             } else {
                 LineKind::Tool
             };
-            self.push_row(kind, &view.summary);
+            let detail = view.detail.as_deref().map(Collapsible::new);
+            self.push_row_with_detail(kind, view.summary.clone(), detail);
             return;
         }
-        self.tool_burst.start(call_id.to_string(), &view.summary);
+        self.tool_burst
+            .start(call_id.to_string(), &view.summary, view.detail.as_deref());
         self.upsert_tool_summary();
     }
 
     fn note_tool_end(&mut self, call_id: &str, ok: bool, output: &str) {
-        if let Some(is_diff) = self.detail_ids.remove(call_id) {
-            if !is_diff || !ok {
-                self.push_result_row(ok, output);
+        if self
+            .tool_burst
+            .finish(call_id, !ok, (!ok).then_some(output))
+        {
+            if !ok {
+                self.upsert_tool_summary();
             }
             return;
         }
-        if self.tool_burst.finish(call_id, !ok) {
-            if !ok {
-                self.upsert_tool_summary();
+        if let Some(has_detail) = self.detail_ids.remove(call_id) {
+            if !has_detail || !ok {
+                self.push_result_row(ok, output);
             }
             return;
         }
@@ -313,29 +313,38 @@ impl Transcript {
     }
 
     fn note_seed_result(&mut self, tool_use_id: &str, is_error: bool, content: &[ContentBlock]) {
-        if let Some(is_diff) = self.detail_ids.remove(tool_use_id) {
-            if !is_diff || is_error {
+        if let Some(has_detail) = self.detail_ids.remove(tool_use_id) {
+            if !has_detail || is_error {
                 self.push_tool_result(is_error, content);
             }
             return;
         }
-        if self.tool_burst.finish(tool_use_id, is_error) && is_error {
+        let error = is_error.then(|| result_text(content));
+        if self
+            .tool_burst
+            .finish(tool_use_id, is_error, error.as_deref())
+            && is_error
+        {
             self.upsert_tool_summary();
         }
     }
 
     fn upsert_tool_summary(&mut self) {
         let title = self.tool_burst.title();
-        let body = self.tool_burst.body();
+        let sections = self.tool_burst.sections();
         match self.burst_row.and_then(|idx| self.rows.get_mut(idx)) {
             Some(row) => {
                 row.text = title;
                 if let Some(collapsible) = row.collapsible.as_mut() {
-                    collapsible.replace(body);
+                    collapsible.replace_sections(sections);
                 }
             }
             None => {
-                self.push_row_with_detail(LineKind::Tool, title, Some(Collapsible::new(body)));
+                self.push_row_with_detail(
+                    LineKind::Tool,
+                    title,
+                    Some(Collapsible::from_sections(sections)),
+                );
                 self.burst_row = Some(self.rows.len() - 1);
             }
         }
@@ -347,13 +356,6 @@ impl Transcript {
             LineKind::ToolResult(_) => (RESULT_LABEL.to_string(), Some(Collapsible::new(text))),
             LineKind::Thinking => (THOUGHT_LABEL.to_string(), None),
             LineKind::ShellResult(_) => (tail_lines(text, MAX_SHELL_DISPLAY_LINES), None),
-            LineKind::Diff => {
-                let (title, body) = match text.split_once('\n') {
-                    Some((title, body)) => (title.to_string(), body.to_string()),
-                    None => (text.to_string(), String::new()),
-                };
-                (title, Some(Collapsible::new(body)))
-            }
             _ => (text.to_string(), None),
         };
         self.push_row_with_detail(kind, text, collapsible);
@@ -395,7 +397,7 @@ impl Transcript {
             kind,
             text,
             collapsible,
-            header: None,
+            headers: Vec::new(),
         });
         self.wrap_row(self.rows.len() - 1);
         if kind == LineKind::Thinking {
@@ -420,15 +422,12 @@ impl Transcript {
         row: &Row,
         width: usize,
         live_limit: Option<usize>,
-    ) -> Option<usize> {
-        let start = out.len();
+    ) -> Vec<Header> {
         if let Some(collapsible) = &row.collapsible {
-            let header = start + usize::from(start > 0);
-            wrap_collapsible_into(out, row.kind, &row.text, collapsible, width, live_limit);
-            Some(header)
+            wrap_collapsible_into(out, row.kind, &row.text, collapsible, width, live_limit)
         } else {
             wrap_row_into(out, row.kind, &row.text, width);
-            None
+            Vec::new()
         }
     }
 
@@ -469,12 +468,12 @@ impl Transcript {
     fn wrap_row(&mut self, idx: usize) {
         let width = self.width();
         let live_limit = self.live_body_limit(idx);
-        let header = if width == 0 {
-            None
+        let headers = if width == 0 {
+            Vec::new()
         } else {
             Self::wrap_row_into(&mut self.wrapped, &self.rows[idx], width, live_limit)
         };
-        self.rows[idx].header = header;
+        self.rows[idx].headers = headers;
     }
 
     /// A body that is still growing — live thinking deltas or an open tool burst
@@ -618,29 +617,48 @@ impl Transcript {
         }
     }
 
-    fn collapsible_header_at(&self, column: u16, row: u16) -> Option<usize> {
+    fn collapsible_header_at(&self, column: u16, row: u16) -> Option<(usize, Header)> {
         let line = self.pos_at(column, row).line;
-        self.rows.iter().position(|r| r.header == Some(line))
+        let idx = self
+            .rows
+            .iter()
+            .position(|r| r.headers.iter().any(|header| header.line == line))?;
+        let header = self.rows[idx]
+            .headers
+            .iter()
+            .find(|header| header.line == line)?
+            .clone();
+        Some((idx, header))
     }
 
     fn update_hover(&mut self, in_area: bool, column: u16, row: u16) -> bool {
-        let hovered = in_area
-            .then(|| self.collapsible_header_at(column, row))
-            .flatten();
+        let hovered = if in_area {
+            self.collapsible_header_at(column, row)
+                .map(|(_, header)| header)
+        } else {
+            None
+        };
         let changed = self.hovered_collapsible != hovered;
         self.hovered_collapsible = hovered;
         changed
     }
 
-    fn toggle_collapsible(&mut self, row: usize) {
-        if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
-            collapsible.toggle();
-            let start = self.current_top();
-            self.rewrap_all();
-            // Pin the clicked header to its screen row, so its body grows
-            // downward instead of scrolling the header out of view.
-            self.top = Some(start);
+    fn toggle_collapsible(&mut self, row: usize, header: &Header) {
+        let Some(mut target) = self.rows.get_mut(row).and_then(|r| r.collapsible.as_mut()) else {
+            return;
+        };
+        for idx in &header.path {
+            let Some(nested) = target.item_mut(*idx) else {
+                return;
+            };
+            target = nested;
         }
+        target.toggle();
+        let start = self.current_top();
+        self.rewrap_all();
+        // Pin the clicked header to its screen row, so its body grows
+        // downward instead of scrolling the header out of view.
+        self.top = Some(start);
     }
 
     /// Settles the live thinking row on the label, for reasoning the agent
@@ -671,7 +689,7 @@ impl Transcript {
     fn live_thinking_header(&self) -> Option<usize> {
         let row = self.thinking_row?;
         (self.rows[row].text == THINKING_LABEL)
-            .then_some(self.rows[row].header)
+            .then(|| self.rows[row].headers.first().map(|header| header.line))
             .flatten()
     }
 
@@ -734,17 +752,23 @@ impl Component for Transcript {
             }
             MouseEventKind::Down(MouseButton::Left) if in_area => {
                 let header = self.collapsible_header_at(mouse.column, mouse.row);
-                if let Some(row) = header
-                    && let Some((last, at)) = self.last_collapsible_click
-                    && last == row
-                    && at.elapsed() <= DOUBLE_CLICK_TIMEOUT
-                {
+                let double = header
+                    .as_ref()
+                    .filter(|(_, hit)| {
+                        self.last_collapsible_click
+                            .as_ref()
+                            .is_some_and(|(last, at)| {
+                                last.line == hit.line && at.elapsed() <= DOUBLE_CLICK_TIMEOUT
+                            })
+                    })
+                    .map(|(row, hit)| (*row, hit.clone()));
+                if let Some((row, hit)) = double {
                     self.last_collapsible_click = None;
-                    self.toggle_collapsible(row);
+                    self.toggle_collapsible(row, &hit);
                     self.clear_selection();
                     return KeyResult::Handled;
                 }
-                self.last_collapsible_click = header.map(|row| (row, Instant::now()));
+                self.last_collapsible_click = header.map(|(_, hit)| (hit, Instant::now()));
                 self.begin_selection(mouse.column, mouse.row);
                 KeyResult::Handled
             }
@@ -902,10 +926,9 @@ impl Component for Transcript {
         {
             *line = apply_thinking_shimmer(line, thinking_phase());
         }
-        if let Some(row) = self.hovered_collapsible
-            && let Some(header) = self.rows.get(row).and_then(|r| r.header)
-            && header >= start
-            && let Some(line) = visible.get_mut(header - start)
+        if let Some(header) = &self.hovered_collapsible
+            && header.line >= start
+            && let Some(line) = visible.get_mut(header.line - start)
         {
             *line = apply_hover(line, self.width());
         }
@@ -939,6 +962,17 @@ impl Component for Transcript {
         }
         paint_visible(f, area, visible);
     }
+}
+
+fn result_text(content: &[ContentBlock]) -> String {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

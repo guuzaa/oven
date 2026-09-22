@@ -9,15 +9,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::super::collapsible::Collapsible;
 use super::super::theme;
-use super::kinds::{COLLAPSED_MARKER, EXPANDED_MARKER, LINE_INDENT, LineKind, MESSAGE_INDENT};
+use super::collapsible::{Collapsible, Section};
+use super::kinds::{
+    COLLAPSED_MARKER, EXPANDED_MARKER, Header, LINE_INDENT, LineKind, MESSAGE_INDENT,
+};
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 pub(super) const MAX_LIVE_BODY_LINES: usize = 8;
 pub(super) const THINKING_LABEL: &str = "Thinking...";
 pub(super) const THOUGHT_LABEL: &str = "Thought";
 pub(super) const RESULT_LABEL: &str = "Result";
+const EARLIER_LINES: &str = "earlier lines";
+const EARLIER_CALLS: &str = "earlier calls";
 const MS_PER_SECOND: u64 = 1000;
 const MS_PER_TENTH: u64 = 100;
 const TENTHS_PER_SECOND: u64 = 10;
@@ -136,29 +140,41 @@ fn thinking_shade(t: f32) -> Color {
 }
 
 fn earlier_lines(skipped: usize) -> String {
-    format!("… {skipped} earlier lines")
+    format!("… {skipped} {EARLIER_LINES}")
 }
 
-fn earlier_lines_marker(skipped: usize) -> Line<'static> {
+fn earlier_marker(skipped: usize, label: &str, depth: usize) -> Line<'static> {
     let style = theme::dim();
     Line::from(vec![
-        Span::styled(body_prefix(), style),
-        Span::styled(earlier_lines(skipped), style),
+        Span::styled(body_prefix(depth), style),
+        Span::styled(format!("… {skipped} {label}"), style),
     ])
 }
 
-/// Left margin every non-User row shares, so their bodies line up.
-fn body_prefix() -> String {
-    format!("{MESSAGE_INDENT}{LINE_INDENT}")
+fn earlier_lines_marker(skipped: usize, depth: usize) -> Line<'static> {
+    earlier_marker(skipped, EARLIER_LINES, depth)
 }
 
-fn collapsible_prefix(collapsible: &Collapsible) -> String {
+fn earlier_calls_marker(skipped: usize) -> Line<'static> {
+    earlier_marker(skipped, EARLIER_CALLS, 0)
+}
+
+/// Left margin every row at nesting `depth` shares, so bodies line up.
+fn indent(depth: usize) -> String {
+    format!("{MESSAGE_INDENT}{}", LINE_INDENT.repeat(depth))
+}
+
+fn body_prefix(depth: usize) -> String {
+    format!("{}{LINE_INDENT}", indent(depth))
+}
+
+fn marker_prefix(collapsible: &Collapsible, depth: usize) -> String {
     let marker = if collapsible.is_expanded() {
         EXPANDED_MARKER
     } else {
         COLLAPSED_MARKER
     };
-    format!("{MESSAGE_INDENT}{marker}")
+    format!("{}{marker}", indent(depth))
 }
 
 pub(super) fn tail_lines(text: &str, max: usize) -> String {
@@ -198,6 +214,8 @@ pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Wraps a collapsible row and returns its markers: the row's own header
+/// first, then one per nested item that is currently rendered.
 pub(super) fn wrap_collapsible_into(
     out: &mut Vec<Line<'static>>,
     kind: LineKind,
@@ -205,35 +223,104 @@ pub(super) fn wrap_collapsible_into(
     collapsible: &Collapsible,
     width: usize,
     live_limit: Option<usize>,
-) {
+) -> Vec<Header> {
     if !out.is_empty() {
         out.push(Line::from(""));
     }
     let style = kind.style();
     let header = Line::from(vec![
-        Span::styled(collapsible_prefix(collapsible), style),
+        Span::styled(marker_prefix(collapsible, 0), style),
         Span::styled(title.to_string(), style),
     ]);
+    let line = out.len();
     wrap_line_into(out, &header, width, kind);
-    if !collapsible.is_expanded() {
-        return;
+    let mut headers = vec![Header {
+        line,
+        path: Vec::new(),
+    }];
+    if collapsible.is_expanded() {
+        headers.extend(wrap_sections_into(
+            out,
+            collapsible,
+            kind,
+            width,
+            live_limit,
+            0,
+            &[],
+        ));
     }
-    let (skipped, body_lines) = collapsible.visible_body(live_limit);
+    headers
+}
+
+fn wrap_sections_into(
+    out: &mut Vec<Line<'static>>,
+    collapsible: &Collapsible,
+    kind: LineKind,
+    width: usize,
+    live_limit: Option<usize>,
+    depth: usize,
+    path: &[usize],
+) -> Vec<Header> {
+    let mut headers = Vec::new();
+    let (skipped, sections) = collapsible.visible_sections(live_limit);
     if skipped > 0 {
-        wrap_line_into(out, &earlier_lines_marker(skipped), width, kind);
+        wrap_line_into(out, &earlier_calls_marker(skipped), width, kind);
     }
-    for part in body_lines {
-        let body_style = if kind == LineKind::Diff {
-            diff_line_style(part, style)
-        } else {
-            style
-        };
-        let line = Line::from(vec![
-            Span::styled(body_prefix(), style),
-            Span::styled(part.to_string(), body_style),
-        ]);
-        wrap_line_into(out, &line, width, kind);
+    for (idx, section) in sections.iter().enumerate() {
+        let mut path = path.to_vec();
+        path.push(skipped + idx);
+        match section {
+            Section::Text(text) => {
+                let (dropped, lines) = visible_lines(text, live_limit);
+                if dropped > 0 {
+                    wrap_line_into(out, &earlier_lines_marker(dropped, depth), width, kind);
+                }
+                for part in lines {
+                    let style = kind.style();
+                    let line = Line::from(vec![
+                        Span::styled(body_prefix(depth), style),
+                        Span::styled(part.to_string(), diff_line_style(part, style, kind)),
+                    ]);
+                    wrap_line_into(out, &line, width, kind);
+                }
+            }
+            Section::Item {
+                kind: item_kind,
+                title,
+                detail,
+            } => {
+                let style = item_kind.style();
+                let marker = Line::from(vec![
+                    Span::styled(marker_prefix(detail, depth + 1), style),
+                    Span::styled(title.clone(), style),
+                ]);
+                let line = out.len();
+                wrap_line_into(out, &marker, width, *item_kind);
+                headers.push(Header {
+                    line,
+                    path: path.clone(),
+                });
+                if detail.is_expanded() {
+                    headers.extend(wrap_sections_into(
+                        out,
+                        detail,
+                        *item_kind,
+                        width,
+                        live_limit,
+                        depth + 1,
+                        &path,
+                    ));
+                }
+            }
+        }
     }
+    headers
+}
+
+/// Newest `limit` lines of a section that is still growing.
+fn visible_lines(text: &str, limit: Option<usize>) -> (usize, impl Iterator<Item = &str> + '_) {
+    let skipped = limit.map_or(0, |max| text.lines().count().saturating_sub(max));
+    (skipped, text.lines().skip(skipped))
 }
 
 pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
@@ -260,11 +347,7 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         } else {
             &rest_prefix
         };
-        let line_style = if kind == LineKind::Diff {
-            diff_line_style(part, style)
-        } else {
-            style
-        };
+        let line_style = diff_line_style(part, style, kind);
         let body = if blank {
             String::new()
         } else {
@@ -355,7 +438,10 @@ fn continuation_prefix(kind: LineKind, first_prefix: &str) -> String {
     }
 }
 
-fn diff_line_style(part: &str, fallback: Style) -> Style {
+fn diff_line_style(part: &str, fallback: Style, kind: LineKind) -> Style {
+    if kind != LineKind::Diff {
+        return fallback;
+    }
     match part.chars().next() {
         Some('+') => theme::diff_added(),
         Some('-') => theme::diff_removed(),

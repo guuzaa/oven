@@ -1,5 +1,4 @@
 pub(super) mod choice_popup;
-pub(super) mod collapsible;
 pub(super) mod component;
 pub(super) mod file_mention_popup;
 pub(super) mod input;

@@ -1,3 +1,4 @@
+mod collapsible;
 mod kinds;
 mod selection;
 mod tools;

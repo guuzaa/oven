@@ -22,16 +22,16 @@ impl FileWriteTool {
             return ToolView::named(Self::NAME);
         };
 
-        let mut diff = format!("Write {}", path.trim());
-        for line in content.split('\n') {
-            diff.push_str("\n+ ");
-            diff.push_str(line.trim_end_matches('\r'));
-        }
-
         ToolView {
-            summary: diff,
-            collapse: false,
-            diff: true,
+            summary: format!("Write {}", path.trim()),
+            collapse: true,
+            detail: Some(
+                content
+                    .lines()
+                    .map(|line| format!("+ {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
         }
     }
 
@@ -102,8 +102,9 @@ mod tests {
             "path": "hello.txt",
             "content": "line one\nline two",
         }));
-        assert!(!view.collapse);
-        assert_eq!(view.summary, "Write hello.txt\n+ line one\n+ line two");
+        assert!(view.collapse);
+        assert_eq!(view.summary, "Write hello.txt");
+        assert_eq!(view.detail.as_deref(), Some("+ line one\n+ line two"));
     }
 
     #[test]

@@ -19,7 +19,7 @@ impl TodoWriteTool {
         ToolView {
             summary,
             collapse: false,
-            diff: false,
+            detail: None,
         }
     }
 }

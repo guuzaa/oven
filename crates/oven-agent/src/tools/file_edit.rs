@@ -26,9 +26,9 @@ impl FileEditTool {
         };
 
         ToolView {
-            summary: format_diff(path, old_string, new_string),
-            collapse: false,
-            diff: true,
+            summary: format!("Edit {}", path.trim()),
+            collapse: true,
+            detail: Some(diff_lines(old_string, new_string)),
         }
     }
 
@@ -37,17 +37,10 @@ impl FileEditTool {
     }
 }
 
-fn format_diff(path: &str, old_string: &str, new_string: &str) -> String {
-    let mut diff = format!("Edit {}", path.trim());
-    for line in old_string.split('\n') {
-        diff.push_str("\n- ");
-        diff.push_str(line.trim_end_matches('\r'));
-    }
-    for line in new_string.split('\n') {
-        diff.push_str("\n+ ");
-        diff.push_str(line.trim_end_matches('\r'));
-    }
-    diff
+fn diff_lines(old_string: &str, new_string: &str) -> String {
+    let removed = old_string.lines().map(|line| format!("- {line}"));
+    let added = new_string.lines().map(|line| format!("+ {line}"));
+    removed.chain(added).collect::<Vec<_>>().join("\n")
 }
 
 #[async_trait]
@@ -151,10 +144,11 @@ mod tests {
             "old_string": "let answer = 41;",
             "new_string": "let answer = 42;",
         }));
-        assert!(!view.collapse);
+        assert!(view.collapse);
+        assert_eq!(view.summary, "Edit src/main.rs");
         assert_eq!(
-            view.summary,
-            "Edit src/main.rs\n- let answer = 41;\n+ let answer = 42;"
+            view.detail.as_deref(),
+            Some("- let answer = 41;\n+ let answer = 42;")
         );
     }
 

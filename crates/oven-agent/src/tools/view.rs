@@ -8,7 +8,8 @@ use super::{
 pub struct ToolView {
     pub summary: String,
     pub collapse: bool,
-    pub diff: bool,
+    /// Nested body rendered under the summary, e.g. a file diff.
+    pub detail: Option<String>,
 }
 
 impl ToolView {
@@ -16,7 +17,7 @@ impl ToolView {
         Self {
             summary: name.into(),
             collapse: true,
-            diff: false,
+            detail: None,
         }
     }
 }
@@ -63,7 +64,7 @@ pub(crate) fn labeled(name: &str, verb: &str, input: &Value, key: &str) -> ToolV
         Some(v) => ToolView {
             summary: format!("{verb} {v}"),
             collapse: true,
-            diff: false,
+            detail: None,
         },
         None => ToolView::named(name),
     }
@@ -84,39 +85,36 @@ mod tests {
             present_tool(FileReadTool::NAME, &json!({ "path": "src/main.rs" })).summary,
             "Read src/main.rs"
         );
-        assert_eq!(
-            present_tool(
-                FileEditTool::NAME,
-                &json!({
-                    "path": "src/main.rs",
-                    "old_string": "old",
-                    "new_string": "new"
-                })
-            )
-            .summary,
-            "Edit src/main.rs\n- old\n+ new"
+        let edit = present_tool(
+            FileEditTool::NAME,
+            &json!({
+                "path": "src/main.rs",
+                "old_string": "old",
+                "new_string": "new"
+            }),
         );
-        assert!(
-            !present_tool(
-                FileEditTool::NAME,
-                &json!({
-                    "path": "src/main.rs",
-                    "old_string": "old",
-                    "new_string": "new"
-                })
-            )
-            .collapse
-        );
+        assert_eq!(edit.summary, "Edit src/main.rs");
+        assert_eq!(edit.detail.as_deref(), Some("- old\n+ new"));
+        assert!(edit.collapse);
         assert_eq!(
             present_tool(
                 FileWriteTool::NAME,
                 &json!({ "path": "out.txt", "content": "new content" })
             )
             .summary,
-            "Write out.txt\n+ new content"
+            "Write out.txt"
+        );
+        assert_eq!(
+            present_tool(
+                FileWriteTool::NAME,
+                &json!({ "path": "out.txt", "content": "new content" })
+            )
+            .detail
+            .as_deref(),
+            Some("+ new content")
         );
         assert!(
-            !present_tool(
+            present_tool(
                 FileWriteTool::NAME,
                 &json!({ "path": "out.txt", "content": "new content" })
             )
@@ -143,6 +141,7 @@ mod tests {
             &json!({ "todos": [{"id": "a", "content": "one", "status": "pending"}] }),
         );
         assert!(!todo.collapse);
+        assert_eq!(todo.detail, None);
         assert_eq!(
             todo.summary,
             "todo_write · 1 todos (0 in_progress, 0 completed)"
