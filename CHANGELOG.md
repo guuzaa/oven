@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.0.8] - 2026-09-22
+
+### Added
+- Live token usage: the status bar and context readout update as each provider response arrives, instead of once per turn
+- File edit/write results are collapsible in the transcript, toggled like thinking blocks
+- Tool bursts are titled by count (e.g. `Ran 2 commands, Read 1 file, 1 failed`) with the individual call lines in a collapsible body
+- Newest-only live bodies: thinking deltas and open tool bursts render only their most recent screen rows, marked with an "N earlier lines" gap, so streaming cannot scroll the view upward
+- `@` file mention now lists directories too, and `Tab` completes a directory without submitting
+
+### Changed
+- Assistant prose renders a single bullet gutter on its first line, with continuation lines indented under the body; other line kinds share the message indent
+- Live bodies are capped by wrapped screen rows rather than logical lines
+- Session files are appended from the already-persisted message count instead of rewriting every record after a turn
+- History messages are shared as `Arc`, so publishing state and re-seeding the transcript cost refcounts instead of copying the conversation
+- The agent owns the thinking clock and emits `StreamEvent::ThinkingDone { duration_ms }`, so the reported span, the transcript row, and the persisted session always agree; the non-streaming fallback now times its reasoning too
+- Drop the per-turn `Worked for Xs` transcript separator and other dead code
+- Bump `oven-llm` to 0.4.2 (new `raw_arguments` field on tool-use blocks)
+- Install script prefers the `linux-gnu` artifacts (glibc ≥ 2.28) and falls back to musl, and fails fast when neither curl nor wget is available
+- Add `docs/oven-tui.md` and `docs/oven-app.md`; refresh `docs/architectures.md`
+
+### Fixed
+- Close the thinking window before the answer or tool it led to
+- Pin the clicked header row while a collapsed detail expands
+- Keep transcript text selection alive across streaming events
+- Align non-user rows with the user gutter
+- Mid-turn `/model` switches publish the switching model's context window
+
 ## [0.0.7] - 2026-09-16
 
 ### Added
