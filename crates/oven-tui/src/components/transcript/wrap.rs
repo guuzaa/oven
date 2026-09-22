@@ -14,6 +14,7 @@ use super::super::theme;
 use super::kinds::{LINE_INDENT, LineKind, MESSAGE_INDENT, SEPARATOR_GLYPH};
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
+pub(super) const MAX_LIVE_BODY_LINES: usize = 8;
 pub(super) const THINKING_LABEL: &str = "Thinking...";
 pub(super) const THOUGHT_LABEL: &str = "Thought";
 pub(super) const RESULT_LABEL: &str = "Result";
@@ -139,13 +140,25 @@ fn thinking_shade(t: f32) -> Color {
     Color::Rgb(v, v, v)
 }
 
+fn earlier_lines(skipped: usize) -> String {
+    format!("… {skipped} earlier lines")
+}
+
+fn earlier_lines_marker(skipped: usize) -> Line<'static> {
+    let style = theme::dim();
+    Line::from(vec![
+        Span::styled(format!("{MESSAGE_INDENT}{LINE_INDENT}"), style),
+        Span::styled(format!("{LINE_INDENT}{}", earlier_lines(skipped)), style),
+    ])
+}
+
 pub(super) fn tail_lines(text: &str, max: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= max {
         return text.to_string();
     }
     let skip = lines.len() - max;
-    format!("… {skip} earlier lines\n{}", lines[skip..].join("\n"))
+    format!("{}\n{}", earlier_lines(skip), lines[skip..].join("\n"))
 }
 
 pub(super) fn wrap_row_into(
@@ -199,6 +212,7 @@ pub(super) fn wrap_collapsible_into(
     title: &str,
     collapsible: &Collapsible,
     width: usize,
+    live_limit: Option<usize>,
 ) {
     if !out.is_empty() {
         out.push(Line::from(""));
@@ -217,7 +231,11 @@ pub(super) fn wrap_collapsible_into(
     if !collapsible.is_expanded() {
         return;
     }
-    for part in collapsible.body().lines() {
+    let (skipped, body_lines) = collapsible.visible_body(live_limit);
+    if skipped > 0 {
+        wrap_line_into(out, &earlier_lines_marker(skipped), width, kind);
+    }
+    for part in body_lines {
         let body_style = if kind == LineKind::Diff {
             diff_line_style(part, style)
         } else {

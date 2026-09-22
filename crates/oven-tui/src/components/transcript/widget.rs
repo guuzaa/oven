@@ -19,9 +19,9 @@ use super::kinds::{LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::ToolBurst;
 use super::wrap::{
-    MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL, apply_hover,
-    apply_thinking_shimmer, collect_lines, format_elapsed, format_lines, format_thought,
-    line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
+    MAX_LIVE_BODY_LINES, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
+    apply_hover, apply_thinking_shimmer, collect_lines, format_elapsed, format_lines,
+    format_thought, line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
     wrap_collapsible_into, wrap_line_into, wrap_row_into,
 };
 
@@ -210,6 +210,9 @@ impl Transcript {
             }
         }
         self.close_tool_burst();
+        // Seeded rows carry their durations already, so none of them is still
+        // awaiting the live clock that would keep its body windowed.
+        self.thinking_row = None;
         self.collapse_open();
     }
 
@@ -280,7 +283,12 @@ impl Transcript {
 
     fn close_tool_burst(&mut self) {
         self.tool_burst = ToolBurst::default();
-        self.burst_row = None;
+        if let Some(row) = self.burst_row.take() {
+            if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
+                collapsible.collapse();
+            }
+            self.rewrap_all();
+        }
     }
 
     fn note_tool_start(&mut self, call_id: &str, view: &ToolView) {
@@ -422,11 +430,16 @@ impl Transcript {
         }
     }
 
-    fn wrap_row_into(out: &mut Vec<Line<'static>>, row: &Row, width: usize) -> Option<usize> {
+    fn wrap_row_into(
+        out: &mut Vec<Line<'static>>,
+        row: &Row,
+        width: usize,
+        live_limit: Option<usize>,
+    ) -> Option<usize> {
         let start = out.len();
         if let Some(collapsible) = &row.collapsible {
             let header = start + usize::from(start > 0);
-            wrap_collapsible_into(out, row.kind, &row.text, collapsible, width);
+            wrap_collapsible_into(out, row.kind, &row.text, collapsible, width, live_limit);
             Some(header)
         } else {
             wrap_row_into(out, row.kind, &row.text, width);
@@ -492,12 +505,20 @@ impl Transcript {
 
     fn wrap_row(&mut self, idx: usize) {
         let width = self.width();
+        let live_limit = self.live_body_limit(idx);
         let header = if width == 0 {
             None
         } else {
-            Self::wrap_row_into(&mut self.wrapped, &self.rows[idx], width)
+            Self::wrap_row_into(&mut self.wrapped, &self.rows[idx], width, live_limit)
         };
         self.rows[idx].header = header;
+    }
+
+    /// A body that is still growing — live thinking deltas or an open tool burst
+    /// — renders only its newest lines, so it cannot scroll the view upward.
+    fn live_body_limit(&self, idx: usize) -> Option<usize> {
+        let live = Some(idx) == self.thinking_row || Some(idx) == self.burst_row;
+        live.then_some(MAX_LIVE_BODY_LINES)
     }
 
     fn wrap_rows(&mut self, start: usize, end: usize) {
@@ -658,18 +679,24 @@ impl Transcript {
     /// Settles the live thinking row on the label, for reasoning the agent
     /// never reported a span for (a cancelled or interrupted window).
     fn stop_live_thinking(&mut self) {
-        if let Some(row) = self.thinking_row.take() {
-            self.rows[row].text = THOUGHT_LABEL.to_string();
-            self.rewrap_all();
-        }
+        self.retire_thinking(THOUGHT_LABEL.to_string());
     }
 
     /// The agent owns the thinking clock; the transcript only renders the
     /// duration it reports. Reporting retires the row so nothing settles it
     /// back onto the bare label.
     fn report_thinking_done(&mut self, duration_ms: u64) {
+        self.retire_thinking(format_thought(Some(duration_ms)));
+    }
+
+    /// Streaming is over for the row, so it collapses: its windowed body stops
+    /// here and an expanded row would blank the screen until the next row.
+    fn retire_thinking(&mut self, title: String) {
         if let Some(row) = self.thinking_row.take() {
-            self.rows[row].text = format_thought(Some(duration_ms));
+            self.rows[row].text = title;
+            if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
+                collapsible.collapse();
+            }
             self.rewrap_all();
         }
     }

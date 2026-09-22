@@ -19,8 +19,8 @@ use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
 use super::widget::{LOOP_LIMIT_REACHED, Transcript};
 use super::wrap::{
-    MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer, format_elapsed, format_lines,
-    format_thought, line_display_width, tail_lines,
+    MAX_LIVE_BODY_LINES, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer,
+    format_elapsed, format_lines, format_thought, line_display_width, tail_lines,
 };
 
 const ELAPSED_0: &str = "Worked for 0s";
@@ -437,6 +437,13 @@ fn thinking_done(duration_ms: u64) -> AppEvent {
     }))
 }
 
+fn stream_thinking(t: &mut Transcript, lines: usize) {
+    for i in 1..=lines {
+        let delta = format!("t{i:02}\n");
+        t.on_event(&thinking(&delta));
+    }
+}
+
 fn started() -> AppEvent {
     agent(AgentEvent::Turn(TurnEvent::Started))
 }
@@ -716,9 +723,10 @@ fn thinking_double_click_toggles_detail() {
 
     let detail = t.rows[0].collapsible.as_ref().expect("thinking detail");
     assert_eq!(detail.body(), THINKING);
-    assert!(detail.is_expanded());
-    assert!(t.wrapped.iter().any(|line| {
-        line.spans
+    assert!(!detail.is_expanded());
+    assert!(t.wrapped.iter().all(|line| {
+        !line
+            .spans
             .iter()
             .any(|span| span.content.contains(THINKING))
     }));
@@ -726,15 +734,14 @@ fn thinking_double_click_toggles_detail() {
     double_click(&mut t, 2, 0);
 
     assert!(
-        !t.rows[0]
+        t.rows[0]
             .collapsible
             .as_ref()
             .expect("thinking detail")
             .is_expanded()
     );
-    assert!(t.wrapped.iter().all(|line| {
-        !line
-            .spans
+    assert!(t.wrapped.iter().any(|line| {
+        line.spans
             .iter()
             .any(|span| span.content.contains(THINKING))
     }));
@@ -745,7 +752,7 @@ fn thinking_double_click_toggles_detail() {
     );
     double_click(&mut t, 2, 0);
     assert!(
-        t.rows[0]
+        !t.rows[0]
             .collapsible
             .as_ref()
             .expect("thinking detail")
@@ -816,16 +823,16 @@ fn manual_expand_survives_next_thinking() {
 }
 
 #[test]
-fn last_detail_stays_open_until_next_message() {
+fn ended_stream_collapses_its_details() {
     let mut t = Transcript::new();
     t.on_event(&thinking("plan"));
-    t.on_event(&completed());
-    t.on_event(&started());
+    t.on_event(&thinking_done(1_500));
     assert!(
-        t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
-        "turn end is not a following message"
+        !t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
+        "streaming ended, so the windowed body is gone"
     );
 
+    t.on_event(&started());
     t.push_user("next");
     assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
 }
@@ -1154,6 +1161,90 @@ fn burst_double_click_toggles_call_list() {
             .iter()
             .any(|line| line_text(line).contains("Read src/main.rs"))
     );
+}
+
+const EARLIER_4: &str = "… 4 earlier lines";
+const EARLIER_2: &str = "… 2 earlier lines";
+
+#[test]
+fn live_thinking_body_windows_to_the_newest_lines() {
+    let mut t = Transcript::new();
+    stream_thinking(&mut t, MAX_LIVE_BODY_LINES + 4);
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+
+    assert!(has(EARLIER_4), "{:?}", t.wrapped);
+    assert!(has("t12"));
+    assert!(!has("t04"));
+
+    t.on_event(&thinking_done(1_500));
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(!has(EARLIER_4));
+    assert!(!has("t12"), "no gap is left before the next row");
+
+    double_click(&mut t, 2, 0);
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(!has(EARLIER_4));
+    assert!(has("t01"));
+    assert!(has("t12"));
+}
+
+#[test]
+fn open_tool_burst_body_windows_to_the_newest_calls() {
+    let mut t = Transcript::new();
+    for i in 1..=(MAX_LIVE_BODY_LINES + 2) as u64 {
+        t.on_event(&tool_start(
+            i,
+            "bash",
+            serde_json::json!({ "command": format!("c{i:02}") }),
+        ));
+    }
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+
+    assert!(has(EARLIER_2), "{:?}", t.wrapped);
+    assert!(has("c10"));
+    assert!(!has("c01"));
+
+    t.on_event(&completed());
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(!has(EARLIER_2));
+    assert!(!has("c10"), "the burst closes once the turn moves on");
+
+    let header = t
+        .wrapped
+        .iter()
+        .position(|line| line_text(line).contains("Ran 10 commands"))
+        .expect("burst header") as u16;
+    double_click(&mut t, 2, header);
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(!has(EARLIER_2));
+    assert!(has("c01"));
+    assert!(has("c10"));
 }
 
 fn todo_input() -> serde_json::Value {
