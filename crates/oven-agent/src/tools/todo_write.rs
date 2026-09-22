@@ -42,7 +42,7 @@ impl Tool for TodoWriteTool {
         }
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Replace the session TODO list with the given JSON array. Always send the\n\
          complete list (full replace, not a patch). Use short stable ids. At most\n\
          one item may be in_progress. Call this before starting multi-step work and\n\

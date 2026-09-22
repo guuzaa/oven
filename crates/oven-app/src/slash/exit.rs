@@ -6,10 +6,10 @@ use crate::AppError;
 pub struct Exit;
 
 impl SlashCommand for Exit {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "exit"
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "End the session."
     }
     fn execute(&self, _agent: &mut Agent, _args: &str) -> Result<CommandOutcome, AppError> {

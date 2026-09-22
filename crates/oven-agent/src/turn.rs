@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use oven_llm::{Message, ModelId, ReasoningEffort, Usage};
 use tokio::sync::oneshot;
@@ -85,7 +85,7 @@ impl TurnContext {
             .ok()?;
         tokio::select! {
             biased;
-            _ = self.cancellation.cancelled() => None,
+            () = self.cancellation.cancelled() => None,
             decision = response => decision.ok(),
         }
     }
@@ -108,25 +108,28 @@ impl TurnContext {
             .ok()?;
         tokio::select! {
             biased;
-            _ = self.cancellation.cancelled() => None,
+            () = self.cancellation.cancelled() => None,
             decision = response => decision.ok(),
         }
     }
 
     pub fn set_mode(&self, mode: AgentMode) {
-        *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = mode;
     }
 
     pub fn mode(&self) -> AgentMode {
-        *self.mode.lock().unwrap_or_else(|e| e.into_inner())
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn set_model(&self, model: ModelId, reasoning_effort: Option<ReasoningEffort>) {
-        *self.model.lock().unwrap_or_else(|e| e.into_inner()) = (model, reasoning_effort);
+        *self.model.lock().unwrap_or_else(PoisonError::into_inner) = (model, reasoning_effort);
     }
 
     pub fn model(&self) -> ModelSelection {
-        self.model.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.model
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 }
 

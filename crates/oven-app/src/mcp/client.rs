@@ -6,6 +6,7 @@
 //! [`McpCaller`] covers a single `tools/call`, [`McpConnector`] covers
 //! connecting a configured server and listing its tools.
 
+use std::fmt::Write;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -261,7 +262,7 @@ impl Tool for McpTool {
         let result = if let Some(cancel) = cancel {
             tokio::select! {
                 biased;
-                _ = cancel.cancelled() => return Err(AgentError::cancelled()),
+                () = cancel.cancelled() => return Err(AgentError::cancelled()),
                 res = self.caller.call_tool(request) => res,
             }
         } else {
@@ -287,10 +288,10 @@ fn format_result(result: &CallToolResult) -> String {
         match block {
             ContentBlock::Text(t) => text.push_str(&t.text),
             ContentBlock::Image(img) => {
-                text.push_str(&format!("[image: {}]", img.mime_type));
+                let _ = write!(text, "[image: {}]", img.mime_type);
             }
             ContentBlock::Audio(a) => {
-                text.push_str(&format!("[audio: {}]", a.mime_type));
+                let _ = write!(text, "[audio: {}]", a.mime_type);
             }
             ContentBlock::Resource(r) => {
                 let uri = match &r.resource {
@@ -298,7 +299,7 @@ fn format_result(result: &CallToolResult) -> String {
                     | ResourceContents::BlobResourceContents { uri, .. } => uri.as_str(),
                     _ => "(unknown)",
                 };
-                text.push_str(&format!("[resource: {uri}]"));
+                let _ = write!(text, "[resource: {uri}]");
             }
             ContentBlock::ResourceLink(_) => text.push_str("[resource_link]"),
             _ => text.push_str("[content]"),

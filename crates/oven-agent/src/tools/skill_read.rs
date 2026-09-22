@@ -32,7 +32,7 @@ impl Tool for SkillReadTool {
         Self::NAME
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Load the full content of a skill by id. Skills are guidance modules; \
          the system prompt only lists their descriptions."
     }

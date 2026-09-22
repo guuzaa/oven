@@ -72,7 +72,7 @@ impl From<ProviderError> for AgentError {
 impl From<oven_llm::StreamCollectorError> for AgentError {
     fn from(err: oven_llm::StreamCollectorError) -> Self {
         Self {
-            message: format!("stream: {}", err),
+            message: format!("stream: {err}"),
         }
     }
 }
@@ -80,7 +80,7 @@ impl From<oven_llm::StreamCollectorError> for AgentError {
 impl From<serde_json::Error> for AgentError {
     fn from(err: serde_json::Error) -> Self {
         Self {
-            message: format!("json: {}", err),
+            message: format!("json: {err}"),
         }
     }
 }

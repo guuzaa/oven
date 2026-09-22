@@ -1,10 +1,11 @@
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, require_str, resolve_within};
+use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
 use crate::error::AgentError;
 use crate::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
 use oven_host::walk_dir;
@@ -34,10 +35,10 @@ impl GrepTool {
             .filter(|include| !include.is_empty());
         let mut summary = format!("Search {pattern}");
         if let Some(path) = path {
-            summary.push_str(&format!(" in {path}"));
+            let _ = write!(summary, " in {path}");
         }
         if let Some(include) = include {
-            summary.push_str(&format!(" ({include})"));
+            let _ = write!(summary, " ({include})");
         }
         ToolView {
             summary,
@@ -60,7 +61,7 @@ impl Tool for GrepTool {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Search file contents with a regex. Returns matching lines as \
          path:line:content (paths relative to the workspace root). Respects \
          .gitignore; skips binary files."
@@ -87,10 +88,10 @@ impl Tool for GrepTool {
         let re = compile_regex(
             pattern,
             args.get("case_insensitive")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false),
         )
-        .map_err(|e| AgentError::from(format!("grep: invalid regex {:?}: {}", pattern, e)))?;
+        .map_err(|e| AgentError::from(format!("grep: invalid regex {pattern:?}: {e}")))?;
 
         let include = args
             .get("include")
@@ -99,7 +100,7 @@ impl Tool for GrepTool {
             .filter(|s| !s.is_empty())
             .map(|p| {
                 compile_glob(p).map_err(|e| {
-                    AgentError::from(format!("grep: invalid include pattern {:?}: {}", p, e))
+                    AgentError::from(format!("grep: invalid include pattern {p:?}: {e}"))
                 })
             })
             .transpose()?;
@@ -117,11 +118,7 @@ impl Tool for GrepTool {
                 base.display()
             )));
         }
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.max(0) as usize)
-            .unwrap_or(self.max_results);
+        let limit = parse_limit(args, self.max_results);
 
         let mut out = Vec::new();
         if base.is_file() {
@@ -137,7 +134,7 @@ impl Tool for GrepTool {
                 {
                     return Err(AgentError::cancelled());
                 }
-                let entry = entry.map_err(|e| AgentError::from(format!("grep: walk: {}", e)))?;
+                let entry = entry.map_err(|e| AgentError::from(format!("grep: walk: {e}")))?;
                 if entry.is_file() {
                     let full = entry.path();
                     let rel = full.strip_prefix(&self.root).unwrap_or(full);
@@ -151,7 +148,7 @@ impl Tool for GrepTool {
         }
         let mut text = out.join("\n");
         if out.len() >= limit {
-            text.push_str(&format!("\n[truncated at {} results]", out.len()));
+            let _ = write!(text, "\n[truncated at {limit} results]");
         }
         Ok(text)
     }

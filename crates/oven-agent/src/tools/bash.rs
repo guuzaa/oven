@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -48,7 +49,7 @@ impl Tool for BashTool {
             ..Default::default()
         }
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Execute a command with the host shell in the workspace root and return stdout/stderr. Uses PowerShell on Windows and bash (falling back to sh) elsewhere. Use for builds, tests, git, etc."
     }
     fn schema(&self) -> Value {
@@ -80,17 +81,17 @@ impl Tool for BashTool {
             text.push_str(&output.stdout);
         }
         if !output.stderr.is_empty() {
-            if !text.is_empty() {
-                text.push_str("\n--- stderr ---\n");
-            } else {
+            if text.is_empty() {
                 text.push_str("--- stderr ---\n");
+            } else {
+                text.push_str("\n--- stderr ---\n");
             }
             text.push_str(&output.stderr);
         }
         if let Some(status) = output.status
             && !status.success()
         {
-            text.push_str(&format!("\n[exit code: {}]", status.code().unwrap_or(-1)));
+            let _ = write!(text, "\n[exit code: {}]", status.code().unwrap_or(-1));
         }
         if text.is_empty() {
             text.push_str("(no output)");

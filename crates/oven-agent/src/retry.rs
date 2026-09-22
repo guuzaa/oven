@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use oven_host::as_ms;
 use oven_llm::{
     ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response, Result,
     StreamEvent,
@@ -63,7 +64,7 @@ fn retry_status(err: &ProviderError) -> Option<u16> {
 fn log_retry(attempt: u32, backoff: Duration, err: &ProviderError) {
     tracing::warn!(
         attempt,
-        backoff_ms = backoff.as_millis() as u64,
+        backoff_ms = as_ms(backoff),
         status = retry_status(err),
         "retrying provider request"
     );

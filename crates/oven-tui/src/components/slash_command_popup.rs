@@ -83,7 +83,7 @@ impl SlashCommandPopup {
         if !self.open {
             return 0;
         }
-        self.matches().len().clamp(1, MAX_LIST_ROWS) as u16
+        list::bounded_rows(self.matches().len())
     }
 
     pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect) {

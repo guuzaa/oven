@@ -130,6 +130,6 @@ fn osc52_copy(text: &str) -> bool {
 
     let encoded = STANDARD.encode(text.as_bytes());
     write!(io::stdout(), "\x1b]52;c;{encoded}\x07")
-        .and_then(|_| io::stdout().flush())
+        .and_then(|()| io::stdout().flush())
         .is_ok()
 }

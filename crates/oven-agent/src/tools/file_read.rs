@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -31,7 +32,7 @@ impl Tool for FileReadTool {
     fn view(&self, input: &Value) -> ToolView {
         Self::view_input(input)
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Read a UTF-8 text file. Returns selected source lines with their 1-based \
          line numbers in the format `L<line>→<content>`, along with the file path \
          and returned line range. Optionally restrict the range with `offset` and `limit`."
@@ -61,15 +62,24 @@ impl Tool for FileReadTool {
             .await
             .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))?;
 
-        let offset = args.get("offset").and_then(|v| v.as_i64()).unwrap_or(1);
-        let limit = args.get("limit").and_then(|v| v.as_i64());
+        let offset = args
+            .get("offset")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1);
+        let limit = args.get("limit").and_then(serde_json::Value::as_i64);
 
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
         let total = lines.len();
-        let start = (offset.max(1) as usize).saturating_sub(1).min(total);
-        let end = match limit {
-            Some(n) if n > 0 => start.saturating_add(n as usize).min(total),
-            _ => total,
+        let start = offset
+            .max(1)
+            .try_into()
+            .map_or(0, |offset: usize| offset.saturating_sub(1).min(total));
+        let end = match limit
+            .filter(|n| *n > 0)
+            .and_then(|n| usize::try_from(n).ok())
+        {
+            Some(n) => start.saturating_add(n).min(total),
+            None => total,
         };
         let range = if start < end {
             format!("{}-{}", start + 1, end)
@@ -83,7 +93,7 @@ impl Tool for FileReadTool {
 
         output.push('\n');
         for (index, line) in lines[start..end].iter().enumerate() {
-            output.push_str(&format!("L{}→{}", start + index + 1, line));
+            let _ = write!(output, "L{}→{}", start + index + 1, line);
         }
         Ok(output)
     }

@@ -116,11 +116,8 @@ impl ModelPicker {
             return 0;
         }
         match self.stage {
-            Stage::Models => {
-                let rows = self.matches().len().clamp(1, MAX_LIST_ROWS);
-                (rows as u16).saturating_add(1)
-            }
-            Stage::Effort => EFFORT_ITEMS.len() as u16,
+            Stage::Models => list::bounded_rows(self.matches().len()).saturating_add(1),
+            Stage::Effort => u16::try_from(EFFORT_ITEMS.len()).unwrap_or(u16::MAX),
         }
     }
 

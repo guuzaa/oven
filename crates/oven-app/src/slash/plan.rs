@@ -6,11 +6,11 @@ use crate::AppError;
 pub struct Plan;
 
 impl SlashCommand for Plan {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "plan"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Switch plan mode: /plan [on|off]"
     }
 

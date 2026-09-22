@@ -223,19 +223,19 @@ impl ProviderConfig {
     /// Copy unset fields from `src`.
     pub fn fill_missing(&mut self, src: &ProviderConfig) {
         if self.name.is_none() {
-            self.name = src.name.clone();
+            self.name.clone_from(&src.name);
         }
         if self.model.is_none() {
-            self.model = src.model.clone();
+            self.model.clone_from(&src.model);
         }
         if self.base_url.is_none() {
-            self.base_url = src.base_url.clone();
+            self.base_url.clone_from(&src.base_url);
         }
         if self.protocol.is_none() {
             self.protocol = src.protocol;
         }
         if self.api_key.is_none() {
-            self.api_key = src.api_key.clone();
+            self.api_key.clone_from(&src.api_key);
         }
         if self.models.is_empty() {
             self.models = src.models.clone();
@@ -412,6 +412,7 @@ impl AppConfig {
     pub fn request_timeout(&self) -> Duration {
         Duration::from_secs(self.request_timeout_secs)
     }
+
     pub fn base_backoff(&self) -> Duration {
         Duration::from_millis(self.base_backoff_ms)
     }
@@ -437,6 +438,10 @@ impl AppConfig {
         if overlay.base_backoff_ms != default_base_backoff_ms() {
             self.base_backoff_ms = overlay.base_backoff_ms;
         }
+        #[allow(
+            clippy::float_cmp,
+            reason = "overlay values only override when non-default"
+        )]
         if overlay.compact_threshold != default_compact_threshold() {
             self.compact_threshold = overlay.compact_threshold;
         }
@@ -565,6 +570,10 @@ impl AppConfig {
     }
 
     /// Update one Provider and rewrite the file in the canonical format.
+    ///
+    /// # Panics
+    /// Panics if reading back the file does not contain the provider that was
+    /// just written into it.
     pub fn save_provider_at(path: &Path, overlay: &ProviderConfig) -> Result<(), ConfigError> {
         let mut config = Self::load_file(path)?.unwrap_or_default();
         let name = overlay

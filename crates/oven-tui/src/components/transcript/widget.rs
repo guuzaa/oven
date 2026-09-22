@@ -333,21 +333,18 @@ impl Transcript {
     fn upsert_tool_summary(&mut self) {
         let title = self.tool_burst.title();
         let sections = self.tool_burst.sections();
-        match self.burst_row.and_then(|idx| self.rows.get_mut(idx)) {
-            Some(row) => {
-                row.text = title;
-                if let Some(collapsible) = row.collapsible.as_mut() {
-                    collapsible.replace_sections(sections);
-                }
+        if let Some(row) = self.burst_row.and_then(|idx| self.rows.get_mut(idx)) {
+            row.text = title;
+            if let Some(collapsible) = row.collapsible.as_mut() {
+                collapsible.replace_sections(sections);
             }
-            None => {
-                self.push_row_with_detail(
-                    LineKind::Tool,
-                    title,
-                    Some(Collapsible::from_sections(sections)),
-                );
-                self.burst_row = Some(self.rows.len() - 1);
-            }
+        } else {
+            self.push_row_with_detail(
+                LineKind::Tool,
+                title,
+                Some(Collapsible::from_sections(sections)),
+            );
+            self.burst_row = Some(self.rows.len() - 1);
         }
         self.rewrap_all();
     }
@@ -528,7 +525,7 @@ impl Transcript {
 
     fn clamp_pos(&self, pos: SelPos, last: usize) -> SelPos {
         let line = pos.line.min(last);
-        let width = self.line_at(line).map(line_display_width).unwrap_or(0);
+        let width = self.line_at(line).map_or(0, line_display_width);
         SelPos {
             line,
             col: pos.col.min(width),
@@ -585,7 +582,7 @@ impl Transcript {
         let raw_line = top.saturating_add(rel_y);
         let last = total - 1;
         let line = raw_line.min(last);
-        let width = self.line_at(line).map(line_display_width).unwrap_or(0);
+        let width = self.line_at(line).map_or(0, line_display_width);
         let rel_x = if column <= self.area.x {
             0
         } else {
@@ -724,11 +721,13 @@ impl Component for Transcript {
     fn handle_key(&mut self, key: KeyEvent, _state: &State) -> KeyResult {
         match key.code {
             KeyCode::PageUp => {
-                self.scroll_up(self.height().max(1) as u16);
+                let page = u16::try_from(self.height().max(1)).unwrap_or(u16::MAX);
+                self.scroll_up(page);
                 KeyResult::Handled
             }
             KeyCode::PageDown => {
-                self.scroll_down(self.height().max(1) as u16);
+                let page = u16::try_from(self.height().max(1)).unwrap_or(u16::MAX);
+                self.scroll_down(page);
                 KeyResult::Handled
             }
             _ => KeyResult::Ignored,
@@ -842,8 +841,9 @@ impl Component for Transcript {
                     };
                     self.note_tool_end(&call_id.0.to_string(), ok, output);
                 }
-                AgentEvent::Tool(ToolEvent::OutputDelta { .. }) => {}
-                AgentEvent::Turn(TurnEvent::Started) => {}
+                AgentEvent::Tool(ToolEvent::OutputDelta { .. })
+                | AgentEvent::Turn(TurnEvent::Started)
+                | AgentEvent::TodosChanged { .. } => {}
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
                     self.stop_live_thinking();
                     self.flush_streaming();
@@ -874,7 +874,6 @@ impl Component for Transcript {
                     self.flush_streaming();
                     self.push_row(LineKind::Error, &error.message);
                 }
-                AgentEvent::TodosChanged { .. } => {}
             },
             AppEventKind::Shell(ev) => match ev {
                 ShellEvent::Started { .. } => {}
@@ -891,9 +890,9 @@ impl Component for Transcript {
                     self.push_row(LineKind::System, "context compacted");
                 }
             }
-            AppEventKind::StateChanged(_) => {}
-            AppEventKind::Exited => {}
-            AppEventKind::Notification { .. } => {}
+            AppEventKind::StateChanged(_)
+            | AppEventKind::Exited
+            | AppEventKind::Notification { .. } => {}
             AppEventKind::Error { message } => {
                 self.close_tool_burst();
                 self.flush_streaming();

@@ -6,10 +6,10 @@ use crate::AppError;
 pub struct Clear;
 
 impl SlashCommand for Clear {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "clear"
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Clear conversation history."
     }
     fn execute(&self, agent: &mut Agent, _args: &str) -> Result<CommandOutcome, AppError> {

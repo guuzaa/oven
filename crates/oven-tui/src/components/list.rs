@@ -53,7 +53,13 @@ pub fn draw_choice_list<N, D>(
 }
 
 pub fn titled_list_height(item_count: usize) -> u16 {
-    TITLE_ROWS + item_count as u16
+    TITLE_ROWS.saturating_add(u16::try_from(item_count).unwrap_or(u16::MAX))
+}
+
+/// Rows a bounded list needs for `count` entries: at least one, at most
+/// [`MAX_LIST_ROWS`].
+pub fn bounded_rows(count: usize) -> u16 {
+    u16::try_from(count.clamp(1, MAX_LIST_ROWS)).unwrap_or(u16::MAX)
 }
 
 pub fn draw_titled_choice_list<N, D>(

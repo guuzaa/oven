@@ -18,6 +18,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::string::String;
 
 /// Canonical filename of the guidance document inside a skill directory.
 pub(crate) const SKILL_FILE: &str = "SKILL.md";
@@ -58,7 +59,7 @@ impl SkillRegistry {
     }
 
     pub fn ids(&self) -> Vec<&str> {
-        self.skills.keys().map(|s| s.as_str()).collect()
+        self.skills.keys().map(String::as_str).collect()
     }
 
     /// (id, source path) pairs for skills backed by a document on disk.

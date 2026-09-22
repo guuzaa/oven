@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, TurnId};
 use tokio::sync::mpsc;
@@ -140,7 +140,7 @@ impl EventBus {
         let mut subscribers = self
             .subscribers
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(PoisonError::into_inner);
         subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
     }
 

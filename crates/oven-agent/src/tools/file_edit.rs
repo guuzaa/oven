@@ -57,7 +57,7 @@ impl Tool for FileEditTool {
             ..Default::default()
         }
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Edit a file by replacing text. Replaces the single exact occurrence of \
          old_string with new_string; fails if old_string matches more than once \
          unless replace_all is true."
@@ -84,7 +84,7 @@ impl Tool for FileEditTool {
         let new_string = require_str(args, "new_string", Self::NAME)?;
         let replace_all = args
             .get("replace_all")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
         let path = resolve_within(&self.root, path_str)?;

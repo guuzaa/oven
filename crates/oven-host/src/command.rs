@@ -49,7 +49,7 @@ pub async fn run_shell_command(
         if let Some(cancel) = cancel {
             tokio::select! {
                 biased;
-                _ = cancel.cancelled() => None,
+                () = cancel.cancelled() => None,
                 result = &mut wait => Some(result),
             }
         } else {

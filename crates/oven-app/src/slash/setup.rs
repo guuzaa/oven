@@ -50,11 +50,11 @@ impl Setup {
 }
 
 impl SlashCommand for Setup {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "setup"
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Configure provider: /setup name=... api_key=..."
     }
 

@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::path::Path;
 
 use super::instructions::InstructionDoc;
@@ -13,12 +14,13 @@ pub fn system_prompt(
     out.push_str("\n\n");
     out.push_str(&env_block(root));
     for doc in instructions {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\n\n## {} Instructions (from {})\n\n{}\n\n",
             doc.scope,
             doc.path.display(),
             doc.content
-        ));
+        );
     }
     if let Some(extra) = skills {
         out.push_str("\n\n## Available Skills\n\n");
@@ -29,9 +31,7 @@ pub fn system_prompt(
 
 fn env_block(root: &Path) -> String {
     let workspace = canonical_root(root);
-    let cwd = std::env::current_dir()
-        .map(|p| canonical_root(&p))
-        .unwrap_or_else(|_| workspace.clone());
+    let cwd = std::env::current_dir().map_or_else(|_| workspace.clone(), |p| canonical_root(&p));
     let git = if is_git_repo(root) { "yes" } else { "no" };
     format!(
         "<env>\n  Working directory: {cwd}\n  Workspace root folder: {workspace}\n  Is directory a git repo: {git}\n  Platform: {}\n  Today's date: {}\n</env>",

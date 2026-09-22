@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::string::String;
+use std::sync::{Arc, PoisonError};
 
 use oven_agent::AgentError;
 use oven_agent::{AgentEvent, LoopLimitDecision, TodoList, TurnEvent};
@@ -102,7 +103,7 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.subscribers
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .push(tx);
         rx
     }
@@ -181,8 +182,9 @@ impl App {
                     AgentEvent::Stream(oven_agent::StreamEvent::TextDelta { text: t }) => {
                         text.push_str(&t);
                     }
-                    AgentEvent::Turn(TurnEvent::Completed { .. }) => return Ok(text),
-                    AgentEvent::Turn(TurnEvent::Cancelled { .. }) => return Ok(text),
+                    AgentEvent::Turn(TurnEvent::Completed { .. } | TurnEvent::Cancelled { .. }) => {
+                        return Ok(text);
+                    }
                     AgentEvent::Turn(TurnEvent::Failed { error, .. }) => {
                         return Err(AppError::Runtime(error.message));
                     }

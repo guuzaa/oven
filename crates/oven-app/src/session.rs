@@ -13,10 +13,11 @@
 //! with timestamp 0, and a non-zero envelope usage becomes a `TokenUsage`
 //! record after its message.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use oven_agent::{Record, SessionMeta};
 use oven_llm::{Message, Usage};
@@ -289,13 +290,13 @@ impl SessionStore {
     pub(crate) fn current(&self) -> Session {
         self.shared
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .session
             .clone()
     }
 
     pub(crate) fn set_current(&self, session: Session) {
-        let mut shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         shared.session = session;
         shared.has_content = false;
     }
@@ -303,12 +304,12 @@ impl SessionStore {
     pub(crate) fn mark_content(&self, has_content: bool) {
         self.shared
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .has_content = has_content;
     }
 
     pub(crate) fn session_id(&self) -> Option<String> {
-        let shared = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        let shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         shared.has_content.then(|| shared.session.id().to_string())
     }
 }
@@ -321,19 +322,16 @@ fn recent_path(dir: &Path) -> PathBuf {
     dir.join("cwd_latest.json")
 }
 
-fn load_recent(dir: &Path) -> Result<std::collections::BTreeMap<String, String>, SessionError> {
+fn load_recent(dir: &Path) -> Result<BTreeMap<String, String>, SessionError> {
     let path = recent_path(dir);
     match fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| SessionError::Parse(path, 1, e)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Default::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::default()),
         Err(e) => Err(SessionError::Io(path, e)),
     }
 }
 
-fn save_recent(
-    dir: &Path,
-    map: &std::collections::BTreeMap<String, String>,
-) -> Result<(), SessionError> {
+fn save_recent(dir: &Path, map: &BTreeMap<String, String>) -> Result<(), SessionError> {
     let path = recent_path(dir);
     let tmp = dir.join("cwd_latest.json.tmp");
     let text = serde_json::to_string_pretty(map).expect("recent map serialization cannot fail");

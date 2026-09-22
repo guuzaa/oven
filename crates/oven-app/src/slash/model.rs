@@ -39,7 +39,7 @@ impl Model {
         if qualified.vendor().is_some() {
             match router.provider(&qualified) {
                 Ok(_) => Ok(qualified.to_string()),
-                Err(RouterError::UnknownModel(_)) | Err(RouterError::NoProviderRegistered) => {
+                Err(RouterError::UnknownModel(_) | RouterError::NoProviderRegistered) => {
                     Err(AppError::Runtime(format!(
                         "model '{qualified}' is not available; run /setup to configure that provider"
                     )))
@@ -85,7 +85,7 @@ impl SlashCommand for Model {
         Self::NAME
     }
 
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Switch model and reasoning effort: /model <id> [none|low|medium|high]"
     }
 

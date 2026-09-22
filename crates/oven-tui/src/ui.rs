@@ -16,7 +16,7 @@ use crate::components::choice_popup::{ChoicePopup, ChoicePopupAction};
 use crate::components::component::{Action, Component, KeyResult, State};
 use crate::components::input::{InputView, Overlay, display_user_input};
 use crate::components::paste_burst::{self, Burst};
-use crate::components::queue::QueueWidget;
+use crate::components::queue;
 use crate::components::shell;
 use crate::components::status::{StatusBar, StatusHint};
 use crate::components::todos::TodosWidget;
@@ -60,7 +60,6 @@ pub struct Ui {
     transcript: Transcript,
     status: StatusBar,
     input: InputView,
-    queue: QueueWidget,
     todos: TodosWidget,
     prompt: Option<OverlayPrompt>,
 }
@@ -99,7 +98,6 @@ impl Ui {
                 .with_effort(provider.reasoning_effort)
                 .with_context(context_tokens, context_window),
             input,
-            queue: QueueWidget::new(),
             todos: TodosWidget::new(todos),
             prompt: None,
         }
@@ -146,7 +144,7 @@ impl Ui {
                 }
                 result = self.events.recv() => {
                     match result {
-                        Some(ev) => self.apply_event(ev),
+                        Some(ev) => self.apply_event(&ev),
                         None => {
                             self.state.busy = false;
                         }
@@ -189,7 +187,7 @@ impl Ui {
     fn drain_events(&mut self) {
         loop {
             match self.events.try_recv() {
-                Ok(ev) => self.apply_event(ev),
+                Ok(ev) => self.apply_event(&ev),
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     self.state.busy = false;
@@ -199,7 +197,7 @@ impl Ui {
         }
     }
 
-    fn apply_event(&mut self, ev: AppEvent) {
+    fn apply_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Exited => self.quit = true,
             AppEventKind::Agent(env) => match &env.event {
@@ -265,10 +263,10 @@ impl Ui {
                 }
             }
         }
-        self.transcript.on_event(&ev);
-        self.status.on_event(&ev);
-        self.input.on_event(&ev);
-        self.todos.on_event(&ev);
+        self.transcript.on_event(ev);
+        self.status.on_event(ev);
+        self.input.on_event(ev);
+        self.todos.on_event(ev);
         self.maybe_flush();
     }
 
@@ -347,7 +345,7 @@ impl Ui {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         match self.transcript.handle_mouse(mouse, &self.state) {
             KeyResult::Action(Action::Notify(text)) => {
-                self.apply_event(AppEvent::notification(text));
+                self.apply_event(&AppEvent::notification(text));
             }
             KeyResult::Ignored => {
                 self.input.handle_mouse(mouse, &self.state);
@@ -444,7 +442,7 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::Notify(text)) => {
-                self.apply_event(AppEvent::notification(text));
+                self.apply_event(&AppEvent::notification(text));
                 false
             }
         }
@@ -459,14 +457,14 @@ impl Ui {
         let regions = layout::split(
             area,
             self.input.height(area.width),
-            self.queue.height(&self.pending),
+            queue::height(&self.pending),
             self.todos.height(),
             overlay_height,
         );
 
         self.transcript.draw(f, regions.transcript, &self.state);
         if let Some(queue) = regions.queue {
-            self.queue.draw(f, queue, &self.pending);
+            queue::draw(f, queue, &self.pending);
         }
         if let Some(todos) = regions.todos {
             self.todos.draw(f, todos);

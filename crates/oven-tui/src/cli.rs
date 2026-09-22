@@ -53,7 +53,7 @@ impl Cli {
     fn builder(&self) -> AppBuilder {
         let mut builder = App::builder(&self.dir);
         if let Err(e) = builder.load_config() {
-            eprintln!("warning: loading config: {}", e);
+            eprintln!("warning: loading config: {e}");
         }
         builder
     }

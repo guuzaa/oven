@@ -221,8 +221,7 @@ impl History {
     /// user message timestamp persisted on that `Record`.
     pub fn elapsed_ms(&self) -> u64 {
         self.last_user_timestamp()
-            .map(|start| now_ms().saturating_sub(start))
-            .unwrap_or(0)
+            .map_or(0, |start| now_ms().saturating_sub(start))
     }
 
     /// Persisted duration of the last user turn: last message timestamp minus
@@ -233,10 +232,7 @@ impl History {
             .iter()
             .rposition(|(m, _)| m.role == Role::User)?;
         let start = self.messages[idx].1;
-        let end = self.messages[idx..]
-            .last()
-            .map(|(_, ts)| *ts)
-            .unwrap_or(start);
+        let end = self.messages[idx..].last().map_or(start, |(_, ts)| *ts);
         Some(end.saturating_sub(start))
     }
 
@@ -340,12 +336,14 @@ impl History {
 
     /// Record a provider response's usage as the current turn's latest usage.
     pub fn record_usage(&mut self, usage: &Usage) {
-        if self.turn_usage.is_empty() {
-            self.turn_usage.push((Usage::default(), 0));
+        let timestamp = self.messages.last().map_or(0, |(_, ts)| *ts);
+        match self.turn_usage.last_mut() {
+            Some(last) => {
+                last.0 = *usage;
+                last.1 = timestamp;
+            }
+            None => self.turn_usage.push((*usage, timestamp)),
         }
-        let last = self.turn_usage.last_mut().expect("usage bucket exists");
-        last.0 = *usage;
-        last.1 = self.messages.last().map(|(_, ts)| *ts).unwrap_or(0);
     }
 }
 

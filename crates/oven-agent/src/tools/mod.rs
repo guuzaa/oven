@@ -58,5 +58,13 @@ pub(crate) fn require_str<'a>(
 ) -> Result<&'a str, AgentError> {
     args.get(key)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| AgentError::from(format!("{}: missing '{}' string argument", tool, key)))
+        .ok_or_else(|| AgentError::from(format!("{tool}: missing '{key}' string argument")))
+}
+
+pub(crate) fn parse_limit(args: &Value, default: usize) -> usize {
+    args.get("limit")
+        .and_then(Value::as_i64)
+        .map(|v| v.max(0))
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(default)
 }

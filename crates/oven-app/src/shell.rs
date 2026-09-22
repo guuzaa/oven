@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fmt::Write;
 use std::time::Duration;
 
 use oven_host::{CommandError, CommandOutput};
@@ -130,7 +131,7 @@ pub(crate) fn commit_shell(
             };
             let mut text = format_shell_text(&output);
             if text == NO_OUTPUT {
-                text = message.clone();
+                text.clone_from(&message);
             } else if !text.ends_with('\n') {
                 text.push('\n');
                 text.push_str(&message);
@@ -177,7 +178,7 @@ fn format_shell_text(output: &CommandOutput) -> String {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(&format!("[exit code: {code}]"));
+        let _ = write!(text, "[exit code: {code}]");
     }
     if text.is_empty() {
         NO_OUTPUT.to_string()

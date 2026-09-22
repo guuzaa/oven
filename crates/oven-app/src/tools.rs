@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::string::String;
 
 use oven_agent::{BUILTIN_TOOLS, Tool};
 
@@ -71,7 +72,7 @@ impl ToolRegistry {
 
     /// Registered tool names, deterministically ordered.
     pub fn names(&self) -> Vec<&str> {
-        self.tools.keys().map(|s| s.as_str()).collect()
+        self.tools.keys().map(String::as_str).collect()
     }
 
     /// Fresh tool instances for one agent, in registry order.

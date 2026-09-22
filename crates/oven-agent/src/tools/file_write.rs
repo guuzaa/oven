@@ -54,7 +54,7 @@ impl Tool for FileWriteTool {
             ..Default::default()
         }
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Write text content to a file, creating parent directories as needed. Overwrites."
     }
     fn schema(&self) -> Value {

@@ -26,6 +26,7 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::string::String;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -91,7 +92,7 @@ impl McpRegistry {
     }
 
     pub fn ids(&self) -> Vec<&str> {
-        self.servers.keys().map(|s| s.as_str()).collect()
+        self.servers.keys().map(String::as_str).collect()
     }
 
     pub fn len(&self) -> usize {

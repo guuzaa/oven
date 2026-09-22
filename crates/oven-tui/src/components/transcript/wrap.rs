@@ -26,6 +26,10 @@ const MS_PER_SECOND: u64 = 1000;
 const MS_PER_TENTH: u64 = 100;
 const TENTHS_PER_SECOND: u64 = 10;
 const MS_PER_MINUTE: u64 = 60_000;
+const PERIOD_MS: u128 = 1400;
+const PERIOD: f32 = 1400.0;
+const SHADE_MIN: f32 = 88.0;
+const SHADE_MAX: f32 = 220.0;
 const THOUGHT_FOR: &str = "Thought for";
 
 fn format_duration(ms: u64) -> String {
@@ -97,12 +101,16 @@ pub(super) fn trim_message(text: &str) -> String {
         .to_string()
 }
 
+/// Fraction of the shimmer period the current time sits at.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the offset is reduced modulo PERIOD_MS, which is exact in f32"
+)]
 pub(super) fn thinking_phase() -> f32 {
-    const PERIOD_MS: u128 = 1400;
-    SystemTime::now()
+    let phase_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| (d.as_millis() % PERIOD_MS) as f32 / PERIOD_MS as f32)
-        .unwrap_or(0.0)
+        .map_or(0, |d| d.as_millis() % PERIOD_MS);
+    phase_ms as f32 / PERIOD
 }
 
 pub(super) fn apply_thinking_shimmer(line: &Line<'static>, phase: f32) -> Line<'static> {
@@ -121,22 +129,32 @@ pub(super) fn apply_thinking_shimmer(line: &Line<'static>, phase: f32) -> Line<'
 }
 
 fn shimmer_body(text: &str, phase: f32) -> Vec<Span<'static>> {
-    let n = text.chars().count().max(1) as f32;
+    let n = to_f32(text.chars().count()).max(1.0);
     text.chars()
         .enumerate()
         .map(|(i, ch)| {
-            let wave = ((i as f32 / n - phase) * TAU).cos() * 0.5 + 0.5;
+            let wave = ((to_f32(i) / n - phase) * TAU).cos() * 0.5 + 0.5;
             Span::styled(ch.to_string(), Style::default().fg(thinking_shade(wave)))
         })
         .collect()
 }
 
+/// Character offsets in `f32`; shimmer lines are far too short for the
+/// saturation to be observable.
+#[inline]
+fn to_f32(n: usize) -> f32 {
+    f32::from(u16::try_from(n).unwrap_or(u16::MAX))
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the clamped shade always lands inside the u8 range"
+)]
 fn thinking_shade(t: f32) -> Color {
     let t = t.clamp(0.0, 1.0);
-    let lo = 88.0;
-    let hi = 220.0;
-    let v = (lo + (hi - lo) * t) as u8;
-    Color::Rgb(v, v, v)
+    let shade = (SHADE_MIN + (SHADE_MAX - SHADE_MIN) * t) as u8;
+    Color::Rgb(shade, shade, shade)
 }
 
 fn earlier_lines(skipped: usize) -> String {
@@ -381,24 +399,21 @@ pub(super) fn wrap_line_into(
         out.push(line.clone());
         return;
     }
-    let (prefix, style, body_style, body) = match line.spans.as_slice() {
-        [head, rest @ ..] => {
-            let body: String = rest.iter().map(|s| s.content.as_ref()).collect();
-            let body_style = rest
-                .first()
-                .map(|span| span.style)
-                .filter(|style| *style != Style::default());
-            (
-                head.content.as_ref().to_string(),
-                head.style,
-                body_style,
-                body,
-            )
-        }
-        [] => {
-            out.push(line.clone());
-            return;
-        }
+    let (prefix, style, body_style, body) = if let [head, rest @ ..] = line.spans.as_slice() {
+        let body: String = rest.iter().map(|s| s.content.as_ref()).collect();
+        let body_style = rest
+            .first()
+            .map(|span| span.style)
+            .filter(|style| *style != Style::default());
+        (
+            head.content.as_ref().to_string(),
+            head.style,
+            body_style,
+            body,
+        )
+    } else {
+        out.push(line.clone());
+        return;
     };
     let body_width = width.saturating_sub(prefix.width()).max(1);
     if body.is_empty() {

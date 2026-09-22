@@ -6,10 +6,10 @@ use crate::AppError;
 pub struct Compact;
 
 impl SlashCommand for Compact {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "compact"
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Compact conversation history into a summary."
     }
     fn execute(&self, _agent: &mut Agent, _args: &str) -> Result<CommandOutcome, AppError> {

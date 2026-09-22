@@ -1,7 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 pub const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
 pub const LOG_MAX_FILES: usize = 2;
@@ -47,7 +47,7 @@ impl RotatingFile {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

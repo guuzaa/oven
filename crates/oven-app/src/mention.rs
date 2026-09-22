@@ -101,7 +101,9 @@ impl FileMentions {
             }
         }
         let snap = self.nucleo.snapshot();
-        let n = snap.matched_item_count().min(limit as u32);
+        let n = snap
+            .matched_item_count()
+            .min(limit.try_into().unwrap_or(u32::MAX));
         snap.matched_items(..n)
             .map(|item| item.data.clone())
             .collect()

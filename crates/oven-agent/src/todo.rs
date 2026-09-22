@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt::Write;
 
 use oven_llm::{ContentBlock, Message};
 use serde::{Deserialize, Serialize};
@@ -130,7 +131,7 @@ impl TodoList {
                 TodoStatus::Completed => "completed",
                 TodoStatus::Cancelled => "cancelled",
             };
-            out.push_str(&format!("- [{status}] `{}` {}\n", item.id, item.content));
+            let _ = writeln!(out, "- [{status}] `{}` {}", item.id, item.content);
         }
         out
     }

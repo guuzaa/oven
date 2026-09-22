@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::sync::PoisonError;
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -126,13 +128,15 @@ impl Runtime {
         tracing::debug!(kind = command_kind(&cmd), "runtime command");
         match cmd {
             AppCommand::Shutdown => Control::Shutdown,
-            AppCommand::Control(ControlCommand::Cancel { .. }) => Control::Continue,
             AppCommand::Control(ControlCommand::SetMode { mode }) => {
                 self.set_mode(mode);
                 Control::Continue
             }
-            AppCommand::Control(ControlCommand::RespondToolApproval { .. }) => Control::Continue,
-            AppCommand::Control(ControlCommand::RespondLoopLimit { .. }) => Control::Continue,
+            AppCommand::Control(
+                ControlCommand::Cancel { .. }
+                | ControlCommand::RespondToolApproval { .. }
+                | ControlCommand::RespondLoopLimit { .. },
+            ) => Control::Continue,
             AppCommand::Control(ControlCommand::Rewind) => {
                 self.rewind();
                 Control::Continue
@@ -141,6 +145,10 @@ impl Runtime {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the turn loop must borrow agent fields individually while the turn future runs"
+    )]
     pub(crate) async fn start_turn(
         &mut self,
         input: String,
@@ -245,24 +253,28 @@ impl Runtime {
                                 let _ = self.state_tx.send(self.state.clone());
                                 self.events.emit_state(StateChange::ModeChanged { mode });
                             }
-                            Some(cmd) => match model_command_args(&cmd) {
-                                Some(args) => apply_model_during_turn(
-                                    args,
-                                    &ctx,
-                                    &self.router,
-                                    &mut self.config,
-                                    &mut self.state,
-                                    &self.state_tx,
-                                    self.user_config_path.as_deref(),
-                                    &mut self.events,
-                                ),
-                                None => defer_command(
-                                    cmd,
-                                    &self.slash,
-                                    &mut self.events,
-                                    &mut self.pending,
-                                ),
-                            },
+                            Some(cmd) => {
+                                match model_command_args(&cmd) {
+                                    Some(args) => apply_model_during_turn(
+                                        args,
+                                        &ctx,
+                                        &self.router,
+                                        &mut self.config,
+                                        &mut self.state,
+                                        &self.state_tx,
+                                        self.user_config_path.as_deref(),
+                                        &mut self.events,
+                                    ),
+                                    None => {
+                                        defer_command(
+                                            cmd,
+                                            &self.slash,
+                                            &mut self.events,
+                                            &mut self.pending,
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     approval = approval_rx.recv() => {
@@ -335,10 +347,7 @@ impl Runtime {
             Some(store) => {
                 let mut errors = Vec::new();
                 let rev = self.agent.history_revision();
-                if rev != self.persisted_rev {
-                    self.persisted_messages = 0;
-                    self.persisted_rev = rev;
-                } else {
+                if rev == self.persisted_rev {
                     let pending = self.agent.history_records_from(self.persisted_messages);
                     if !pending.is_empty() {
                         if let Err(error) = store.current().append_records(&pending) {
@@ -351,6 +360,9 @@ impl Runtime {
                             }
                         }
                     }
+                } else {
+                    self.persisted_messages = 0;
+                    self.persisted_rev = rev;
                 }
                 if should_persist_todos(self.agent.todos(), self.agent.todo_written_this_turn())
                     && let Err(error) = persist_todo_snapshot(store, self.agent.todos())
@@ -407,7 +419,7 @@ impl Runtime {
                             self.set_mode(mode);
                         }
                         Some(cmd) => {
-                            defer_command(cmd, &self.slash, &mut self.events, &mut self.pending)
+                            defer_command(cmd, &self.slash, &mut self.events, &mut self.pending);
                         }
                     }
                 }
@@ -462,7 +474,7 @@ impl Runtime {
         let model = self.agent.model().to_string();
         let router = self.agent.router();
         let (models, _) = refresh_model_choices(router.as_ref(), &model, &self.config).await;
-        self.state.models = models.clone();
+        self.state.models.clone_from(&models);
         self.publish();
         self.emit_state(StateChange::ModelsChanged { models });
     }
@@ -668,7 +680,7 @@ impl Runtime {
         let outcome = resolve_model_switch(&router, &mut self.config, model, reasoning_effort);
         self.agent.set_model(&*outcome.model);
         self.agent.set_reasoning_effort(outcome.reasoning_effort);
-        self.state.model = outcome.model.clone();
+        self.state.model.clone_from(&outcome.model);
         self.state.reasoning_effort = outcome.reasoning_effort;
         self.publish();
         self.emit_state(StateChange::ModelChanged {
@@ -679,7 +691,7 @@ impl Runtime {
         let saved = self.save_provider_overlay(&outcome.overlay);
         let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
         if let Some(path) = saved {
-            text.push_str(&format!("\nsaved to {}", path.display()));
+            let _ = write!(text, "\nsaved to {}", path.display());
         }
         self.emit(AppEventKind::Notification { text });
     }
@@ -748,7 +760,7 @@ impl Runtime {
                         .expect("active provider exists after update"),
                 );
                 self.state.configured_providers = self.config.configured_providers();
-                self.state.model = model.clone();
+                self.state.model.clone_from(&model);
                 self.state.reasoning_effort = self.agent.reasoning_effort();
                 self.publish();
                 self.emit_state(StateChange::ProviderChanged {
@@ -763,7 +775,7 @@ impl Runtime {
                 let router = self.agent.router();
                 let (models, auth_error) =
                     refresh_model_choices(router.as_ref(), &model, &self.config).await;
-                self.state.models = models.clone();
+                self.state.models.clone_from(&models);
                 self.publish();
                 self.emit_state(StateChange::ModelsChanged { models });
                 self.emit(AppEventKind::Notification {
@@ -871,10 +883,12 @@ fn deferred_notice(cmd: &AppCommand, slash: &SlashRegistry) -> Option<String> {
         AppCommand::Prompt(text) => slash
             .recognized_name(text)
             .map(|name| format!("/{name} {QUEUED_NOTICE_SUFFIX}")),
-        AppCommand::Control(ControlCommand::Cancel { .. })
-        | AppCommand::Control(ControlCommand::SetMode { .. })
-        | AppCommand::Control(ControlCommand::RespondToolApproval { .. })
-        | AppCommand::Control(ControlCommand::RespondLoopLimit { .. })
+        AppCommand::Control(
+            ControlCommand::Cancel { .. }
+            | ControlCommand::SetMode { .. }
+            | ControlCommand::RespondToolApproval { .. }
+            | ControlCommand::RespondLoopLimit { .. },
+        )
         | AppCommand::Shutdown => None,
     }
 }
@@ -995,7 +1009,10 @@ fn apply_model_during_turn(
     user_config_path: Option<&Path>,
     events: &mut EventBus,
 ) {
-    let snapshot = router.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let snapshot = router
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     let current_effort = ctx.model().1;
     match Model::resolve(&snapshot, current_effort, args) {
         Ok(ModelDirective::Query) => {
@@ -1013,7 +1030,7 @@ fn apply_model_during_turn(
                 ModelId::from(outcome.model.as_str()),
                 outcome.reasoning_effort,
             );
-            state.model = outcome.model.clone();
+            state.model.clone_from(&outcome.model);
             state.reasoning_effort = outcome.reasoning_effort;
             let _ = state_tx.send(state.clone());
             events.emit_state(StateChange::ModelChanged {
@@ -1023,7 +1040,7 @@ fn apply_model_during_turn(
             let saved = save_provider_overlay(user_config_path, &outcome.overlay, events);
             let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
             if let Some(path) = saved {
-                text.push_str(&format!("\nsaved to {}", path.display()));
+                let _ = write!(text, "\nsaved to {}", path.display());
             }
             events.emit(AppEventKind::Notification { text });
         }
@@ -1155,7 +1172,7 @@ fn summarize_setup(overlay: &ProviderConfig, saved: Option<&Path>) -> String {
         format!("provider updated ({})", parts.join(" "))
     };
     if let Some(path) = saved {
-        text.push_str(&format!("\nsaved to {}", path.display()));
+        let _ = write!(text, "\nsaved to {}", path.display());
     }
     text
 }
@@ -1174,8 +1191,7 @@ async fn refresh_model_choices(
     };
     let current_provider = ModelId::from(current_model)
         .vendor()
-        .map(ProviderName::from)
-        .unwrap_or_else(|| provider.provider_name());
+        .map_or_else(|| provider.provider_name(), ProviderName::from);
     (
         merge_model_choices(known, dynamic, current_model, &current_provider),
         auth_error,

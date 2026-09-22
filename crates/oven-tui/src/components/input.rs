@@ -156,7 +156,7 @@ impl InputView {
     pub(crate) fn set_text(&mut self, text: &str) {
         let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
         let row = lines.len().saturating_sub(1);
-        let col = lines.last().map(|l| l.chars().count()).unwrap_or(0);
+        let col = lines.last().map_or(0, |l| l.chars().count());
         self.textarea.set_lines(lines, (row, col));
         self.refresh_popups();
     }
@@ -177,7 +177,7 @@ impl InputView {
         let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
         let prefix_lines: Vec<&str> = prefix.split('\n').collect();
         let row = prefix_lines.len().saturating_sub(1);
-        let col = prefix_lines.last().map(|l| l.chars().count()).unwrap_or(0);
+        let col = prefix_lines.last().map_or(0, |l| l.chars().count());
         self.textarea.set_lines(lines, (row, col));
         self.refresh_popups();
     }
@@ -431,8 +431,7 @@ pub(crate) fn display_user_input(text: &str) -> String {
             token
                 .strip_prefix("api_key=")
                 .filter(|v| !v.is_empty())
-                .map(|_| "api_key=***")
-                .unwrap_or(token)
+                .map_or(token, |_| "api_key=***")
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -475,10 +474,7 @@ fn cursor_byte(text: &str, (row, col): (usize, usize)) -> usize {
 }
 
 fn char_index_to_byte(line: &str, col: usize) -> usize {
-    line.char_indices()
-        .nth(col)
-        .map(|(i, _)| i)
-        .unwrap_or(line.len())
+    line.char_indices().nth(col).map_or(line.len(), |(i, _)| i)
 }
 
 fn fits_border(area: Rect) -> bool {

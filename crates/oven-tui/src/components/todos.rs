@@ -24,7 +24,9 @@ impl TodosWidget {
         if self.list.is_empty() {
             0
         } else {
-            (self.list.items.len() as u16).min(MAX_HEIGHT)
+            u16::try_from(self.list.items.len())
+                .unwrap_or(u16::MAX)
+                .min(MAX_HEIGHT)
         }
     }
 
@@ -32,12 +34,8 @@ impl TodosWidget {
         let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind else {
             return;
         };
-        match change {
-            StateChange::TodosChanged { todos } => {
-                self.list = todos.clone();
-            }
-            StateChange::HistoryChanged { .. } => {}
-            _ => {}
+        if let StateChange::TodosChanged { todos } = change {
+            self.list = todos.clone();
         }
     }
 

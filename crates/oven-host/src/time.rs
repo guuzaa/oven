@@ -4,6 +4,10 @@ use std::time;
 pub fn now_ms() -> u64 {
     time::SystemTime::now()
         .duration_since(time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, as_ms)
+}
+
+/// Whole milliseconds of a duration, saturating instead of truncating.
+pub fn as_ms(duration: time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }

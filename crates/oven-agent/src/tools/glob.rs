@@ -1,10 +1,11 @@
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, require_str, resolve_within};
+use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
 use crate::error::AgentError;
 use crate::matching::compile_glob;
 use oven_host::walk_dir;
@@ -50,7 +51,7 @@ impl Tool for GlobTool {
     fn name(&self) -> &str {
         Self::NAME
     }
-    fn description(&self) -> &str {
+    fn description(&self) -> &'static str {
         "Find files by glob pattern. Patterns support `**` for recursive matches. \
          Results are paths relative to the workspace root, usable directly by \
          file_read/file_edit. Respects .gitignore."
@@ -73,7 +74,7 @@ impl Tool for GlobTool {
     ) -> Result<String, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;
         let matcher = compile_glob(pattern)
-            .map_err(|e| AgentError::from(format!("glob: invalid pattern {:?}: {}", pattern, e)))?;
+            .map_err(|e| AgentError::from(format!("glob: invalid pattern {pattern:?}: {e}")))?;
 
         let base_str = args
             .get("path")
@@ -88,15 +89,11 @@ impl Tool for GlobTool {
                 base.display()
             )));
         }
-        let limit = args
-            .get("limit")
-            .and_then(|v| v.as_i64())
-            .map(|v| v.max(0) as usize)
-            .unwrap_or(self.max_results);
+        let limit = parse_limit(args, self.max_results);
 
-        let mut matches = Vec::new();
+        let mut hits = Vec::new();
         for entry in walk_dir(&base) {
-            if matches.len() >= limit {
+            if hits.len() >= limit {
                 break;
             }
             if let Some(c) = cancel
@@ -104,23 +101,23 @@ impl Tool for GlobTool {
             {
                 return Err(AgentError::cancelled());
             }
-            let entry = entry.map_err(|e| AgentError::from(format!("glob: walk: {}", e)))?;
+            let entry = entry.map_err(|e| AgentError::from(format!("glob: walk: {e}")))?;
             if entry.is_file()
                 && let Ok(rel) = entry.path().strip_prefix(&base)
                 && matcher.is_match(rel)
             {
                 let full = entry.path().strip_prefix(&self.root).unwrap_or(rel);
-                matches.push(full.to_string_lossy().into_owned());
+                hits.push(full.to_string_lossy().into_owned());
             }
         }
-        matches.sort();
+        hits.sort();
 
-        if matches.is_empty() {
+        if hits.is_empty() {
             return Ok("(no matches)".to_string());
         }
-        let mut out = matches.join("\n");
-        if matches.len() >= limit {
-            out.push_str(&format!("\n[truncated at {} results]", matches.len()));
+        let mut out = hits.join("\n");
+        if hits.len() >= limit {
+            let _ = write!(out, "\n[truncated at {limit} results]");
         }
         Ok(out)
     }

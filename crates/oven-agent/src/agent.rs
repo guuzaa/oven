@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
@@ -8,7 +8,7 @@ use oven_llm::{
     ToolChoice, Usage,
 };
 
-use oven_host::now_ms;
+use oven_host::{as_ms, now_ms};
 
 use crate::approval::{ApprovalDecision, ApprovalRequestId, LoopLimitDecision, LoopLimitRequestId};
 use crate::error::{AgentError, MAX_ITERS_EXCEEDED};
@@ -102,7 +102,7 @@ impl Agent {
     pub fn router(&self) -> Arc<Router> {
         self.router
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
@@ -117,8 +117,11 @@ impl Agent {
     /// provider). Requires `&mut Agent`, so this only ever runs when no
     /// turn holds the agent, which guarantees no [`Agent::router`] snapshot
     /// is outstanding for `Arc::get_mut` to contend with.
+    ///
+    /// # Panics
+    /// Panics if a [`Agent::router`] snapshot is still alive when `f` runs.
     pub fn update_router(&mut self, f: impl FnOnce(&mut Router)) {
-        let mut guard = self.router.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.router.write().unwrap_or_else(PoisonError::into_inner);
         let router =
             Arc::get_mut(&mut guard).expect("router mutated while a snapshot was outstanding");
         f(router);
@@ -303,7 +306,7 @@ impl Agent {
                 },
             ),
             reasoning_effort: self.reasoning_effort,
-            provider_options: Default::default(),
+            provider_options: serde_json::Map::default(),
         }
     }
 
@@ -329,7 +332,7 @@ impl Agent {
         let result = self.complete_or_stream(sink).await;
         tracing::debug!(
             model = %self.model,
-            duration_ms = started.elapsed().as_millis() as u64,
+            duration_ms = as_ms(started.elapsed()),
             "llm request complete"
         );
         result
@@ -559,7 +562,7 @@ impl Agent {
                                 usage,
                             });
                         }
-                        Ok(None) => continue,
+                        Ok(None) => {}
                         Err(e) => return Err(e),
                     }
                 }
@@ -576,7 +579,7 @@ impl Agent {
             tokio::pin!(turn);
             tokio::select! {
                 biased;
-                _ = ctx.cancellation.cancelled() => Err(AgentError::cancelled()),
+                () = ctx.cancellation.cancelled() => Err(AgentError::cancelled()),
                 res = &mut turn => res,
             }
         };
@@ -681,7 +684,7 @@ impl ThinkingSpan {
 /// is all the thinking window that can be observed. Sub-millisecond durations
 /// round up so timed thinking is never mistaken for untimed.
 fn thinking_span(elapsed: Duration) -> (u64, u64) {
-    let duration_ms = elapsed.as_millis().max(1) as u64;
+    let duration_ms = as_ms(elapsed).max(1);
     (now_ms().saturating_sub(duration_ms), duration_ms)
 }
 
@@ -690,7 +693,7 @@ fn log_tool_started(name: &str, call_id: ToolCallId) {
 }
 
 fn log_tool_finished(name: &str, call_id: ToolCallId, result: &ToolResult, started: Instant) {
-    let duration_ms = started.elapsed().as_millis() as u64;
+    let duration_ms = as_ms(started.elapsed());
     let (ok, error) = match result {
         ToolResult::Success { .. } => (true, None),
         ToolResult::Failed { error, .. } => (false, Some(error.as_str())),

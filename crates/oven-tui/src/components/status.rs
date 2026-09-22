@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -111,11 +112,13 @@ impl StatusBar {
 
         let text_width = lines
             .iter()
-            .map(|line| line.width() as u16)
+            .map(|line| u16::try_from(line.width()).unwrap_or(u16::MAX))
             .max()
             .unwrap_or(0);
         let width = text_width.saturating_add(4).min(max_width);
-        let height = (lines.len() as u16 + 2).min(area.height);
+        let height = u16::try_from(lines.len() + 2)
+            .unwrap_or(u16::MAX)
+            .min(area.height);
         let toast = Rect {
             x: area.right().saturating_sub(width + 1),
             y: area.bottom().saturating_sub(height + 1),
@@ -160,7 +163,7 @@ impl StatusBar {
         let gray = theme::dim();
         let mut spans = Vec::new();
         if state.busy {
-            let ch = SPIN_FRAMES[(state.frame as usize) % SPIN_FRAMES.len()];
+            let ch = SPIN_FRAMES[usize::try_from(state.frame).unwrap_or(0) % SPIN_FRAMES.len()];
             spans.push(Span::styled(ch.to_string(), theme::accent()));
             spans.push(Span::raw(" "));
         }
@@ -234,7 +237,7 @@ impl Component for StatusBar {
                     model,
                     reasoning_effort,
                 } => {
-                    self.model = model.clone();
+                    self.model.clone_from(model);
                     self.effort = *reasoning_effort;
                 }
                 StateChange::ContextChanged { tokens, window } => {
@@ -280,25 +283,26 @@ fn usage_spans(total: &Usage, gray: Style) -> Vec<Span<'static>> {
 /// window known, or nothing measured yet).
 fn context_percent(tokens: u32, window: Option<u32>) -> Option<u32> {
     let window = window.filter(|w| *w > 0)?;
-    (tokens > 0).then(|| (u64::from(tokens) * 100 / u64::from(window)) as u32)
+    (tokens > 0).then(|| u32::try_from(u64::from(tokens) * 100 / u64::from(window)).unwrap_or(0))
 }
 
 fn format_usage(u: &Usage) -> String {
     let i = human(u.input_tokens);
     let o = human(u.output_tokens);
-    let mut s = format!("{i} in · {o} out");
-    s.push_str(&format!(" · {} cache", human(u.cache_read_tokens)));
+    let cache = human(u.cache_read_tokens);
+    let reasoning = human(u.reasoning_tokens);
+    let mut s = format!("{i} in · {o} out · {cache} cache");
     if u.reasoning_tokens > 0 {
-        s.push_str(&format!(" · {} reasoning", human(u.reasoning_tokens)));
+        let _ = write!(s, " · {reasoning} reasoning");
     }
     s
 }
 
 fn human(n: u32) -> String {
     if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
+        format!("{:.1}M", f64::from(n) / 1_000_000.0)
     } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
+        format!("{:.1}k", f64::from(n) / 1_000.0)
     } else {
         n.to_string()
     }
@@ -325,7 +329,7 @@ pub(crate) fn truncate_str(s: &str, max_width: usize) -> String {
     out
 }
 
-fn truncate_line<'a>(line: Line<'a>, max_width: usize) -> Line<'a> {
+fn truncate_line(line: Line<'_>, max_width: usize) -> Line<'_> {
     let mut spans = Vec::new();
     let mut width = 0usize;
     for span in line.spans {

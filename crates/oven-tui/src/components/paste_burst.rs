@@ -57,16 +57,15 @@ fn coalesce_from(
     let mut timeout = Duration::ZERO;
     while let Some(ev) = source.next_ready(timeout)? {
         match ev {
-            Event::Key(key) if key.kind == KeyEventKind::Press => match burst_char(&key) {
-                Some(ch) => {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if let Some(ch) = burst_char(&key) {
                     text.push(ch);
                     timeout = BURST_CONTINUE_TIMEOUT;
-                }
-                None => {
+                } else {
                     trailing = Some(Event::Key(key));
                     break;
                 }
-            },
+            }
             Event::Key(_) => {}
             other => {
                 trailing = Some(other);

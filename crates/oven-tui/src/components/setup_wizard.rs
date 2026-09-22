@@ -100,8 +100,8 @@ impl SetupWizard {
             return 0;
         }
         match self.stage {
-            Stage::Name => NAME_ITEMS.len() as u16,
-            Stage::Protocol => PROTOCOL_ITEMS.len() as u16,
+            Stage::Name => list::bounded_rows(NAME_ITEMS.len()),
+            Stage::Protocol => list::bounded_rows(PROTOCOL_ITEMS.len()),
             Stage::CustomName | Stage::BaseUrl | Stage::ApiKey => 1,
         }
     }
@@ -109,10 +109,8 @@ impl SetupWizard {
     pub(crate) fn prompt_hint(&self) -> &'static str {
         match self.stage {
             Stage::Name => "choose a provider",
-            Stage::CustomName => "",
-            Stage::BaseUrl => "",
             Stage::Protocol => "choose an API protocol",
-            Stage::ApiKey => "",
+            Stage::CustomName | Stage::BaseUrl | Stage::ApiKey => "",
         }
     }
 
@@ -131,12 +129,12 @@ impl SetupWizard {
         match self.stage {
             Stage::Name => self.draw_list(f, area, &NAME_ITEMS),
             Stage::Protocol => self.draw_list(f, area, &PROTOCOL_ITEMS),
-            Stage::CustomName => self.draw_label(
+            Stage::CustomName => Self::draw_label(
                 f,
                 area,
                 "name · gateway id (e.g. my-proxy) · Enter to continue · Esc to go back",
             ),
-            Stage::BaseUrl => self.draw_label(
+            Stage::BaseUrl => Self::draw_label(
                 f,
                 area,
                 "base_url · required · Enter to continue · Esc to go back",
@@ -147,7 +145,7 @@ impl SetupWizard {
                 } else {
                     "api_key · empty keeps saved · Enter to save · Esc to go back"
                 };
-                self.draw_label(f, area, label);
+                Self::draw_label(f, area, label);
             }
         }
     }
@@ -179,8 +177,7 @@ impl SetupWizard {
         self.buffer.clear();
         match stage {
             Stage::Name => self.selected = preselect_name(&self.current),
-            Stage::Protocol => {}
-            Stage::CustomName | Stage::BaseUrl | Stage::ApiKey => {}
+            Stage::Protocol | Stage::CustomName | Stage::BaseUrl | Stage::ApiKey => {}
         }
     }
 
@@ -245,7 +242,6 @@ impl SetupWizard {
             }
             KeyCode::Esc => {
                 let back = match stage {
-                    Stage::CustomName => Stage::Name,
                     Stage::BaseUrl => Stage::CustomName,
                     _ => Stage::Name,
                 };
@@ -296,15 +292,12 @@ impl SetupWizard {
                     return SetupWizardAction::Handled;
                 }
                 self.draft.api_key = nonempty(value);
-                match compose(&self.draft) {
-                    Some(line) => {
-                        self.close();
-                        SetupWizardAction::Submit(line)
-                    }
-                    None => {
-                        self.close();
-                        SetupWizardAction::Close
-                    }
+                if let Some(line) = compose(&self.draft) {
+                    self.close();
+                    SetupWizardAction::Submit(line)
+                } else {
+                    self.close();
+                    SetupWizardAction::Close
                 }
             }
             KeyCode::Esc => {
@@ -333,7 +326,7 @@ impl SetupWizard {
         list::draw_choice_list(f, area, items.iter().copied(), self.selected);
     }
 
-    fn draw_label(&self, f: &mut Frame<'_>, area: Rect, label: &str) {
+    fn draw_label(f: &mut Frame<'_>, area: Rect, label: &str) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(label, theme::dim()))),
             area,
