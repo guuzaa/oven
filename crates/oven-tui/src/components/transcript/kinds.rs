@@ -6,6 +6,8 @@ use super::super::theme;
 pub(super) const LINE_PREFIX_WIDTH: usize = 2;
 pub(super) const LINE_INDENT: &str = "  ";
 pub(super) const MESSAGE_INDENT: &str = " ";
+pub(super) const COLLAPSED_MARKER: &str = "› ";
+pub(super) const EXPANDED_MARKER: &str = "⌄ ";
 pub(super) const SEPARATOR_GLYPH: char = '−';
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

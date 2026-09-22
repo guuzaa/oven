@@ -13,7 +13,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
-use super::kinds::{LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, SEPARATOR_GLYPH};
+use super::kinds::{LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, MESSAGE_INDENT, SEPARATOR_GLYPH};
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
@@ -72,7 +72,7 @@ fn thinking_header_has_no_gutter() {
     t.on_event(&text_delta("answer"));
     wide(&mut t);
     let header = line_text(&t.wrapped[0]);
-    assert!(header.starts_with("  › "), "{header:?}");
+    assert!(header.starts_with(" › "), "{header:?}");
 }
 
 #[test]
@@ -162,6 +162,42 @@ fn wrapped_shell_gutter_repeats() {
     ready(&mut t, Rect::new(0, 0, 7, 5));
     let rows: Vec<String> = t.wrapped.iter().map(line_text).collect();
     assert_eq!(rows, vec![" $ abcd", " $ efgh"]);
+}
+
+#[test]
+fn non_user_rows_share_one_message_indent() {
+    let mut t = Transcript::new();
+    for (kind, text) in [
+        (LineKind::Text, "assistant text that is long enough to wrap"),
+        (LineKind::Shell, "$ command that is long enough to wrap"),
+        (LineKind::System, "system note"),
+        (LineKind::Error, "failure note"),
+        (LineKind::Tool, "tool summary"),
+        (LineKind::ToolResult(false), "tool output"),
+        (LineKind::Thinking, THOUGHT_LABEL),
+    ] {
+        t.push_row(kind, text);
+    }
+    for row in &mut t.rows {
+        if let Some(collapsible) = row.collapsible.as_mut() {
+            collapsible.toggle();
+        }
+    }
+    ready(&mut t, Rect::new(0, 0, 20, 40));
+    let indent = MESSAGE_INDENT.width() + LINE_PREFIX_WIDTH;
+    for line in &t.wrapped {
+        let text = line_text(line);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let prefix = line.spans.first().map_or("", |s| s.content.as_ref());
+        assert_eq!(
+            prefix.width(),
+            indent,
+            "{:?} must indent every non-user row by {indent}",
+            text
+        );
+    }
 }
 
 #[test]
@@ -1397,21 +1433,11 @@ fn diff_double_click_toggles_detail() {
         .iter()
         .find(|line| line_text(line).contains("+ new"))
         .expect("added line");
-    assert_eq!(removed.spans[0].content.as_ref(), "   ");
-    assert_eq!(added.spans[0].content.as_ref(), "   ");
-    assert!(
-        removed.spans[1]
-            .content
-            .as_ref()
-            .starts_with(&format!("{LINE_INDENT}- old")),
-        "diff body should nest under the header"
-    );
-    assert!(
-        added.spans[1]
-            .content
-            .as_ref()
-            .starts_with(&format!("{LINE_INDENT}+ new"))
-    );
+    let indent = format!("{MESSAGE_INDENT}{LINE_INDENT}");
+    assert_eq!(removed.spans[0].content.as_ref(), indent);
+    assert_eq!(added.spans[0].content.as_ref(), indent);
+    assert_eq!(removed.spans[1].content.as_ref(), "- old");
+    assert_eq!(added.spans[1].content.as_ref(), "+ new");
     assert_eq!(
         removed.spans[1].style.bg,
         Some(ratatui::style::Color::LightRed)

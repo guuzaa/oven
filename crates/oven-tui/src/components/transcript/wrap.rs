@@ -11,7 +11,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::collapsible::Collapsible;
 use super::super::theme;
-use super::kinds::{LINE_INDENT, LineKind, MESSAGE_INDENT, SEPARATOR_GLYPH};
+use super::kinds::{
+    COLLAPSED_MARKER, EXPANDED_MARKER, LINE_INDENT, LineKind, MESSAGE_INDENT, SEPARATOR_GLYPH,
+};
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 pub(super) const MAX_LIVE_BODY_LINES: usize = 8;
@@ -147,9 +149,23 @@ fn earlier_lines(skipped: usize) -> String {
 fn earlier_lines_marker(skipped: usize) -> Line<'static> {
     let style = theme::dim();
     Line::from(vec![
-        Span::styled(format!("{MESSAGE_INDENT}{LINE_INDENT}"), style),
-        Span::styled(format!("{LINE_INDENT}{}", earlier_lines(skipped)), style),
+        Span::styled(body_prefix(), style),
+        Span::styled(earlier_lines(skipped), style),
     ])
+}
+
+/// Left margin every non-User row shares, so their bodies line up.
+fn body_prefix() -> String {
+    format!("{MESSAGE_INDENT}{LINE_INDENT}")
+}
+
+fn collapsible_prefix(collapsible: &Collapsible) -> String {
+    let marker = if collapsible.is_expanded() {
+        EXPANDED_MARKER
+    } else {
+        COLLAPSED_MARKER
+    };
+    format!("{MESSAGE_INDENT}{marker}")
 }
 
 pub(super) fn tail_lines(text: &str, max: usize) -> String {
@@ -218,14 +234,9 @@ pub(super) fn wrap_collapsible_into(
         out.push(Line::from(""));
     }
     let style = kind.style();
-    let marker = if collapsible.is_expanded() {
-        "⌄ "
-    } else {
-        "› "
-    };
     let header = Line::from(vec![
-        Span::styled(kind.gutter().to_string(), style),
-        Span::styled(format!("{marker}{title}"), style),
+        Span::styled(collapsible_prefix(collapsible), style),
+        Span::styled(title.to_string(), style),
     ]);
     wrap_line_into(out, &header, width, kind);
     if !collapsible.is_expanded() {
@@ -242,8 +253,8 @@ pub(super) fn wrap_collapsible_into(
             style
         };
         let line = Line::from(vec![
-            Span::styled(format!("{MESSAGE_INDENT}{LINE_INDENT}"), style),
-            Span::styled(format!("{LINE_INDENT}{part}"), body_style),
+            Span::styled(body_prefix(), style),
+            Span::styled(part.to_string(), body_style),
         ]);
         wrap_line_into(out, &line, width, kind);
     }
