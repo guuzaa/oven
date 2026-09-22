@@ -85,15 +85,11 @@ pub(super) fn collect_lines(
     start: usize,
     end: usize,
 ) -> Vec<Line<'static>> {
-    let mut out = Vec::with_capacity(end.saturating_sub(start));
-    for idx in start..end {
-        if idx < history.len() {
-            out.push(history[idx].clone());
-        } else {
-            out.push(stream[idx - history.len()].clone());
-        }
-    }
-    out
+    let n = history.len();
+    let cut = start.min(n).min(end);
+    let h = &history[cut..end.min(n)];
+    let s = &stream[start.saturating_sub(n)..end.saturating_sub(n)];
+    h.iter().chain(s).cloned().collect()
 }
 
 pub(super) fn trim_message(text: &str) -> String {

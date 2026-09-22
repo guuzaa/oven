@@ -524,7 +524,31 @@ impl Transcript {
         self.wrapped.clear();
         self.wrap_rows(0, self.rows.len());
         self.rewrap_stream();
-        self.clear_selection();
+        self.reanchor_selection();
+    }
+
+    /// Events land mid-drag on every tool call, so a rewrap must never drop an
+    /// in-progress selection: both ends are clamped into the new line range.
+    fn reanchor_selection(&mut self) {
+        let total = self.total_lines();
+        if total == 0 {
+            self.clear_selection();
+            return;
+        }
+        let last = total - 1;
+        let anchor = self.select_anchor.map(|pos| self.clamp_pos(pos, last));
+        let head = self.select_head.map(|pos| self.clamp_pos(pos, last));
+        self.select_anchor = anchor;
+        self.select_head = head;
+    }
+
+    fn clamp_pos(&self, pos: SelPos, last: usize) -> SelPos {
+        let line = pos.line.min(last);
+        let width = self.line_at(line).map(line_display_width).unwrap_or(0);
+        SelPos {
+            line,
+            col: pos.col.min(width),
+        }
     }
 
     fn clear_selection(&mut self) {
@@ -741,8 +765,10 @@ impl Component for Transcript {
                     KeyResult::Ignored
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) if self.dragging => {
-                self.update_selection(mouse.column, mouse.row);
+            MouseEventKind::Up(MouseButton::Left) if in_area || self.dragging => {
+                if self.dragging {
+                    self.update_selection(mouse.column, mouse.row);
+                }
                 let selected = self.normalized_sel().is_some();
                 let copied = self.end_selection();
                 if copied || selected {

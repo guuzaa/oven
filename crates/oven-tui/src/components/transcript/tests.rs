@@ -1730,6 +1730,59 @@ fn mouse_click_without_drag_is_empty() {
 }
 
 #[test]
+fn drag_survives_events_that_rewrap_the_transcript() {
+    let mut t = Transcript::new();
+    t.on_event(&text_delta("first answer"));
+    t.on_event(&completed());
+    t.on_event(&tool_start(1, "todo_write", todo_input()));
+    t.on_event(&tool_end(1, true, "ok"));
+    ready(&mut t, Rect::new(0, 0, 80, 10));
+
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 12, 0),
+        &State::new(),
+    );
+    let selected = t.selected_text();
+    assert!(selected.is_some());
+
+    t.on_event(&tool_start(2, "todo_write", todo_input()));
+    t.on_event(&tool_end(2, true, "ok"));
+    assert!(t.dragging);
+    assert_eq!(t.selected_text(), selected);
+
+    let up = t.handle_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 12, 0),
+        &State::new(),
+    );
+    assert!(matches!(up, KeyResult::Action(Action::Notify(text)) if text == "Copied!"));
+}
+
+#[test]
+fn up_copies_when_drag_state_was_lost() {
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, "hello");
+    ready(&mut t, Rect::new(0, 0, 80, 5));
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 8, 0),
+        &State::new(),
+    );
+    t.dragging = false;
+    let up = t.handle_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 8, 0),
+        &State::new(),
+    );
+    assert!(matches!(up, KeyResult::Action(Action::Notify(text)) if text == "Copied!"));
+}
+
+#[test]
 fn mouse_up_after_selection_emits_copied_reply() {
     let mut t = Transcript::new();
     t.push_row(LineKind::Text, "hello");
