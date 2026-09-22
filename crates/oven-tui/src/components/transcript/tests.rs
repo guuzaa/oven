@@ -731,6 +731,51 @@ fn thinking_double_click_toggles_detail() {
 }
 
 #[test]
+fn expanding_a_block_grows_downward_and_keeps_its_header() {
+    const DETAIL: &str = "body one\nbody two\nbody three";
+
+    let mut t = Transcript::new();
+    for i in 0..8 {
+        t.push_row(LineKind::Text, &format!("line {i}"));
+    }
+    t.push_row(LineKind::ToolResult(true), DETAIL);
+    for i in 0..2 {
+        t.push_row(LineKind::Text, &format!("tail {i}"));
+    }
+    ready(&mut t, Rect::new(0, 0, 80, 6));
+    let detail = t.rows[8].collapsible.as_ref().expect("result detail");
+    assert!(!detail.is_expanded(), "a later row collapsed it");
+
+    let header = t.rows[8].header.expect("collapsible header");
+    let top = t.current_top();
+    assert!(t.top.is_none(), "the view follows the bottom");
+    assert!(top <= header && header < top + 6, "header is on screen");
+
+    double_click(&mut t, 2, u16::try_from(header - top).expect("screen row"));
+
+    assert!(
+        t.rows[8]
+            .collapsible
+            .as_ref()
+            .expect("result detail")
+            .is_expanded()
+    );
+    assert_eq!(
+        t.current_top(),
+        top,
+        "the header must stay where it was clicked"
+    );
+    assert!(t.top.is_some(), "the anchor pins the view");
+    let start = t.current_top();
+    assert!(start <= header && header < start + 6);
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains("body two"))
+    );
+}
+
+#[test]
 fn next_message_collapses_previous_details() {
     let mut t = Transcript::new();
     t.on_event(&thinking("plan"));

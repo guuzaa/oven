@@ -635,7 +635,11 @@ impl Transcript {
     fn toggle_collapsible(&mut self, row: usize) {
         if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
             collapsible.toggle();
+            let start = self.current_top();
             self.rewrap_all();
+            // Pin the clicked header to its screen row, so its body grows
+            // downward instead of scrolling the header out of view.
+            self.top = Some(start);
         }
     }
 
