@@ -919,7 +919,10 @@ mod tests {
     fn history_changed_does_not_touch_input() {
         let mut view = view();
         type_text(&mut view, "draft");
-        let ev = AppEvent::state_changed(oven_app::StateChange::HistoryChanged { revision: 1 });
+        let ev = AppEvent::state_changed(oven_app::StateChange::HistoryChanged {
+            revision: 1,
+            reason: oven_app::HistoryChangeReason::External,
+        });
         view.on_event(&ev);
         assert_eq!(view.textarea.lines()[0], "draft");
     }

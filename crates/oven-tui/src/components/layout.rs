@@ -1,6 +1,6 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
-const TRANSCRIPT_MIN: u16 = 3;
+const TRANSCRIPT_MIN: u16 = 1;
 const STATUS_H: u16 = 1;
 
 pub struct Regions {
@@ -19,14 +19,14 @@ pub fn split(
     mut todos_h: u16,
     mut overlay_h: u16,
 ) -> Regions {
-    let avail = area.height;
-    let chrome = TRANSCRIPT_MIN + STATUS_H;
-    input_h = input_h.min(avail.saturating_sub(chrome));
-    queue_h = queue_h.min(avail.saturating_sub(chrome + input_h));
-    todos_h = todos_h.min(avail.saturating_sub(chrome + input_h + queue_h));
-    overlay_h = overlay_h.min(avail.saturating_sub(chrome + input_h + queue_h + todos_h));
+    let body = area.height.saturating_sub(STATUS_H);
+    let transcript_min = TRANSCRIPT_MIN.min(body);
+    input_h = input_h.min(body.saturating_sub(transcript_min));
+    queue_h = queue_h.min(body.saturating_sub(transcript_min + input_h));
+    todos_h = todos_h.min(body.saturating_sub(transcript_min + input_h + queue_h));
+    overlay_h = overlay_h.min(body.saturating_sub(transcript_min + input_h + queue_h + todos_h));
 
-    let mut constraints = vec![Constraint::Min(TRANSCRIPT_MIN)];
+    let mut constraints = vec![Constraint::Min(transcript_min)];
     if queue_h > 0 {
         constraints.push(Constraint::Length(queue_h));
     }
@@ -47,29 +47,23 @@ pub fn split(
     let mut i = 0;
     let transcript = chunks[i];
     i += 1;
-    let queue = if queue_h > 0 {
-        let r = chunks[i];
+    let queue = (queue_h > 0).then(|| {
+        let area = chunks[i];
         i += 1;
-        Some(r)
-    } else {
-        None
-    };
-    let todos = if todos_h > 0 {
-        let r = chunks[i];
+        area
+    });
+    let todos = (todos_h > 0).then(|| {
+        let area = chunks[i];
         i += 1;
-        Some(r)
-    } else {
-        None
-    };
+        area
+    });
     let input = chunks[i];
     i += 1;
-    let overlay = if overlay_h > 0 {
-        let r = chunks[i];
+    let overlay = (overlay_h > 0).then(|| {
+        let area = chunks[i];
         i += 1;
-        Some(r)
-    } else {
-        None
-    };
+        area
+    });
     let status = chunks[i];
 
     Regions {
@@ -90,58 +84,57 @@ mod tests {
         Rect::new(0, 0, w, h)
     }
 
+    fn assert_tiles(regions: &Regions, area: Rect) {
+        let mut bands = vec![regions.transcript];
+        bands.extend(regions.queue);
+        bands.extend(regions.todos);
+        bands.push(regions.input);
+        bands.extend(regions.overlay);
+        bands.push(regions.status);
+        let mut y = area.y;
+        for band in bands {
+            assert_eq!(band.y, y, "{band:?} must tile from the top");
+            assert_eq!(band.width, area.width, "{band:?} must span the width");
+            y += band.height;
+        }
+        assert_eq!(y, area.y + area.height, "bands must cover the terminal");
+    }
+
     #[test]
     fn idle_layout_is_transcript_input_status() {
-        let r = split(area(80, 24), 1, 0, 0, 0);
-        assert_eq!(r.transcript, Rect::new(0, 0, 80, 22));
-        assert!(r.queue.is_none());
-        assert!(r.todos.is_none());
-        assert_eq!(r.input, Rect::new(0, 22, 80, 1));
-        assert!(r.overlay.is_none());
-        assert_eq!(r.status, Rect::new(0, 23, 80, 1));
+        let regions = split(area(80, 24), 1, 0, 0, 0);
+        assert_eq!(regions.transcript, Rect::new(0, 0, 80, 22));
+        assert_eq!(regions.input, Rect::new(0, 22, 80, 1));
+        assert_eq!(regions.status, Rect::new(0, 23, 80, 1));
+        assert_tiles(&regions, area(80, 24));
     }
 
     #[test]
-    fn queue_overlay_and_reply_take_named_rows() {
-        let r = split(area(80, 24), 2, 1, 0, 4);
-        assert_eq!(r.transcript.height, 16);
-        assert_eq!(r.queue, Some(Rect::new(0, 16, 80, 1)));
-        assert!(r.todos.is_none());
-        assert_eq!(r.input, Rect::new(0, 17, 80, 2));
-        assert_eq!(r.overlay, Some(Rect::new(0, 19, 80, 4)));
-        assert_eq!(r.status, Rect::new(0, 23, 80, 1));
+    fn queue_overlay_and_todos_take_named_rows() {
+        let regions = split(area(80, 24), 2, 1, 3, 4);
+        assert_eq!(regions.transcript.height, 13);
+        assert_eq!(regions.queue, Some(Rect::new(0, 13, 80, 1)));
+        assert_eq!(regions.todos, Some(Rect::new(0, 14, 80, 3)));
+        assert_eq!(regions.input, Rect::new(0, 17, 80, 2));
+        assert_eq!(regions.overlay, Some(Rect::new(0, 19, 80, 4)));
+        assert_eq!(regions.status, Rect::new(0, 23, 80, 1));
+        assert_tiles(&regions, area(80, 24));
     }
 
     #[test]
-    fn todos_sit_between_queue_and_input() {
-        let r = split(area(80, 24), 1, 1, 3, 0);
-        assert_eq!(r.transcript.height, 18);
-        assert_eq!(r.queue, Some(Rect::new(0, 18, 80, 1)));
-        assert_eq!(r.todos, Some(Rect::new(0, 19, 80, 3)));
-        assert_eq!(r.input, Rect::new(0, 22, 80, 1));
-        assert_eq!(r.status, Rect::new(0, 23, 80, 1));
+    fn short_terminal_preserves_transcript_and_status() {
+        let regions = split(area(20, 2), 4, 1, 3, 2);
+        assert_eq!(regions.transcript.height, TRANSCRIPT_MIN);
+        assert_eq!(regions.input.height, 0);
+        assert_eq!(regions.status.height, STATUS_H);
+        assert_tiles(&regions, area(20, 2));
     }
 
     #[test]
-    fn empty_todos_are_absent() {
-        let r = split(area(80, 24), 1, 0, 0, 0);
-        assert!(r.todos.is_none());
-        let r = split(area(80, 24), 1, 1, 0, 0);
-        assert!(r.todos.is_none());
-        assert!(r.queue.is_some());
-    }
-
-    #[test]
-    fn narrow_height_preserves_transcript_minimum() {
-        let r = split(area(40, 8), 8, 3, 6, 6);
-        assert!(r.transcript.height >= TRANSCRIPT_MIN);
-        assert_eq!(r.status.height, STATUS_H);
-        let used = r.transcript.height
-            + r.queue.map(|q| q.height).unwrap_or(0)
-            + r.todos.map(|t| t.height).unwrap_or(0)
-            + r.input.height
-            + r.overlay.map(|o| o.height).unwrap_or(0)
-            + r.status.height;
-        assert_eq!(used, 8);
+    fn one_row_terminal_keeps_only_the_status() {
+        let regions = split(area(20, 1), 1, 1, 1, 1);
+        assert_eq!(regions.transcript.height, 0);
+        assert_eq!(regions.status.height, STATUS_H);
+        assert_tiles(&regions, area(20, 1));
     }
 }

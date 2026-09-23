@@ -15,8 +15,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
+
 use super::collapsible::Section;
-use super::kinds::{COLLAPSED_MARKER, LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, MESSAGE_INDENT};
+use super::kinds::{
+    COLLAPSED_MARKER, LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, MESSAGE_INDENT, Row,
+};
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
@@ -48,6 +51,10 @@ fn fill(t: &mut Transcript, n: usize) {
     for i in 0..n {
         t.push_row(LineKind::Text, &format!("line {i}"));
     }
+}
+
+fn row_texts(t: &Transcript) -> Vec<&str> {
+    t.rows.iter().map(|r| r.text.as_str()).collect()
 }
 
 fn line_body(kind: LineKind, text: &str) -> String {
@@ -281,31 +288,17 @@ fn scroll_down_returns_to_bottom() {
 }
 
 #[test]
-fn user_input_pins_to_bottom() {
+fn starting_a_turn_pins_to_bottom_and_appends_its_prompt() {
     let mut t = Transcript::new();
     wide(&mut t);
     t.area.height = 3;
     fill(&mut t, 10);
     t.scroll_up(5);
     assert!(t.top.is_some());
-    t.push_user("hello");
+    t.start_user_turn("hello");
     assert!(t.top.is_none());
-    assert_eq!(
-        t.current_top(),
-        t.total_lines().saturating_sub(t.area.height as usize)
-    );
-}
-
-#[test]
-fn shell_command_pins_to_bottom() {
-    let mut t = Transcript::new();
-    wide(&mut t);
-    t.area.height = 3;
-    fill(&mut t, 10);
-    t.scroll_up(5);
-    assert!(t.top.is_some());
-    t.push_shell_command("ls");
-    assert!(t.top.is_none());
+    assert_eq!(t.rows.last().map(|row| row.kind), Some(LineKind::User));
+    assert_eq!(t.rows.last().map(|row| row.text.as_str()), Some("hello"));
 }
 
 #[test]
@@ -1928,26 +1921,139 @@ fn format_elapsed_units() {
 }
 
 #[test]
-fn last_user_text_returns_most_recent_user_row() {
+fn rewind_text_returns_most_recent_user_row() {
     let mut t = Transcript::new();
     t.push_user("first");
     t.push_row(LineKind::Text, "one");
     t.push_user("second");
-    assert_eq!(t.last_user_text().as_deref(), Some("second"));
+    assert_eq!(t.rewind_text(), Some("second".into()));
 }
 
 #[test]
-fn last_user_text_none_without_user_rows() {
+fn persisted_history_keeps_user_messages_in_the_transcript() {
     let mut t = Transcript::new();
+    t.seed(&[
+        Message::user_text("question one"),
+        Message::assistant_text("answer one"),
+    ]);
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::User, LineKind::Text, LineKind::Separator]
+    );
+    assert_eq!(row_texts(&t), vec!["question one", "answer one", ""]);
+}
+
+#[test]
+fn turn_prompt_precedes_its_response() {
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.start_user_turn("first");
+    t.on_event(&text_delta("answer one"));
+    t.on_event(&completed());
+    t.start_user_turn("second");
+    t.on_event(&text_delta("answer two"));
+    t.on_event(&completed());
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Text,
+            LineKind::Separator,
+            LineKind::User,
+            LineKind::Text,
+            LineKind::Separator,
+        ]
+    );
+    assert_eq!(
+        row_texts(&t),
+        vec!["first", "answer one", "", "second", "answer two", ""]
+    );
+}
+
+#[test]
+fn active_turn_projects_its_prompt_inside_the_transcript() {
+    let mut t = Transcript::new();
+    t.start_user_turn("question");
+    t.on_event(&text_delta("answer"));
+    let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let first_row: String = (0..40).map(|x| buffer[(x, 0)].symbol()).collect();
+    assert!(first_row.contains("question"));
+    assert!(t.has_sticky_prompt());
+
+    t.on_event(&completed());
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    assert!(!t.has_sticky_prompt());
+    assert!(!t.has_active_prompt());
+}
+
+#[test]
+fn scrolling_up_hides_the_active_prompt_projection() {
+    let mut t = Transcript::new();
+    wide(&mut t);
+    fill(&mut t, 10);
+    t.start_user_turn("question");
+    t.on_event(&text_delta("answer"));
+    t.scroll_up(1);
+    let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    assert!(!t.has_sticky_prompt());
+}
+
+#[test]
+fn shell_turn_uses_shell_row_and_rewinds_with_bang_prefix() {
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.start_shell_turn("ls -la");
+    assert_eq!(kinds_of(&t), vec![LineKind::Shell]);
+    assert_eq!(t.rewind_text(), Some("! ls -la".into()));
+}
+
+#[test]
+fn rewind_uses_the_latest_user_or_shell_row() {
+    let mut t = Transcript::new();
+    t.push_user("first");
     t.push_row(LineKind::Text, "one");
-    assert_eq!(t.last_user_text(), None);
+    t.push_user("second");
+    assert_eq!(t.rewind_text(), Some("second".into()));
 }
 
 #[test]
-fn last_user_text_rewinds_shell_as_bang() {
+fn finish_response_settles_thinking_and_stream() {
     let mut t = Transcript::new();
-    t.push_shell_command("ls -la");
-    assert_eq!(t.last_user_text().as_deref(), Some("! ls -la"));
+    wide(&mut t);
+    t.on_event(&thinking("secret plan"));
+    t.on_event(&text_delta("half an answer"));
+    t.finish_response();
+    assert!(t.wrapped_stream.is_empty());
+    assert_eq!(t.rows[0].text, THOUGHT_LABEL);
+    assert_eq!(t.rows.last().unwrap().kind, LineKind::Text);
+}
+
+#[test]
+fn finish_response_matches_a_completed_turn() {
+    let mut completed_turn = Transcript::new();
+    completed_turn.on_event(&thinking("secret plan"));
+    completed_turn.on_event(&text_delta("half an answer"));
+    completed_turn.on_event(&completed());
+    let mut closed = Transcript::new();
+    closed.on_event(&thinking("secret plan"));
+    closed.on_event(&text_delta("half an answer"));
+    closed.finish_response();
+    let answers = |rows: &[Row]| {
+        rows.iter()
+            .filter(|row| row.kind != LineKind::Separator)
+            .map(|row| (row.kind, row.text.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(answers(&completed_turn.rows), answers(&closed.rows));
 }
 
 #[test]
@@ -2171,6 +2277,96 @@ fn mouse_up_after_selection_emits_copied_reply() {
     );
     assert!(matches!(up, KeyResult::Action(Action::Notify(text)) if text == "Copied!"));
     assert_eq!(t.selected_text().as_deref(), Some("hello"));
+}
+
+#[test]
+fn selection_maps_coordinates_below_an_offset_transcript_area() {
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, "hello world");
+    // The transcript may begin below another top-level region; a drag inside
+    // it must still select the row it shows.
+    ready(&mut t, Rect::new(0, 1, 80, 5));
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 1),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 8, 1),
+        &State::new(),
+    );
+    assert_eq!(t.selected_text().as_deref(), Some("hello"));
+}
+
+#[test]
+fn scroll_outside_the_transcript_does_not_scroll_it() {
+    let mut t = Transcript::new();
+    ready(&mut t, Rect::new(0, 1, 80, 3));
+    fill(&mut t, 20);
+    t.scroll_up(5);
+    let top = t.top;
+
+    for kind in [MouseEventKind::ScrollUp, MouseEventKind::ScrollDown] {
+        assert!(matches!(
+            t.handle_mouse(mouse(kind, 3, 0), &State::new()),
+            KeyResult::Ignored
+        ));
+    }
+    assert_eq!(t.top, top);
+}
+
+#[test]
+fn drag_released_above_the_transcript_still_copies() {
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, "hello world");
+    ready(&mut t, Rect::new(0, 1, 80, 5));
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 1),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 8, 1),
+        &State::new(),
+    );
+    // The pointer leaves the transcript into another region above it.
+    let up = t.handle_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 8, 0),
+        &State::new(),
+    );
+    assert!(matches!(up, KeyResult::Action(Action::Notify(text)) if text == "Copied!"));
+    assert!(!t.dragging);
+}
+
+#[test]
+fn collapsible_header_in_an_offset_transcript_toggles() {
+    const THINKING: &str = "inspect the implementation";
+
+    let mut t = Transcript::new();
+    t.on_event(&thinking(THINKING));
+    t.on_event(&completed());
+    ready(&mut t, Rect::new(0, 1, 80, 8));
+
+    assert!(
+        !t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("thinking detail")
+            .is_expanded()
+    );
+
+    double_click(&mut t, 2, 1);
+
+    assert!(
+        t.rows[0]
+            .collapsible
+            .as_ref()
+            .expect("thinking detail")
+            .is_expanded()
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line.spans.iter().any(|s| s.content.contains(THINKING)))
+    );
 }
 
 #[test]
@@ -2413,7 +2609,7 @@ fn draw_repaints_every_cell_after_shorter_cjk_line() {
         .draw(|f| t.draw(f, f.area(), &State::new()))
         .unwrap();
 
-    t.reset();
+    let mut t = Transcript::new();
     t.push_row(LineKind::Text, "好");
     let frame = terminal
         .draw(|f| t.draw(f, f.area(), &State::new()))
@@ -2482,7 +2678,10 @@ fn seed_shell_envelope_renders_command_and_output() {
     assert_eq!(t.rows[0].text, "ls");
     assert_eq!(t.rows[1].kind, LineKind::ShellResult(true));
     assert_eq!(t.rows[1].text, "a.rs\nb.rs");
-    assert_eq!(t.last_user_text().as_deref(), Some("! ls"));
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::Shell, LineKind::ShellResult(true)]
+    );
 }
 
 #[test]

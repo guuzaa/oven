@@ -10,7 +10,7 @@ pub(super) const COLLAPSED_MARKER: &str = "▸ ";
 pub(super) const EXPANDED_MARKER: &str = "▾ ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LineKind {
+pub(crate) enum LineKind {
     User,
     Shell,
     Thinking,
@@ -25,7 +25,7 @@ pub(super) enum LineKind {
 }
 
 impl LineKind {
-    pub(super) fn style(self) -> Style {
+    pub(crate) fn style(self) -> Style {
         match self {
             LineKind::User => theme::user(),
             LineKind::Shell => theme::shell(),
@@ -44,7 +44,7 @@ impl LineKind {
         self == LineKind::Text
     }
 
-    pub(super) fn gutter(self) -> &'static str {
+    pub(crate) fn gutter(self) -> &'static str {
         match self {
             LineKind::User => "› ",
             LineKind::Shell => "$ ",

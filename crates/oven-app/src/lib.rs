@@ -28,5 +28,9 @@ pub use oven_agent::{
     present_tool,
 };
 pub use shell::{LocalShell, ShellInput, display_shell_line};
-pub use state::{AppPhase, AppState, PendingToolApproval, SessionState, StateChange, StateEvent};
+pub use slash::invokes_command;
+pub use state::{
+    AppPhase, AppState, HistoryChangeReason, PendingToolApproval, SessionState, StateChange,
+    StateEvent,
+};
 pub use tools::ToolRegistry;

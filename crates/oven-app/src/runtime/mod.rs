@@ -29,8 +29,8 @@ use crate::session::{
 use crate::shell;
 use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::state::{
-    AppPhase, AppState, PendingToolApproval, SessionState, StateChange, context_tokens,
-    context_tokens_of, context_window, context_window_of,
+    AppPhase, AppState, HistoryChangeReason, PendingToolApproval, SessionState, StateChange,
+    context_tokens, context_tokens_of, context_window, context_window_of,
 };
 
 const EMPTY_SHELL: &str = "empty shell command";
@@ -539,6 +539,7 @@ impl Runtime {
                 self.publish();
                 self.emit_state(StateChange::HistoryChanged {
                     revision: self.agent.history_revision(),
+                    reason: HistoryChangeReason::Compacted,
                 });
                 self.emit_state(StateChange::UsageChanged {
                     usage: self.state.last_turn_usage,
@@ -659,6 +660,7 @@ impl Runtime {
         self.publish();
         self.emit_state(StateChange::HistoryChanged {
             revision: self.agent.history_revision(),
+            reason: HistoryChangeReason::Cleared,
         });
         self.emit_state(StateChange::TodosChanged {
             todos: self.state.todos.clone(),
@@ -829,6 +831,7 @@ impl Runtime {
         self.emit_context_changed();
         self.emit_state(StateChange::HistoryChanged {
             revision: self.agent.history_revision(),
+            reason: HistoryChangeReason::Rewound,
         });
     }
 

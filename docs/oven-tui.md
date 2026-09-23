@@ -53,7 +53,8 @@ Terminal events are converted first: a bracketed paste arrives as one
 
 After an app event is applied, `drain_events` repeatedly `try_recv`s until the
 channel is empty, so a burst of deltas costs one draw instead of one draw per
-delta. A disconnected channel clears `busy`.
+delta. A disconnected channel settles the live transcript response and clears
+`busy`.
 
 `apply_event` maps each event onto four things:
 
@@ -74,9 +75,11 @@ never queued — they submit immediately, because the runtime applies them live.
 
 `EscAction::new` resolves the overloaded Esc key in a fixed order: pop the queue
 into the composer → cancel a running turn → rewind the last user message →
-ignore. During a rewind the `rewinding` flag blocks a plain Enter until
-`HistoryChanged` arrives, so the user cannot submit before the backend has
-truncated history.
+ignore. The rewind text comes from the latest User or Shell row in the
+transcript; shell prompts come back in their bang form. During a rewind the
+`rewinding` flag blocks a plain Enter until `HistoryChanged` arrives, so the
+user cannot submit before the backend has truncated history; that event then
+rebuilds the transcript from the truncated history.
 
 ### Component contract
 
@@ -107,11 +110,11 @@ counter used for animations).
 
 ## Layout
 
-`components/layout.rs` splits the screen into named rows, bottom-up:
+`components/layout.rs` splits the screen into named rows, top-down:
 
 ```text
 ┌──────────────────────────┐
-│ transcript (Min 3 rows)  │
+│ transcript (Min 1 row)   │
 ├──────────────────────────┤
 │ queue       (0 or 1)     │
 ├──────────────────────────┤
@@ -125,9 +128,24 @@ counter used for animations).
 └──────────────────────────┘
 ```
 
-Each band is clamped against the remaining height, so the status bar and the
-transcript minimum always survive a short terminal. Bands that collapse to zero
-height are omitted entirely and drawn by nothing.
+A submitted prompt is appended to `Transcript` before any turn events arrive.
+It is therefore the first row of its turn and shares scrolling, selection, and
+mouse coordinates with thinking, tool, and response rows. While the view follows
+the tail, `Transcript` projects that active row at the top of its own viewport
+and reserves the corresponding internal height for response content. Scrolling
+up, or receiving `Completed`, `Cancelled`, `Failed`, or a dropped backend,
+removes only this projection: the prompt row remains in place in the transcript.
+
+`classify_prompt_for_display` mirrors runtime dispatch
+(`oven_app::invokes_command`): normal text starts a User turn, `!` commands
+start a Shell turn, and registered control commands (`/model`, `/setup`,
+`/clear`, …) stay out of the transcript. Queue entries create their row only
+when they are actually sent.
+
+Startup and every `StateChange::HistoryChanged` rebuild the transcript directly
+from `App::history`; no user row is promoted out of history. On a short terminal
+the transcript keeps one row whenever possible, then status; optional bands are
+clamped to the remaining height.
 
 `components/terminal.rs` owns the raw-mode lifecycle: raw mode, alternate
 screen, mouse capture, bracketed paste on `setup()`, and the inverse on
@@ -141,6 +159,7 @@ line kind, border state, and status segment.
 | `input.rs` | multi-line composer; dispatches to the four overlays; dynamic height; border colour encodes mode |
 | `status.rs` | bottom status row plus the transient reply toast |
 | `transcript/` | scrolling conversation, streaming, selection, tool grouping |
+
 | `setup_wizard.rs` | staged provider configuration |
 | `model_picker.rs` | two-stage model + reasoning-effort picker |
 | `slash_command_popup.rs` | `/` command completion |
@@ -219,8 +238,8 @@ When the row does not fit, the hint is dropped and the left side is truncated
 with `…` by display width.
 
 App notifications become a toast: 3 s TTL, anchored bottom-right over the
-transcript, and a 150 ms blank flash when a new reply replaces a visible one so
-the change is noticeable without reading it.
+transcript and clamped to that area, with a 150 ms blank flash when a new reply
+replaces a visible one so the change is noticeable without reading it.
 
 ## Transcript
 
@@ -240,7 +259,7 @@ Row kinds (`transcript/kinds.rs`) each carry a two-column gutter and a style:
 
 | Kind | Gutter | Notes |
 | --- | --- | --- |
-| `User` | `› ` | |
+| `User` | `› ` | archived prompts and seeded history; never the live one |
 | `Shell` | `$ ` | |
 | `Text` | `∙ ` | assistant prose; gutter drawn on the first line only |
 | `Thinking` | `  ` | header holds the duration, body is collapsed |
@@ -283,17 +302,24 @@ Thinking content is never streamed to the screen. A live thinking row shows
 when the agent reports its duration, or to the bare `Thought` label if the turn
 ends without one. Resuming a session replays the same rows from
 `App::history_timed_shared()`, including reordering reasoning ahead of the answer
-for providers that persist it after the text. A restored turn ends with its own
-`Separator` computed from the user prompt's timestamp to the answer's, so the
+for providers that persist it after the text. Every question is a `User` row
+there, because nothing is running yet to pin one. A restored turn ends with its
+own `Separator` computed from the user prompt's timestamp to the answer's, so the
 `Worked for 1.2s` line survives a resume; a message that ended in a tool call
 has none, because the answer it led to is still to come.
 
 ### Scrolling and selection
 
 `top` is `None` to follow the tail and `Some(index)` to anchor. Streaming never
-changes `top`; only PageUp/PageDown, the mouse wheel, and a new user message do.
-A submitted message snaps straight back to the tail (`push_user` resets `top`),
-so the reply keeps rendering on the bottom edge and extending downward.
+changes `top`; only PageUp/PageDown, the mouse wheel, and a new turn do. A new
+turn appends its User or Shell row and snaps straight back to the tail. While
+following, that same active row is projected as an internal sticky header; once
+anchored in history it is rendered only at its logical scroll position.
+
+The pinned band is the only part of the screen outside that model: it cannot be
+reached by scrolling, and the wheel over it scrolls nothing, because the
+transcript hit-tests its own band. It is only there while a turn runs, so an
+idle screen scrolls as one region again.
 
 Expanding or collapsing a row re-anchors `top` afterwards, so the clicked header
 stays on its screen row instead of being scrolled away by the rewrap.
@@ -301,15 +327,17 @@ stays on its screen row instead of being scrolled away by the rewrap.
 Drag-selecting with the mouse highlights by display width (`transcript/
 selection.rs` slices spans at column boundaries, so double-width glyphs copy
 correctly) and copies on release — via `arboard`, falling back to an OSC52 escape
-sequence for terminals without clipboard access.
+sequence for terminals without clipboard access. The transcript hit-tests the
+whole conversation area, including user messages; a drag that starts there still
+owns the pointer while it runs, including a release outside the area.
 
 ## Rendering notes
 
 - `paint_visible` marks cells `AlwaysUpdate` for the transcript region: wide CJK
   glyphs leave a stale trailing cell on Windows terminals under diff-based
   painting.
-- `draw` order in `Ui` is transcript, queue, todos, input, overlay, status, then
-  the reply toast above the transcript.
+- `draw` order in `Ui` is user prompt, transcript, queue, todos, input,
+  overlay, status, then the reply toast above the transcript.
 - Ticks are only scheduled while something animates (`wants_tick`), so an idle
   TUI does not wake up 12 times a second.
 

@@ -121,7 +121,9 @@ impl StatusBar {
             .min(area.height);
         let toast = Rect {
             x: area.right().saturating_sub(width + 1),
-            y: area.bottom().saturating_sub(height + 1),
+            // A toast as tall as its anchor would otherwise start one row
+            // above it, covering whatever sits on top of the anchor.
+            y: area.bottom().saturating_sub(height + 1).max(area.y),
             width,
             height,
         };
@@ -556,6 +558,28 @@ mod tests {
     }
 
     #[test]
+    fn reply_toast_never_rises_above_its_anchor() {
+        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
+        bar.on_event(&notify(&"reply ".repeat(120)));
+        // The transcript band, which starts below the pinned prompt.
+        let anchor = Rect::new(0, 1, 40, 9);
+
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        terminal
+            .draw(|f| bar.draw_reply_overlay(f, anchor))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        assert_eq!(buf.area, Rect::new(0, 0, 40, 10));
+        // Row 0 is the pinned prompt band: it must stay untouched.
+        let top: String = (0..40).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(top.trim().is_empty(), "{top:?}");
+        assert!(buffer_text(buf).contains("reply"));
+    }
+
+    #[test]
     fn first_notify_does_not_flash() {
         let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         bar.on_event(&notify("Copied!"));
@@ -626,6 +650,7 @@ mod tests {
         bar.reply = Some("hi".into());
         bar.on_event(&AppEvent::state_changed(StateChange::HistoryChanged {
             revision: 1,
+            reason: oven_app::HistoryChangeReason::Rewound,
         }));
         assert!(bar.reply.is_none());
 

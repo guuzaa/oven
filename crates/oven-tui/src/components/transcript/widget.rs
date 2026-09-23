@@ -7,7 +7,7 @@ use super::collapsible::Collapsible;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
     AgentEvent, AppEvent, AppEventKind, LocalShell, ShellEvent, StreamEvent, ToolEvent, ToolResult,
-    ToolView, TurnEvent, display_shell_line, present_tool,
+    ToolView, TurnEvent, present_tool,
 };
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
@@ -16,6 +16,7 @@ use ratatui::text::{Line, Span};
 
 use super::super::component::{Action, Component, KeyResult, State};
 use super::super::theme;
+
 use super::kinds::{Header, LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
 use super::tools::ToolBurst;
@@ -30,6 +31,7 @@ const MOUSE_SCROLL_STEP: u16 = 3;
 const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
+const MAX_STICKY_PROMPT_ROWS: usize = 6;
 const NO_OUTPUT: &str = "(no output)";
 pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
 
@@ -38,7 +40,7 @@ pub struct Transcript {
     pub(super) wrapped: Vec<Line<'static>>,
     streaming: String,
     stream_kind: LineKind,
-    wrapped_stream: Vec<Line<'static>>,
+    pub(super) wrapped_stream: Vec<Line<'static>>,
     /// None follows newest content; Some is an anchored wrapped-line index.
     pub(super) top: Option<usize>,
     pub(super) area: Rect,
@@ -53,6 +55,9 @@ pub struct Transcript {
     /// body, whose success output stays hidden.
     detail_ids: HashMap<String, bool>,
     thinking_row: Option<usize>,
+    active_prompt: Option<usize>,
+    sticky_prompt: Option<(usize, u16)>,
+    render_start: usize,
 }
 
 impl Transcript {
@@ -74,19 +79,21 @@ impl Transcript {
             burst_row: None,
             detail_ids: HashMap::new(),
             thinking_row: None,
+            active_prompt: None,
+            sticky_prompt: None,
+            render_start: 0,
         }
     }
 
+    /// Appends a user row to the transcript.
     pub fn push_user(&mut self, text: &str) {
         self.close_tool_burst();
         self.push_row(LineKind::User, text);
-        self.top = None;
     }
 
     pub fn push_shell_command(&mut self, command: &str) {
         self.close_tool_burst();
         self.push_row(LineKind::Shell, command);
-        self.top = None;
     }
 
     pub fn push_shell_output(&mut self, output: &str, ok: bool) {
@@ -102,22 +109,60 @@ impl Transcript {
         );
     }
 
-    pub(crate) fn last_user_text(&self) -> Option<String> {
-        self.rows.iter().rev().find_map(|r| match r.kind {
-            LineKind::User => Some(r.text.clone()),
-            LineKind::Shell => Some(display_shell_line(&r.text)),
-            _ => None,
-        })
+    /// Starts a turn at the tail by appending its prompt before any response
+    /// events can arrive.
+    pub(crate) fn start_user_turn(&mut self, text: &str) {
+        self.push_user(text);
+        self.active_prompt = Some(self.rows.len() - 1);
+        self.top = None;
+    }
+
+    /// Starts a local shell turn at the tail.
+    pub(crate) fn start_shell_turn(&mut self, command: &str) {
+        self.push_shell_command(command);
+        self.active_prompt = Some(self.rows.len() - 1);
+        self.top = None;
     }
 
     #[cfg(test)]
-    pub(crate) fn replace_from(&mut self, messages: &[Message]) {
-        self.replace_from_timed(&timed_messages(messages));
+    pub(super) fn has_active_prompt(&self) -> bool {
+        self.active_prompt.is_some()
     }
 
-    pub(crate) fn replace_from_timed(&mut self, messages: &[(Arc<Message>, u64, Option<u64>)]) {
-        self.reset();
-        self.seed_timed(messages);
+    #[cfg(test)]
+    pub(super) fn has_sticky_prompt(&self) -> bool {
+        self.sticky_prompt.is_some()
+    }
+
+    pub(crate) fn rewind_text(&self) -> Option<String> {
+        let row = self
+            .rows
+            .iter()
+            .rfind(|row| matches!(row.kind, LineKind::User | LineKind::Shell))?;
+        Some(if row.kind == LineKind::Shell {
+            oven_app::display_shell_line(&row.text)
+        } else {
+            row.text.clone()
+        })
+    }
+
+    /// Closes the current response the way a completed turn does, without
+    /// touching the pinned prompt — for paths that end a turn without the
+    /// agent reporting one.
+    pub(crate) fn finish_response(&mut self) {
+        self.close_tool_burst();
+        self.stop_live_thinking();
+        self.flush_streaming();
+        self.active_prompt = None;
+    }
+
+    /// Rebuilds the rows from a history without promoting the last user
+    /// message, the way the pinned prompt path does.
+    #[cfg(test)]
+    pub(crate) fn replace_from(&mut self, messages: &[Message]) {
+        let mut fresh = Self::new();
+        fresh.seed_timed(&timed_messages(messages));
+        *self = fresh;
     }
 
     /// Pre-fill the transcript from a persisted session's messages when
@@ -263,19 +308,6 @@ impl Transcript {
         let max_top = total.saturating_sub(height);
         let top = self.current_top().saturating_add(n as usize).min(max_top);
         self.top = (top.saturating_add(height) < total).then_some(top);
-    }
-
-    pub(super) fn reset(&mut self) {
-        self.rows.clear();
-        self.wrapped.clear();
-        self.clear_stream();
-        self.top = None;
-        self.clear_selection();
-        self.hovered_collapsible = None;
-        self.last_collapsible_click = None;
-        self.close_tool_burst();
-        self.detail_ids.clear();
-        self.thinking_row = None;
     }
 
     fn close_tool_burst(&mut self) {
@@ -481,11 +513,6 @@ impl Transcript {
         }
     }
 
-    fn clear_stream(&mut self) {
-        self.streaming.clear();
-        self.wrapped_stream.clear();
-    }
-
     pub(super) fn push_stream(&mut self, kind: LineKind, text: &str) {
         if text.is_empty() {
             return;
@@ -609,14 +636,21 @@ impl Transcript {
         if total == 0 {
             return SelPos::default();
         }
-        let top = self.current_top();
         let height = self.area.height.max(1);
         let rel_y = if row <= self.area.y {
             0
         } else {
             usize::from(row.saturating_sub(self.area.y)).min(usize::from(height - 1))
         };
-        let raw_line = top.saturating_add(rel_y);
+        let raw_line = match self.sticky_prompt {
+            Some((start, sticky_height)) if rel_y < usize::from(sticky_height) => {
+                start.saturating_add(rel_y)
+            }
+            Some((_, sticky_height)) => self
+                .render_start
+                .saturating_add(rel_y.saturating_sub(usize::from(sticky_height))),
+            None => self.current_top().saturating_add(rel_y),
+        };
         let last = total - 1;
         let line = raw_line.min(last);
         let width = self.line_at(line).map_or(0, line_display_width);
@@ -631,6 +665,28 @@ impl Transcript {
             rel_x.min(width)
         };
         SelPos { line, col }
+    }
+
+    fn active_prompt_range(&self) -> Option<(usize, usize)> {
+        let active = self.active_prompt?;
+        let width = self.width();
+        if width == 0 || active >= self.rows.len() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        for (idx, row) in self.rows.iter().enumerate() {
+            let start = lines.len();
+            let live_rows = self.live_body_rows(idx);
+            Self::wrap_row_into(&mut lines, row, width, live_rows);
+            if idx == active {
+                let first_content = lines[start..]
+                    .iter()
+                    .position(|line| line_display_width(line) > 0)
+                    .map_or(start, |offset| start + offset);
+                return Some((first_content, lines.len()));
+            }
+        }
+        None
     }
 
     fn line_at(&self, idx: usize) -> Option<&Line<'static>> {
@@ -891,9 +947,7 @@ impl Component for Transcript {
                     );
                 }
                 AgentEvent::Turn(TurnEvent::Completed { duration_ms, .. }) => {
-                    self.close_tool_burst();
-                    self.stop_live_thinking();
-                    self.flush_streaming();
+                    self.finish_response();
                     self.push_elapsed(*duration_ms);
                 }
                 AgentEvent::Turn(TurnEvent::Cancelled { duration_ms, .. }) => {
@@ -906,6 +960,7 @@ impl Component for Transcript {
                         }
                     }
                     self.push_row(LineKind::System, "cancelled");
+                    self.finish_response();
                     self.push_elapsed(*duration_ms);
                 }
                 AgentEvent::Turn(TurnEvent::Failed {
@@ -915,6 +970,7 @@ impl Component for Transcript {
                     self.stop_live_thinking();
                     self.flush_streaming();
                     self.push_row(LineKind::Error, &error.message);
+                    self.finish_response();
                     self.push_elapsed(*duration_ms);
                 }
             },
@@ -922,10 +978,14 @@ impl Component for Transcript {
                 ShellEvent::Started { .. } => {}
                 ShellEvent::Finished {
                     output, exit_code, ..
-                } => self.push_shell_output(output, *exit_code == 0),
+                } => {
+                    self.push_shell_output(output, *exit_code == 0);
+                    self.active_prompt = None;
+                }
                 ShellEvent::Failed { error, output, .. } => {
                     let body = if output.is_empty() { error } else { output };
                     self.push_shell_output(body, false);
+                    self.active_prompt = None;
                 }
             },
             AppEventKind::Compaction(ev) => {
@@ -955,14 +1015,40 @@ impl Component for Transcript {
             self.rewrap_stream();
         }
 
-        let height = area.height as usize;
+        self.sticky_prompt = None;
+        let mut content_area = area;
+        if self.top.is_none()
+            && let Some((prompt_start, prompt_end)) = self.active_prompt_range()
+        {
+            let prompt_lines = &self.wrapped[prompt_start..prompt_end];
+            let height = prompt_lines
+                .len()
+                .min(MAX_STICKY_PROMPT_ROWS)
+                .min(area.height as usize);
+            if height > 0 {
+                let height = u16::try_from(height).unwrap_or(area.height);
+                let prompt_area = Rect::new(area.x, area.y, area.width, height);
+                paint_visible(f, prompt_area, prompt_lines[..usize::from(height)].to_vec());
+                content_area.y = content_area.y.saturating_add(height);
+                content_area.height = content_area.height.saturating_sub(height);
+                self.sticky_prompt = Some((prompt_start, height));
+            }
+        }
+
+        let height = content_area.height as usize;
         let total = self.total_lines();
         let max_top = total.saturating_sub(height);
         if let Some(top) = self.top {
             let top = top.min(max_top);
             self.top = (top.saturating_add(height) < total).then_some(top);
         }
-        let start = self.top.unwrap_or(max_top);
+        let mut start = self.top.unwrap_or(max_top);
+        if let Some((_, prompt_end)) = self.active_prompt_range()
+            && self.sticky_prompt.is_some()
+        {
+            start = start.max(prompt_end);
+        }
+        self.render_start = start;
         let end = start.saturating_add(height).min(total);
         let mut visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
         if let Some(header) = self.live_thinking_header()
@@ -1005,8 +1091,17 @@ impl Component for Transcript {
                 *line = highlight_line(line, from, to);
             }
         }
-        paint_visible(f, area, visible);
+        paint_visible(f, content_area, visible);
     }
+}
+
+#[cfg(test)]
+fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)> {
+    messages
+        .iter()
+        .cloned()
+        .map(|message| (Arc::new(message), 0, None))
+        .collect()
 }
 
 fn result_text(content: &[ContentBlock]) -> String {
@@ -1018,15 +1113,6 @@ fn result_text(content: &[ContentBlock]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-#[cfg(test)]
-fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)> {
-    messages
-        .iter()
-        .cloned()
-        .map(|m| (Arc::new(m), 0, None))
-        .collect()
 }
 
 /// Wall time a persisted turn took; `0` when the session predates timestamps.

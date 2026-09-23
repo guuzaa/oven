@@ -137,7 +137,9 @@ Alongside the snapshot, coarse-grained deltas go out as `StateChange`:
 `ModelChanged`, `ModeChanged`, `TodosChanged`, `HistoryChanged`,
 `SessionChanged`, `UsageChanged`, `ContextChanged`, `ProviderChanged`,
 `ModelsChanged`. The phase carries the approval payload, so the approve/reject
-modal can be rendered without a second query.
+modal can be rendered without a second query. `HistoryChanged` names its
+`HistoryChangeReason` (`Rewound`, `Cleared`, `Compacted`, `External`), so a view
+tells a rewind from a `/clear` without inferring it from the revision number.
 
 `context_tokens` is prompt-side tokens (input plus cache reads) of the last
 response and `context_window` comes from the router's model info; both refresh on

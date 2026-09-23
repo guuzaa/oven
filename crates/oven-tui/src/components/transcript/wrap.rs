@@ -82,7 +82,7 @@ pub(super) fn thinking_display_label(text: &str) -> &str {
     }
 }
 
-pub(super) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
+pub(crate) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
     f.render_widget(Paragraph::new(lines), area);
     // Wide CJK glyphs leave a stale trailing cell on Windows; force a full paint.
     let buf = f.buffer_mut();
@@ -489,7 +489,7 @@ fn body_span(text: String, style: Option<Style>) -> Span<'static> {
     }
 }
 
-pub(super) fn split_at_width(s: &str, max_width: usize) -> (&str, &str) {
+pub(crate) fn split_at_width(s: &str, max_width: usize) -> (&str, &str) {
     if max_width == 0 {
         return ("", s);
     }

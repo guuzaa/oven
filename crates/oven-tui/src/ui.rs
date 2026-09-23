@@ -7,8 +7,8 @@ use crossterm::event::{
 use futures::StreamExt;
 use oven_app::{
     AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ApprovalDecision,
-    ApprovalRequestId, CompactionEvent, ControlCommand, LoopLimitDecision, LoopLimitRequestId,
-    ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent,
+    ApprovalRequestId, CompactionEvent, ControlCommand, HistoryChangeReason, LoopLimitDecision,
+    LoopLimitRequestId, ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent, invokes_command,
 };
 use tokio::sync::mpsc;
 
@@ -21,6 +21,7 @@ use crate::components::shell;
 use crate::components::status::{StatusBar, StatusHint};
 use crate::components::todos::TodosWidget;
 use crate::components::transcript::Transcript;
+
 use crate::components::{layout, terminal};
 
 enum OverlayPrompt {
@@ -57,6 +58,7 @@ pub struct Ui {
     /// desync the transcript from the backend.
     rewinding: bool,
     pending: Vec<String>,
+
     transcript: Transcript,
     status: StatusBar,
     input: InputView,
@@ -93,6 +95,7 @@ impl Ui {
             quit: false,
             rewinding: false,
             pending: Vec::new(),
+
             transcript: Transcript::new(),
             status: StatusBar::new(model, &root, last_turn_usage)
                 .with_effort(provider.reasoning_effort)
@@ -105,7 +108,15 @@ impl Ui {
 
     #[inline]
     fn load_transcript(&mut self) {
-        self.transcript.seed_timed(&self.app.history_timed_shared());
+        self.reload_history(HistoryChangeReason::External);
+    }
+
+    /// Rebuilds the single scrollable transcript from backend history.
+    fn reload_history(&mut self, _reason: HistoryChangeReason) {
+        let mut transcript = Transcript::new();
+        transcript.seed_timed(&self.app.history_timed_shared());
+        self.transcript = transcript;
+        self.rewinding = false;
     }
 
     pub async fn run(mut self) -> io::Result<()> {
@@ -145,9 +156,7 @@ impl Ui {
                 result = self.events.recv() => {
                     match result {
                         Some(ev) => self.apply_event(&ev),
-                        None => {
-                            self.state.busy = false;
-                        }
+                        None => self.disconnected(),
                     }
                     self.drain_events();
                     if self.quit {
@@ -190,11 +199,18 @@ impl Ui {
                 Ok(ev) => self.apply_event(&ev),
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.state.busy = false;
+                    self.disconnected();
                     break;
                 }
             }
         }
+    }
+
+    /// The backend went away mid-turn: close the response so an unfinished
+    /// answer is settled before the next prompt archives the pinned one.
+    fn disconnected(&mut self) {
+        self.transcript.finish_response();
+        self.state.busy = false;
     }
 
     fn apply_event(&mut self, ev: &AppEvent) {
@@ -244,11 +260,7 @@ impl Ui {
             }
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::ModeChanged { mode } => self.state.mode = *mode,
-                StateChange::HistoryChanged { .. } => {
-                    self.transcript
-                        .replace_from_timed(&self.app.history_timed_shared());
-                    self.rewinding = false;
-                }
+                StateChange::HistoryChanged { reason, .. } => self.reload_history(*reason),
                 _ => {}
             },
             AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {
@@ -292,11 +304,13 @@ impl Ui {
         }
     }
 
+    /// A submitted turn enters the transcript before response events, so its
+    /// prompt and response always share one scroll coordinate system.
     fn push_submitted(&mut self, text: &str) {
-        if let Some(cmd) = shell::command(text) {
-            self.transcript.push_shell_command(cmd);
-        } else {
-            self.transcript.push_user(&display_user_input(text));
+        match classify_prompt_for_display(text) {
+            PromptDisplay::User(text) => self.transcript.start_user_turn(&text),
+            PromptDisplay::Shell(command) => self.transcript.start_shell_turn(&command),
+            PromptDisplay::Quiet => {}
         }
     }
 
@@ -382,7 +396,7 @@ impl Ui {
                 self.pending.pop(),
                 self.state.busy,
                 self.rewinding,
-                self.transcript.last_user_text(),
+                self.transcript.rewind_text(),
             ) {
                 EscAction::PopQueue(text) => {
                     self.input.set_text(&text);
@@ -490,6 +504,24 @@ impl Ui {
     }
 }
 
+/// Classifies submitted text by the kind of turn it starts. Control commands
+/// do not create transcript rows.
+enum PromptDisplay {
+    User(String),
+    Shell(String),
+    Quiet,
+}
+
+fn classify_prompt_for_display(text: &str) -> PromptDisplay {
+    if let Some(command) = shell::command(text) {
+        return PromptDisplay::Shell(command.to_string());
+    }
+    if invokes_command(text) {
+        return PromptDisplay::Quiet;
+    }
+    PromptDisplay::User(display_user_input(text))
+}
+
 fn is_mode_toggle(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::BackTab)
         || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
@@ -576,6 +608,64 @@ mod tests {
         assert!(matches!(
             EscAction::new(None, false, false, None),
             EscAction::Ignore
+        ));
+    }
+
+    #[test]
+    fn empty_prompt_cannot_trigger_rewind() {
+        assert!(matches!(
+            EscAction::new(None, false, false, None),
+            EscAction::Ignore
+        ));
+    }
+
+    #[test]
+    fn classify_starts_user_turn_for_ordinary_text() {
+        assert!(matches!(
+            classify_prompt_for_display("why is the build slow?"),
+            PromptDisplay::User(text) if text == "why is the build slow?"
+        ));
+    }
+
+    #[test]
+    fn classify_starts_shell_turn_for_shell_commands() {
+        assert!(matches!(
+            classify_prompt_for_display("! ls -la"),
+            PromptDisplay::Shell(text) if text == "ls -la"
+        ));
+    }
+
+    #[test]
+    fn classify_starts_user_turn_for_unknown_slash_commands() {
+        assert!(matches!(
+            classify_prompt_for_display("/nope"),
+            PromptDisplay::User(text) if text == "/nope"
+        ));
+    }
+
+    #[test]
+    fn classify_keeps_control_commands_out_of_the_transcript() {
+        for text in [
+            "/clear",
+            "/compact",
+            "/exit",
+            "/model",
+            "/model gpt-4o high",
+            "/plan on",
+            "/setup name=deepseek api_key=sk-secret",
+        ] {
+            assert!(
+                matches!(classify_prompt_for_display(text), PromptDisplay::Quiet),
+                "{text} configures the runtime and produces no response"
+            );
+        }
+    }
+
+    #[test]
+    fn classified_setup_command_never_starts_a_turn() {
+        assert!(matches!(
+            classify_prompt_for_display("/setup name=deepseek api_key=sk-secret"),
+            PromptDisplay::Quiet
         ));
     }
 

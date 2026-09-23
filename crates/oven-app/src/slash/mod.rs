@@ -113,6 +113,16 @@ impl SlashRegistry {
     }
 }
 
+/// Whether `text` invokes a builtin slash command: a control command that
+/// configures the runtime instead of sending a turn to the agent. Mirrors the
+/// dispatch `Runtime::start_turn` performs, so callers can classify composer
+/// text without executing anything.
+pub fn invokes_command(text: &str) -> bool {
+    SlashRegistry::with_builtin()
+        .recognized_name(text)
+        .is_some()
+}
+
 impl Default for SlashRegistry {
     fn default() -> Self {
         Self::with_builtin()
@@ -188,6 +198,25 @@ mod tests {
         assert_eq!(reg.recognized_name("/model"), Some("model"));
         assert_eq!(reg.recognized_name("/nope"), None);
         assert_eq!(reg.recognized_name("hello there"), None);
+    }
+
+    #[test]
+    fn invokes_command_recognizes_only_registered_commands() {
+        for text in [
+            "/clear",
+            "/compact",
+            "/exit",
+            "/model",
+            "/model gpt-4o high",
+            "/setup name=deepseek api_key=sk-secret",
+            "/plan on",
+            "  /plan",
+        ] {
+            assert!(invokes_command(text), "{text} must be a control command");
+        }
+        for text in ["hello there", "/nope", "! ls", " /nope args"] {
+            assert!(!invokes_command(text), "{text} must reach the agent");
+        }
     }
 
     #[test]

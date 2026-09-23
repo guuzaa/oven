@@ -151,6 +151,20 @@ pub struct StateEvent {
     pub change: StateChange,
 }
 
+/// Why the conversation history changed, so a view can rebuild itself
+/// without guessing from a revision number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryChangeReason {
+    /// Esc rewind truncated the last turn.
+    Rewound,
+    /// `/clear` dropped the conversation.
+    Cleared,
+    /// `/compact` or auto-compaction replaced it with a summary.
+    Compacted,
+    /// History was replaced by something outside a known command.
+    External,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateChange {
     ModelChanged {
@@ -165,6 +179,7 @@ pub enum StateChange {
     },
     HistoryChanged {
         revision: u64,
+        reason: HistoryChangeReason,
     },
     SessionChanged {
         session_id: Option<String>,

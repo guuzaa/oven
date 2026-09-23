@@ -2,7 +2,7 @@ use crate::command::{AppCommand, ControlCommand};
 use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent};
 use crate::session::{Session, canonical_root};
-use crate::state::{AppPhase, StateChange, StateEvent};
+use crate::state::{AppPhase, HistoryChangeReason, StateChange, StateEvent};
 use crate::{App, AppBuilder};
 use crate::{LocalShell, runtime::*};
 use std::borrow::Borrow;
@@ -278,14 +278,18 @@ fn notification(ev: &AppEvent) -> Option<&str> {
     }
 }
 
-fn is_history_changed(ev: &AppEvent) -> bool {
-    matches!(
-        ev.kind,
+fn history_change_reason(ev: &AppEvent) -> Option<HistoryChangeReason> {
+    match &ev.kind {
         AppEventKind::StateChanged(StateEvent {
-            change: StateChange::HistoryChanged { .. },
+            change: StateChange::HistoryChanged { reason, .. },
             ..
-        })
-    )
+        }) => Some(*reason),
+        _ => None,
+    }
+}
+
+fn is_history_changed(ev: &AppEvent) -> bool {
+    history_change_reason(ev).is_some()
 }
 
 fn is_mode_changed(ev: &AppEvent, want: oven_agent::AgentMode) -> bool {
@@ -548,15 +552,18 @@ async fn slash_clear_emits_history_cleared_and_resets_usage() {
     let out = handle.prompt("/clear").await.unwrap();
     assert_eq!(out, "history cleared");
 
-    let mut saw_cleared = false;
     let mut saw_todos_cleared = false;
     let mut done_usage = None;
+    let mut cleared = None;
     while let Ok(ev) = rx.try_recv() {
+        if let Some(reason) = history_change_reason(&ev) {
+            cleared = Some(reason);
+        }
         match &ev.kind {
             AppEventKind::StateChanged(StateEvent {
-                change: StateChange::HistoryChanged { .. },
+                change: StateChange::TodosChanged { todos },
                 ..
-            }) => saw_cleared = true,
+            }) if todos.is_empty() => saw_todos_cleared = true,
             AppEventKind::StateChanged(StateEvent {
                 change: StateChange::TodosChanged { todos },
                 ..
@@ -568,7 +575,7 @@ async fn slash_clear_emits_history_cleared_and_resets_usage() {
             _ => {}
         }
     }
-    assert!(saw_cleared);
+    assert_eq!(cleared, Some(HistoryChangeReason::Cleared));
     assert!(saw_todos_cleared);
     let usage = done_usage.expect("usage after /clear");
     assert_eq!(usage.input_tokens, 0);
@@ -665,7 +672,11 @@ async fn slash_compact_replaces_history_and_switches_session() {
 
     let mut saw_started = false;
     let mut completed = None;
+    let mut compacted = None;
     while let Ok(ev) = rx.try_recv() {
+        if let Some(reason) = history_change_reason(&ev) {
+            compacted = Some(reason);
+        }
         match compaction_of(&ev) {
             Some(CompactionEvent::Started) => saw_started = true,
             Some(CompactionEvent::Completed {
@@ -677,6 +688,7 @@ async fn slash_compact_replaces_history_and_switches_session() {
     }
     assert!(saw_started);
     assert_eq!(completed, Some((10, 5)));
+    assert_eq!(compacted, Some(HistoryChangeReason::Compacted));
 
     let history = history(&handle);
     assert_eq!(history.len(), 1);
@@ -1738,12 +1750,15 @@ fn user_texts<M: Borrow<Message>>(messages: &[M]) -> Vec<String> {
         .collect()
 }
 
-async fn wait_rewound(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
+async fn wait_rewound(sub: &mut mpsc::UnboundedReceiver<AppEvent>) -> HistoryChangeReason {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match sub.recv().await {
-                Some(ev) if is_history_changed(&ev) => return,
-                Some(_) => {}
+                Some(ev) => {
+                    if let Some(reason) = history_change_reason(&ev) {
+                        return reason;
+                    }
+                }
                 None => panic!("channel closed before rewind"),
             }
         }
@@ -1770,14 +1785,14 @@ async fn rewind_while_idle_emits_rewound_and_drops_last_exchange() {
     handle
         .send(AppCommand::Control(ControlCommand::Rewind))
         .unwrap();
-    wait_rewound(&mut sub).await;
+    assert_eq!(wait_rewound(&mut sub).await, HistoryChangeReason::Rewound);
     assert_eq!(user_texts(&history(&handle)), vec!["first"]);
 
     assert_eq!(handle.prompt("third").await.unwrap(), "three");
     handle
         .send(AppCommand::Control(ControlCommand::Rewind))
         .unwrap();
-    wait_rewound(&mut sub).await;
+    assert_eq!(wait_rewound(&mut sub).await, HistoryChangeReason::Rewound);
     assert_eq!(user_texts(&history(&handle)), vec!["first"]);
 
     handle.shutdown().await;
