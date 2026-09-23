@@ -259,8 +259,8 @@ Row kinds (`transcript/kinds.rs`) each carry a two-column gutter and a style:
 
 | Kind | Gutter | Notes |
 | --- | --- | --- |
-| `User` | `› ` | archived prompts and seeded history; never the live one |
-| `Shell` | `$ ` | |
+| `User` | `› ` | framed in the composer's rounded border, gutter inside the frame; selection copies only the text |
+| `Shell` | `$ ` | framed like `User`, in shell colors, with `$ ` inside the frame |
 | `Text` | `∙ ` | assistant prose; gutter drawn on the first line only |
 | `Thinking` | `  ` | header holds the duration, body is collapsed |
 | `Tool` | `  ` | burst summary row |
@@ -272,7 +272,7 @@ Row kinds (`transcript/kinds.rs`) each carry a two-column gutter and a style:
 | `Separator` | `  ` | turn end: `Worked for 1.2s`, or a blank line when the
 duration is unknown |
 
-`User` alone sits flush left; every other kind is pushed right by a one-column
+`User` and `Shell` span the full width inside their frames; every other kind is pushed right by a one-column
 message indent, so all row bodies start at the same column. A collapsible row
 draws its expand/collapse marker (`▸ ` / `▾ `) in that gutter slot instead of the
 blank gutter, and its body lines render at the same column as any other row.

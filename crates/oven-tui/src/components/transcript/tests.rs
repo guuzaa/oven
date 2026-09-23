@@ -166,20 +166,22 @@ fn wrapped_streamed_assistant_gutter_is_drawn_once() {
 }
 
 #[test]
-fn wrapped_shell_gutter_repeats() {
+fn wrapped_shell_command_aligns_under_its_marker() {
     let mut t = Transcript::new();
     t.push_row(LineKind::Shell, "abcdefgh");
-    ready(&mut t, Rect::new(0, 0, 7, 5));
+    ready(&mut t, Rect::new(0, 0, 10, 5));
     let rows: Vec<String> = t.wrapped.iter().map(line_text).collect();
-    assert_eq!(rows, vec![" $ abcd", " $ efgh"]);
+    assert_eq!(
+        rows,
+        vec!["╭────────╮", "│ $ abcd │", "│   efgh │", "╰────────╯"]
+    );
 }
 
 #[test]
-fn non_user_rows_share_one_message_indent() {
+fn non_prompt_rows_share_one_message_indent() {
     let mut t = Transcript::new();
     for (kind, text) in [
         (LineKind::Text, "assistant text that is long enough to wrap"),
-        (LineKind::Shell, "$ command that is long enough to wrap"),
         (LineKind::System, "system note"),
         (LineKind::Error, "failure note"),
         (LineKind::Tool, "tool summary"),
@@ -204,7 +206,7 @@ fn non_user_rows_share_one_message_indent() {
         assert_eq!(
             prefix.width(),
             indent,
-            "{:?} must indent every non-user row by {indent}",
+            "{:?} must indent every non-prompt row by {indent}",
             text
         );
     }
@@ -948,10 +950,10 @@ fn thinking_hover_paints_gray_background() {
     t.push_user("q");
     t.on_event(&thinking("secret"));
     t.on_event(&completed());
-    let area = Rect::new(0, 0, 40, 6);
+    let area = Rect::new(0, 0, 40, 8);
     ready(&mut t, area);
 
-    let header_y = 2;
+    let header_y = 4;
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).unwrap();
 
@@ -1980,8 +1982,9 @@ fn active_turn_projects_its_prompt_inside_the_transcript() {
         .draw(|f| t.draw(f, f.area(), &State::new()))
         .unwrap();
     let buffer = terminal.backend().buffer();
-    let first_row: String = (0..40).map(|x| buffer[(x, 0)].symbol()).collect();
-    assert!(first_row.contains("question"));
+    let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+    assert!(row(0).starts_with('╭'));
+    assert!(row(1).contains("question"));
     assert!(t.has_sticky_prompt());
 
     t.on_event(&completed());
@@ -2151,6 +2154,54 @@ fn mouse_drag_selects_body_without_gutter() {
         &State::new(),
     );
     assert_eq!(t.selected_text().as_deref(), Some("hello"));
+}
+
+#[test]
+fn user_prompt_is_framed_like_the_composer() {
+    const PROMPT: &str = "hello";
+    let mut t = Transcript::new();
+    t.push_user(PROMPT);
+    ready(&mut t, Rect::new(0, 0, 20, 5));
+    let text = |idx: usize| -> String {
+        t.wrapped[idx]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    };
+    assert_eq!(t.wrapped.len(), 3);
+    assert_eq!(text(0), format!("╭{}╮", "─".repeat(18)));
+    assert_eq!(text(1), format!("│ › {PROMPT:<14} │"));
+    assert_eq!(t.wrapped[1].spans[1].style, theme::user());
+    assert_eq!(text(2), format!("╰{}╯", "─".repeat(18)));
+    assert_eq!(extract_line_range(&t.wrapped[1], 0, 20), PROMPT);
+}
+
+#[test]
+fn framed_prompt_wraps_inside_its_border() {
+    let mut t = Transcript::new();
+    t.push_user("abcdefgh");
+    ready(&mut t, Rect::new(0, 0, 8, 5));
+    let bodies: Vec<String> = t.wrapped[1..t.wrapped.len() - 1]
+        .iter()
+        .map(|line| extract_line_range(line, 0, 8))
+        .collect();
+    assert_eq!(bodies, vec!["ab", "cd", "ef", "gh"]);
+    assert!(t.wrapped.iter().all(|line| line_display_width(line) == 8));
+}
+
+#[test]
+fn shell_command_is_framed_with_its_marker() {
+    const COMMAND: &str = "ls";
+    let mut t = Transcript::new();
+    t.push_shell_command(COMMAND);
+    ready(&mut t, Rect::new(0, 0, 20, 5));
+    let body = &t.wrapped[1];
+    let text: String = body.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(t.wrapped.len(), 3);
+    assert_eq!(text, format!("│ $ {COMMAND:<14} │"));
+    assert!(body.spans.iter().all(|s| s.style == theme::shell()));
+    assert_eq!(extract_line_range(body, 0, 20), COMMAND);
 }
 
 #[test]

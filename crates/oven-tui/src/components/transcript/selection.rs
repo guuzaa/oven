@@ -10,8 +10,11 @@ pub(super) struct SelPos {
     pub col: usize,
 }
 
+/// Framed prompt lines are `[edge, marker, body, edge]`; every other line is
+/// `[gutter, body]`.
 fn line_prefix_width(line: &Line<'_>) -> usize {
     match line.spans.as_slice() {
+        [edge, marker, _, _] => edge.content.width() + marker.content.width(),
         [head, rest @ ..] if !rest.is_empty() && head.content.width() >= LINE_PREFIX_WIDTH => {
             head.content.width()
         }
@@ -21,6 +24,7 @@ fn line_prefix_width(line: &Line<'_>) -> usize {
 
 fn line_body(line: &Line<'_>) -> String {
     match line.spans.as_slice() {
+        [_, _, body, _] => body.content.to_string(),
         [head, rest @ ..] if head.content.width() >= LINE_PREFIX_WIDTH => {
             rest.iter().map(|s| s.content.as_ref()).collect()
         }

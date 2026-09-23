@@ -1,4 +1,5 @@
 use std::f32::consts::TAU;
+use std::mem;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::Frame;
@@ -36,6 +37,9 @@ const WORKED_FOR: &str = "Worked for";
 const THOUGHT_FOR: &str = "Thought for";
 /// Rows the … N earlier lines marker occupies inside a live body budget.
 const MARKER_ROWS: usize = 1;
+/// Border plus one padding column on each side of a framed prompt.
+const PROMPT_FRAME_COLS: usize = 4;
+const PROMPT_CORNER_COLS: usize = 2;
 
 fn format_duration(ms: u64) -> String {
     let mins = ms / MS_PER_MINUTE;
@@ -216,6 +220,12 @@ pub(super) fn wrap_row_into(
     if !out.is_empty() {
         out.push(Line::from(""));
     }
+    if let Some(frame) = PromptFrame::of(kind)
+        && width > PROMPT_FRAME_COLS + frame.marker.width()
+    {
+        wrap_prompt_frame_into(out, &frame, text, width);
+        return;
+    }
     if kind == LineKind::Separator {
         if text.is_empty() {
             out.push(Line::from(""));
@@ -229,6 +239,79 @@ pub(super) fn wrap_row_into(
     for line in format_lines(kind, text) {
         wrap_line_into(out, &line, width, kind);
     }
+}
+
+/// How the composer looked when a prompt was submitted: its border, prompt
+/// marker and text colors.
+struct PromptFrame {
+    border: Style,
+    marker: &'static str,
+    marker_style: Style,
+    body: Style,
+}
+
+impl PromptFrame {
+    fn of(kind: LineKind) -> Option<Self> {
+        let (border, body) = match kind {
+            LineKind::User => (theme::border_idle(), Style::default()),
+            LineKind::Shell => (kind.style(), kind.style()),
+            _ => return None,
+        };
+        Some(Self {
+            border,
+            marker: kind.gutter(),
+            marker_style: kind.style(),
+            body,
+        })
+    }
+}
+
+/// Frames a submitted prompt like the composer, so it reads as input rather
+/// than an answer. Body lines are `[left edge, marker, text, padded right edge]`;
+/// the marker shows on the first line only.
+fn wrap_prompt_frame_into(
+    out: &mut Vec<Line<'static>>,
+    frame: &PromptFrame,
+    text: &str,
+    width: usize,
+) {
+    let style = frame.border;
+    let set = theme::border_type().to_border_set();
+    let rule = |left: &str, fill: &str, right: &str| {
+        let fill = fill.repeat(width - PROMPT_CORNER_COLS);
+        Line::from(Span::styled(format!("{left}{fill}{right}"), style))
+    };
+    let marker_width = frame.marker.width();
+    let body_width = width - PROMPT_FRAME_COLS - marker_width;
+    let left_edge = format!("{} ", set.vertical_left);
+    let continuation = " ".repeat(marker_width);
+    let mut marker: &str = frame.marker;
+    out.push(rule(set.top_left, set.horizontal_top, set.top_right));
+    for part in trim_message(text).split('\n') {
+        let mut rest = part.strip_suffix('\r').unwrap_or(part);
+        loop {
+            let (chunk, next) = split_at_width(rest, body_width);
+            let pad = " ".repeat(body_width.saturating_sub(chunk.width()));
+            out.push(Line::from(vec![
+                Span::styled(left_edge.clone(), style),
+                Span::styled(
+                    mem::replace(&mut marker, &continuation).to_string(),
+                    frame.marker_style,
+                ),
+                Span::styled(chunk.to_string(), frame.body),
+                Span::styled(format!("{pad} {}", set.vertical_right), style),
+            ]));
+            if next.is_empty() {
+                break;
+            }
+            rest = next;
+        }
+    }
+    out.push(rule(
+        set.bottom_left,
+        set.horizontal_bottom,
+        set.bottom_right,
+    ));
 }
 
 pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {

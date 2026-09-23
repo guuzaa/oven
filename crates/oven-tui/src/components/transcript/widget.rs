@@ -31,7 +31,7 @@ const MOUSE_SCROLL_STEP: u16 = 3;
 const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
-const MAX_STICKY_PROMPT_ROWS: usize = 6;
+const MAX_STICKY_PROMPT_ROWS: usize = 8;
 const NO_OUTPUT: &str = "(no output)";
 pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
 
