@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Restore the per-turn `Worked for Xs` transcript separator after answers, tool follow-ups, cancellations, failures, compaction, and app errors, including the turn duration when resuming a session from its persisted timestamps
+
 ## [0.0.8] - 2026-09-22
 
 ### Added

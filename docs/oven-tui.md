@@ -250,6 +250,8 @@ Row kinds (`transcript/kinds.rs`) each carry a two-column gutter and a style:
 | `ShellResult(bool)` | `  ` | last 100 lines of output |
 | `Error` | `  ` | |
 | `System` | `  ` | approvals, cancellations, compaction |
+| `Separator` | `  ` | turn end: `Worked for 1.2s`, or a blank line when the
+duration is unknown |
 
 `User` alone sits flush left; every other kind is pushed right by a one-column
 message indent, so all row bodies start at the same column. A collapsible row
@@ -281,7 +283,10 @@ Thinking content is never streamed to the screen. A live thinking row shows
 when the agent reports its duration, or to the bare `Thought` label if the turn
 ends without one. Resuming a session replays the same rows from
 `App::history_timed_shared()`, including reordering reasoning ahead of the answer
-for providers that persist it after the text.
+for providers that persist it after the text. A restored turn ends with its own
+`Separator` computed from the user prompt's timestamp to the answer's, so the
+`Worked for 1.2s` line survives a resume; a message that ended in a tool call
+has none, because the answer it led to is still to come.
 
 ### Scrolling and selection
 

@@ -21,6 +21,7 @@ pub(super) enum LineKind {
     ShellResult(bool),
     Error,
     System,
+    Separator,
 }
 
 impl LineKind {
@@ -34,7 +35,7 @@ impl LineKind {
             LineKind::ToolResult(true) | LineKind::ShellResult(true) => theme::ok(),
             LineKind::ToolResult(false) | LineKind::ShellResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
-            LineKind::System => theme::dim(),
+            LineKind::System | LineKind::Separator => theme::dim(),
         }
     }
 
@@ -54,7 +55,8 @@ impl LineKind {
             | LineKind::ShellResult(_)
             | LineKind::Diff
             | LineKind::Error
-            | LineKind::System => "  ",
+            | LineKind::System
+            | LineKind::Separator => "  ",
         }
     }
 }

@@ -23,9 +23,18 @@ use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 use super::widget::{LOOP_LIMIT_REACHED, Transcript};
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer,
-    format_lines, format_thought, line_display_width, tail_lines,
+    format_elapsed, format_lines, format_thought, line_display_width, tail_lines,
 };
 
+const ELAPSED_0: &str = "Worked for 0s";
+const ELAPSED_0_1S: &str = "Worked for 0.1s";
+const ELAPSED_0_3S: &str = "Worked for 0.3s";
+const ELAPSED_0_9S: &str = "Worked for 0.9s";
+const ELAPSED_1S: &str = "Worked for 1s";
+const ELAPSED_1_2S: &str = "Worked for 1.2s";
+const ELAPSED_1_5S: &str = "Worked for 1.5s";
+const ELAPSED_1M: &str = "Worked for 1m 0s";
+const ELAPSED_1M_1S: &str = "Worked for 1m 1s";
 const THOUGHT_0: &str = "Thought for 0s";
 const THOUGHT_1_5S: &str = "Thought for 1.5s";
 const THOUGHT_1M_1S: &str = "Thought for 1m 1s";
@@ -98,6 +107,7 @@ fn all_gutters_are_two_wide() {
         LineKind::ShellResult(false),
         LineKind::Error,
         LineKind::System,
+        LineKind::Separator,
     ];
     for kind in kinds {
         assert_eq!(kind.gutter().width(), LINE_PREFIX_WIDTH);
@@ -478,9 +488,13 @@ fn started() -> AppEvent {
 }
 
 fn completed() -> AppEvent {
+    completed_in(0)
+}
+
+fn completed_in(duration_ms: u64) -> AppEvent {
     agent(AgentEvent::Turn(TurnEvent::Completed {
         usage: oven_llm::Usage::default(),
-        duration_ms: 0,
+        duration_ms,
     }))
 }
 
@@ -521,6 +535,42 @@ fn tool_end_adds_no_extra_row() {
 }
 
 #[test]
+fn done_appends_elapsed_after_answer() {
+    let mut t = Transcript::new();
+    t.push_user("q");
+    t.on_event(&text_delta("a"));
+    t.on_event(&completed_in(1_500));
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::User, LineKind::Text, LineKind::Separator]
+    );
+    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some(ELAPSED_1_5S));
+}
+
+#[test]
+fn separator_comes_after_tool_followup_not_between() {
+    let mut t = Transcript::new();
+    t.push_user("q");
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&tool_end(1, true, "done"));
+    t.on_event(&text_delta("ok"));
+    t.on_event(&completed());
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Tool,
+            LineKind::Text,
+            LineKind::Separator,
+        ]
+    );
+}
+
+#[test]
 fn loop_limit_reached_appends_system_line() {
     let mut t = Transcript::new();
     t.push_user("q");
@@ -535,8 +585,12 @@ fn cancelled_appends_system_line() {
     let mut t = Transcript::new();
     t.push_user("q");
     t.on_event(&cancelled());
-    assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::System]);
-    assert_eq!(t.rows.last().map(|r| r.text.as_str()), Some("cancelled"));
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::User, LineKind::System, LineKind::Separator]
+    );
+    assert_eq!(t.rows[1].text.as_str(), "cancelled");
+    assert_eq!(t.rows[2].text.as_str(), "");
 }
 
 #[test]
@@ -546,7 +600,10 @@ fn thinking_delta_shows_label_not_content() {
     t.on_event(&thinking(" more secrets"));
     t.on_event(&text_delta("answer"));
     t.on_event(&completed());
-    assert_eq!(kinds_of(&t), vec![LineKind::Thinking, LineKind::Text]);
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::Thinking, LineKind::Text, LineKind::Separator]
+    );
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
     assert_eq!(t.rows[1].text, "answer");
     assert!(t.rows.iter().all(|r| !r.text.contains("secret")));
@@ -586,7 +643,12 @@ fn reported_thinking_duration_survives_the_answer() {
 
     assert_eq!(
         kinds_of(&t),
-        vec![LineKind::User, LineKind::Thinking, LineKind::Text]
+        vec![
+            LineKind::User,
+            LineKind::Thinking,
+            LineKind::Text,
+            LineKind::Separator
+        ]
     );
     assert_eq!(t.rows[1].text, THOUGHT_1_5S);
 }
@@ -627,10 +689,16 @@ fn seeded_reasoning_renders_before_the_answer_it_precedes() {
 
     assert_eq!(
         kinds_of(&t),
-        vec![LineKind::User, LineKind::Thinking, LineKind::Text]
+        vec![
+            LineKind::User,
+            LineKind::Thinking,
+            LineKind::Text,
+            LineKind::Separator
+        ]
     );
     assert_eq!(t.rows[1].text, THOUGHT_1_5S);
     assert_eq!(t.rows[2].text, "answer");
+    assert_eq!(t.rows[3].text, ELAPSED_1S);
 }
 
 #[test]
@@ -927,7 +995,10 @@ fn seed_collapses_consecutive_thinking() {
         },
         ContentBlock::Text { text: "hi".into() },
     ])]);
-    assert_eq!(kinds_of(&t), vec![LineKind::Thinking, LineKind::Text]);
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::Thinking, LineKind::Text, LineKind::Separator]
+    );
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
     assert_eq!(
         t.rows[0]
@@ -936,6 +1007,11 @@ fn seed_collapses_consecutive_thinking() {
             .expect("thinking detail")
             .body(),
         "onetwo"
+    );
+    assert_eq!(
+        t.rows.last().map(|r| r.text.as_str()),
+        Some(""),
+        "legacy sessions without timestamps keep a plain separator"
     );
 }
 
@@ -1732,12 +1808,123 @@ fn seed_failed_tool_counts_without_result() {
 }
 
 #[test]
+fn elapsed_renders_duration_text() {
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.push_user("q");
+    t.on_event(&text_delta("a"));
+    t.on_event(&completed_in(1_500));
+    let last = t.wrapped.last().expect("wrapped elapsed");
+    let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert!(text.contains(ELAPSED_1_5S), "{text:?}");
+    assert_eq!(last.spans[1].style.fg, theme::dim().fg);
+}
+
+#[test]
+fn textless_separator_is_a_blank_line() {
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.push_row(LineKind::System, "context compacted");
+    t.push_row(LineKind::Separator, "");
+    let last = t.wrapped.last().expect("wrapped separator");
+    assert_eq!(line_text(last), "");
+    assert_eq!(
+        t.wrapped.len(),
+        3,
+        "the separator adds its own break after the shared one"
+    );
+}
+
+#[test]
+fn seed_separates_complete_turns_not_tool_followup() {
+    let mut t = Transcript::new();
+    t.seed(&[
+        Message::user_text("one"),
+        Message::assistant(vec![ContentBlock::Text {
+            text: "first".into(),
+        }]),
+        Message::user_text("two"),
+        Message::assistant(vec![
+            ContentBlock::Text {
+                text: "checking".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "bash".to_string(),
+                input: serde_json::json!({ "command": "ls" }),
+                raw_arguments: None,
+            },
+        ]),
+        Message::tool_result("c1", "out", false),
+        Message::assistant(vec![ContentBlock::Text {
+            text: "second".into(),
+        }]),
+    ]);
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Text,
+            LineKind::Separator,
+            LineKind::User,
+            LineKind::Text,
+            LineKind::Tool,
+            LineKind::Text,
+            LineKind::Separator,
+        ]
+    );
+}
+
+#[test]
+fn seed_timed_shows_turn_elapsed_from_timestamps() {
+    let mut t = Transcript::new();
+    t.seed_timed(&[
+        (Arc::new(Message::user_text("one")), 1_000, None),
+        (
+            Arc::new(Message::assistant(vec![ContentBlock::Text {
+                text: "first".into(),
+            }])),
+            2_500,
+            None,
+        ),
+        (Arc::new(Message::user_text("two")), 3_000, None),
+        (
+            Arc::new(Message::assistant(vec![ContentBlock::Text {
+                text: "second".into(),
+            }])),
+            4_200,
+            None,
+        ),
+    ]);
+    let elapsed: Vec<&str> = t
+        .rows
+        .iter()
+        .filter(|r| r.kind == LineKind::Separator)
+        .map(|r| r.text.as_str())
+        .collect();
+    assert_eq!(elapsed, vec![ELAPSED_1_5S, ELAPSED_1_2S]);
+}
+
+#[test]
 fn format_thought_units() {
     assert_eq!(format_thought(None), THOUGHT_LABEL);
     assert_eq!(format_thought(Some(0)), THOUGHT_0);
     assert_eq!(format_thought(Some(99)), THOUGHT_0);
     assert_eq!(format_thought(Some(1_500)), THOUGHT_1_5S);
     assert_eq!(format_thought(Some(61_000)), THOUGHT_1M_1S);
+}
+
+#[test]
+fn format_elapsed_units() {
+    assert_eq!(format_elapsed(0), ELAPSED_0);
+    assert_eq!(format_elapsed(99), ELAPSED_0);
+    assert_eq!(format_elapsed(100), ELAPSED_0_1S);
+    assert_eq!(format_elapsed(342), ELAPSED_0_3S);
+    assert_eq!(format_elapsed(999), ELAPSED_0_9S);
+    assert_eq!(format_elapsed(1_000), ELAPSED_1S);
+    assert_eq!(format_elapsed(1_500), ELAPSED_1_5S);
+    assert_eq!(format_elapsed(60_000), ELAPSED_1M);
+    assert_eq!(format_elapsed(61_000), ELAPSED_1M_1S);
 }
 
 #[test]

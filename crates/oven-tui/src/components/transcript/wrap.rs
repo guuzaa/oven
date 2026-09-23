@@ -32,6 +32,7 @@ const PERIOD_MS: u128 = 1400;
 const PERIOD: f32 = 1400.0;
 const SHADE_MIN: f32 = 88.0;
 const SHADE_MAX: f32 = 220.0;
+const WORKED_FOR: &str = "Worked for";
 const THOUGHT_FOR: &str = "Thought for";
 /// Rows the … N earlier lines marker occupies inside a live body budget.
 const MARKER_ROWS: usize = 1;
@@ -56,6 +57,12 @@ fn format_duration(ms: u64) -> String {
     } else {
         format!("{mins}m {secs}s")
     }
+}
+
+/// Trailing line of a finished turn: how long the agent took, or nothing at all
+/// when the duration is unknown.
+pub(super) fn format_elapsed(ms: u64) -> String {
+    format!("{WORKED_FOR} {}", format_duration(ms))
 }
 
 /// Header for a thinking row: the duration the agent reported, or a bare label
@@ -208,6 +215,16 @@ pub(super) fn wrap_row_into(
 ) {
     if !out.is_empty() {
         out.push(Line::from(""));
+    }
+    if kind == LineKind::Separator {
+        if text.is_empty() {
+            out.push(Line::from(""));
+        } else {
+            for line in format_lines(kind, text) {
+                wrap_line_into(out, &line, width, kind);
+            }
+        }
+        return;
     }
     for line in format_lines(kind, text) {
         wrap_line_into(out, &line, width, kind);
@@ -371,7 +388,9 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
             part.to_string()
         };
         let body_span = match kind {
-            LineKind::Diff | LineKind::Shell => Span::styled(body, line_style),
+            LineKind::Diff | LineKind::Shell | LineKind::Separator => {
+                Span::styled(body, line_style)
+            }
             _ => Span::raw(body),
         };
         lines.push(Line::from(vec![

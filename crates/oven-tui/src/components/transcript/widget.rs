@@ -21,8 +21,8 @@ use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_
 use super::tools::ToolBurst;
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
-    apply_hover, apply_thinking_shimmer, collect_lines, format_lines, format_thought,
-    line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
+    apply_hover, apply_thinking_shimmer, collect_lines, format_elapsed, format_lines,
+    format_thought, line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
     wrap_collapsible_into, wrap_line_into, wrap_row_into,
 };
 
@@ -129,7 +129,8 @@ impl Transcript {
     }
 
     pub fn seed_timed(&mut self, messages: &[(Arc<Message>, u64, Option<u64>)]) {
-        for (m, _, thinking_ms) in messages {
+        let mut turn_started_at: Option<u64> = None;
+        for (m, ts, thinking_ms) in messages {
             match m.role {
                 Role::User => {
                     for block in &m.content {
@@ -140,6 +141,7 @@ impl Transcript {
                                     self.push_shell_command(&sh.command);
                                     self.push_shell_output(&sh.output, sh.ok());
                                 } else {
+                                    turn_started_at = Some(*ts);
                                     self.push_row(LineKind::User, text);
                                 }
                             }
@@ -165,6 +167,8 @@ impl Transcript {
                     }
                 }
                 Role::Assistant => {
+                    let mut emitted = false;
+                    let mut has_tool = false;
                     // Providers that open the text block first (an empty
                     // leading `content` delta) persist the reasoning after the
                     // answer; live events always put reasoning first, so the
@@ -181,19 +185,30 @@ impl Transcript {
                             ContentBlock::Thinking { thinking } => {
                                 self.close_tool_burst();
                                 self.push_thinking(&format_thought(*thinking_ms), thinking);
+                                emitted = true;
                             }
                             ContentBlock::Text { text } => {
                                 let body = trim_message(text);
                                 if !body.is_empty() {
                                     self.close_tool_burst();
                                     self.push_row(LineKind::Text, &body);
+                                    emitted = true;
                                 }
                             }
                             ContentBlock::ToolUse {
                                 id, name, input, ..
-                            } => self.note_tool_start(id, &present_tool(name, input)),
+                            } => {
+                                self.note_tool_start(id, &present_tool(name, input));
+                                emitted = true;
+                                has_tool = true;
+                            }
                             _ => {}
                         }
+                    }
+                    // A message ending in a tool call is mid-turn: the answer
+                    // it led to is still to come, so no turn end yet.
+                    if emitted && !has_tool {
+                        self.push_elapsed(turn_elapsed(turn_started_at, *ts));
                     }
                 }
                 Role::System => {}
@@ -427,6 +442,28 @@ impl Transcript {
             wrap_row_into(out, row.kind, &row.text, width);
             Vec::new()
         }
+    }
+
+    fn push_separator(&mut self) {
+        self.push_turn_end("");
+    }
+
+    fn push_elapsed(&mut self, duration_ms: u64) {
+        if duration_ms == 0 {
+            self.push_turn_end("");
+            return;
+        }
+        self.push_turn_end(&format_elapsed(duration_ms));
+    }
+
+    fn push_turn_end(&mut self, text: &str) {
+        if matches!(
+            self.rows.last().map(|r| r.kind),
+            Some(LineKind::Separator) | None
+        ) {
+            return;
+        }
+        self.push_row(LineKind::Separator, text);
     }
 
     fn take_stream(&mut self) -> (LineKind, String) {
@@ -853,12 +890,13 @@ impl Component for Transcript {
                         &format!("{LOOP_LIMIT_REACHED} ({max_iters} iterations)"),
                     );
                 }
-                AgentEvent::Turn(TurnEvent::Completed { .. }) => {
+                AgentEvent::Turn(TurnEvent::Completed { duration_ms, .. }) => {
                     self.close_tool_burst();
                     self.stop_live_thinking();
                     self.flush_streaming();
+                    self.push_elapsed(*duration_ms);
                 }
-                AgentEvent::Turn(TurnEvent::Cancelled { .. }) => {
+                AgentEvent::Turn(TurnEvent::Cancelled { duration_ms, .. }) => {
                     self.close_tool_burst();
                     self.stop_live_thinking();
                     if !self.streaming.is_empty() {
@@ -868,12 +906,16 @@ impl Component for Transcript {
                         }
                     }
                     self.push_row(LineKind::System, "cancelled");
+                    self.push_elapsed(*duration_ms);
                 }
-                AgentEvent::Turn(TurnEvent::Failed { error, .. }) => {
+                AgentEvent::Turn(TurnEvent::Failed {
+                    error, duration_ms, ..
+                }) => {
                     self.close_tool_burst();
                     self.stop_live_thinking();
                     self.flush_streaming();
                     self.push_row(LineKind::Error, &error.message);
+                    self.push_elapsed(*duration_ms);
                 }
             },
             AppEventKind::Shell(ev) => match ev {
@@ -889,6 +931,7 @@ impl Component for Transcript {
             AppEventKind::Compaction(ev) => {
                 if matches!(ev, oven_app::CompactionEvent::Completed { .. }) {
                     self.push_row(LineKind::System, "context compacted");
+                    self.push_separator();
                 }
             }
             AppEventKind::StateChanged(_)
@@ -898,6 +941,7 @@ impl Component for Transcript {
                 self.close_tool_burst();
                 self.flush_streaming();
                 self.push_row(LineKind::Error, message);
+                self.push_separator();
             }
         }
     }
@@ -983,4 +1027,11 @@ fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)>
         .cloned()
         .map(|m| (Arc::new(m), 0, None))
         .collect()
+}
+
+/// Wall time a persisted turn took; `0` when the session predates timestamps.
+fn turn_elapsed(started_at: Option<u64>, ended_at: u64) -> u64 {
+    started_at
+        .map(|start| ended_at.saturating_sub(start))
+        .unwrap_or(0)
 }
