@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
-use oven_agent::{AgentError, CancellationToken, Tool, ToolCaps, ToolPermission};
+use oven_agent::{AgentError, Tool, ToolCaps, ToolContext, ToolPermission};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ResourceContents};
 use rmcp::service::{RoleClient, RunningService, serve_client};
 use rmcp::transport::TokioChildProcess;
@@ -245,11 +245,7 @@ impl Tool for McpTool {
         }
     }
 
-    async fn run(
-        &self,
-        args: &Value,
-        cancel: Option<&CancellationToken>,
-    ) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError> {
         let arguments = args.as_object().cloned().ok_or_else(|| {
             AgentError::from(format!(
                 "mcp:{}: arguments must be an object",
@@ -259,7 +255,7 @@ impl Tool for McpTool {
         let request =
             CallToolRequestParams::new(self.remote_name.clone()).with_arguments(arguments);
 
-        let result = if let Some(cancel) = cancel {
+        let result = if let Some(cancel) = ctx.cancel() {
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(AgentError::cancelled()),

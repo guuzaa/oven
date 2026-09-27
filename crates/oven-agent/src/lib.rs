@@ -8,6 +8,7 @@ mod identity;
 mod matching;
 mod mode;
 mod prompt_template;
+mod question;
 mod retry;
 mod sink;
 mod skills;
@@ -29,13 +30,17 @@ pub use history::{History, Record, SessionMeta};
 pub use identity::{AgentId, ToolCallId, TurnId};
 pub use mode::{AgentMode, ToolAccess};
 pub use prompt_template::{InstructionDoc, InstructionScope, load_instructions, system_prompt};
+pub use question::{
+    AnswerResponse, Question, QuestionOption, QuestionRequest, QuestionRequestId, QuestionSender,
+};
 pub use retry::RetryingProvider;
 pub use sink::{ChannelEventSink, EventSink, NullSink, VecEventSink};
 pub use skills::{Skill, SkillRegistry};
 pub use todo::{TodoItem, TodoList, TodoStatus, restore_todos};
 pub use tokio_util::sync::CancellationToken;
 pub use tools::{
-    BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-    GrepTool, SkillReadTool, TodoWriteTool, Tool, ToolCaps, ToolPermission, ToolView, present_tool,
+    AnswerTool, BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool,
+    GlobTool, GrepTool, SkillReadTool, TodoWriteTool, Tool, ToolCaps, ToolContext, ToolPermission,
+    ToolView, present_tool,
 };
 pub use turn::{TurnContext, TurnOutput};

@@ -23,15 +23,16 @@ pub use event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent};
 pub use mcp::McpServerConfig;
 pub use mention::FileMentions;
 pub use oven_agent::{
-    AgentEvent, AgentEventEnvelope, AgentId, AgentMode, ApprovalDecision, ApprovalRequestId,
-    CancellationToken, LoopLimitDecision, LoopLimitRequestId, Skill, SkillRegistry, StreamEvent,
-    TodoItem, TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
+    AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AnswerTool,
+    ApprovalDecision, ApprovalRequestId, CancellationToken, LoopLimitDecision, LoopLimitRequestId,
+    Question, QuestionOption, QuestionRequestId, Skill, SkillRegistry, StreamEvent, TodoItem,
+    TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
     present_tool,
 };
 pub use shell::{LocalShell, ShellInput, display_shell_line};
 pub use slash::invokes_command;
 pub use state::{
-    AppPhase, AppState, HistoryChangeReason, PendingToolApproval, SessionState, StateChange,
-    StateEvent,
+    AppPhase, AppState, HistoryChangeReason, PendingQuestion, PendingToolApproval, SessionState,
+    StateChange, StateEvent,
 };
 pub use tools::ToolRegistry;

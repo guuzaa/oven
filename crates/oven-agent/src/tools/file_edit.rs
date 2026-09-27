@@ -2,9 +2,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
+use super::{Tool, ToolCaps, ToolContext, ToolPermission, ToolView, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileEditTool {
@@ -74,11 +73,7 @@ impl Tool for FileEditTool {
             "required": ["path", "old_string", "new_string"]
         })
     }
-    async fn run(
-        &self,
-        args: &Value,
-        _cancel: Option<&CancellationToken>,
-    ) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _ctx: &ToolContext<'_>) -> Result<String, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;
         let old_string = require_str(args, "old_string", Self::NAME)?;
         let new_string = require_str(args, "new_string", Self::NAME)?;
@@ -131,6 +126,7 @@ impl Tool for FileEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const CTX: ToolContext<'static> = ToolContext::new(None, None);
     use serde_json::json;
 
     fn tmp_dir() -> tempdir::TempDir {
@@ -168,7 +164,7 @@ mod tests {
         let edit = FileEditTool::new(tmp.path());
         edit.run(
             &json!({"path": "a.txt", "old_string": "two", "new_string": "2"}),
-            None,
+            &CTX,
         )
         .await
         .unwrap();
@@ -183,7 +179,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "a.txt", "old_string": "a", "new_string": "b"}),
-                None,
+                &CTX,
             )
             .await
             .unwrap_err();
@@ -198,7 +194,7 @@ mod tests {
         let edit = FileEditTool::new(tmp.path());
         edit.run(
             &json!({"path": "a.txt", "old_string": "a", "new_string": "b", "replace_all": true}),
-            None,
+            &CTX,
         )
         .await
         .unwrap();
@@ -213,7 +209,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "a.txt", "old_string": "zzz", "new_string": "x"}),
-                None,
+                &CTX,
             )
             .await
             .unwrap_err();
@@ -228,7 +224,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "../a.txt", "old_string": "a", "new_string": "b"}),
-                None,
+                &CTX,
             )
             .await
             .unwrap_err();

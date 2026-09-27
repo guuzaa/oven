@@ -2033,6 +2033,7 @@ dependencies = [
  "oven-llm",
  "ratatui",
  "serde_json",
+ "tempdir",
  "tokio",
  "tracing",
  "tui-textarea-2",

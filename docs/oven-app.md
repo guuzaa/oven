@@ -100,9 +100,10 @@ and approvals are never starved by a flood of stream deltas:
 
 | Branch | Purpose |
 | --- | --- |
-| `cmd_rx.recv()` | shutdown, cancel, tool-approval and loop-limit replies, mid-turn `/model`; anything else is deferred |
+| `cmd_rx.recv()` | shutdown, cancel, tool-approval, loop-limit and question replies, mid-turn `/model`; anything else is deferred |
 | `approval_rx.recv()` | agent asked for a tool approval → phase becomes `AwaitingToolApproval` |
 | `loop_limit_rx.recv()` | agent hit the iteration cap → phase becomes `AwaitingLoopLimit` |
+| `question_rx.recv()` | a tool asked the user a question → phase becomes `AwaitingAnswer`, and the runtime publishes `ToolEvent::QuestionAsked` itself |
 | `agent_rx.recv()` | one agent event, forwarded and mirrored into `AppState` |
 | `turn` | the turn future itself |
 
@@ -229,9 +230,15 @@ with a short timeout; an auth error surfaces as `API key rejected: …`.
 ## Tools, MCP and skills
 
 `tools.rs` mounts a named set of tools per workspace: `file_read`,
-`file_write`, `file_edit`, `bash`, `glob`, `grep`, plus `todo_write` and
-`read_skill` added by the builder. An empty config list means the built-in
+`file_write`, `file_edit`, `bash`, `glob`, `grep`, `todo_write` and `answer`,
+plus `read_skill` added by the builder. An empty config list means the built-in
 defaults; unknown names are skipped silently.
+
+`answer` is how the model asks the user something: it publishes a `Question`
+(optionally with the answers to choose from) on the turn's question channel and
+awaits the reply, which comes back as the tool's result. It needs a frontend, so
+it fails with `no user is available to answer the question` on a bare
+`Agent`.
 
 `mcp/` declares MCP servers in config (`mcps.<id>`, stdio via `command`/`args`/
 `env`, or streamable HTTP via `url`/`headers`) and connects them at agent build

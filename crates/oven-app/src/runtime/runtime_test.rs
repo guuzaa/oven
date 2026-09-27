@@ -2403,6 +2403,82 @@ async fn repro_ask_mode_bash_requests_approval() {
     handle.shutdown().await;
 }
 
+#[tokio::test]
+async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
+    const QUESTION: &str = "which database?";
+    const ANSWER: &str = "postgres";
+    let tmp = tempdir::TempDir::new("app-runtime-question").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "c1",
+            "answer",
+            serde_json::json!({
+                "question": QUESTION,
+                "options": [{ "label": ANSWER }, { "label": "sqlite" }]
+            }),
+        ),
+        text_response("done"),
+    ]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+    let mut rx = handle.subscribe();
+    handle
+        .send(AppCommand::Prompt("set up the database".into()))
+        .unwrap();
+
+    let mut request_id = None;
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::Agent(env) = &ev.kind {
+            if let AgentEvent::Tool(oven_agent::ToolEvent::QuestionAsked {
+                request_id: id,
+                question,
+            }) = &env.event
+            {
+                assert_eq!(question.question, QUESTION);
+                assert_eq!(question.options.len(), 2);
+                request_id = Some(*id);
+                break;
+            }
+            if let AgentEvent::Turn(TurnEvent::Completed { .. }) = &env.event {
+                panic!("turn completed without asking the user");
+            }
+        }
+    }
+    let request_id = request_id.expect("question asked");
+    assert!(
+        matches!(handle.state().phase, AppPhase::AwaitingAnswer { .. }),
+        "phase: {:?}",
+        handle.state().phase
+    );
+
+    handle
+        .send(AppCommand::Control(ControlCommand::RespondQuestion {
+            request_id,
+            response: oven_agent::AnswerResponse::Answered {
+                answer: ANSWER.into(),
+            },
+        }))
+        .unwrap();
+
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::Agent(env) = &ev.kind
+            && matches!(env.event, AgentEvent::Turn(TurnEvent::Completed { .. }))
+        {
+            break;
+        }
+    }
+    let answered = history(&handle).iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::ToolResult { content, .. } => content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains(ANSWER))),
+            _ => false,
+        })
+    });
+    assert!(answered, "the user's answer must reach the model");
+    handle.shutdown().await;
+}
+
 async fn spawn_loop_limit_app(tmp: &tempdir::TempDir) -> App {
     std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
     let app = AppBuilder::new(tmp.path());

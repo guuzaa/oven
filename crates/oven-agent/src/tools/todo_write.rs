@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView};
+use super::{Tool, ToolCaps, ToolContext, ToolPermission, ToolView};
 use crate::error::AgentError;
 use crate::todo::TodoList;
 
@@ -76,11 +75,7 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    async fn run(
-        &self,
-        args: &Value,
-        _cancel: Option<&CancellationToken>,
-    ) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _ctx: &ToolContext<'_>) -> Result<String, AgentError> {
         let next = TodoList::parse(args).map_err(AgentError::from)?;
         Ok(next.summary())
     }

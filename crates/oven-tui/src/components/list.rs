@@ -8,7 +8,7 @@ use ratatui::widgets::Paragraph;
 use super::theme;
 
 pub const MAX_LIST_ROWS: usize = 6;
-const SELECTED_MARK: &str = "▸ ";
+pub(crate) const SELECTED_MARK: &str = "▸ ";
 const IDLE_MARK: &str = "  ";
 const TITLE_ROWS: u16 = 2;
 

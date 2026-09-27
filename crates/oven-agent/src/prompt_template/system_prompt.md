@@ -19,6 +19,7 @@ Available skills are listed later in this prompt when any are installed. When a 
 - Run builds, tests, git, and other commands with `bash` in the workspace root.
 - Tool paths are relative to the workspace root.
 - Tool availability and authorization are enforced by the host. Only call tools that are available in the current request.
+- When the request is ambiguous, or a choice changes what you are about to build, ask with the `answer` tool instead of guessing. Offer the concrete answers you are choosing between.
 - When doing file search, prefer to use the `glob` tool in order to reduce context usage.
 - You have the capability to call multiple tools in a single response. When multiple independent pieces of information are requested, batch your tool calls together for optimal performance. When making multiple bash tool calls, you MUST send a single message with multiple tools calls to run the calls in parallel. For example, if you need to run "git status" and "git diff", send a single message with two tool calls to run the calls in parallel.
 

@@ -129,6 +129,7 @@ pub enum ControlCommand {
     SetMode { mode: AgentMode },
     RespondToolApproval { request_id: ApprovalRequestId, decision: ApprovalDecision },
     RespondLoopLimit { request_id: LoopLimitRequestId, decision: LoopLimitDecision },
+    RespondQuestion { request_id: QuestionRequestId, response: AnswerResponse },
     Rewind,
 }
 ```
@@ -152,11 +153,12 @@ A running turn holds `&mut Agent` exclusively. Incoming commands split on whethe
 | `Prompt("/model …")` | apply immediately via `RouterHandle` + `TurnContext` |
 | `Control::RespondToolApproval` | consumed by the turn's select loop; phase returns to `Running` |
 | `Control::RespondLoopLimit` | consumed by the turn's select loop; continues or fails the turn |
+| `Control::RespondQuestion` | consumed by the turn's select loop; resumes the tool waiting for the answer |
 | `Control::Rewind` | queue; emit `Notification` |
 | other `Prompt` (chat, other slash, bang-shell) | queue; recognized slash names get a `Notification` |
 | `Shutdown` | cancel the turn and exit |
 
-`TurnContext` carries `mode` and `model` behind a lock so those two can change without `&mut Agent`. The agent re-reads them at each step and at turn end. `TurnContext` also carries the approval and loop-limit reply channels, so the turn can consume those replies directly instead of going through `pending`. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::update_router`, so it waits.
+`TurnContext` carries `mode` and `model` behind a lock so those two can change without `&mut Agent`. The agent re-reads them at each step and at turn end. `TurnContext` also carries the approval, loop-limit and question reply channels, so the turn can consume those replies directly instead of going through `pending`. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::update_router`, so it waits.
 
 Queued commands drain after the turn ends, in arrival order. Keyboard mode toggle is `Control::SetMode` and applies live; `/plan` is Prompt slash and therefore waits until the agent is free.
 
@@ -194,6 +196,7 @@ TurnEvent     Started | Completed { usage, duration_ms }
 StreamEvent   TextDelta { text } | ThinkingDelta { text }
               ThinkingDone { duration_ms }
 ToolEvent     ApprovalRequested { request_id, call_id, name, view }
+              QuestionAsked { request_id, question }
               Started { call_id, name, view }
               OutputDelta { call_id, stream, text }
               Finished { call_id, result }
@@ -201,9 +204,13 @@ ToolEvent     ApprovalRequested { request_id, call_id, name, view }
 
 `ThinkingDone` closes the thinking window the agent timed: it fires the moment
 the reasoning phase ends, ahead of the answer text or the tool call that ended
-it, so the transcript never has to guess a duration. `LoopLimitReached` and
-`ApprovalRequested` park the turn until `Control::RespondLoopLimit` /
-`Control::RespondToolApproval` arrives.
+it, so the transcript never has to guess a duration. `LoopLimitReached`,
+`ApprovalRequested` and `QuestionAsked` park the turn until
+`Control::RespondLoopLimit` / `Control::RespondToolApproval` /
+`Control::RespondQuestion` arrives. `QuestionAsked` is the one agent event the
+runtime raises itself: the question originates inside the tool call that asked
+it, where no event sink is reachable, so the runtime republishes it from the
+question channel.
 
 `ToolResult` is `Success`, `Failed { error, output }`, `Rejected { reason }`, or
 `Cancelled` — not `ok: bool`.
@@ -254,9 +261,9 @@ agent.run(input, &TurnContext::new(turn_id, cancellation, mode, model, effort), 
     -> Result<TurnOutput, AgentError>
 ```
 
-`mode` and `model` are shared (`Arc<Mutex<_>>`) so the runtime can update them while the turn holds `&mut Agent`. The agent copies both onto itself at the start of every step. `TurnContext` also carries the approval and loop-limit reply channels, which is how those replies reach the running turn without needing `&mut Agent`.
+`mode` and `model` are shared (`Arc<Mutex<_>>`) so the runtime can update them while the turn holds `&mut Agent`. The agent copies both onto itself at the start of every step. `TurnContext` also carries the approval, loop-limit and question reply channels, which is how those replies reach the running turn without needing `&mut Agent`.
 
-The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`.
+The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`. A tool receives a `ToolContext` holding the turn's cancellation token and, when a frontend is attached, the channel it asks the user a question on.
 
 `EventSink::emit` is synchronous. Production uses `ChannelEventSink`; tests use `VecEventSink`.
 
@@ -296,6 +303,7 @@ pub enum AppPhase {
     Running { turn_id: TurnId },
     AwaitingToolApproval { turn_id: TurnId, request: PendingToolApproval },
     AwaitingLoopLimit { turn_id: TurnId, request_id: LoopLimitRequestId, max_iters: usize },
+    AwaitingAnswer { turn_id: TurnId, request: PendingQuestion },
     Cancelling { turn_id: TurnId },
     ShuttingDown,
 }
@@ -337,6 +345,7 @@ stateDiagram-v2
     Idle --> Running: Prompt (passthrough or bang-shell)
     Idle --> AwaitingToolApproval: approval prompt on a parked step
     Idle --> AwaitingLoopLimit: iteration cap reached
+    Idle --> AwaitingAnswer: the answer tool asked the user
     Idle --> Idle: slash / empty bang / Rewind / SetMode
     Idle --> ShuttingDown: Shutdown
 
@@ -353,6 +362,11 @@ stateDiagram-v2
     AwaitingLoopLimit --> Idle: TurnFailed / TurnCancelled
     AwaitingLoopLimit --> ShuttingDown: Shutdown
 
+    AwaitingAnswer --> Running: RespondQuestion
+    AwaitingAnswer --> Cancelling: Cancel
+    AwaitingAnswer --> Idle: TurnFailed / TurnCancelled
+    AwaitingAnswer --> ShuttingDown: Shutdown
+
     Cancelling --> Idle: TurnCancelled
     Cancelling --> ShuttingDown: Shutdown
 
@@ -365,7 +379,7 @@ A bang-shell `Prompt` enters `Running` like an agent turn (so Cancel and queuing
 
 While `Running`, `SetMode` and `/model` apply immediately and the phase stays `Running`. Other `Prompt`s and `Rewind` wait in `pending`. `Cancel` while idle is a no-op. `Cancel { turn_id }` only applies if it matches the active turn.
 
-A step that needs a tool approval or that hits the iteration cap parks the phase on `AwaitingToolApproval` / `AwaitingLoopLimit`; the matching `Control` reply returns it to `Running`, and a reject / exit reply ends the turn.
+A step that needs a tool approval, that hits the iteration cap, or whose tool asked the user a question parks the phase on `AwaitingToolApproval` / `AwaitingLoopLimit` / `AwaitingAnswer`; the matching `Control` reply returns it to `Running`, and a reject / exit reply ends the turn.
 
 ---
 
@@ -397,6 +411,7 @@ stateDiagram-v2
     Tool --> Tool: OutputDelta / ToolFinished / ToolStarted
     Tool --> AwaitApproval: ApprovalRequested
     Tool --> AwaitLoopLimit: LoopLimitReached
+    Tool --> AwaitAnswer: QuestionAsked
     Tool --> Streaming: follow-up text
     Tool --> Completed: final assistant message
     Tool --> Cancelled: cancel
@@ -405,13 +420,14 @@ stateDiagram-v2
     AwaitApproval --> Tool: RespondToolApproval
     AwaitLoopLimit --> Tool: RespondLoopLimit (continue)
     AwaitLoopLimit --> Failed: exit
+    AwaitAnswer --> Tool: RespondQuestion
 
     Completed --> [*]
     Cancelled --> [*]
     Failed --> [*]
 ```
 
-`ThinkingDone` is not a terminal state: it closes the reasoning window the agent timed, before the answer or the tool call that ended it. Approval and loop-limit parks are turn-scoped; the reply arrives as `Control` and the turn resumes.
+`ThinkingDone` is not a terminal state: it closes the reasoning window the agent timed, before the answer or the tool call that ended it. Approval, loop-limit and question parks are turn-scoped; the reply arrives as `Control` and the turn resumes.
 
 Typical successful sequence:
 
@@ -503,10 +519,10 @@ The TUI shows the typed `!` line as a user row and the last 100 output lines as 
 # Invariants
 
 1. `Running(turn_id)` means exactly one active request: an agent turn **or** a bang-shell command.
-2. Every `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running`, `AwaitingToolApproval`, `AwaitingLoopLimit`, or `Cancelling`. Agent envelopes are not emitted for bang-shell.
+2. Every `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running`, `AwaitingToolApproval`, `AwaitingLoopLimit`, `AwaitingAnswer`, or `Cancelling`. Agent envelopes are not emitted for bang-shell.
 3. Each agent turn emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`. Each bang-shell request emits exactly one `Shell::Started` and exactly one of `Finished | Failed`.
 4. `ToolFinished` is always preceded by `ToolStarted` for the same `ToolCallId`.
-5. While `Running` or `Cancelling`, only `Cancel`, `SetMode`, `/model`, the approval / loop-limit replies, and `Shutdown` are applied immediately. Everything else waits in `pending`.
+5. While `Running` or `Cancelling`, only `Cancel`, `SetMode`, `/model`, the approval / loop-limit / question replies, and `Shutdown` are applied immediately. Everything else waits in `pending`.
 
 Runtime is a single app actor. It is not the `oven-host` crate:
 

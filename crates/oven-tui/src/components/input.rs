@@ -95,10 +95,16 @@ impl InputView {
 
     pub fn clear(&mut self) {
         self.textarea = new_textarea();
-        self.slash_command.close();
-        self.file_mention.close();
+        self.close_popups();
         self.model_picker.close();
         self.setup.close();
+    }
+
+    /// Closes the completion popups, leaving the typed text alone: the composer
+    /// is answering a question, so nothing it holds may be completed into.
+    pub(crate) fn close_popups(&mut self) {
+        self.slash_command.close();
+        self.file_mention.close();
     }
 
     pub fn overlay(&self) -> Overlay {

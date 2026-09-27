@@ -11,6 +11,7 @@ use crate::approval::{
 use crate::identity::ToolCallId;
 use crate::identity::TurnId;
 use crate::mode::AgentMode;
+use crate::question::QuestionSender;
 use crate::tools::ToolView;
 
 type ModelSelection = (ModelId, Option<ReasoningEffort>);
@@ -29,6 +30,7 @@ pub struct TurnContext {
     model: Arc<Mutex<ModelSelection>>,
     approval_sender: Option<ApprovalSender>,
     loop_limit_sender: Option<LoopLimitSender>,
+    question_sender: Option<QuestionSender>,
 }
 
 impl TurnContext {
@@ -46,6 +48,7 @@ impl TurnContext {
             model: Arc::new(Mutex::new((model, reasoning_effort))),
             approval_sender: None,
             loop_limit_sender: None,
+            question_sender: None,
         }
     }
 
@@ -57,6 +60,16 @@ impl TurnContext {
     pub fn with_loop_limit_sender(mut self, loop_limit_sender: LoopLimitSender) -> Self {
         self.loop_limit_sender = Some(loop_limit_sender);
         self
+    }
+
+    pub fn with_question_sender(mut self, question_sender: QuestionSender) -> Self {
+        self.question_sender = Some(question_sender);
+        self
+    }
+
+    /// The channel interactive tools use to put a question to the user.
+    pub fn question_sender(&self) -> Option<&QuestionSender> {
+        self.question_sender.as_ref()
     }
 
     pub fn has_loop_limit_sender(&self) -> bool {

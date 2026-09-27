@@ -3,9 +3,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, labeled, require_str, resolve_within};
+use super::{Tool, ToolContext, ToolView, labeled, require_str, resolve_within};
 use crate::error::AgentError;
 
 pub struct FileReadTool {
@@ -48,11 +47,7 @@ impl Tool for FileReadTool {
             "required": ["path"]
         })
     }
-    async fn run(
-        &self,
-        args: &Value,
-        _cancel: Option<&CancellationToken>,
-    ) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _ctx: &ToolContext<'_>) -> Result<String, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;
         let path = resolve_within(&self.root, path_str)?;
         if !path.is_file() {
@@ -102,6 +97,7 @@ impl Tool for FileReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const CTX: ToolContext<'static> = ToolContext::new(None, None);
     use serde_json::json;
 
     fn tmp_dir() -> tempdir::TempDir {
@@ -113,7 +109,7 @@ mod tests {
         let tmp = tmp_dir();
         let read = FileReadTool::new(tmp.path());
         let err = read
-            .run(&json!({"path": "../etc/passwd"}), None)
+            .run(&json!({"path": "../etc/passwd"}), &CTX)
             .await
             .unwrap_err();
         assert!(err.message.contains("escapes root"));
@@ -126,7 +122,7 @@ mod tests {
         std::fs::write(&path, "l1\nl2\nl3\nl4\n").unwrap();
         let read = FileReadTool::new(tmp.path());
         let out = read
-            .run(&json!({"path": "r.txt", "offset": 2, "limit": 2}), None)
+            .run(&json!({"path": "r.txt", "offset": 2, "limit": 2}), &CTX)
             .await
             .unwrap();
         assert_eq!(out, "file: r.txt\nlines: 2-3\n\nL2→l2\nL3→l3\n");
@@ -139,7 +135,7 @@ mod tests {
         std::fs::write(&path, "l1\nl2\n").unwrap();
         let read = FileReadTool::new(tmp.path());
         let out = read
-            .run(&json!({"path": "r.txt", "offset": 99, "limit": 5}), None)
+            .run(&json!({"path": "r.txt", "offset": 99, "limit": 5}), &CTX)
             .await
             .unwrap();
         assert_eq!(out, "file: r.txt\nlines: empty\n");
@@ -151,7 +147,7 @@ mod tests {
         let path = tmp.path().join("r.txt");
         std::fs::write(&path, "one\ntwo").unwrap();
         let read = FileReadTool::new(tmp.path());
-        let out = read.run(&json!({"path": "r.txt"}), None).await.unwrap();
+        let out = read.run(&json!({"path": "r.txt"}), &CTX).await.unwrap();
         assert_eq!(out, "file: r.txt\nlines: 1-2\n\nL1→one\nL2→two");
     }
 
@@ -162,7 +158,7 @@ mod tests {
         std::fs::write(&path, "l1\nl2\nl3\nl4\n").unwrap();
         let read = FileReadTool::new(tmp.path());
         let out = read
-            .run(&json!({"path": "r.txt", "offset": 2}), None)
+            .run(&json!({"path": "r.txt", "offset": 2}), &CTX)
             .await
             .unwrap();
         assert_eq!(out, "file: r.txt\nlines: 2-4\n\nL2→l2\nL3→l3\nL4→l4\n");

@@ -144,6 +144,12 @@ impl EventBus {
         subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
     }
 
+    /// Emits an agent event the runtime raises itself, rather than one it
+    /// forwards from the agent's own event channel.
+    pub(crate) fn emit_agent(&mut self, agent_id: AgentId, turn_id: TurnId, event: AgentEvent) {
+        self.emit(AppEvent::agent_with(agent_id, turn_id, event).kind);
+    }
+
     pub(crate) fn emit_state(&mut self, change: StateChange) {
         self.state_rev += 1;
         self.emit(AppEventKind::StateChanged(StateEvent {

@@ -1,9 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oven_agent::{
-    Agent, InstructionDoc, Record, Skill, SkillReadTool, TodoWriteTool, Tool, load_instructions,
-};
+use oven_agent::{Agent, InstructionDoc, Record, Skill, SkillReadTool, Tool, load_instructions};
 #[cfg(test)]
 use oven_llm::Provider;
 use oven_llm::{Role, Router};
@@ -165,7 +163,6 @@ impl AppBuilder {
             .await
             .map_err(AppError::Mcp)?;
         tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn Tool>));
-        tools.push(Box::new(TodoWriteTool));
         let mut agent = Agent::new(router, tools).with_system(oven_agent::system_prompt(
             &self.root,
             &self.instructions,

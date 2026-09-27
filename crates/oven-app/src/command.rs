@@ -1,5 +1,6 @@
 use oven_agent::{
-    AgentMode, ApprovalDecision, ApprovalRequestId, LoopLimitDecision, LoopLimitRequestId, TurnId,
+    AgentMode, AnswerResponse, ApprovalDecision, ApprovalRequestId, LoopLimitDecision,
+    LoopLimitRequestId, QuestionRequestId, TurnId,
 };
 
 /// Commands sent from a frontend to the runtime task.
@@ -35,6 +36,10 @@ pub enum ControlCommand {
     RespondLoopLimit {
         request_id: LoopLimitRequestId,
         decision: LoopLimitDecision,
+    },
+    RespondQuestion {
+        request_id: QuestionRequestId,
+        response: AnswerResponse,
     },
     Rewind,
 }

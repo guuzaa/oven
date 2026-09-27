@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use oven_agent::{
     Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink,
-    LoopLimitPrompt, Record, RouterHandle, TodoList, ToolApproval, TurnContext, TurnId,
-    restore_todos,
+    LoopLimitPrompt, QuestionRequest, Record, RouterHandle, TodoList, ToolApproval, ToolEvent,
+    TurnContext, TurnId, restore_todos,
 };
 use oven_host::run_shell_command;
 use oven_llm::{
@@ -29,8 +29,8 @@ use crate::session::{
 use crate::shell;
 use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::state::{
-    AppPhase, AppState, HistoryChangeReason, PendingToolApproval, SessionState, StateChange,
-    context_tokens, context_tokens_of, context_window, context_window_of,
+    AppPhase, AppState, HistoryChangeReason, PendingQuestion, PendingToolApproval, SessionState,
+    StateChange, context_tokens, context_tokens_of, context_window, context_window_of,
 };
 
 const EMPTY_SHELL: &str = "empty shell command";
@@ -135,7 +135,8 @@ impl Runtime {
             AppCommand::Control(
                 ControlCommand::Cancel { .. }
                 | ControlCommand::RespondToolApproval { .. }
-                | ControlCommand::RespondLoopLimit { .. },
+                | ControlCommand::RespondLoopLimit { .. }
+                | ControlCommand::RespondQuestion { .. },
             ) => Control::Continue,
             AppCommand::Control(ControlCommand::Rewind) => {
                 self.rewind();
@@ -190,8 +191,10 @@ impl Runtime {
         let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
         let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ToolApproval>();
         let (loop_limit_tx, mut loop_limit_rx) = mpsc::unbounded_channel::<LoopLimitPrompt>();
+        let (question_tx, mut question_rx) = mpsc::unbounded_channel::<QuestionRequest>();
         let mut pending_approval = None;
         let mut pending_loop_limit = None;
+        let mut pending_question = None;
         let mut sink = ChannelEventSink::new(agent_tx, self.agent.id(), turn_id);
         let ctx = TurnContext::new(
             turn_id,
@@ -201,8 +204,10 @@ impl Runtime {
             self.agent.reasoning_effort(),
         )
         .with_approval_sender(approval_tx)
-        .with_loop_limit_sender(loop_limit_tx);
+        .with_loop_limit_sender(loop_limit_tx)
+        .with_question_sender(question_tx);
 
+        let agent_id = self.agent.id();
         let result = {
             let turn = self.agent.run(input, &ctx, &mut sink);
             tokio::pin!(turn);
@@ -243,6 +248,17 @@ impl Runtime {
                                     && let Some(prompt) = pending_loop_limit.take()
                                 {
                                     let _ = prompt.responder.send(decision);
+                                    self.state.phase = AppPhase::Running { turn_id };
+                                    let _ = self.state_tx.send(self.state.clone());
+                                }
+                            }
+                            Some(AppCommand::Control(ControlCommand::RespondQuestion { request_id, response })) => {
+                                if pending_question
+                                    .as_ref()
+                                    .is_some_and(|question: &QuestionRequest| question.request_id == request_id)
+                                    && let Some(question) = pending_question.take()
+                                {
+                                    let _ = question.responder.send(response);
                                     self.state.phase = AppPhase::Running { turn_id };
                                     let _ = self.state_tx.send(self.state.clone());
                                 }
@@ -301,6 +317,27 @@ impl Runtime {
                             };
                             let _ = self.state_tx.send(self.state.clone());
                             pending_loop_limit = Some(prompt);
+                        }
+                    }
+                    question = question_rx.recv() => {
+                        if let Some(question) = question {
+                            self.events.emit_agent(
+                                agent_id,
+                                turn_id,
+                                AgentEvent::Tool(ToolEvent::QuestionAsked {
+                                    request_id: question.request_id,
+                                    question: question.question.clone(),
+                                }),
+                            );
+                            self.state.phase = AppPhase::AwaitingAnswer {
+                                turn_id,
+                                request: PendingQuestion {
+                                    request_id: question.request_id,
+                                    question: question.question.clone(),
+                                },
+                            };
+                            let _ = self.state_tx.send(self.state.clone());
+                            pending_question = Some(question);
                         }
                     }
                     ev = agent_rx.recv() => {
@@ -890,7 +927,8 @@ fn deferred_notice(cmd: &AppCommand, slash: &SlashRegistry) -> Option<String> {
             ControlCommand::Cancel { .. }
             | ControlCommand::SetMode { .. }
             | ControlCommand::RespondToolApproval { .. }
-            | ControlCommand::RespondLoopLimit { .. },
+            | ControlCommand::RespondLoopLimit { .. }
+            | ControlCommand::RespondQuestion { .. },
         )
         | AppCommand::Shutdown => None,
     }
@@ -952,6 +990,7 @@ fn command_kind(cmd: &AppCommand) -> &'static str {
         AppCommand::Control(ControlCommand::SetMode { .. }) => "set_mode",
         AppCommand::Control(ControlCommand::RespondToolApproval { .. }) => "tool_approval",
         AppCommand::Control(ControlCommand::RespondLoopLimit { .. }) => "loop_limit",
+        AppCommand::Control(ControlCommand::RespondQuestion { .. }) => "question",
         AppCommand::Control(ControlCommand::Rewind) => "rewind",
         AppCommand::Shutdown => "shutdown",
     }

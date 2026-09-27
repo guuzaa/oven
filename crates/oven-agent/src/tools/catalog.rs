@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use super::{BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, Tool};
+use super::{
+    AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,
+    TodoWriteTool, Tool,
+};
 
 pub struct BuiltinTool {
     pub name: &'static str,
@@ -31,5 +34,13 @@ pub const BUILTIN_TOOLS: &[BuiltinTool] = &[
     BuiltinTool {
         name: GrepTool::NAME,
         make: |r| Box::new(GrepTool::new(r)),
+    },
+    BuiltinTool {
+        name: TodoWriteTool::NAME,
+        make: |_| Box::new(TodoWriteTool),
+    },
+    BuiltinTool {
+        name: AnswerTool::NAME,
+        make: |_| Box::new(AnswerTool),
     },
 ];

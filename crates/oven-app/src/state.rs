@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use oven_agent::{
-    Agent, AgentMode, ApprovalRequestId, LoopLimitRequestId, TodoList, ToolCallId, ToolView, TurnId,
+    Agent, AgentMode, ApprovalRequestId, LoopLimitRequestId, Question, QuestionRequestId, TodoList,
+    ToolCallId, ToolView, TurnId,
 };
 use oven_llm::{Message, ModelId, Provider, ReasoningEffort, Router, Usage};
 
@@ -94,6 +95,12 @@ pub struct PendingToolApproval {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingQuestion {
+    pub request_id: QuestionRequestId,
+    pub question: Question,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppPhase {
     Idle,
     Running {
@@ -108,6 +115,10 @@ pub enum AppPhase {
         request_id: LoopLimitRequestId,
         max_iters: usize,
     },
+    AwaitingAnswer {
+        turn_id: TurnId,
+        request: PendingQuestion,
+    },
     Cancelling {
         turn_id: TurnId,
     },
@@ -120,6 +131,7 @@ impl AppPhase {
             Self::Running { turn_id }
             | Self::AwaitingToolApproval { turn_id, .. }
             | Self::AwaitingLoopLimit { turn_id, .. }
+            | Self::AwaitingAnswer { turn_id, .. }
             | Self::Cancelling { turn_id } => Some(*turn_id),
             Self::Idle | Self::ShuttingDown => None,
         }
@@ -135,6 +147,7 @@ impl AppPhase {
             Self::Running { .. }
                 | Self::AwaitingToolApproval { .. }
                 | Self::AwaitingLoopLimit { .. }
+                | Self::AwaitingAnswer { .. }
                 | Self::Cancelling { .. }
         )
     }

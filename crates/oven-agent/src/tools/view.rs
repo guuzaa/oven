@@ -1,7 +1,8 @@
 use serde_json::Value;
 
 use super::{
-    BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, TodoWriteTool,
+    AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,
+    TodoWriteTool,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,7 @@ pub fn present_tool(name: &str, input: &Value) -> ToolView {
         GlobTool::NAME => GlobTool::view_input(input),
         GrepTool::NAME => GrepTool::view_input(input),
         TodoWriteTool::NAME => TodoWriteTool::view_input(input),
+        AnswerTool::NAME => AnswerTool::view_input(input),
         _ => ToolView::named(name),
     }
 }
@@ -148,5 +150,13 @@ mod tests {
         );
         assert!(present_tool(TodoWriteTool::NAME, &json!({})).summary == TodoWriteTool::NAME);
         assert!(!present_tool(TodoWriteTool::NAME, &json!({})).collapse);
+        assert_eq!(
+            present_tool(AnswerTool::NAME, &json!({ "question": "which database?" })).summary,
+            "Ask which database?"
+        );
+        assert_eq!(
+            present_tool(AnswerTool::NAME, &json!({})).summary,
+            AnswerTool::NAME
+        );
     }
 }

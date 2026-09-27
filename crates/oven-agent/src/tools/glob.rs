@@ -3,9 +3,8 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
+use super::{Tool, ToolContext, ToolView, parse_limit, require_str, resolve_within};
 use crate::error::AgentError;
 use crate::matching::compile_glob;
 use oven_host::walk_dir;
@@ -67,11 +66,7 @@ impl Tool for GlobTool {
             "required": ["pattern"]
         })
     }
-    async fn run(
-        &self,
-        args: &Value,
-        cancel: Option<&CancellationToken>,
-    ) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;
         let matcher = compile_glob(pattern)
             .map_err(|e| AgentError::from(format!("glob: invalid pattern {pattern:?}: {e}")))?;
@@ -96,7 +91,7 @@ impl Tool for GlobTool {
             if hits.len() >= limit {
                 break;
             }
-            if let Some(c) = cancel
+            if let Some(c) = ctx.cancel()
                 && c.is_cancelled()
             {
                 return Err(AgentError::cancelled());
@@ -125,6 +120,7 @@ impl Tool for GlobTool {
 
 #[cfg(test)]
 mod tests {
+    const CTX: ToolContext<'static> = ToolContext::new(None, None);
     use super::*;
     use serde_json::json;
 
@@ -148,7 +144,7 @@ mod tests {
         write(root, "README.md", "x");
         let glob = GlobTool::new(root);
         let out = glob
-            .run(&json!({"pattern": "**/*.rs"}), None)
+            .run(&json!({"pattern": "**/*.rs"}), &CTX)
             .await
             .unwrap();
         assert!(out.contains("src/lib.rs"), "{out}");
@@ -166,7 +162,7 @@ mod tests {
         write(root, ".github/keep.txt", "x");
         let glob = GlobTool::new(root);
         let out = glob
-            .run(&json!({"pattern": "**/*.txt"}), None)
+            .run(&json!({"pattern": "**/*.txt"}), &CTX)
             .await
             .unwrap();
         assert!(out.contains("keep.txt"), "{out}");
@@ -185,7 +181,7 @@ mod tests {
         write(root, ".hidden/x.txt", "x");
         let glob = GlobTool::new(root);
         let out = glob
-            .run(&json!({"pattern": "**/*.txt"}), None)
+            .run(&json!({"pattern": "**/*.txt"}), &CTX)
             .await
             .unwrap();
         assert!(out.contains("keep.txt"), "{out}");
@@ -201,7 +197,7 @@ mod tests {
         }
         let glob = GlobTool::new(root);
         let out = glob
-            .run(&json!({"pattern": "**/*.txt", "limit": 2}), None)
+            .run(&json!({"pattern": "**/*.txt", "limit": 2}), &CTX)
             .await
             .unwrap();
         assert!(out.contains("truncated at 2"), "{out}");
@@ -212,7 +208,7 @@ mod tests {
     async fn invalid_pattern_errors() {
         let tmp = tmp_dir();
         let glob = GlobTool::new(tmp.path());
-        let err = glob.run(&json!({"pattern": "["}), None).await.unwrap_err();
+        let err = glob.run(&json!({"pattern": "["}), &CTX).await.unwrap_err();
         assert!(err.message.contains("invalid pattern"), "{}", err.message);
     }
 
@@ -221,7 +217,7 @@ mod tests {
         let tmp = tmp_dir();
         let glob = GlobTool::new(tmp.path());
         let err = glob
-            .run(&json!({"pattern": "*.rs", "path": "../etc"}), None)
+            .run(&json!({"pattern": "*.rs", "path": "../etc"}), &CTX)
             .await
             .unwrap_err();
         assert!(err.message.contains("escapes root"), "{}", err.message);

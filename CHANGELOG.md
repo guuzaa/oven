@@ -5,12 +5,20 @@
 ### Added
 - `/model` and `/setup` completion lists filter by the characters typed: the query is rendered in the composer (`/model deep`), `Tab` completes the highlighted entry into it, and the provider and protocol stages of the setup wizard now narrow the same way
 - `oven_app::complete` owns the prefix rule shared by the slash popup, the model picker and the setup wizard
+- `answer` tool: the model can ask the user a question mid-turn and blocks until they reply, and the reply becomes the tool result. The question renders as an overlay prompt listing the proposed answers plus an `Other…` row that hands the composer the keystrokes, so any answer can be typed; `Esc` skips the question and `Ctrl-C` cancels the turn
+- Tools receive a `ToolContext` instead of a bare cancellation token, carrying the turn's cancellation plus the channel an interactive tool asks its question on
+- A pending question is mirrored as `ToolEvent::QuestionAsked` and `AppPhase::AwaitingAnswer`, resumed by `ControlCommand::RespondQuestion`
 
 ### Changed
 - The model picker no longer prints its filter inside the popup, since the composer line shows it
+- The question prompt grows with the question's wrapped text instead of clipping it to a fixed block
+- The `answer` tool clamps its question, option labels and descriptions to their display limits, and clamps the answer before it enters the conversation
+- `docs/architectures.md`, `docs/oven-app.md` and `docs/oven-tui.md` cover the question channel, the new phase and the prompt
 
 ### Fixed
 - Restore the per-turn `Worked for Xs` transcript separator after answers, tool follow-ups, cancellations, failures, compaction, and app errors, including the turn duration when resuming a session from its persisted timestamps
+- A verbose question no longer fails the `answer` call, which used to leave the user with a failed tool row and no prompt at all
+- Composer slash and mention completions stay shut while a question waits for a typed answer, so `Tab` can no longer complete command text into the answer
 
 ## [0.0.8] - 2026-09-22
 

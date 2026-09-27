@@ -19,7 +19,7 @@ use crate::mode::{AgentMode, ToolAccess};
 use crate::prompt_template;
 use crate::sink::EventSink;
 use crate::todo::TodoList;
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolContext};
 use crate::turn::{TurnContext, TurnOutput};
 
 const DEFAULT_MAX_ITERS: usize = 200;
@@ -321,7 +321,8 @@ impl Agent {
             .iter()
             .find(|t| t.name() == name)
             .ok_or_else(|| AgentError::from(format!("unknown tool: {name}")))?;
-        tool.run(args, Some(&ctx.cancellation)).await
+        let tool_ctx = ToolContext::new(Some(&ctx.cancellation), ctx.question_sender());
+        tool.run(args, &tool_ctx).await
     }
 
     async fn complete_response(
@@ -770,8 +771,11 @@ mod tests {
     use super::*;
     use crate::TurnId;
     use crate::identity::ToolCallId;
+    use crate::question::AnswerResponse;
     use crate::sink::{NullSink, VecEventSink};
-    use crate::tools::{BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool};
+    use crate::tools::{
+        AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool,
+    };
     use crate::turn::TurnContext;
     use async_trait::async_trait;
     use futures::stream::{BoxStream, StreamExt, iter};
@@ -1193,6 +1197,52 @@ mod tests {
 
         assert_eq!(turn.await.unwrap().text(), "done");
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), APPROVED_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn the_answer_tool_blocks_the_turn_until_the_user_replies() {
+        const QUESTION: &str = "which database?";
+        const ANSWER: &str = "postgres";
+        let mock = MockProvider::new(vec![
+            tool_response(
+                "call_1",
+                "answer",
+                json!({
+                    "question": QUESTION,
+                    "options": [{ "label": ANSWER }, { "label": "sqlite" }]
+                }),
+            ),
+            text_response("done"),
+        ]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), vec![Box::new(AnswerTool)]);
+        let (question_tx, mut question_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = turn_ctx().with_question_sender(question_tx);
+        let mut sink = NullSink;
+        let reply = {
+            let turn = agent.run("pick one", &ctx, &mut sink);
+            tokio::pin!(turn);
+
+            let request = tokio::select! {
+                request = question_rx.recv() => request.unwrap(),
+                _ = &mut turn => panic!("turn completed before asking the user"),
+            };
+            assert_eq!(request.question.question, QUESTION);
+            assert_eq!(request.question.options.len(), 2);
+            request
+                .responder
+                .send(AnswerResponse::Answered {
+                    answer: ANSWER.into(),
+                })
+                .unwrap();
+
+            turn.await.unwrap().text()
+        };
+
+        assert_eq!(reply, "done");
+        assert!(
+            agent.history().any(|message| content_has(message, ANSWER)),
+            "the answer must reach the model"
+        );
     }
 
     #[tokio::test]

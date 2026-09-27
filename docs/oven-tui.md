@@ -60,7 +60,9 @@ delta. A disconnected channel settles the live transcript response and clears
 
 - `Ui`'s own `state.busy` / `state.mode` / `rewinding` / `quit`
 - transcript, status, input, and todos widgets via `on_event`
-- overlay prompts (`OverlayPrompt`) for tool approval and loop limit
+- overlay prompts (`OverlayPrompt`) for tool approval, loop limit, and a
+  question from the `answer` tool that is answered either by picking an offered
+  option or by typing into the composer
 - `pending`, the messages queued while the backend is busy
 
 ### Queueing
@@ -157,6 +159,7 @@ line kind, border state, and status segment.
 | Module | Role |
 | --- | --- |
 | `input.rs` | multi-line composer; dispatches to the four overlays; dynamic height; border colour encodes mode |
+| `question_prompt.rs` | the `answer` tool's question: options plus an `Other…` row that hands the composer the keystrokes |
 | `status.rs` | bottom status row plus the transient reply toast |
 | `transcript/` | scrolling conversation, streaming, selection, tool grouping |
 

@@ -3,6 +3,7 @@ use oven_llm::Usage;
 use crate::approval::{ApprovalRequestId, LoopLimitRequestId};
 use crate::error::AgentError;
 use crate::identity::{AgentId, ToolCallId, TurnId};
+use crate::question::{Question, QuestionRequestId};
 use crate::todo::TodoList;
 use crate::tools::ToolView;
 
@@ -73,6 +74,14 @@ pub enum ToolEvent {
         call_id: ToolCallId,
         name: String,
         view: ToolView,
+    },
+    /// A tool is waiting for the user to answer `question`. A question
+    /// originates inside the tool call that asked it, so this event is
+    /// emitted by the frontend that owns the answer channel rather than by
+    /// the agent loop.
+    QuestionAsked {
+        request_id: QuestionRequestId,
+        question: Question,
     },
     OutputDelta {
         call_id: ToolCallId,

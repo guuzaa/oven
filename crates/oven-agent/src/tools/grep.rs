@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
+use super::{Tool, ToolContext, ToolView, parse_limit, require_str, resolve_within};
 use crate::error::AgentError;
 use crate::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
 use oven_host::walk_dir;
@@ -79,11 +78,7 @@ impl Tool for GrepTool {
             "required": ["pattern"]
         })
     }
-    async fn run(
-        &self,
-        args: &Value,
-        cancel: Option<&CancellationToken>,
-    ) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;
         let re = compile_regex(
             pattern,
@@ -129,7 +124,7 @@ impl Tool for GrepTool {
                 if out.len() >= limit {
                     break;
                 }
-                if let Some(c) = cancel
+                if let Some(c) = ctx.cancel()
                     && c.is_cancelled()
                 {
                     return Err(AgentError::cancelled());
@@ -196,6 +191,7 @@ impl GrepTool {
 
 #[cfg(test)]
 mod tests {
+    const CTX: ToolContext<'static> = ToolContext::new(None, None);
     use super::*;
     use serde_json::json;
 
@@ -215,7 +211,7 @@ mod tests {
         let root = tmp.path();
         write(root, "a.rs", "fn foo() {}\nfn bar() {}\n");
         let grep = GrepTool::new(root);
-        let out = grep.run(&json!({"pattern": "foo"}), None).await.unwrap();
+        let out = grep.run(&json!({"pattern": "foo"}), &CTX).await.unwrap();
         assert_eq!(out, "a.rs:1:fn foo() {}");
     }
 
@@ -226,11 +222,11 @@ mod tests {
         write(root, "a.txt", "Hello\nworld\n");
         let grep = GrepTool::new(root);
         let out = grep
-            .run(&json!({"pattern": "hello", "case_insensitive": true}), None)
+            .run(&json!({"pattern": "hello", "case_insensitive": true}), &CTX)
             .await
             .unwrap();
         assert_eq!(out, "a.txt:1:Hello");
-        let err = grep.run(&json!({"pattern": "hello"}), None).await.unwrap();
+        let err = grep.run(&json!({"pattern": "hello"}), &CTX).await.unwrap();
         assert_eq!(err, "(no matches)");
     }
 
@@ -242,7 +238,7 @@ mod tests {
         write(root, "a.txt", "needle\n");
         let grep = GrepTool::new(root);
         let out = grep
-            .run(&json!({"pattern": "needle", "include": "*.rs"}), None)
+            .run(&json!({"pattern": "needle", "include": "*.rs"}), &CTX)
             .await
             .unwrap();
         assert_eq!(out, "a.rs:1:needle");
@@ -258,7 +254,7 @@ mod tests {
         write(root, "real.txt", "needle\n");
         write(root, ".github/ci.yml", "needle\n");
         let grep = GrepTool::new(root);
-        let out = grep.run(&json!({"pattern": "needle"}), None).await.unwrap();
+        let out = grep.run(&json!({"pattern": "needle"}), &CTX).await.unwrap();
         let lines: Vec<_> = out.lines().collect();
         assert!(lines.contains(&"real.txt:1:needle"), "{out}");
         #[cfg(windows)]
@@ -276,7 +272,7 @@ mod tests {
         write(root, "real.txt", "needle\n");
         write(root, ".hidden/x.txt", "needle\n");
         let grep = GrepTool::new(root);
-        let out = grep.run(&json!({"pattern": "needle"}), None).await.unwrap();
+        let out = grep.run(&json!({"pattern": "needle"}), &CTX).await.unwrap();
         assert_eq!(out, "real.txt:1:needle");
     }
 
@@ -284,7 +280,7 @@ mod tests {
     async fn invalid_regex_errors() {
         let tmp = tmp_dir();
         let grep = GrepTool::new(tmp.path());
-        let err = grep.run(&json!({"pattern": "("}), None).await.unwrap_err();
+        let err = grep.run(&json!({"pattern": "("}), &CTX).await.unwrap_err();
         assert!(err.message.contains("invalid regex"), "{}", err.message);
     }
 
@@ -293,7 +289,7 @@ mod tests {
         let tmp = tmp_dir();
         let grep = GrepTool::new(tmp.path());
         let err = grep
-            .run(&json!({"pattern": "x", "path": "../etc"}), None)
+            .run(&json!({"pattern": "x", "path": "../etc"}), &CTX)
             .await
             .unwrap_err();
         assert!(err.message.contains("escapes root"), "{}", err.message);

@@ -929,6 +929,7 @@ impl Component for Transcript {
                     self.note_tool_end(&call_id.0.to_string(), ok, output);
                 }
                 AgentEvent::Tool(ToolEvent::OutputDelta { .. })
+                | AgentEvent::Tool(ToolEvent::QuestionAsked { .. })
                 | AgentEvent::Turn(TurnEvent::Started)
                 | AgentEvent::Usage { .. }
                 | AgentEvent::TodosChanged { .. } => {}

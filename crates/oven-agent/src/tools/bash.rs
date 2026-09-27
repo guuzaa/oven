@@ -4,9 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str};
+use super::{Tool, ToolCaps, ToolContext, ToolPermission, ToolView, labeled, require_str};
 use crate::error::AgentError;
 use oven_host::{CommandError, run_shell_command};
 
@@ -61,13 +60,9 @@ impl Tool for BashTool {
             "required": ["command"]
         })
     }
-    async fn run(
-        &self,
-        args: &Value,
-        cancel: Option<&CancellationToken>,
-    ) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError> {
         let command = require_str(args, "command", Self::NAME)?;
-        let output = run_shell_command(command, &self.root, self.timeout, cancel)
+        let output = run_shell_command(command, &self.root, self.timeout, ctx.cancel())
             .await
             .map_err(|error| match error {
                 CommandError::Cancelled { .. } => AgentError::cancelled(),
@@ -105,6 +100,9 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
+    use tokio_util::sync::CancellationToken;
+
+    const CTX: ToolContext<'static> = ToolContext::new(None, None);
 
     fn tmp_dir() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-test").unwrap()
@@ -137,7 +135,7 @@ mod tests {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path());
         let out = bash
-            .run(&json!({"command": "echo hi"}), None)
+            .run(&json!({"command": "echo hi"}), &CTX)
             .await
             .unwrap();
         assert!(out.contains("hi"), "{out}");
@@ -147,7 +145,7 @@ mod tests {
     async fn bash_reports_nonzero_exit() {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path());
-        let out = bash.run(&json!({"command": "exit 7"}), None).await.unwrap();
+        let out = bash.run(&json!({"command": "exit 7"}), &CTX).await.unwrap();
         assert!(out.contains("[exit code: 7]"), "{out}");
     }
 
@@ -156,7 +154,7 @@ mod tests {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path()).with_timeout(Duration::from_millis(100));
         let err = bash
-            .run(&json!({"command": sleep_command(5)}), None)
+            .run(&json!({"command": sleep_command(5)}), &CTX)
             .await
             .unwrap_err();
         assert!(err.message.contains("timed out"), "{}", err.message);
@@ -169,7 +167,7 @@ mod tests {
         std::fs::write(root.join("marker.txt"), "found").unwrap();
         let bash = BashTool::new(&root);
         let out = bash
-            .run(&json!({"command": read_marker_command()}), None)
+            .run(&json!({"command": read_marker_command()}), &CTX)
             .await
             .unwrap();
         assert_eq!(out.trim(), "found");
@@ -187,7 +185,7 @@ mod tests {
             let result = bash
                 .run(
                     &json!({"command": sleep_command(60)}),
-                    Some(&cancel_for_task),
+                    &ToolContext::new(Some(&cancel_for_task), None),
                 )
                 .await;
             let _ = tx.send(result);

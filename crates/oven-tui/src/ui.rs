@@ -6,16 +6,19 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ApprovalDecision,
+    AgentEvent, AnswerResponse, App, AppCommand, AppEvent, AppEventKind, ApprovalDecision,
     ApprovalRequestId, CompactionEvent, ControlCommand, LoopLimitDecision, LoopLimitRequestId,
-    ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent, invokes_command,
+    QuestionRequestId, ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent, invokes_command,
 };
+use ratatui::Frame;
+use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::components::choice_popup::{ChoicePopup, ChoicePopupAction};
 use crate::components::component::{Action, Component, KeyResult, State};
 use crate::components::input::{InputView, Overlay, display_user_input};
 use crate::components::paste_burst::{self, Burst};
+use crate::components::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::components::queue;
 use crate::components::shell;
 use crate::components::status::{StatusBar, StatusHint};
@@ -33,20 +36,46 @@ enum OverlayPrompt {
         request_id: LoopLimitRequestId,
         popup: ChoicePopup,
     },
+    Question {
+        request_id: QuestionRequestId,
+        popup: QuestionPrompt,
+    },
 }
 
 impl OverlayPrompt {
-    fn popup(&self) -> &ChoicePopup {
+    /// Rows the prompt wants; the question needs the width to wrap into them.
+    fn height(&self, width: u16) -> u16 {
         match self {
-            Self::Approval { popup, .. } | Self::LoopLimit { popup, .. } => popup,
+            Self::Approval { popup, .. } | Self::LoopLimit { popup, .. } => popup.height(),
+            Self::Question { popup, .. } => popup.height(width),
         }
     }
 
-    fn popup_mut(&mut self) -> &mut ChoicePopup {
+    fn draw(&self, f: &mut Frame<'_>, area: Rect) {
         match self {
-            Self::Approval { popup, .. } | Self::LoopLimit { popup, .. } => popup,
+            Self::Approval { popup, .. } | Self::LoopLimit { popup, .. } => popup.draw(f, area),
+            Self::Question { popup, .. } => popup.draw(f, area),
         }
     }
+
+    /// Whether the open question expects its answer typed into the input box.
+    fn awaits_typed_answer(&self) -> bool {
+        matches!(self, Self::Question { popup, .. } if popup.awaits_typed_answer())
+    }
+}
+
+/// What an open overlay prompt does with a key.
+enum PromptFlow {
+    /// No prompt is open.
+    Free,
+    /// The prompt kept the key and stays open.
+    Kept,
+    /// The prompt is finished with: it approved, answered, declined or
+    /// cancelled, so it closes.
+    Closed,
+    /// The open question expects its answer typed into the input box, which
+    /// therefore owns the key.
+    Typing,
 }
 
 pub struct Ui {
@@ -175,13 +204,19 @@ impl Ui {
                             return Ok(true);
                         }
                     }
-                    Burst::Paste(text) => self.input.paste(&text),
+                    Burst::Paste(text) => {
+                        self.input.paste(&text);
+                        self.suppress_completions();
+                    }
                 }
                 if let Some(ev) = trailing {
                     return self.handle_term_event(ev);
                 }
             }
-            Event::Paste(text) => self.input.paste(&text),
+            Event::Paste(text) => {
+                self.input.paste(&text);
+                self.suppress_completions();
+            }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => {}
         }
@@ -241,6 +276,18 @@ impl Ui {
                         popup: ChoicePopup::approval(name, &view.summary),
                     });
                 }
+                AgentEvent::Tool(ToolEvent::QuestionAsked {
+                    request_id,
+                    question,
+                }) => {
+                    self.prompt = Some(OverlayPrompt::Question {
+                        request_id: *request_id,
+                        popup: QuestionPrompt::new(
+                            question.question.clone(),
+                            question.options.clone(),
+                        ),
+                    });
+                }
                 AgentEvent::Tool(ToolEvent::Finished { .. }) => self.prompt = None,
                 _ => {}
             },
@@ -259,13 +306,7 @@ impl Ui {
                 _ => {}
             },
             AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {
-                if !matches!(
-                    self.app.state().phase,
-                    AppPhase::Running { .. }
-                        | AppPhase::AwaitingToolApproval { .. }
-                        | AppPhase::AwaitingLoopLimit { .. }
-                        | AppPhase::Cancelling { .. }
-                ) {
+                if !self.app.state().phase.is_active() {
                     self.state.busy = false;
                 }
             }
@@ -309,46 +350,124 @@ impl Ui {
         }
     }
 
+    fn control(&self, command: ControlCommand) {
+        let _ = self.app.send(AppCommand::Control(command));
+    }
+
     fn send_cancel(&self) {
         if let Some(turn_id) = self.app.state().phase.turn_id() {
-            let _ = self
-                .app
-                .send(AppCommand::Control(ControlCommand::Cancel { turn_id }));
+            self.control(ControlCommand::Cancel { turn_id });
         }
     }
 
-    fn submit_prompt(&mut self, idx: usize) {
-        let Some(prompt) = self.prompt.take() else {
-            return;
+    /// Gives the open overlay prompt first refusal on `key`.
+    ///
+    /// The prompt is taken out of `self` so the decision it produces can be
+    /// sent with `&mut self`, then put back unless it is finished with.
+    fn handle_prompt_key(&mut self, key: KeyEvent) -> PromptFlow {
+        let Some(mut prompt) = self.prompt.take() else {
+            return PromptFlow::Free;
         };
-        match prompt {
-            OverlayPrompt::Approval { request_id, .. } => {
-                let decision = if idx == 0 {
-                    ApprovalDecision::Approved
-                } else {
-                    ApprovalDecision::Rejected
-                };
-                let _ = self
-                    .app
-                    .send(AppCommand::Control(ControlCommand::RespondToolApproval {
-                        request_id,
+        let flow = match &mut prompt {
+            OverlayPrompt::Approval { request_id, popup } => match popup.handle_key(key) {
+                ChoicePopupAction::Handled => PromptFlow::Kept,
+                ChoicePopupAction::Confirm(row) => {
+                    let decision = if row == 0 {
+                        ApprovalDecision::Approved
+                    } else {
+                        ApprovalDecision::Rejected
+                    };
+                    self.control(ControlCommand::RespondToolApproval {
+                        request_id: *request_id,
                         decision,
-                    }));
-            }
-            OverlayPrompt::LoopLimit { request_id, .. } => {
-                let decision = if idx == 0 {
-                    LoopLimitDecision::Continue
-                } else {
-                    LoopLimitDecision::Exit
-                };
-                let _ = self
-                    .app
-                    .send(AppCommand::Control(ControlCommand::RespondLoopLimit {
-                        request_id,
+                    });
+                    PromptFlow::Closed
+                }
+                ChoicePopupAction::Cancel => {
+                    self.send_cancel();
+                    PromptFlow::Closed
+                }
+            },
+            OverlayPrompt::LoopLimit { request_id, popup } => match popup.handle_key(key) {
+                ChoicePopupAction::Handled => PromptFlow::Kept,
+                ChoicePopupAction::Confirm(row) => {
+                    let decision = if row == 0 {
+                        LoopLimitDecision::Continue
+                    } else {
+                        LoopLimitDecision::Exit
+                    };
+                    self.control(ControlCommand::RespondLoopLimit {
+                        request_id: *request_id,
                         decision,
-                    }));
-            }
+                    });
+                    PromptFlow::Closed
+                }
+                ChoicePopupAction::Cancel => {
+                    self.send_cancel();
+                    PromptFlow::Closed
+                }
+            },
+            OverlayPrompt::Question { request_id, popup } => match popup.handle_key(key) {
+                QuestionPromptAction::Handled => PromptFlow::Kept,
+                QuestionPromptAction::Typing => PromptFlow::Typing,
+                QuestionPromptAction::Answered(answer) => {
+                    self.respond_question(*request_id, AnswerResponse::Answered { answer });
+                    PromptFlow::Closed
+                }
+                QuestionPromptAction::Declined => {
+                    self.respond_question(*request_id, AnswerResponse::Declined);
+                    PromptFlow::Closed
+                }
+                QuestionPromptAction::Cancelled => {
+                    self.send_cancel();
+                    PromptFlow::Closed
+                }
+            },
+        };
+        if matches!(flow, PromptFlow::Kept | PromptFlow::Typing) {
+            self.prompt = Some(prompt);
         }
+        flow
+    }
+
+    /// Keeps the composer's completion popups shut while an answer is being
+    /// typed: they draw under the question prompt, and Tab would otherwise
+    /// complete command text straight into the answer.
+    fn suppress_completions(&mut self) {
+        if self
+            .prompt
+            .as_ref()
+            .is_some_and(OverlayPrompt::awaits_typed_answer)
+        {
+            self.input.close_popups();
+        }
+    }
+
+    fn respond_question(&self, request_id: QuestionRequestId, response: AnswerResponse) {
+        self.control(ControlCommand::RespondQuestion {
+            request_id,
+            response,
+        });
+    }
+
+    /// Routes submitted text to the open question when it is waiting for a
+    /// typed answer, returning whether the text was consumed as that answer.
+    fn answer_question_with(&mut self, text: &str) -> bool {
+        let Some(OverlayPrompt::Question { request_id, popup }) = self.prompt.as_ref() else {
+            return false;
+        };
+        if !popup.awaits_typed_answer() {
+            return false;
+        }
+        let request_id = *request_id;
+        self.prompt = None;
+        self.respond_question(
+            request_id,
+            AnswerResponse::Answered {
+                answer: text.to_string(),
+            },
+        );
+        true
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
@@ -364,59 +483,55 @@ impl Ui {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        if let Some(prompt) = self.prompt.as_mut() {
-            match prompt.popup_mut().handle_key(key) {
-                ChoicePopupAction::Handled => {}
-                ChoicePopupAction::Confirm(idx) => self.submit_prompt(idx),
-                ChoicePopupAction::Cancel => {
-                    self.prompt = None;
-                    self.send_cancel();
+        let result = match self.handle_prompt_key(key) {
+            PromptFlow::Kept | PromptFlow::Closed => return false,
+            PromptFlow::Typing => {
+                let result = self.input.handle_key(key, &self.state);
+                self.suppress_completions();
+                result
+            }
+            PromptFlow::Free => match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyResult::Action(Action::Quit)
                 }
-            }
-            return false;
-        }
-
-        let result = match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                KeyResult::Action(Action::Quit)
-            }
-            _ if is_mode_toggle(key) => {
-                self.state.mode = self.state.mode.toggle();
-                let _ = self.app.send(AppCommand::Control(ControlCommand::SetMode {
-                    mode: self.state.mode,
-                }));
-                KeyResult::Handled
-            }
-            KeyCode::Esc if self.input.overlay() == Overlay::None => match EscAction::new(
-                self.pending.pop(),
-                self.state.busy,
-                self.rewinding,
-                self.transcript.rewind_text(),
-            ) {
-                EscAction::PopQueue(text) => {
-                    self.input.set_text(&text);
+                _ if is_mode_toggle(key) => {
+                    self.state.mode = self.state.mode.toggle();
+                    self.control(ControlCommand::SetMode {
+                        mode: self.state.mode,
+                    });
                     KeyResult::Handled
                 }
-                EscAction::Cancel => KeyResult::Action(Action::Cancel),
-                EscAction::Rewind(text) => {
-                    self.input.set_text(&text);
-                    self.rewinding = true;
-                    if self
-                        .app
-                        .send(AppCommand::Control(ControlCommand::Rewind))
-                        .is_err()
-                    {
-                        self.rewinding = false;
+                KeyCode::Esc if self.input.overlay() == Overlay::None => match EscAction::new(
+                    self.pending.pop(),
+                    self.state.busy,
+                    self.rewinding,
+                    self.transcript.rewind_text(),
+                ) {
+                    EscAction::PopQueue(text) => {
+                        self.input.set_text(&text);
+                        KeyResult::Handled
                     }
-                    KeyResult::Handled
-                }
-                EscAction::Ignore => KeyResult::Handled,
-            },
-            // Plain Enter during rewind would submit before history is truncated.
-            KeyCode::Enter if self.rewinding && key.modifiers.is_empty() => KeyResult::Handled,
-            _ => match self.transcript.handle_key(key, &self.state) {
-                KeyResult::Ignored => self.input.handle_key(key, &self.state),
-                other => other,
+                    EscAction::Cancel => KeyResult::Action(Action::Cancel),
+                    EscAction::Rewind(text) => {
+                        self.input.set_text(&text);
+                        self.rewinding = true;
+                        if self
+                            .app
+                            .send(AppCommand::Control(ControlCommand::Rewind))
+                            .is_err()
+                        {
+                            self.rewinding = false;
+                        }
+                        KeyResult::Handled
+                    }
+                    EscAction::Ignore => KeyResult::Handled,
+                },
+                // Plain Enter during rewind would submit before history is truncated.
+                KeyCode::Enter if self.rewinding && key.modifiers.is_empty() => KeyResult::Handled,
+                _ => match self.transcript.handle_key(key, &self.state) {
+                    KeyResult::Ignored => self.input.handle_key(key, &self.state),
+                    other => other,
+                },
             },
         };
 
@@ -433,10 +548,15 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::Queue(text)) => {
-                self.pending.push(text);
+                if !self.answer_question_with(&text) {
+                    self.pending.push(text);
+                }
                 false
             }
             KeyResult::Action(Action::Submit(text)) => {
+                if self.answer_question_with(&text) {
+                    return false;
+                }
                 self.push_submitted(&text);
                 self.status.clear_reply();
                 self.input.clear();
@@ -447,7 +567,9 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
-                let _ = self.app.send(AppCommand::Prompt(text));
+                if !self.answer_question_with(&text) {
+                    let _ = self.app.send(AppCommand::Prompt(text));
+                }
                 false
             }
             KeyResult::Action(Action::Notify(text)) => {
@@ -457,10 +579,10 @@ impl Ui {
         }
     }
 
-    fn draw(&mut self, f: &mut ratatui::Frame<'_>) {
+    fn draw(&mut self, f: &mut Frame<'_>) {
         let area = f.area();
         let overlay_height = match self.prompt.as_ref() {
-            Some(prompt) => prompt.popup().height(),
+            Some(prompt) => prompt.height(area.width),
             None => self.input.overlay_height(),
         };
         let regions = layout::split(
@@ -481,7 +603,7 @@ impl Ui {
         self.input.draw(f, regions.input, &self.state);
         if let Some(overlay) = regions.overlay {
             match self.prompt.as_ref() {
-                Some(prompt) => prompt.popup().draw(f, overlay),
+                Some(prompt) => prompt.draw(f, overlay),
                 None => self.input.draw_overlay(f, overlay),
             }
         }
@@ -526,6 +648,8 @@ fn status_hint(overlay: Overlay, busy: bool, prompt: Option<&OverlayPrompt>) -> 
     match prompt {
         Some(OverlayPrompt::Approval { .. }) => return StatusHint::Approval,
         Some(OverlayPrompt::LoopLimit { .. }) => return StatusHint::LoopLimit,
+        Some(prompt) if prompt.awaits_typed_answer() => return StatusHint::AnswerTyping,
+        Some(OverlayPrompt::Question { .. }) => return StatusHint::Question,
         None => {}
     }
     match overlay {
@@ -730,5 +854,121 @@ mod tests {
             KeyCode::Char('c'),
             KeyModifiers::CONTROL
         )));
+    }
+
+    const TEST_PROVIDER: &str = "mock";
+    const TEST_API_KEY: &str = "test-key";
+    /// Nothing listens here, so the runtime's model listing fails offline.
+    const UNREACHABLE_BASE_URL: &str = "http://127.0.0.1:1/v1";
+    const TEST_QUESTION: &str = "which database?";
+    const TEST_ANSWER: &str = "postgres";
+
+    fn test_config() -> oven_app::config::AppConfig {
+        use oven_app::config::{AppConfig, ProviderConfig, ProviderSelection};
+        AppConfig {
+            active_provider: ProviderSelection {
+                name: TEST_PROVIDER.into(),
+            },
+            providers: [(
+                TEST_PROVIDER.to_string(),
+                ProviderConfig {
+                    name: Some(TEST_PROVIDER.into()),
+                    api_key: Some(TEST_API_KEY.into()),
+                    base_url: Some(UNREACHABLE_BASE_URL.into()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// A `Ui` over a live runtime. The keyboard paths under test only reach the
+    /// command channel, so no provider ever answers.
+    async fn test_ui(root: &tempdir::TempDir) -> Ui {
+        let app = oven_app::AppBuilder::new(root.path())
+            .with_config(test_config())
+            .open()
+            .await
+            .unwrap();
+        Ui::new(app)
+    }
+
+    /// The question prompt after the user chose "Other…", so the composer owns
+    /// the answer.
+    fn answering_prompt() -> OverlayPrompt {
+        let mut popup = QuestionPrompt::new(TEST_QUESTION.to_string(), Vec::new());
+        let action = popup.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(action, QuestionPromptAction::Handled));
+        assert!(popup.awaits_typed_answer());
+        OverlayPrompt::Question {
+            request_id: QuestionRequestId(1),
+            popup,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_typed_answer_is_not_submitted_as_a_prompt() {
+        let root = tempdir::TempDir::new("oven-ui-answer").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.prompt = Some(answering_prompt());
+        ui.input.set_text(TEST_ANSWER);
+
+        ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(ui.prompt.is_none(), "the answer closes the question");
+        assert!(ui.pending.is_empty(), "the answer must not be queued");
+        assert!(
+            ui.transcript.rewind_text().is_none(),
+            "the answer must not start a transcript turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_typed_answer_is_not_queued_while_the_turn_runs() {
+        let root = tempdir::TempDir::new("oven-ui-answer-busy").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.state.busy = true;
+        ui.prompt = Some(answering_prompt());
+        ui.input.set_text(TEST_ANSWER);
+
+        ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(
+            ui.pending.is_empty(),
+            "an answer is never a queued prompt, even mid-turn"
+        );
+        assert!(ui.prompt.is_none());
+    }
+
+    #[tokio::test]
+    async fn ordinary_text_still_starts_a_turn() {
+        let root = tempdir::TempDir::new("oven-ui-prompt").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.input.set_text(TEST_ANSWER);
+
+        ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
+    }
+
+    #[tokio::test]
+    async fn a_slash_prefix_cannot_open_a_completion_over_the_question() {
+        let root = tempdir::TempDir::new("oven-ui-completion").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.prompt = Some(answering_prompt());
+
+        for letter in ['/', 'm', 'o'] {
+            ui.handle_key(key(KeyCode::Char(letter), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            ui.input.overlay(),
+            Overlay::None,
+            "a typed answer must not complete into a command"
+        );
+
+        ui.handle_key(key(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(ui.input.overlay(), Overlay::None);
     }
 }
