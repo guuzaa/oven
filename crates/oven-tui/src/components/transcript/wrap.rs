@@ -490,6 +490,25 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
     lines
 }
 
+/// A line's leading gutter span plus everything after it; `None` for a line
+/// without one, which passes through untouched.
+fn gutter_and_body(line: &Line<'_>) -> Option<(String, Style, String, Option<Style>)> {
+    let [head, rest @ ..] = line.spans.as_slice() else {
+        return None;
+    };
+    let body: String = rest.iter().map(|s| s.content.as_ref()).collect();
+    let body_style = rest
+        .first()
+        .map(|span| span.style)
+        .filter(|style| *style != Style::default());
+    Some((
+        head.content.as_ref().to_string(),
+        head.style,
+        body,
+        body_style,
+    ))
+}
+
 pub(super) fn wrap_line_into(
     out: &mut Vec<Line<'static>>,
     line: &Line<'static>,
@@ -500,19 +519,7 @@ pub(super) fn wrap_line_into(
         out.push(line.clone());
         return;
     }
-    let (prefix, style, body_style, body) = if let [head, rest @ ..] = line.spans.as_slice() {
-        let body: String = rest.iter().map(|s| s.content.as_ref()).collect();
-        let body_style = rest
-            .first()
-            .map(|span| span.style)
-            .filter(|style| *style != Style::default());
-        (
-            head.content.as_ref().to_string(),
-            head.style,
-            body_style,
-            body,
-        )
-    } else {
+    let Some((prefix, style, body, body_style)) = gutter_and_body(line) else {
         out.push(line.clone());
         return;
     };

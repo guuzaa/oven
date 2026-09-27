@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -11,6 +12,7 @@ const SELECTED_MARK: &str = "▸ ";
 const IDLE_MARK: &str = "  ";
 const TITLE_ROWS: u16 = 2;
 
+/// Moves `selected` by one within `n` rows, wrapping at both ends.
 pub fn cycle_selected(selected: &mut usize, n: usize, up: bool) {
     if n == 0 {
         return;
@@ -22,9 +24,32 @@ pub fn cycle_selected(selected: &mut usize, n: usize, up: bool) {
     };
 }
 
+/// Handles the arrow keys every list answers; `false` for any other key, which
+/// the caller keeps.
+pub fn cycle_key(key: KeyEvent, selected: &mut usize, n: usize) -> bool {
+    match key.code {
+        KeyCode::Up => {
+            cycle_selected(selected, n, true);
+            true
+        }
+        KeyCode::Down => {
+            cycle_selected(selected, n, false);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Keeps `selected` inside `len` rows, settling on the last one (or the first
+/// when the list is empty).
+pub fn clamp_selected(selected: &mut usize, len: usize) {
+    *selected = (*selected).min(len.saturating_sub(1));
+}
+
 pub fn draw_choice_list<N, D>(
     f: &mut Frame<'_>,
     area: Rect,
+    empty_hint: &str,
     items: impl IntoIterator<Item = (N, D)>,
     selected: usize,
 ) where
@@ -33,23 +58,23 @@ pub fn draw_choice_list<N, D>(
 {
     let mut lines = Vec::new();
     for (row, (name, desc)) in items.into_iter().enumerate() {
-        let name_style = if row == selected {
-            theme::accent()
+        let (mark, name_style) = if row == selected {
+            (SELECTED_MARK, theme::accent())
         } else {
-            Style::default()
-        };
-        let mark = if row == selected {
-            SELECTED_MARK
-        } else {
-            IDLE_MARK
+            (IDLE_MARK, Style::default())
         };
         lines.push(Line::from(vec![
-            Span::styled(mark.to_string(), name_style),
+            Span::styled(mark, name_style),
             Span::styled(name.into(), name_style),
             Span::styled(format!("  {}", desc.into()), theme::dim()),
         ]));
     }
-    f.render_widget(Paragraph::new(lines), area);
+    let para = if lines.is_empty() {
+        Paragraph::new(Span::styled(empty_hint, theme::dim()))
+    } else {
+        Paragraph::new(lines)
+    };
+    f.render_widget(para, area);
 }
 
 pub fn titled_list_height(item_count: usize) -> u16 {
@@ -67,6 +92,7 @@ pub fn draw_titled_choice_list<N, D>(
     area: Rect,
     title: &str,
     detail: &str,
+    empty_hint: &str,
     items: impl IntoIterator<Item = (N, D)>,
     selected: usize,
 ) where
@@ -78,12 +104,14 @@ pub fn draw_titled_choice_list<N, D>(
         .constraints([Constraint::Length(TITLE_ROWS), Constraint::Min(0)])
         .split(area);
     f.render_widget(Paragraph::new(format!("{title}\n{detail}")), rows[0]);
-    draw_choice_list(f, rows[1], items, selected);
+    draw_choice_list(f, rows[1], empty_hint, items, selected);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EMPTY_HINT: &str = "nothing to choose";
 
     #[test]
     fn cycle_wraps_both_directions() {
@@ -100,6 +128,57 @@ mod tests {
     }
 
     #[test]
+    fn cycle_key_moves_only_on_arrows() {
+        use crossterm::event::KeyModifiers;
+
+        let mut i = 0;
+        assert!(cycle_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut i,
+            3
+        ));
+        assert_eq!(i, 1);
+        assert!(cycle_key(
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut i,
+            3
+        ));
+        assert_eq!(i, 0);
+        assert!(!cycle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut i,
+            3
+        ));
+        assert_eq!(i, 0);
+    }
+
+    #[test]
+    fn clamp_selected_stays_inside_the_rows() {
+        let mut i = 5;
+        clamp_selected(&mut i, 3);
+        assert_eq!(i, 2);
+        clamp_selected(&mut i, 0);
+        assert_eq!(i, 0);
+    }
+
+    #[test]
+    fn empty_list_shows_the_hint() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(24, 1)).unwrap();
+        terminal
+            .draw(|f| {
+                draw_choice_list(f, f.area(), EMPTY_HINT, Vec::<(String, String)>::new(), 0);
+            })
+            .unwrap();
+        let row: String = (0..24)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(row.contains(EMPTY_HINT), "{row:?}");
+    }
+
+    #[test]
     fn selected_row_uses_marker_prefix() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -108,7 +187,13 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                draw_choice_list(f, f.area(), [("exit", "leave"), ("clear", "wipe")], 1);
+                draw_choice_list(
+                    f,
+                    f.area(),
+                    EMPTY_HINT,
+                    [("exit", "leave"), ("clear", "wipe")],
+                    1,
+                );
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -134,6 +219,7 @@ mod tests {
                     f.area(),
                     "limit reached",
                     "ran 2 iterations",
+                    EMPTY_HINT,
                     [("Continue", "keep going"), ("Exit", "stop")],
                     0,
                 );

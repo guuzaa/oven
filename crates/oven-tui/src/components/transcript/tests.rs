@@ -21,12 +21,12 @@ use super::kinds::{
     COLLAPSED_MARKER, LINE_INDENT, LINE_PREFIX_WIDTH, LineKind, MESSAGE_INDENT, Row,
 };
 use super::selection::{extract_line_range, highlight_line, slice_cols};
-use super::wrap::{THINKING_LABEL, THOUGHT_LABEL};
 
 use super::widget::{LOOP_LIMIT_REACHED, Transcript};
 use super::wrap::{
-    MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, apply_thinking_shimmer,
-    format_elapsed, format_lines, format_thought, line_display_width, tail_lines,
+    MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
+    apply_thinking_shimmer, format_elapsed, format_lines, format_thought, line_display_width,
+    tail_lines,
 };
 
 const ELAPSED_0: &str = "Worked for 0s";
@@ -408,7 +408,7 @@ fn seed_empty_history_is_empty() {
 #[test]
 fn reply_event_does_not_append_to_transcript() {
     let mut t = Transcript::new();
-    t.push_user("/model");
+    t.push_prompt(LineKind::User, "/model");
     let n = t.rows.len();
     t.on_event(&AppEvent::notification("current model: gpt-4o"));
     assert_eq!(t.rows.len(), n);
@@ -518,7 +518,7 @@ fn all_details_collapsed(t: &Transcript) -> bool {
 #[test]
 fn tool_end_adds_no_extra_row() {
     let mut t = Transcript::new();
-    t.push_user("q");
+    t.push_prompt(LineKind::User, "q");
     t.on_event(&tool_start(
         1,
         "bash",
@@ -532,7 +532,7 @@ fn tool_end_adds_no_extra_row() {
 #[test]
 fn done_appends_elapsed_after_answer() {
     let mut t = Transcript::new();
-    t.push_user("q");
+    t.push_prompt(LineKind::User, "q");
     t.on_event(&text_delta("a"));
     t.on_event(&completed_in(1_500));
     assert_eq!(
@@ -545,7 +545,7 @@ fn done_appends_elapsed_after_answer() {
 #[test]
 fn separator_comes_after_tool_followup_not_between() {
     let mut t = Transcript::new();
-    t.push_user("q");
+    t.push_prompt(LineKind::User, "q");
     t.on_event(&tool_start(
         1,
         "bash",
@@ -568,7 +568,7 @@ fn separator_comes_after_tool_followup_not_between() {
 #[test]
 fn loop_limit_reached_appends_system_line() {
     let mut t = Transcript::new();
-    t.push_user("q");
+    t.push_prompt(LineKind::User, "q");
     t.on_event(&loop_limit_reached(100));
     assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::System]);
     let expected = format!("{LOOP_LIMIT_REACHED} (100 iterations)");
@@ -578,7 +578,7 @@ fn loop_limit_reached_appends_system_line() {
 #[test]
 fn cancelled_appends_system_line() {
     let mut t = Transcript::new();
-    t.push_user("q");
+    t.push_prompt(LineKind::User, "q");
     t.on_event(&cancelled());
     assert_eq!(
         kinds_of(&t),
@@ -630,7 +630,7 @@ fn thinking_duration_lands_on_its_own_row() {
 #[test]
 fn reported_thinking_duration_survives_the_answer() {
     let mut t = Transcript::new();
-    t.push_user("q");
+    t.push_prompt(LineKind::User, "q");
     t.on_event(&thinking("planning"));
     t.on_event(&thinking_done(1_500));
     t.on_event(&text_delta("answer"));
@@ -914,7 +914,7 @@ fn ended_stream_collapses_its_details() {
     );
 
     t.on_event(&started());
-    t.push_user("next");
+    t.push_prompt(LineKind::User, "next");
     assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
 }
 
@@ -947,7 +947,7 @@ fn thinking_hover_paints_gray_background() {
     let hover_bg = theme::hover().bg.expect("hover bg");
 
     let mut t = Transcript::new();
-    t.push_user("q");
+    t.push_prompt(LineKind::User, "q");
     t.on_event(&thinking("secret"));
     t.on_event(&completed());
     let area = Rect::new(0, 0, 40, 8);
@@ -1806,7 +1806,7 @@ fn seed_failed_tool_counts_without_result() {
 fn elapsed_renders_duration_text() {
     let mut t = Transcript::new();
     wide(&mut t);
-    t.push_user("q");
+    t.push_prompt(LineKind::User, "q");
     t.on_event(&text_delta("a"));
     t.on_event(&completed_in(1_500));
     let last = t.wrapped.last().expect("wrapped elapsed");
@@ -1925,9 +1925,9 @@ fn format_elapsed_units() {
 #[test]
 fn rewind_text_returns_most_recent_user_row() {
     let mut t = Transcript::new();
-    t.push_user("first");
+    t.push_prompt(LineKind::User, "first");
     t.push_row(LineKind::Text, "one");
-    t.push_user("second");
+    t.push_prompt(LineKind::User, "second");
     assert_eq!(t.rewind_text(), Some("second".into()));
 }
 
@@ -2022,9 +2022,9 @@ fn shell_turn_uses_shell_row_and_rewinds_with_bang_prefix() {
 #[test]
 fn rewind_uses_the_latest_user_or_shell_row() {
     let mut t = Transcript::new();
-    t.push_user("first");
+    t.push_prompt(LineKind::User, "first");
     t.push_row(LineKind::Text, "one");
-    t.push_user("second");
+    t.push_prompt(LineKind::User, "second");
     assert_eq!(t.rewind_text(), Some("second".into()));
 }
 
@@ -2062,7 +2062,7 @@ fn finish_response_matches_a_completed_turn() {
 #[test]
 fn replace_from_rebuilds_rows() {
     let mut t = Transcript::new();
-    t.push_user("old");
+    t.push_prompt(LineKind::User, "old");
     t.replace_from(&[Message::user_text("resumed")]);
     assert_eq!(t.rows[0].text, "resumed");
     assert_eq!(t.rows.len(), 1);
@@ -2160,7 +2160,7 @@ fn mouse_drag_selects_body_without_gutter() {
 fn user_prompt_is_framed_like_the_composer() {
     const PROMPT: &str = "hello";
     let mut t = Transcript::new();
-    t.push_user(PROMPT);
+    t.push_prompt(LineKind::User, PROMPT);
     ready(&mut t, Rect::new(0, 0, 20, 5));
     let text = |idx: usize| -> String {
         t.wrapped[idx]
@@ -2180,7 +2180,7 @@ fn user_prompt_is_framed_like_the_composer() {
 #[test]
 fn framed_prompt_wraps_inside_its_border() {
     let mut t = Transcript::new();
-    t.push_user("abcdefgh");
+    t.push_prompt(LineKind::User, "abcdefgh");
     ready(&mut t, Rect::new(0, 0, 8, 5));
     let bodies: Vec<String> = t.wrapped[1..t.wrapped.len() - 1]
         .iter()
@@ -2194,7 +2194,7 @@ fn framed_prompt_wraps_inside_its_border() {
 fn shell_command_is_framed_with_its_marker() {
     const COMMAND: &str = "ls";
     let mut t = Transcript::new();
-    t.push_shell_command(COMMAND);
+    t.push_prompt(LineKind::Shell, COMMAND);
     ready(&mut t, Rect::new(0, 0, 20, 5));
     let body = &t.wrapped[1];
     let text: String = body.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -2777,7 +2777,7 @@ fn seed_shell_envelope_does_not_show_raw_xml() {
 #[test]
 fn shell_finished_event_appends_tailed_output() {
     let mut t = Transcript::new();
-    t.push_shell_command("ls");
+    t.push_prompt(LineKind::Shell, "ls");
     let output = (0..150)
         .map(|i| format!("l{i}"))
         .collect::<Vec<_>>()
@@ -2796,7 +2796,7 @@ fn shell_finished_event_appends_tailed_output() {
 #[test]
 fn shell_failed_event_is_error_result() {
     let mut t = Transcript::new();
-    t.push_shell_command("sleep 60");
+    t.push_prompt(LineKind::Shell, "sleep 60");
     t.on_event(&AppEvent::shell(ShellEvent::Failed {
         command: "sleep 60".into(),
         error: "cancelled".into(),

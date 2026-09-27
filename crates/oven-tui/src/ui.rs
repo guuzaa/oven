@@ -7,8 +7,8 @@ use crossterm::event::{
 use futures::StreamExt;
 use oven_app::{
     AgentEvent, App, AppCommand, AppEvent, AppEventKind, AppPhase, ApprovalDecision,
-    ApprovalRequestId, CompactionEvent, ControlCommand, HistoryChangeReason, LoopLimitDecision,
-    LoopLimitRequestId, ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent, invokes_command,
+    ApprovalRequestId, CompactionEvent, ControlCommand, LoopLimitDecision, LoopLimitRequestId,
+    ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent, invokes_command,
 };
 use tokio::sync::mpsc;
 
@@ -106,13 +106,8 @@ impl Ui {
         }
     }
 
-    #[inline]
-    fn load_transcript(&mut self) {
-        self.reload_history(HistoryChangeReason::External);
-    }
-
     /// Rebuilds the single scrollable transcript from backend history.
-    fn reload_history(&mut self, _reason: HistoryChangeReason) {
+    fn reload_history(&mut self) {
         let mut transcript = Transcript::new();
         transcript.seed_timed(&self.app.history_timed_shared());
         self.transcript = transcript;
@@ -120,7 +115,7 @@ impl Ui {
     }
 
     pub async fn run(mut self) -> io::Result<()> {
-        self.load_transcript();
+        self.reload_history();
         let mut terminal = terminal::setup()?;
         let result = self.event_loop(&mut terminal).await;
         terminal::restore(&mut terminal)?;
@@ -260,7 +255,7 @@ impl Ui {
             }
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::ModeChanged { mode } => self.state.mode = *mode,
-                StateChange::HistoryChanged { reason, .. } => self.reload_history(*reason),
+                StateChange::HistoryChanged { .. } => self.reload_history(),
                 _ => {}
             },
             AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {

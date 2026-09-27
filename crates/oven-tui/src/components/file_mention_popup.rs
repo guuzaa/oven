@@ -2,13 +2,11 @@ use crossterm::event::{KeyCode, KeyEvent};
 use oven_app::FileMentions;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Span;
-use ratatui::widgets::Paragraph;
 
 use super::list::{self, MAX_LIST_ROWS};
-use super::theme;
 
 const DIR_SUFFIX: char = '/';
+const EMPTY_HINT: &str = "no matching file";
 
 pub(crate) enum FileMentionPopupAction {
     Handled,
@@ -69,18 +67,11 @@ impl FileMentionPopup {
         };
         if !was_open {
             mentions.rescan();
+            self.selected = 0;
         }
         self.matches = mentions.search(&token.query);
         self.matches.truncate(MAX_LIST_ROWS);
-        if !was_open {
-            self.selected = 0;
-        }
-        let n = self.matches.len();
-        if n == 0 {
-            self.selected = 0;
-        } else if self.selected >= n {
-            self.selected = n - 1;
-        }
+        list::clamp_selected(&mut self.selected, self.matches.len());
     }
 
     pub(crate) fn height(&self) -> u16 {
@@ -94,16 +85,10 @@ impl FileMentionPopup {
         if !self.is_open() {
             return;
         }
-        if self.matches.is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled("no matching file", theme::dim())),
-                area,
-            );
-            return;
-        }
         list::draw_choice_list(
             f,
             area,
+            EMPTY_HINT,
             self.matches
                 .iter()
                 .map(|path| (format!("@{path}"), String::new())),
@@ -115,14 +100,6 @@ impl FileMentionPopup {
         match key.code {
             KeyCode::Esc => {
                 self.close();
-                Some(FileMentionPopupAction::Handled)
-            }
-            KeyCode::Up | KeyCode::Down => {
-                list::cycle_selected(
-                    &mut self.selected,
-                    self.matches.len(),
-                    key.code == KeyCode::Up,
-                );
                 Some(FileMentionPopupAction::Handled)
             }
             KeyCode::Tab => {
@@ -140,6 +117,9 @@ impl FileMentionPopup {
                 } else {
                     self.fill_selected()
                 }
+            }
+            _ if list::cycle_key(key, &mut self.selected, self.matches.len()) => {
+                Some(FileMentionPopupAction::Handled)
             }
             _ => None,
         }

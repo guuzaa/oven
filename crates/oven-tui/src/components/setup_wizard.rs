@@ -10,6 +10,7 @@ use super::list;
 use super::theme;
 
 const KEEP: &str = "keep current";
+const EMPTY_HINT: &str = "no choices";
 
 const NAME_ITEMS: [(&str, &str); 6] = [
     ("openai", "OpenAI"),
@@ -183,14 +184,6 @@ impl SetupWizard {
 
     fn handle_name_key(&mut self, key: KeyEvent) -> SetupWizardAction {
         match key.code {
-            KeyCode::Up | KeyCode::Down => {
-                list::cycle_selected(
-                    &mut self.selected,
-                    NAME_ITEMS.len(),
-                    key.code == KeyCode::Up,
-                );
-                SetupWizardAction::Handled
-            }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let id = NAME_ITEMS[self.selected].0;
                 if id == KEEP {
@@ -207,6 +200,9 @@ impl SetupWizard {
             KeyCode::Esc => {
                 self.close();
                 SetupWizardAction::Close
+            }
+            _ if list::cycle_key(key, &mut self.selected, NAME_ITEMS.len()) => {
+                SetupWizardAction::Handled
             }
             _ => SetupWizardAction::Handled,
         }
@@ -254,14 +250,6 @@ impl SetupWizard {
 
     fn handle_protocol_key(&mut self, key: KeyEvent) -> SetupWizardAction {
         match key.code {
-            KeyCode::Up | KeyCode::Down => {
-                list::cycle_selected(
-                    &mut self.selected,
-                    PROTOCOL_ITEMS.len(),
-                    key.code == KeyCode::Up,
-                );
-                SetupWizardAction::Handled
-            }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 self.draft.protocol =
                     ProviderConfig::parse_protocol(PROTOCOL_ITEMS[self.selected].0);
@@ -270,6 +258,9 @@ impl SetupWizard {
             }
             KeyCode::Esc => {
                 self.enter_stage(Stage::BaseUrl);
+                SetupWizardAction::Handled
+            }
+            _ if list::cycle_key(key, &mut self.selected, PROTOCOL_ITEMS.len()) => {
                 SetupWizardAction::Handled
             }
             _ => SetupWizardAction::Handled,
@@ -323,7 +314,7 @@ impl SetupWizard {
     }
 
     fn draw_list(&self, f: &mut Frame<'_>, area: Rect, items: &[(&str, &str)]) {
-        list::draw_choice_list(f, area, items.iter().copied(), self.selected);
+        list::draw_choice_list(f, area, EMPTY_HINT, items.iter().copied(), self.selected);
     }
 
     fn draw_label(f: &mut Frame<'_>, area: Rect, label: &str) {

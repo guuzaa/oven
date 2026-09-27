@@ -4,6 +4,7 @@ use ratatui::layout::Rect;
 
 use super::list;
 
+const NO_CHOICES: &str = "no choices";
 const APPROVAL_TITLE: &str = "permission required";
 const APPROVAL_ITEMS: [(&str, &str); 2] = [
     ("Approve", "run this tool"),
@@ -58,6 +59,7 @@ impl ChoicePopup {
             area,
             &self.title,
             &self.detail,
+            NO_CHOICES,
             self.items.iter().copied(),
             self.selected,
         );
@@ -65,14 +67,6 @@ impl ChoicePopup {
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> ChoicePopupAction {
         match key.code {
-            KeyCode::Up => {
-                list::cycle_selected(&mut self.selected, self.items.len(), true);
-                ChoicePopupAction::Handled
-            }
-            KeyCode::Down => {
-                list::cycle_selected(&mut self.selected, self.items.len(), false);
-                ChoicePopupAction::Handled
-            }
             KeyCode::Enter if key.modifiers.is_empty() => ChoicePopupAction::Confirm(self.selected),
             KeyCode::Char('y') => ChoicePopupAction::Confirm(0),
             KeyCode::Esc | KeyCode::Char('n') => {
@@ -80,6 +74,9 @@ impl ChoicePopup {
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 ChoicePopupAction::Cancel
+            }
+            _ if list::cycle_key(key, &mut self.selected, self.items.len()) => {
+                ChoicePopupAction::Handled
             }
             _ => ChoicePopupAction::Handled,
         }

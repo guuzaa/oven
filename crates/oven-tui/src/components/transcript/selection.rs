@@ -10,31 +10,27 @@ pub(super) struct SelPos {
     pub col: usize,
 }
 
-/// Framed prompt lines are `[edge, marker, body, edge]`; every other line is
-/// `[gutter, body]`.
-fn line_prefix_width(line: &Line<'_>) -> usize {
+/// Gutter width and body of a rendered line: framed prompt lines are
+/// `[edge, marker, body, edge]`, every other line leads with its gutter.
+fn line_parts(line: &Line<'_>) -> (usize, String) {
     match line.spans.as_slice() {
-        [edge, marker, _, _] => edge.content.width() + marker.content.width(),
-        [head, rest @ ..] if !rest.is_empty() && head.content.width() >= LINE_PREFIX_WIDTH => {
-            head.content.width()
+        [edge, marker, body, _] => (
+            edge.content.width() + marker.content.width(),
+            body.content.to_string(),
+        ),
+        [head, rest @ ..] if head.content.width() >= LINE_PREFIX_WIDTH => {
+            (head.content.width(), join_content(rest))
         }
-        _ => 0,
+        spans => (0, join_content(spans)),
     }
 }
 
-fn line_body(line: &Line<'_>) -> String {
-    match line.spans.as_slice() {
-        [_, _, body, _] => body.content.to_string(),
-        [head, rest @ ..] if head.content.width() >= LINE_PREFIX_WIDTH => {
-            rest.iter().map(|s| s.content.as_ref()).collect()
-        }
-        spans => spans.iter().map(|s| s.content.as_ref()).collect(),
-    }
+fn join_content(spans: &[Span<'_>]) -> String {
+    spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
 pub(super) fn extract_line_range(line: &Line<'_>, from_col: usize, to_col: usize) -> String {
-    let prefix = line_prefix_width(line);
-    let body = line_body(line);
+    let (prefix, body) = line_parts(line);
     let from = from_col.saturating_sub(prefix).min(body.width());
     let to = to_col.saturating_sub(prefix).min(body.width());
     slice_cols(&body, from, to)

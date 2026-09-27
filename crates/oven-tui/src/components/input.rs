@@ -137,7 +137,7 @@ impl InputView {
 
     pub(crate) fn open_setup(&mut self) {
         self.setup.open();
-        self.fill_command("/setup ");
+        self.set_text("/setup ");
     }
 
     pub(crate) fn paste(&mut self, text: &str) {
@@ -154,32 +154,29 @@ impl InputView {
     }
 
     pub(crate) fn set_text(&mut self, text: &str) {
-        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
-        let row = lines.len().saturating_sub(1);
-        let col = lines.last().map_or(0, |l| l.chars().count());
-        self.textarea.set_lines(lines, (row, col));
-        self.refresh_popups();
+        self.replace_text(text, text);
     }
 
     fn text(&self) -> String {
         self.textarea.lines().join("\n")
     }
 
-    fn fill_command(&mut self, text: &str) {
-        let col = text.chars().count();
-        self.textarea.set_lines(vec![text.to_string()], (0, col));
+    /// Replaces the composer text, leaving the cursor at the end of
+    /// `cursor_in` — the whole text when setting it, the spliced prefix when
+    /// inserting a mention.
+    fn replace_text(&mut self, text: &str, cursor_in: &str) {
+        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        let cursor_lines: Vec<&str> = cursor_in.split('\n').collect();
+        let row = cursor_lines.len().saturating_sub(1);
+        let col = cursor_lines.last().map_or(0, |l| l.chars().count());
+        self.textarea.set_lines(lines, (row, col));
         self.refresh_popups();
     }
 
     fn splice(&mut self, before: &str, insert: &str, after: &str) {
         let text = format!("{before}{insert}{after}");
-        let prefix = format!("{before}{insert}");
-        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
-        let prefix_lines: Vec<&str> = prefix.split('\n').collect();
-        let row = prefix_lines.len().saturating_sub(1);
-        let col = prefix_lines.last().map_or(0, |l| l.chars().count());
-        self.textarea.set_lines(lines, (row, col));
-        self.refresh_popups();
+        let cursor = format!("{before}{insert}");
+        self.replace_text(&text, &cursor);
     }
 
     fn refresh_popups(&mut self) {
@@ -242,7 +239,7 @@ impl Component for InputView {
                     submit_command(text)
                 }
                 SetupWizardAction::Close => {
-                    self.fill_command("/setup");
+                    self.set_text("/setup");
                     KeyResult::Handled
                 }
             };
@@ -256,7 +253,7 @@ impl Component for InputView {
                     submit_command(text)
                 }
                 ModelPickerAction::Close => {
-                    self.fill_command("/model");
+                    self.set_text("/model");
                     KeyResult::Handled
                 }
             };
@@ -268,13 +265,13 @@ impl Component for InputView {
             return match action {
                 SlashCommandPopupAction::Handled => KeyResult::Handled,
                 SlashCommandPopupAction::Fill(text) => {
-                    self.fill_command(&text);
+                    self.set_text(&text);
                     KeyResult::Handled
                 }
                 SlashCommandPopupAction::Submit(text) => {
                     if setup_opens(&text) {
                         self.setup.open();
-                        self.fill_command("/setup ");
+                        self.set_text("/setup ");
                         return KeyResult::Action(Action::QuietSubmit(text));
                     }
                     // `/model` (with at most one fragment) opens the picker
@@ -283,7 +280,7 @@ impl Component for InputView {
                     // (current model) can show below the status bar.
                     if let Some(filter) = model_filter_from(&text) {
                         self.model_picker.open(&filter);
-                        self.fill_command("/model ");
+                        self.set_text("/model ");
                         return if filter.is_empty() {
                             KeyResult::Action(Action::QuietSubmit(text))
                         } else {
@@ -319,19 +316,15 @@ impl Component for InputView {
             KeyCode::Enter => {
                 let text = self.text().trim().to_string();
                 if text.is_empty() || (shell::is_active(&text) && shell::command(&text).is_none()) {
-                    KeyResult::Handled
-                } else if state.busy {
-                    if is_model_or_setup(&text) {
-                        self.clear();
-                        submit_command(text)
-                    } else {
-                        self.clear();
-                        KeyResult::Action(Action::Queue(text))
-                    }
-                } else {
-                    self.clear();
-                    submit_command(text)
+                    return KeyResult::Handled;
                 }
+                let result = if state.busy && !is_model_or_setup(&text) {
+                    KeyResult::Action(Action::Queue(text))
+                } else {
+                    submit_command(text)
+                };
+                self.clear();
+                result
             }
             _ => {
                 self.textarea.input(key);
@@ -391,18 +384,22 @@ impl Component for InputView {
     }
 }
 
-/// If `text` is a `/model` command with at most one argument (`/model` or
-/// `/model <fragment>`), return the fragment to seed the picker filter with.
-/// Two or more arguments return `None` so the line submits directly.
+/// A slash command split into its name and the arguments that follow it.
+fn slash_parts(text: &str) -> Option<(&str, &str)> {
+    let body = text.trim().strip_prefix('/')?;
+    let (name, args) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
+    Some((name, args.trim_start()))
+}
+
 fn is_model_or_setup(text: &str) -> bool {
-    let trimmed = text.trim();
-    let Some(body) = trimmed.strip_prefix('/') else {
-        return false;
-    };
-    matches!(
-        body.split_whitespace().next(),
-        Some(cmd) if cmd.eq_ignore_ascii_case("model") || cmd.eq_ignore_ascii_case("setup")
-    )
+    slash_parts(text).is_some_and(|(name, _)| {
+        name.eq_ignore_ascii_case("model") || name.eq_ignore_ascii_case("setup")
+    })
+}
+
+fn setup_opens(text: &str) -> bool {
+    slash_parts(text)
+        .is_some_and(|(name, args)| name.eq_ignore_ascii_case("setup") && args.is_empty())
 }
 
 fn submit_command(text: String) -> KeyResult {
@@ -411,15 +408,6 @@ fn submit_command(text: String) -> KeyResult {
     } else {
         KeyResult::Action(Action::Submit(text))
     }
-}
-
-fn setup_opens(text: &str) -> bool {
-    let trimmed = text.trim();
-    let Some(body) = trimmed.strip_prefix('/') else {
-        return false;
-    };
-    let mut words = body.split_whitespace();
-    matches!(words.next(), Some(cmd) if cmd.eq_ignore_ascii_case("setup")) && words.next().is_none()
 }
 
 pub(crate) fn display_user_input(text: &str) -> String {
@@ -448,18 +436,17 @@ fn draw_setup_prompt(f: &mut Frame<'_>, area: Rect, setup: &SetupWizard) {
     );
 }
 
+/// If `text` is a `/model` command with at most one argument (`/model` or
+/// `/model <fragment>`), return the fragment to seed the picker filter with.
+/// Two or more arguments return `None` so the line submits directly.
 fn model_filter_from(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    let body = trimmed.strip_prefix('/')?;
-    let mut words = body.split_whitespace();
-    if !words.next()?.eq_ignore_ascii_case("model") {
+    let (name, args) = slash_parts(text)?;
+    if !name.eq_ignore_ascii_case("model") {
         return None;
     }
-    let fragment = words.next().unwrap_or("");
-    if words.next().is_some() {
-        return None;
-    }
-    Some(fragment.to_string())
+    let mut args = args.split_whitespace();
+    let fragment = args.next().unwrap_or("");
+    args.next().is_none().then(|| fragment.to_string())
 }
 
 fn cursor_byte(text: &str, (row, col): (usize, usize)) -> usize {

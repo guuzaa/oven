@@ -8,6 +8,9 @@ use ratatui::widgets::Paragraph;
 use super::list::{self, MAX_LIST_ROWS};
 use super::theme;
 
+const EMPTY_HINT: &str = "no matching models";
+const KEEP_CURRENT: &str = "keep current";
+
 /// Reasoning-effort choices shown in the second stage. `keep current` submits
 /// the command without an effort argument.
 const EFFORT_ITEMS: [(&str, &str); 5] = [
@@ -15,7 +18,7 @@ const EFFORT_ITEMS: [(&str, &str); 5] = [
     ("low", "Low reasoning effort"),
     ("medium", "Medium reasoning effort"),
     ("high", "High reasoning effort"),
-    ("keep current", "Keep the current reasoning effort"),
+    (KEEP_CURRENT, "Keep the current reasoning effort"),
 ];
 
 /// Result of a key consumed by the model picker.
@@ -153,6 +156,7 @@ impl ModelPicker {
     }
 
     fn handle_models_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        let rows = self.matches().len();
         match key.code {
             KeyCode::Char(ch)
                 if !key.modifiers.intersects(
@@ -168,11 +172,7 @@ impl ModelPicker {
                 self.selected = 0;
                 ModelPickerAction::Handled
             }
-            KeyCode::Up | KeyCode::Down => {
-                let n = self.matches().len();
-                list::cycle_selected(&mut self.selected, n, key.code == KeyCode::Up);
-                ModelPickerAction::Handled
-            }
+            _ if list::cycle_key(key, &mut self.selected, rows) => ModelPickerAction::Handled,
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if let Some(idx) = self.selected_item() {
                     self.model = Some(self.models[idx].0.clone());
@@ -191,20 +191,12 @@ impl ModelPicker {
 
     fn handle_effort_key(&mut self, key: KeyEvent) -> ModelPickerAction {
         match key.code {
-            KeyCode::Up | KeyCode::Down => {
-                list::cycle_selected(
-                    &mut self.selected,
-                    EFFORT_ITEMS.len(),
-                    key.code == KeyCode::Up,
-                );
-                ModelPickerAction::Handled
-            }
             KeyCode::Enter if key.modifiers.is_empty() => {
                 let Some(model) = self.model.clone() else {
                     return ModelPickerAction::Handled;
                 };
                 let (name, _) = EFFORT_ITEMS[self.selected];
-                let line = if name == "keep current" {
+                let line = if name == KEEP_CURRENT {
                     format!("/model {model}")
                 } else {
                     format!("/model {model} {name}")
@@ -222,6 +214,9 @@ impl ModelPicker {
                 self.model = None;
                 self.filter.clear();
                 self.selected = back;
+                ModelPickerAction::Handled
+            }
+            _ if list::cycle_key(key, &mut self.selected, EFFORT_ITEMS.len()) => {
                 ModelPickerAction::Handled
             }
             _ => ModelPickerAction::Handled,
@@ -244,17 +239,11 @@ impl ModelPicker {
             chunks[0],
         );
         let indices = self.matches();
-        if indices.is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled("no matching models", theme::dim())),
-                chunks[1],
-            );
-            return;
-        }
         let start = self.selected.saturating_sub(MAX_LIST_ROWS - 1);
         list::draw_choice_list(
             f,
             chunks[1],
+            EMPTY_HINT,
             indices.iter().skip(start).take(MAX_LIST_ROWS).map(|&idx| {
                 let (id, provider) = &self.models[idx];
                 (wire_id(id), provider.clone())
@@ -264,7 +253,7 @@ impl ModelPicker {
     }
 
     fn draw_effort(&self, f: &mut Frame<'_>, area: Rect) {
-        list::draw_choice_list(f, area, EFFORT_ITEMS, self.selected);
+        list::draw_choice_list(f, area, EMPTY_HINT, EFFORT_ITEMS, self.selected);
     }
 }
 

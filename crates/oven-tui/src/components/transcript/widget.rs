@@ -38,6 +38,8 @@ pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
 pub struct Transcript {
     pub(super) rows: Vec<Row>,
     pub(super) wrapped: Vec<Line<'static>>,
+    /// Wrapped-line offset where each row starts, parallel to `rows`.
+    row_offsets: Vec<usize>,
     streaming: String,
     stream_kind: LineKind,
     pub(super) wrapped_stream: Vec<Line<'static>>,
@@ -65,6 +67,7 @@ impl Transcript {
         Self {
             rows: Vec::new(),
             wrapped: Vec::new(),
+            row_offsets: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
             wrapped_stream: Vec::new(),
@@ -85,43 +88,33 @@ impl Transcript {
         }
     }
 
-    /// Appends a user row to the transcript.
-    pub fn push_user(&mut self, text: &str) {
+    /// Appends a row the user submitted: their prompt or a shell command.
+    pub(super) fn push_prompt(&mut self, kind: LineKind, text: &str) {
         self.close_tool_burst();
-        self.push_row(LineKind::User, text);
-    }
-
-    pub fn push_shell_command(&mut self, command: &str) {
-        self.close_tool_burst();
-        self.push_row(LineKind::Shell, command);
-    }
-
-    pub fn push_shell_output(&mut self, output: &str, ok: bool) {
-        self.close_tool_burst();
-        let trimmed = trim_message(output);
-        self.push_row(
-            LineKind::ShellResult(ok),
-            if trimmed.is_empty() {
-                NO_OUTPUT
-            } else {
-                &trimmed
-            },
-        );
+        self.push_row(kind, text);
     }
 
     /// Starts a turn at the tail by appending its prompt before any response
     /// events can arrive.
     pub(crate) fn start_user_turn(&mut self, text: &str) {
-        self.push_user(text);
-        self.active_prompt = Some(self.rows.len() - 1);
-        self.top = None;
+        self.start_turn(LineKind::User, text);
     }
 
     /// Starts a local shell turn at the tail.
     pub(crate) fn start_shell_turn(&mut self, command: &str) {
-        self.push_shell_command(command);
+        self.start_turn(LineKind::Shell, command);
+    }
+
+    fn start_turn(&mut self, kind: LineKind, text: &str) {
+        self.push_prompt(kind, text);
         self.active_prompt = Some(self.rows.len() - 1);
         self.top = None;
+    }
+
+    pub fn push_shell_output(&mut self, output: &str, ok: bool) {
+        self.close_tool_burst();
+        let body = trim_message(output);
+        self.push_row(LineKind::ShellResult(ok), result_body(&body));
     }
 
     #[cfg(test)]
@@ -183,7 +176,7 @@ impl Transcript {
                             ContentBlock::Text { text } => {
                                 self.close_tool_burst();
                                 if let Some(sh) = LocalShell::try_parse(text) {
-                                    self.push_shell_command(&sh.command);
+                                    self.push_prompt(LineKind::Shell, &sh.command);
                                     self.push_shell_output(&sh.output, sh.ok());
                                 } else {
                                     turn_started_at = Some(*ts);
@@ -275,10 +268,7 @@ impl Transcript {
         if ok && body.is_empty() {
             return;
         }
-        self.push_row(
-            LineKind::ToolResult(ok),
-            if body.is_empty() { NO_OUTPUT } else { &body },
-        );
+        self.push_row(LineKind::ToolResult(ok), result_body(&body));
     }
 
     pub(super) fn total_lines(&self) -> usize {
@@ -444,6 +434,7 @@ impl Transcript {
             collapsible,
             headers: Vec::new(),
         });
+        self.row_offsets.push(self.wrapped.len());
         self.wrap_row(self.rows.len() - 1);
         if kind == LineKind::Thinking {
             self.thinking_row = Some(self.rows.len() - 1);
@@ -474,6 +465,12 @@ impl Transcript {
             wrap_row_into(out, row.kind, &row.text, width);
             Vec::new()
         }
+    }
+
+    /// Settles the response and stamps how long the turn took.
+    fn end_turn(&mut self, duration_ms: u64) {
+        self.finish_response();
+        self.push_elapsed(duration_ms);
     }
 
     fn push_separator(&mut self) {
@@ -545,12 +542,6 @@ impl Transcript {
         live.then_some(MAX_LIVE_BODY_ROWS)
     }
 
-    fn wrap_rows(&mut self, start: usize, end: usize) {
-        for i in start..end {
-            self.wrap_row(i);
-        }
-    }
-
     pub(super) fn rewrap_stream(&mut self) {
         self.wrapped_stream.clear();
         let width = self.width();
@@ -567,7 +558,11 @@ impl Transcript {
 
     pub(super) fn rewrap_all(&mut self) {
         self.wrapped.clear();
-        self.wrap_rows(0, self.rows.len());
+        self.row_offsets.clear();
+        for idx in 0..self.rows.len() {
+            self.row_offsets.push(self.wrapped.len());
+            self.wrap_row(idx);
+        }
         self.rewrap_stream();
         self.reanchor_selection();
     }
@@ -587,9 +582,13 @@ impl Transcript {
         self.select_head = head;
     }
 
+    fn line_width_at(&self, line: usize) -> usize {
+        self.line_at(line).map_or(0, line_display_width)
+    }
+
     fn clamp_pos(&self, pos: SelPos, last: usize) -> SelPos {
         let line = pos.line.min(last);
-        let width = self.line_at(line).map_or(0, line_display_width);
+        let width = self.line_width_at(line);
         SelPos {
             line,
             col: pos.col.min(width),
@@ -653,7 +652,7 @@ impl Transcript {
         };
         let last = total - 1;
         let line = raw_line.min(last);
-        let width = self.line_at(line).map_or(0, line_display_width);
+        let width = self.line_width_at(line);
         let rel_x = if column <= self.area.x {
             0
         } else {
@@ -667,26 +666,21 @@ impl Transcript {
         SelPos { line, col }
     }
 
+    /// Wrapped-line range of the active prompt row: its first non-empty line
+    /// to the start of the next row.
     fn active_prompt_range(&self) -> Option<(usize, usize)> {
         let active = self.active_prompt?;
-        let width = self.width();
-        if width == 0 || active >= self.rows.len() {
-            return None;
-        }
-        let mut lines = Vec::new();
-        for (idx, row) in self.rows.iter().enumerate() {
-            let start = lines.len();
-            let live_rows = self.live_body_rows(idx);
-            Self::wrap_row_into(&mut lines, row, width, live_rows);
-            if idx == active {
-                let first_content = lines[start..]
-                    .iter()
-                    .position(|line| line_display_width(line) > 0)
-                    .map_or(start, |offset| start + offset);
-                return Some((first_content, lines.len()));
-            }
-        }
-        None
+        let start = *self.row_offsets.get(active)?;
+        let end = self
+            .row_offsets
+            .get(active + 1)
+            .copied()
+            .unwrap_or(self.wrapped.len());
+        let first_content = self.wrapped[start..end]
+            .iter()
+            .position(|line| line_display_width(line) > 0)
+            .map_or(start, |offset| start + offset);
+        Some((first_content, end))
     }
 
     fn line_at(&self, idx: usize) -> Option<&Line<'static>> {
@@ -947,8 +941,7 @@ impl Component for Transcript {
                     );
                 }
                 AgentEvent::Turn(TurnEvent::Completed { duration_ms, .. }) => {
-                    self.finish_response();
-                    self.push_elapsed(*duration_ms);
+                    self.end_turn(*duration_ms);
                 }
                 AgentEvent::Turn(TurnEvent::Cancelled { duration_ms, .. }) => {
                     self.close_tool_burst();
@@ -970,8 +963,7 @@ impl Component for Transcript {
                     self.stop_live_thinking();
                     self.flush_streaming();
                     self.push_row(LineKind::Error, &error.message);
-                    self.finish_response();
-                    self.push_elapsed(*duration_ms);
+                    self.end_turn(*duration_ms);
                 }
             },
             AppEventKind::Shell(ev) => match ev {
@@ -1016,9 +1008,10 @@ impl Component for Transcript {
         }
 
         self.sticky_prompt = None;
+        let prompt_range = self.active_prompt_range();
         let mut content_area = area;
         if self.top.is_none()
-            && let Some((prompt_start, prompt_end)) = self.active_prompt_range()
+            && let Some((prompt_start, prompt_end)) = prompt_range
         {
             let prompt_lines = &self.wrapped[prompt_start..prompt_end];
             let height = prompt_lines
@@ -1043,7 +1036,7 @@ impl Component for Transcript {
             self.top = (top.saturating_add(height) < total).then_some(top);
         }
         let mut start = self.top.unwrap_or(max_top);
-        if let Some((_, prompt_end)) = self.active_prompt_range()
+        if let Some((_, prompt_end)) = prompt_range
             && self.sticky_prompt.is_some()
         {
             start = start.max(prompt_end);
@@ -1102,6 +1095,11 @@ fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)>
         .cloned()
         .map(|message| (Arc::new(message), 0, None))
         .collect()
+}
+
+/// A result body, or the placeholder the transcript shows for no output.
+fn result_body(body: &str) -> &str {
+    if body.is_empty() { NO_OUTPUT } else { body }
 }
 
 fn result_text(content: &[ContentBlock]) -> String {

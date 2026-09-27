@@ -1,11 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Span;
-use ratatui::widgets::Paragraph;
 
 use super::list::{self, MAX_LIST_ROWS};
-use super::theme;
+
+const EMPTY_HINT: &str = "no matching command";
 
 /// Result of a key consumed by the slash-command popup.
 pub(crate) enum SlashCommandPopupAction {
@@ -60,7 +59,7 @@ impl SlashCommandPopup {
                 .position(|&i| self.commands[i].0.to_lowercase() == self.token())
                 .unwrap_or(0);
         }
-        self.selected = self.selected.min(matches.len().saturating_sub(1));
+        list::clamp_selected(&mut self.selected, matches.len());
     }
 
     /// Index of the currently selected matching command, if any.
@@ -90,18 +89,11 @@ impl SlashCommandPopup {
         if !self.open {
             return;
         }
-        let indices = self.matches();
-        if indices.is_empty() {
-            f.render_widget(
-                Paragraph::new(Span::styled("no matching command", theme::dim())),
-                area,
-            );
-            return;
-        }
         list::draw_choice_list(
             f,
             area,
-            indices.iter().take(MAX_LIST_ROWS).map(|&idx| {
+            EMPTY_HINT,
+            self.matches().iter().take(MAX_LIST_ROWS).map(|&idx| {
                 let (name, desc) = &self.commands[idx];
                 (format!("/{name}"), desc.clone())
             }),
@@ -113,14 +105,10 @@ impl SlashCommandPopup {
     ///
     /// Returns `None` when the key should fall through to the input itself.
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> Option<SlashCommandPopupAction> {
+        let rows = self.matches().len();
         match key.code {
             KeyCode::Esc => {
                 self.close();
-                Some(SlashCommandPopupAction::Handled)
-            }
-            KeyCode::Up | KeyCode::Down => {
-                let n = self.matches().len();
-                list::cycle_selected(&mut self.selected, n, key.code == KeyCode::Up);
                 Some(SlashCommandPopupAction::Handled)
             }
             KeyCode::Tab => {
@@ -142,6 +130,9 @@ impl SlashCommandPopup {
                 } else {
                     None
                 }
+            }
+            _ if list::cycle_key(key, &mut self.selected, rows) => {
+                Some(SlashCommandPopupAction::Handled)
             }
             _ => None,
         }
