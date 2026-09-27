@@ -197,6 +197,12 @@ notification, `Passthrough` falls through to an agent turn, `Exit` emits
 `ProviderChanged` rebuild routing, and `Cleared` and `Compact` touch
 persistence. Nothing in `slash/` performs IO of its own.
 
+`complete.rs` holds the prefix rule the completion lists in the TUI select with:
+ASCII-case-insensitive, an empty query keeping every key, and `matches_model`
+also accepting the wire id a slug resolves to. `oven-tui` renders the indices
+`select` returns, so the rule cannot drift between the slash popup, the picker
+and the setup wizard.
+
 ## Providers and config
 
 `provider.rs` turns config into a `Router`. Every provider with a usable key is

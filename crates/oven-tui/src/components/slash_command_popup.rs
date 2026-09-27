@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent};
+use oven_app::complete;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -69,13 +70,10 @@ impl SlashCommandPopup {
 
     /// Indices of commands matching the current input token.
     pub(crate) fn matches(&self) -> Vec<usize> {
-        let token = self.token();
-        self.commands
-            .iter()
-            .enumerate()
-            .filter(|(_, (name, _))| name.to_lowercase().starts_with(&token))
-            .map(|(i, _)| i)
-            .collect()
+        complete::select(
+            self.commands.iter().map(|(name, _)| name.as_str()),
+            &self.token(),
+        )
     }
 
     pub(crate) fn height(&self) -> u16 {

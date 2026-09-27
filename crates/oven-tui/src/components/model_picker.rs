@@ -1,12 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use oven_app::complete;
 use oven_llm::ModelId;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 
 use super::list::{self, MAX_LIST_ROWS};
-use super::theme;
 
 const EMPTY_HINT: &str = "no matching models";
 const KEEP_CURRENT: &str = "keep current";
@@ -98,10 +96,27 @@ impl ModelPicker {
                 .models
                 .iter()
                 .enumerate()
-                .filter(|(_, (id, _))| model_matches(id, &self.filter))
+                .filter(|(_, (id, _))| complete::matches_model(id, &self.filter))
                 .map(|(i, _)| i)
                 .collect(),
             Stage::Effort => (0..EFFORT_ITEMS.len()).collect(),
+        }
+    }
+
+    /// The composer line the picker is editing, so the typed query, the list
+    /// and the command that will be submitted can never disagree.
+    pub(crate) fn line(&self) -> String {
+        match self.stage {
+            Stage::Models => format!("/model {}", self.filter),
+            Stage::Effort => {
+                let Some(model) = self.model.as_deref() else {
+                    return format!("/model {}", self.filter);
+                };
+                match EFFORT_ITEMS[self.selected].0 {
+                    KEEP_CURRENT => format!("/model {model}"),
+                    effort => format!("/model {model} {effort}"),
+                }
+            }
         }
     }
 
@@ -119,7 +134,7 @@ impl ModelPicker {
             return 0;
         }
         match self.stage {
-            Stage::Models => list::bounded_rows(self.matches().len()).saturating_add(1),
+            Stage::Models => list::bounded_rows(self.matches().len()),
             Stage::Effort => u16::try_from(EFFORT_ITEMS.len()).unwrap_or(u16::MAX),
         }
     }
@@ -172,6 +187,10 @@ impl ModelPicker {
                 self.selected = 0;
                 ModelPickerAction::Handled
             }
+            KeyCode::Tab => {
+                self.complete_selected();
+                ModelPickerAction::Handled
+            }
             _ if list::cycle_key(key, &mut self.selected, rows) => ModelPickerAction::Handled,
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if let Some(idx) = self.selected_item() {
@@ -192,15 +211,10 @@ impl ModelPicker {
     fn handle_effort_key(&mut self, key: KeyEvent) -> ModelPickerAction {
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let Some(model) = self.model.clone() else {
+                if self.model.is_none() {
                     return ModelPickerAction::Handled;
-                };
-                let (name, _) = EFFORT_ITEMS[self.selected];
-                let line = if name == KEEP_CURRENT {
-                    format!("/model {model}")
-                } else {
-                    format!("/model {model} {name}")
-                };
+                }
+                let line = self.line();
                 self.close();
                 ModelPickerAction::Submit(line)
             }
@@ -223,26 +237,25 @@ impl ModelPicker {
         }
     }
 
+    /// Writes the highlighted model into the filter, keeping it highlighted.
+    fn complete_selected(&mut self) {
+        let Some(idx) = self.selected_item() else {
+            return;
+        };
+        self.filter = self.models[idx].0.clone();
+        self.selected = self
+            .matches()
+            .iter()
+            .position(|&matched| matched == idx)
+            .unwrap_or(0);
+    }
+
     fn draw_models(&self, f: &mut Frame<'_>, area: Rect) {
-        let chunks = ratatui::layout::Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                ratatui::layout::Constraint::Length(1),
-                ratatui::layout::Constraint::Min(0),
-            ])
-            .split(area);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("filter: ", theme::dim()),
-                Span::raw(self.filter.clone()),
-            ])),
-            chunks[0],
-        );
         let indices = self.matches();
         let start = self.selected.saturating_sub(MAX_LIST_ROWS - 1);
         list::draw_choice_list(
             f,
-            chunks[1],
+            area,
             EMPTY_HINT,
             indices.iter().skip(start).take(MAX_LIST_ROWS).map(|&idx| {
                 let (id, provider) = &self.models[idx];
@@ -259,18 +272,4 @@ impl ModelPicker {
 
 fn wire_id(slug: &str) -> String {
     ModelId::from(slug).wire_id().to_string()
-}
-
-fn model_matches(id: &str, filter: &str) -> bool {
-    if filter.is_empty() {
-        return true;
-    }
-    let lower = id.to_lowercase();
-    if lower.starts_with(filter) {
-        return true;
-    }
-    ModelId::from(id)
-        .wire_id()
-        .to_lowercase()
-        .starts_with(filter)
 }

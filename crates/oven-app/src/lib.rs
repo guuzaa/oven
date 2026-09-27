@@ -1,6 +1,7 @@
 mod app;
 mod builder;
 mod command;
+pub mod complete;
 pub mod config;
 pub mod dirs;
 mod event;

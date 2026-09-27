@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use oven_app::complete;
 use oven_app::config::ProviderConfig;
 use oven_llm::canonical_vendor;
 use ratatui::Frame;
@@ -101,8 +102,7 @@ impl SetupWizard {
             return 0;
         }
         match self.stage {
-            Stage::Name => list::bounded_rows(NAME_ITEMS.len()),
-            Stage::Protocol => list::bounded_rows(PROTOCOL_ITEMS.len()),
+            Stage::Name | Stage::Protocol => list::bounded_rows(self.matches().len()),
             Stage::CustomName | Stage::BaseUrl | Stage::ApiKey => 1,
         }
     }
@@ -115,12 +115,20 @@ impl SetupWizard {
         }
     }
 
+    /// What the composer shows at this stage: the masked key, the typed text,
+    /// or the filter narrowing a list.
     pub(crate) fn prompt_value(&self) -> Option<String> {
         match self.stage {
-            Stage::CustomName | Stage::BaseUrl => Some(self.buffer.clone()),
+            Stage::Name | Stage::Protocol => (!self.buffer.is_empty()).then(|| self.buffer.clone()),
             Stage::ApiKey => Some("*".repeat(self.buffer.chars().count())),
-            _ => None,
+            Stage::CustomName | Stage::BaseUrl => Some(self.buffer.clone()),
         }
+    }
+
+    /// Indices of the listed stage's items the typed filter selects, or the
+    /// whole list while the filter is empty.
+    pub(crate) fn matches(&self) -> Vec<usize> {
+        complete::select(self.items().iter().map(|(id, _)| *id), &self.buffer)
     }
 
     pub(crate) fn draw(&self, f: &mut Frame<'_>, area: Rect) {
@@ -128,8 +136,16 @@ impl SetupWizard {
             return;
         }
         match self.stage {
-            Stage::Name => self.draw_list(f, area, &NAME_ITEMS),
-            Stage::Protocol => self.draw_list(f, area, &PROTOCOL_ITEMS),
+            Stage::Name | Stage::Protocol => {
+                let items = self.items();
+                list::draw_choice_list(
+                    f,
+                    area,
+                    EMPTY_HINT,
+                    self.matches().into_iter().map(|idx| items[idx]),
+                    self.selected,
+                );
+            }
             Stage::CustomName => Self::draw_label(
                 f,
                 area,
@@ -185,15 +201,19 @@ impl SetupWizard {
     fn handle_name_key(&mut self, key: KeyEvent) -> SetupWizardAction {
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                let id = NAME_ITEMS[self.selected].0;
-                if id == KEEP {
-                    self.draft.name = None;
-                    self.enter_stage(Stage::ApiKey);
-                } else if id == "custom" {
-                    self.enter_stage(Stage::CustomName);
-                } else {
-                    self.draft.name = Some(id.to_string());
-                    self.enter_stage(Stage::ApiKey);
+                let Some(id) = self.selected_id() else {
+                    return SetupWizardAction::Handled;
+                };
+                match id {
+                    KEEP => {
+                        self.draft.name = None;
+                        self.enter_stage(Stage::ApiKey);
+                    }
+                    "custom" => self.enter_stage(Stage::CustomName),
+                    name => {
+                        self.draft.name = Some(name.to_string());
+                        self.enter_stage(Stage::ApiKey);
+                    }
                 }
                 SetupWizardAction::Handled
             }
@@ -201,10 +221,7 @@ impl SetupWizard {
                 self.close();
                 SetupWizardAction::Close
             }
-            _ if list::cycle_key(key, &mut self.selected, NAME_ITEMS.len()) => {
-                SetupWizardAction::Handled
-            }
-            _ => SetupWizardAction::Handled,
+            _ => self.handle_list_key(key),
         }
     }
 
@@ -248,22 +265,41 @@ impl SetupWizard {
         }
     }
 
+    /// Typing at a list stage narrows it instead of moving the cursor; `Tab`
+    /// writes the highlighted item into the composer filter.
+    fn handle_list_key(&mut self, key: KeyEvent) -> SetupWizardAction {
+        if let Some(ch) = typing_char(key) {
+            self.buffer.push(ch);
+            self.selected = 0;
+        } else if key.code == KeyCode::Backspace {
+            self.buffer.pop();
+            self.selected = 0;
+        } else if key.code == KeyCode::Tab
+            && let Some(id) = self.selected_id()
+        {
+            self.buffer = id.to_string();
+            self.selected = 0;
+        } else {
+            let rows = self.matches().len();
+            list::cycle_key(key, &mut self.selected, rows);
+        }
+        SetupWizardAction::Handled
+    }
+
     fn handle_protocol_key(&mut self, key: KeyEvent) -> SetupWizardAction {
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
-                self.draft.protocol =
-                    ProviderConfig::parse_protocol(PROTOCOL_ITEMS[self.selected].0);
-                self.enter_stage(Stage::ApiKey);
+                if let Some(id) = self.selected_id() {
+                    self.draft.protocol = ProviderConfig::parse_protocol(id);
+                    self.enter_stage(Stage::ApiKey);
+                }
                 SetupWizardAction::Handled
             }
             KeyCode::Esc => {
                 self.enter_stage(Stage::BaseUrl);
                 SetupWizardAction::Handled
             }
-            _ if list::cycle_key(key, &mut self.selected, PROTOCOL_ITEMS.len()) => {
-                SetupWizardAction::Handled
-            }
-            _ => SetupWizardAction::Handled,
+            _ => self.handle_list_key(key),
         }
     }
 
@@ -313,8 +349,17 @@ impl SetupWizard {
         !self.configured.iter().any(|s| s == name)
     }
 
-    fn draw_list(&self, f: &mut Frame<'_>, area: Rect, items: &[(&str, &str)]) {
-        list::draw_choice_list(f, area, EMPTY_HINT, items.iter().copied(), self.selected);
+    fn items(&self) -> &'static [(&'static str, &'static str)] {
+        match self.stage {
+            Stage::Name => &NAME_ITEMS,
+            Stage::Protocol => &PROTOCOL_ITEMS,
+            Stage::CustomName | Stage::BaseUrl | Stage::ApiKey => &[],
+        }
+    }
+
+    fn selected_id(&self) -> Option<&'static str> {
+        let idx = *self.matches().get(self.selected)?;
+        Some(self.items()[idx].0)
     }
 
     fn draw_label(f: &mut Frame<'_>, area: Rect, label: &str) {
@@ -653,5 +698,85 @@ mod tests {
         w.enter_stage(Stage::ApiKey);
         w.paste("sk-6TBpKsAJ\nQuU31N8 ");
         assert_eq!(w.buffer, "sk-6TBpKsAJQuU31N8");
+    }
+
+    fn provider_index(id: &str) -> usize {
+        NAME_ITEMS.iter().position(|(name, _)| *name == id).unwrap()
+    }
+
+    fn type_filter(w: &mut SetupWizard, filter: &str) {
+        for ch in filter.chars() {
+            w.handle_key(key(KeyCode::Char(ch)));
+        }
+    }
+
+    #[test]
+    fn typing_narrows_the_provider_list() {
+        let mut w = open();
+        type_filter(&mut w, "de");
+        assert_eq!(w.matches(), vec![provider_index("deepseek")]);
+        assert_eq!(w.prompt_value().as_deref(), Some("de"));
+    }
+
+    #[test]
+    fn backspace_widens_the_provider_filter() {
+        let mut w = open();
+        type_filter(&mut w, "dex");
+        assert!(w.matches().is_empty());
+
+        w.handle_key(key(KeyCode::Backspace));
+        assert_eq!(w.matches(), vec![provider_index("deepseek")]);
+    }
+
+    #[test]
+    fn tab_writes_the_highlighted_provider_into_the_composer() {
+        let mut w = open();
+        type_filter(&mut w, "zh");
+        assert!(matches!(
+            w.handle_key(key(KeyCode::Tab)),
+            SetupWizardAction::Handled
+        ));
+        assert_eq!(w.prompt_value().as_deref(), Some("zhipu"));
+        assert_eq!(w.matches(), vec![provider_index("zhipu")]);
+    }
+
+    #[test]
+    fn enter_accepts_the_filtered_provider_and_clears_the_filter() {
+        let mut w = open();
+        type_filter(&mut w, "zh");
+        assert!(matches!(
+            w.handle_key(key(KeyCode::Enter)),
+            SetupWizardAction::Handled
+        ));
+        assert_eq!(w.stage, Stage::ApiKey);
+        assert_eq!(w.draft.name.as_deref(), Some("zhipu"));
+        assert_eq!(w.prompt_value().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn unmatched_filter_does_not_leave_the_stage() {
+        let mut w = open();
+        type_filter(&mut w, "zzz");
+        assert!(w.matches().is_empty());
+        assert!(matches!(
+            w.handle_key(key(KeyCode::Enter)),
+            SetupWizardAction::Handled
+        ));
+        assert_eq!(w.stage, Stage::Name);
+        assert!(w.is_open());
+    }
+
+    #[test]
+    fn typing_narrows_the_protocol_list() {
+        let mut w = open();
+        w.enter_stage(Stage::Protocol);
+        type_filter(&mut w, "res");
+        assert_eq!(w.matches(), vec![1]);
+
+        w.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            w.draft.protocol,
+            ProviderConfig::parse_protocol(PROTOCOL_ITEMS[1].0)
+        );
     }
 }

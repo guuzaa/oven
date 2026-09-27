@@ -179,6 +179,13 @@ impl InputView {
         self.replace_text(&text, &cursor);
     }
 
+    /// Mirrors the open picker's command line into the composer, so the filter
+    /// being typed is visible in the input box rather than in the popup.
+    fn sync_picker_line(&mut self) {
+        let line = self.model_picker.line();
+        self.set_text(&line);
+    }
+
     fn refresh_popups(&mut self) {
         let text = self.text();
         self.slash_command.refresh(&text);
@@ -246,7 +253,11 @@ impl Component for InputView {
         }
 
         if self.model_picker.is_open() {
-            return match self.model_picker.handle_key(key) {
+            let action = self.model_picker.handle_key(key);
+            if self.model_picker.is_open() {
+                self.sync_picker_line();
+            }
+            return match action {
                 ModelPickerAction::Handled => KeyResult::Handled,
                 ModelPickerAction::Submit(text) => {
                     self.clear();
@@ -280,7 +291,7 @@ impl Component for InputView {
                     // (current model) can show below the status bar.
                     if let Some(filter) = model_filter_from(&text) {
                         self.model_picker.open(&filter);
-                        self.set_text("/model ");
+                        self.sync_picker_line();
                         return if filter.is_empty() {
                             KeyResult::Action(Action::QuietSubmit(text))
                         } else {
@@ -760,6 +771,7 @@ mod tests {
         }
         assert_eq!(view.model_picker.filter(), "deep");
         assert_eq!(view.model_picker.matches(), vec![2]);
+        assert_eq!(view.textarea.lines()[0], "/model deep");
 
         view.handle_key(key(KeyCode::Backspace), &State::new());
         assert_eq!(view.model_picker.filter(), "dee");
@@ -770,6 +782,29 @@ mod tests {
         }
         assert_eq!(view.model_picker.filter(), "");
         assert_eq!(view.model_picker.matches(), vec![0, 1, 2]);
+        assert_eq!(view.textarea.lines()[0], "/model ");
+    }
+
+    #[test]
+    fn picker_tab_completes_the_highlighted_model_into_the_composer() {
+        let mut view = view();
+        open_picker(&mut view);
+        type_text(&mut view, "deep");
+        let result = view.handle_key(key(KeyCode::Tab), &State::new());
+        assert!(matches!(result, KeyResult::Handled));
+        assert_eq!(view.textarea.lines()[0], "/model deepseek-chat");
+        assert_eq!(view.model_picker.matches(), vec![2]);
+    }
+
+    #[test]
+    fn picker_mirrors_the_highlighted_effort_into_the_composer() {
+        let mut view = view();
+        open_picker(&mut view);
+        view.handle_key(key(KeyCode::Enter), &State::new());
+        assert_eq!(view.textarea.lines()[0], "/model gpt-4o none");
+
+        view.handle_key(key(KeyCode::Down), &State::new());
+        assert_eq!(view.textarea.lines()[0], "/model gpt-4o low");
     }
 
     #[test]

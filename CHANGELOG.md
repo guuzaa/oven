@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+- `/model` and `/setup` completion lists filter by the characters typed: the query is rendered in the composer (`/model deep`), `Tab` completes the highlighted entry into it, and the provider and protocol stages of the setup wizard now narrow the same way
+- `oven_app::complete` owns the prefix rule shared by the slash popup, the model picker and the setup wizard
+
+### Changed
+- The model picker no longer prints its filter inside the popup, since the composer line shows it
+
 ### Fixed
 - Restore the per-turn `Worked for Xs` transcript separator after answers, tool follow-ups, cancellations, failures, compaction, and app errors, including the turn duration when resuming a session from its persisted timestamps
 

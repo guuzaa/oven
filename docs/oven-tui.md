@@ -180,7 +180,10 @@ minimum width the rounded border is dropped rather than overlapping the prompt.
 
 Any single overlay is active at a time, in priority order
 (`overlay()`): `Setup` > `Model` > `Slash` > `Mention`. While one is open it
-receives every key, so the composer line underneath stays frozen.
+receives every key. The model picker also writes back to the composer, mirroring
+the line it is editing (`/model <filter>`, then `/model <id> <effort>`) so the
+typed text stays in the input box; the setup wizard draws its own prompt in the
+box, and the popups leave the frozen line alone.
 
 Border colour encodes mode: shell (`!…`) > Plan > Ask > has text > idle.
 
@@ -200,11 +203,19 @@ whitespace boundary (so an email address is not a mention), a trailing `/` means
 the entry is a directory and stays open for drill-down, and insertion is
 splic-aware so text after the token is preserved.
 
+### Completion rule
+
+Slash names, model ids and provider names all select through `oven_app::complete`:
+an ASCII-case-insensitive prefix, where an empty query keeps the whole list.
+`matches_model` also tries the wire id a slug resolves to, so `gpt` finds
+`openai/gpt-4o`. The TUI only renders the indices the app selected.
+
 ### Model picker
 
 `/model` and `/model <fragment>` open a modal instead of submitting. Stage one
-filters the model list (matching the slug or the provider wire id); Enter
-promotes to stage two, which picks a reasoning effort and composes
+filters the model list by the characters typed, which are drawn in the composer
+instead of a popup header; Tab completes the highlighted id into that line and
+Enter promotes to stage two, which picks a reasoning effort and composes
 `/model <id> <effort>`. `keep current` emits `/model <id>` with no effort. Two or
 more arguments skip the picker and submit directly, which keeps a manual
 fast path.
@@ -212,8 +223,10 @@ fast path.
 ### Setup wizard
 
 `/setup` with no arguments walks five stages: provider name (with `keep
-current` and `custom`) → custom gateway id → base URL → protocol → api key. Text
-stages echo what is typed; the api key stage shows `*` per character. `requires_
+current` and `custom`) → custom gateway id → base URL → protocol → api key. The
+provider and protocol stages are lists narrowed by typed characters, shown in the
+input box, with Tab completing the highlighted id into it. Text stages echo what
+is typed; the api key stage shows `*` per character. `requires_
 new_key` compares the draft provider against the current one and the configured
 slug set, so switching to an already-configured provider keeps its saved key.
 The wizard never stores anything itself — it composes `/setup name=… api_key=…`
