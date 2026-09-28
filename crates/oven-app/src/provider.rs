@@ -1,8 +1,33 @@
 use oven_agent::RetryingProvider;
-use oven_llm::{ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Router};
+use oven_llm::{
+    ModelCapabilities, ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Router,
+};
 
 use crate::AppError;
-use crate::config::{AppConfig, ProviderConfig};
+use crate::config::{AppConfig, ModelParams, ProviderConfig};
+
+/// `ModelInfo` for a user-declared model. Capabilities default to supported
+/// and unknown limits stay zeroed: validation must not reject a model for
+/// metadata the user chose not (or was unable) to spell out.
+fn declared_model_info(params: &ModelParams, provider_name: &ProviderName) -> ModelInfo {
+    ModelInfo {
+        id: params.id.clone(),
+        provider: provider_name.clone(),
+        context_window: params.context_window.unwrap_or_default(),
+        max_output_tokens: params.max_output_tokens.unwrap_or_default(),
+        capabilities: ModelCapabilities {
+            supports_vision: params.supports_vision.unwrap_or(true),
+            supports_tools: params.supports_tools.unwrap_or(true),
+            supports_streaming: params.supports_streaming.unwrap_or(true),
+            supports_json_mode: true,
+            supports_parallel_tool_calls: true,
+            supports_system_prompt: params.supports_system_prompt.unwrap_or(true),
+            max_concurrent_tools: None,
+        },
+        pricing: None,
+        protocols: Vec::new(),
+    }
+}
 
 pub(crate) fn retrying(config: &AppConfig, client: Box<dyn Provider>) -> Box<dyn Provider> {
     Box::new(
@@ -78,10 +103,8 @@ pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider
         Some(kind) => ProviderBuilder::new(kind),
         None => ProviderBuilder::provider(),
     };
-    for (id, params) in &provider.models {
-        let mut info = ModelInfo::minimal(id, provider_name.clone());
-        info.context_window = params.context_window.unwrap_or_default();
-        builder = builder.add_model(info);
+    for params in &provider.models {
+        builder = builder.add_model(declared_model_info(params, &provider_name));
     }
     builder = builder.provider_name(provider_name).api_key(api_key);
     if let Some(u) = &base_url {
@@ -116,14 +139,11 @@ mod tests {
             base_url: Some("https://example.com/v1".into()),
             api_key: Some("k".into()),
             model: Some("my-model".into()),
-            models: [(
-                "my-model".to_string(),
-                ModelParams {
-                    context_window: Some(200_000),
-                },
-            )]
-            .into_iter()
-            .collect(),
+            models: vec![ModelParams {
+                id: "my-model".into(),
+                context_window: Some(200_000),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let client = build_client(&provider).unwrap();
@@ -138,14 +158,11 @@ mod tests {
         let provider = ProviderConfig {
             name: Some("deepseek".into()),
             api_key: Some("k".into()),
-            models: [(
-                "deepseek-v4-flash".to_string(),
-                ModelParams {
-                    context_window: Some(42_000),
-                },
-            )]
-            .into_iter()
-            .collect(),
+            models: vec![ModelParams {
+                id: "deepseek-v4-flash".into(),
+                context_window: Some(42_000),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         let client = build_client(&provider).unwrap();
@@ -153,5 +170,54 @@ mod tests {
             .resolve_model(&ModelId::from("deepseek-v4-flash"))
             .expect("preset model should resolve");
         assert_eq!(info.context_window, 42_000);
+    }
+
+    #[test]
+    fn declared_model_defaults_to_supported_capabilities() {
+        let provider = ProviderConfig {
+            name: Some("stepfun".into()),
+            base_url: Some("https://api.stepfun.com/v1".into()),
+            api_key: Some("k".into()),
+            model: Some("step-5-preview".into()),
+            models: vec![ModelParams {
+                id: "step-5-preview".into(),
+                context_window: Some(1_000_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let client = build_client(&provider).unwrap();
+        let info = client
+            .resolve_model(&ModelId::from("step-5-preview"))
+            .expect("declared model should resolve");
+        assert!(info.capabilities.supports_system_prompt);
+        assert!(info.capabilities.supports_tools);
+        assert!(info.capabilities.supports_streaming);
+        assert!(info.capabilities.supports_vision);
+        assert_eq!(info.max_output_tokens, 0);
+    }
+
+    #[test]
+    fn declared_model_limits_and_capabilities_are_configurable() {
+        let provider = ProviderConfig {
+            name: Some("myproxy".into()),
+            base_url: Some("https://example.com/v1".into()),
+            api_key: Some("k".into()),
+            model: Some("my-model".into()),
+            models: vec![ModelParams {
+                id: "my-model".into(),
+                max_output_tokens: Some(8192),
+                supports_vision: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let client = build_client(&provider).unwrap();
+        let info = client
+            .resolve_model(&ModelId::from("my-model"))
+            .expect("declared model should resolve");
+        assert_eq!(info.max_output_tokens, 8192);
+        assert!(!info.capabilities.supports_vision);
+        assert!(info.capabilities.supports_tools);
     }
 }

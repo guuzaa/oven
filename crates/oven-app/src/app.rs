@@ -36,7 +36,12 @@ pub enum AppError {
 
 impl From<oven_llm::ProviderError> for AppError {
     fn from(err: oven_llm::ProviderError) -> Self {
-        AppError::Provider(err.to_string())
+        match &err {
+            oven_llm::ProviderError::InvalidRequest(reason) => {
+                AppError::Provider(format!("invalid request: {reason}"))
+            }
+            _ => AppError::Provider(err.to_string()),
+        }
     }
 }
 

@@ -40,10 +40,17 @@ name = "deepseek"
 # Explicit API key. If unset, the OVEN_API_KEY env var is used.
 # api_key = "sk-..."
 # reasoning_effort = "medium"
-# Model metadata, keyed by wire id. Overrides the built-in catalog and is
+# Model metadata, one entry per model. Overrides the built-in catalog and is
 # required for custom vendors if you want ctx% display and auto-compaction.
-# [providers.deepseek.models."deepseek-v4-flash"]
+# The wire id goes in the entry itself, so no quoted table keys and ids with
+# dots (`gpt-4.1`) stay valid. Limits left unset are treated as unknown;
+# capabilities default to supported, so declaring a model never disables it.
+# Set a capability to false only when the upstream model really lacks it.
+# [[providers.deepseek.models]]
+# id = "deepseek-v4-flash"
 # context_window = 1000000
+# max_output_tokens = 8192
+# supports_vision = false
 # [providers.xai]
 # api_key = "xai-..."
 # reasoning_effort = "low"

@@ -8,17 +8,21 @@
 - `answer` tool: the model can ask the user a question mid-turn and blocks until they reply, and the reply becomes the tool result. The question renders as an overlay prompt listing the proposed answers plus an `Other…` row that hands the composer the keystrokes, so any answer can be typed; `Esc` skips the question and `Ctrl-C` cancels the turn
 - Tools receive a `ToolContext` instead of a bare cancellation token, carrying the turn's cancellation plus the channel an interactive tool asks its question on
 - A pending question is mirrored as `ToolEvent::QuestionAsked` and `AppPhase::AwaitingAnswer`, resumed by `ControlCommand::RespondQuestion`
+- Per-model metadata declared as `[[providers.<slug>.models]]` accepts `max_output_tokens` and the `supports_system_prompt` / `supports_tools` / `supports_streaming` / `supports_vision` flags next to `context_window`, with the wire id in an `id` field instead of a quoted table key: omitted limits stay unknown (validation skips them) and omitted capabilities count as supported, so declaring a model never silently disables it
 
 ### Changed
 - The model picker no longer prints its filter inside the popup, since the composer line shows it
 - The question prompt grows with the question's wrapped text instead of clipping it to a fixed block
 - The `answer` tool clamps its question, option labels and descriptions to their display limits, and clamps the answer before it enters the conversation
 - `docs/architectures.md`, `docs/oven-app.md` and `docs/oven-tui.md` cover the question channel, the new phase and the prompt
+- Model metadata moved from the quoted `[providers.<slug>.models."<wire-id>"]` table keys to `[[providers.<slug>.models]]` entries with an `id` field, so ids containing dots (`gpt-4.1`, `glm-5.3`) need no quoting; entries merge by `id` and are rewritten sorted when the config is saved
 
 ### Fixed
 - Restore the per-turn `Worked for Xs` transcript separator after answers, tool follow-ups, cancellations, failures, compaction, and app errors, including the turn duration when resuming a session from its persisted timestamps
 - A verbose question no longer fails the `answer` call, which used to leave the user with a failed tool row and no prompt at all
 - Composer slash and mention completions stay shut while a question waits for a typed answer, so `Tab` can no longer complete command text into the answer
+- Declaring a model under `[[providers.<slug>.models]]` no longer registers it with every capability off, which made oven reject each turn locally with `provider: invalid request` before the request ever reached the upstream API
+- Provider request-validation failures name the rule that rejected them (`max_tokens 4096 exceeds model's max_output_tokens 8192`, `model does not support tools`, …) instead of only the bare `invalid request`
 
 ## [0.0.8] - 2026-09-22
 

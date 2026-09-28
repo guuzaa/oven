@@ -34,17 +34,27 @@ pub struct ProviderConfig {
     pub protocol: Option<ProviderKind>,
     pub api_key: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Metadata for models served by this provider, keyed by wire id.
+    /// Per-model metadata declared with `[[providers.<slug>.models]]`.
     /// Overrides the static catalog when the ids collide, and is the only
     /// source of window sizes for custom vendors.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub models: BTreeMap<String, ModelParams>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelParams>,
 }
 
-/// User-declared model metadata (`[providers.<slug>.models."<wire-id>"]`).
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+/// One `[[providers.<slug>.models]]` entry, kept as an array so the wire id
+/// sits in a plain value instead of a quoted table key. Unset limits stay
+/// unknown (skipped by request validation) and unset capabilities default to
+/// supported, so declaring a model keeps the passthrough behaviour of
+/// leaving it undeclared.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModelParams {
+    pub id: String,
     pub context_window: Option<u32>,
+    pub max_output_tokens: Option<u32>,
+    pub supports_system_prompt: Option<bool>,
+    pub supports_tools: Option<bool>,
+    pub supports_streaming: Option<bool>,
+    pub supports_vision: Option<bool>,
 }
 
 impl ProviderConfig {
@@ -64,6 +74,11 @@ impl ProviderConfig {
         if let Some(model) = self.model.take() {
             self.model = Some(wire_model(&model));
         }
+        for model in &mut self.models {
+            model.id = wire_model(&model.id);
+        }
+        self.models.sort_by(|a, b| a.id.cmp(&b.id));
+        self.models.dedup_by(|dropped, kept| dropped.id == kept.id);
         if self.protocol.is_some() && !self.is_custom_vendor() {
             self.protocol = None;
         }
@@ -214,8 +229,12 @@ impl ProviderConfig {
         if let Some(e) = overlay.reasoning_effort {
             self.reasoning_effort = Some(e);
         }
-        for (id, params) in &overlay.models {
-            self.models.insert(id.clone(), *params);
+        for entry in &overlay.models {
+            if let Some(existing) = self.models.iter_mut().find(|m| m.id == entry.id) {
+                *existing = entry.clone();
+            } else {
+                self.models.push(entry.clone());
+            }
         }
         self.normalize();
     }
@@ -637,19 +656,46 @@ mod tests {
     #[test]
     fn model_params_parse_merge_and_roundtrip() {
         let cfg: AppConfig = toml::from_str(
-            "[provider]\nname = \"myproxy\"\n[providers.myproxy.models.\"my-model\"]\ncontext_window = 200000\n",
+            "[provider]\nname = \"myproxy\"\n\n[[providers.myproxy.models]]\nid = \"my-model\"\ncontext_window = 200000\nmax_output_tokens = 8192\nsupports_vision = false\n",
         )
         .unwrap();
         let provider = cfg.active_provider_config().unwrap();
-        assert_eq!(provider.models["my-model"].context_window, Some(200_000));
+        let params = &provider.models[0];
+        assert_eq!(params.id, "my-model");
+        assert_eq!(params.context_window, Some(200_000));
+        assert_eq!(params.max_output_tokens, Some(8192));
+        assert_eq!(params.supports_vision, Some(false));
+        assert_eq!(params.supports_tools, None);
 
         let mut base = ProviderConfig::default();
         base.merge_fields(provider);
-        assert_eq!(base.models["my-model"].context_window, Some(200_000));
+        assert_eq!(base.models[0].id, "my-model");
+        assert_eq!(base.models[0].context_window, Some(200_000));
 
         let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[[providers.myproxy.models]]"));
         let reparsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(reparsed, cfg);
+    }
+
+    #[test]
+    fn model_entries_merge_by_id_and_stay_sorted() {
+        let base: AppConfig = toml::from_str(
+            "[provider]\nname = \"p\"\n\n[[providers.p.models]]\nid = \"b\"\ncontext_window = 1\n",
+        )
+        .unwrap();
+        let overlay: AppConfig =
+            toml::from_str("[[providers.p.models]]\nid = \"a\"\ncontext_window = 2\n\n[[providers.p.models]]\nid = \"b\"\ncontext_window = 3\n")
+                .unwrap();
+        let mut merged = AppConfig::default();
+        merged.merge(base);
+        merged.merge(overlay);
+        let models: Vec<_> = merged.providers["p"]
+            .models
+            .iter()
+            .map(|m| (m.id.as_str(), m.context_window))
+            .collect();
+        assert_eq!(models, vec![("a", Some(2)), ("b", Some(3))]);
     }
 
     #[test]
