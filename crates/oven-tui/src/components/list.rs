@@ -4,6 +4,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::theme;
 
@@ -44,6 +45,29 @@ pub fn cycle_key(key: KeyEvent, selected: &mut usize, n: usize) -> bool {
 /// when the list is empty).
 pub fn clamp_selected(selected: &mut usize, len: usize) {
     *selected = (*selected).min(len.saturating_sub(1));
+}
+
+/// Shortens `s` with a trailing ellipsis so it never runs past `max_width`
+/// columns.
+pub fn truncate_str(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if width + cw > max_width.saturating_sub(1) {
+            break;
+        }
+        out.push(ch);
+        width += cw;
+    }
+    out.push('…');
+    out
 }
 
 pub fn draw_choice_list<N, D>(

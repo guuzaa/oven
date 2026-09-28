@@ -1,5 +1,4 @@
-use std::fmt::Write;
-use std::path::Path;
+use std::path::{Component as PathComponent, Path};
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
@@ -9,11 +8,12 @@ use oven_app::{
 };
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use super::component::{Component, KeyResult, State};
 use super::theme;
@@ -21,38 +21,16 @@ use super::theme;
 const SPIN_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const REPLY_TTL: Duration = Duration::from_secs(3);
 const REPLY_FLASH: Duration = Duration::from_millis(150);
+const SEP: &str = " · ";
+const TOAST_MAX_WIDTH: u16 = 60;
+const TOAST_MAX_TEXT_ROWS: u16 = 8;
+const FRAME_SPAN: u16 = 2;
+const SPIN_COLS: usize = 2;
+const COMPACTING: &str = "compacting…";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StatusHint {
-    Idle,
-    Busy,
-    Slash,
-    Modal,
-    Approval,
-    LoopLimit,
-    Question,
-    AnswerTyping,
-    EscArmed,
-}
-
-impl StatusHint {
-    fn label(&self) -> &str {
-        match self {
-            StatusHint::Slash => "tab fill · enter · esc",
-            StatusHint::Modal => "enter · esc",
-            StatusHint::Approval => "enter/y approve · esc/n reject · ctrl-c cancel",
-            StatusHint::LoopLimit => "enter/y continue · esc/n exit · ctrl-c cancel",
-            StatusHint::Question => "enter answer · esc skip · ctrl-c cancel",
-            StatusHint::AnswerTyping => "enter send · esc back",
-            StatusHint::EscArmed => "esc again to confirm",
-            StatusHint::Busy => "shift-tab mode · esc cancel · enter queue",
-            StatusHint::Idle => "shift-tab mode · enter send · alt-enter newline · esc undo",
-        }
-    }
-}
-
-/// Single status row below the input: model [effort] · mode · root · usage
-/// [· ctx%]. Optional slash-command reply is drawn on the row(s) beneath it.
+/// One row below the input: `[spin] model [effort] · mode · root · ctx% · usage`.
+/// Segments are dropped from the tail when the row is too narrow to hold them
+/// all, so no number is ever shown half cut.
 pub struct StatusBar {
     model: String,
     effort: Option<ReasoningEffort>,
@@ -66,12 +44,15 @@ pub struct StatusBar {
     flash_until: Option<Instant>,
 }
 
+/// A rendered piece of the status row: text plus the style it carries.
+type Segment = (String, Style);
+
 impl StatusBar {
     pub fn new(model: impl Into<String>, root: &Path, usage: Usage) -> Self {
         Self {
             model: model.into(),
             effort: None,
-            root: display_path(root),
+            root: short_root(root),
             usage,
             context_tokens: 0,
             context_window: None,
@@ -113,35 +94,31 @@ impl StatusBar {
         }
     }
 
+    /// Bottom-right toast over `area`, answering a slash command's reply. A
+    /// flashing toast clears first and paints nothing, so a repeated reply
+    /// blinks once before it is read.
     pub fn draw_reply_overlay(&self, f: &mut Frame<'_>, area: Rect) {
-        let Some(text) = self.reply.as_deref() else {
+        let Some(text) = self.reply.as_deref().filter(|t| !t.is_empty()) else {
             return;
         };
-
-        if text.is_empty() || area.width < 8 || area.height < 3 {
+        if area.width < 8 || area.height < 3 {
             return;
         }
 
-        let max_width = area.width.min(60);
-        let inner_width = max_width.saturating_sub(4) as usize;
-        let lines = wrap_text(text, inner_width);
-        if lines.is_empty() {
+        let width = area.width.min(TOAST_MAX_WIDTH);
+        let (rows, text_width) = wrapped_rows(text, width.saturating_sub(FRAME_SPAN));
+        if rows == 0 {
             return;
         }
-
-        let text_width = lines
-            .iter()
-            .map(|line| u16::try_from(line.width()).unwrap_or(u16::MAX))
-            .max()
-            .unwrap_or(0);
-        let width = text_width.saturating_add(4).min(max_width);
-        let height = u16::try_from(lines.len() + 2)
-            .unwrap_or(u16::MAX)
+        let width = text_width.saturating_add(FRAME_SPAN).min(width);
+        let height = u16::try_from(rows)
+            .unwrap_or(TOAST_MAX_TEXT_ROWS)
+            .saturating_add(FRAME_SPAN)
             .min(area.height);
         let toast = Rect {
             x: area.right().saturating_sub(width + 1),
-            // A toast as tall as its anchor would otherwise start one row
-            // above it, covering whatever sits on top of the anchor.
+            // Anchored below its own bottom row: one higher and the toast
+            // would cover whatever sits on top of the anchor.
             y: area.bottom().saturating_sub(height + 1).max(area.y),
             width,
             height,
@@ -151,19 +128,38 @@ impl StatusBar {
         if self.is_flashing() {
             return;
         }
-
-        let lines: Vec<Line> = lines
-            .into_iter()
-            .map(|s| Line::from(Span::styled(s, theme::reply())))
-            .collect();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(theme::border_type())
-            .border_style(theme::reply());
-        f.render_widget(Paragraph::new(lines).block(block), toast);
+        f.render_widget(
+            Paragraph::new(Span::styled(text, theme::reply()))
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(theme::border_type())
+                        .border_style(theme::reply()),
+                ),
+            toast,
+        );
     }
 
-    pub fn clear_reply(&mut self) {
+    pub fn draw_bar(&self, f: &mut Frame<'_>, area: Rect, state: &State) {
+        let spin = state.busy.then(|| spin_frame(state.frame));
+        let spare =
+            usize::from(area.width).saturating_sub(if spin.is_some() { SPIN_COLS } else { 0 });
+        let mut spans = Vec::new();
+        if let Some(frame) = spin {
+            spans.push(Span::styled(frame.to_string(), theme::accent()));
+            spans.push(Span::raw(" "));
+        }
+        for (i, (text, style)) in fit(self.segments(state.mode), spare).iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(SEP));
+            }
+            spans.push(Span::styled(text.clone(), *style));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    pub(crate) fn clear_reply(&mut self) {
         self.reply = None;
         self.reply_until = None;
         self.flash_until = None;
@@ -180,50 +176,46 @@ impl StatusBar {
         self.flash_until.is_some_and(|until| Instant::now() < until)
     }
 
-    pub fn draw_bar(&mut self, f: &mut Frame<'_>, area: Rect, state: &State, hint: StatusHint) {
+    /// The row's segments, most important first.
+    fn segments(&self, mode: AgentMode) -> Vec<Segment> {
         let gray = theme::dim();
-        let mut spans = Vec::new();
-        if state.busy {
-            let ch = SPIN_FRAMES[usize::try_from(state.frame).unwrap_or(0) % SPIN_FRAMES.len()];
-            spans.push(Span::styled(ch.to_string(), theme::accent()));
-            spans.push(Span::raw(" "));
+        let mut segments = vec![
+            (self.model_label(), theme::model()),
+            (mode.label().to_string(), mode_style(mode, gray)),
+            (self.root.clone(), theme::path()),
+        ];
+        segments.extend(self.context_segment(gray));
+        segments
+    }
+
+    fn model_label(&self) -> String {
+        match self.effort {
+            Some(effort) => format!("{} {effort}", self.model),
+            None => self.model.clone(),
         }
-        spans.push(Span::styled(self.model.clone(), theme::model()));
-        if let Some(effort) = self.effort {
-            spans.push(Span::styled(format!(" {effort}"), theme::model()));
-        }
-        spans.push(Span::styled(" · ", gray));
-        let mode_style = match state.mode {
-            AgentMode::Agent => gray,
-            AgentMode::Plan => theme::mode(),
-            AgentMode::Ask => theme::ask_mode(),
-        };
-        spans.push(Span::styled(state.mode.label(), mode_style));
-        spans.push(Span::styled(" · ", gray));
-        spans.push(Span::styled(self.root.clone(), theme::path()));
-        spans.extend(usage_spans(&self.usage, gray));
+    }
+
+    /// Context occupancy plus the share of the prompt the KV cache served; a
+    /// running compaction reports itself instead.
+    fn context_segment(&self, gray: Style) -> Option<Segment> {
         if self.compacting {
-            spans.push(Span::styled(" · ", gray));
-            spans.push(Span::styled("compacting context…", theme::accent()));
-        } else if let Some(pct) = context_percent(self.context_tokens, self.context_window) {
-            spans.push(Span::styled(" · ", gray));
-            spans.push(Span::styled(format!("ctx {pct}%"), gray));
+            return Some((COMPACTING.to_string(), theme::accent()));
         }
-        let hint_label = hint.label();
-        let max = area.width as usize;
-        let hint_w = hint_label.width();
-        let left = Line::from(spans);
-        let left_w = left.width();
-        let line = if hint_w + 1 < max && left_w + 1 + hint_w <= max {
-            let pad = max - left_w - hint_w;
-            let mut spans = left.spans;
-            spans.push(Span::raw(" ".repeat(pad)));
-            spans.push(Span::styled(hint_label, gray));
-            Line::from(spans)
-        } else {
-            truncate_line(left, max.saturating_sub(1))
+        let context = self.context_label()?;
+        let label = match cache_hit_percent(&self.usage) {
+            Some(hit) => format!("{context} · cache {hit}%"),
+            None => context,
         };
-        f.render_widget(Paragraph::new(line), area);
+        Some((label, gray))
+    }
+
+    /// Share of the context window in use, or — when the window is unknown,
+    /// as with hand-configured providers — the prompt size itself.
+    fn context_label(&self) -> Option<String> {
+        if let Some(pct) = context_percent(self.context_tokens, self.context_window) {
+            return Some(format!("ctx {pct}%"));
+        }
+        (self.context_tokens > 0).then(|| format!("ctx {}", human(self.context_tokens)))
     }
 }
 
@@ -271,25 +263,73 @@ impl Component for StatusBar {
     }
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        let hint = if state.busy {
-            StatusHint::Busy
-        } else {
-            StatusHint::Idle
-        };
-        self.draw_bar(f, area, state, hint);
+        self.draw_bar(f, area, state);
     }
 }
 
-/// Token-usage segment of the status row: empty while nothing has been
-/// recorded (all-zero `Usage`), otherwise a separator plus the last turn.
-fn usage_spans(total: &Usage, gray: Style) -> Vec<Span<'static>> {
-    if *total == Usage::default() {
-        Vec::new()
-    } else {
-        vec![
-            Span::styled(" · ", gray),
-            Span::styled(format_usage(total), gray),
-        ]
+/// Rows `text` occupies once wrapped to `width`, rendered into a scratch
+/// buffer so the box is exactly as tall as its content. Also returns the
+/// widest of those rows, so the box can close in around the text.
+fn wrapped_rows(text: &str, width: u16) -> (usize, u16) {
+    let area = Rect::new(0, 0, width, TOAST_MAX_TEXT_ROWS);
+    let mut buf = Buffer::empty(area);
+    Paragraph::new(text)
+        .wrap(Wrap { trim: true })
+        .render(area, &mut buf);
+    let mut rows = 0;
+    let mut widest = 0;
+    for y in 0..TOAST_MAX_TEXT_ROWS {
+        let row: String = (0..width).map(|x| buf[(x, y)].symbol()).collect();
+        let row = row.trim_end();
+        if row.is_empty() {
+            continue;
+        }
+        rows += 1;
+        widest = widest.max(u16::try_from(row.width()).unwrap_or(width));
+    }
+    (rows, widest)
+}
+
+fn spin_frame(frame: u64) -> char {
+    SPIN_FRAMES[usize::try_from(frame).unwrap_or(0) % SPIN_FRAMES.len()]
+}
+
+/// Drops the lowest-priority tail until the row fits `width`; the segment that
+/// survives alone is never sliced in half.
+fn fit(mut segments: Vec<Segment>, width: usize) -> Vec<Segment> {
+    while segments.len() > 1 && segments_width(&segments) > width {
+        segments.pop();
+    }
+    segments
+}
+
+fn segments_width(segments: &[Segment]) -> usize {
+    let text: usize = segments.iter().map(|(text, _)| text.width()).sum();
+    text + SEP.width() * segments.len().saturating_sub(1)
+}
+
+fn mode_style(mode: AgentMode, gray: Style) -> Style {
+    match mode {
+        AgentMode::Agent => gray,
+        AgentMode::Plan => theme::mode(),
+        AgentMode::Ask => theme::ask_mode(),
+    }
+}
+
+/// The last two path components: enough to tell concurrent sessions apart,
+/// short enough to share the row with the rest of the state.
+fn short_root(path: &Path) -> String {
+    let names: Vec<String> = path
+        .components()
+        .filter_map(|part| match part {
+            PathComponent::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    match names.as_slice() {
+        [] => path.display().to_string(),
+        [only] => only.clone(),
+        [.., parent, last] => format!("{parent}/{last}"),
     }
 }
 
@@ -300,16 +340,14 @@ fn context_percent(tokens: u32, window: Option<u32>) -> Option<u32> {
     (tokens > 0).then(|| u32::try_from(u64::from(tokens) * 100 / u64::from(window)).unwrap_or(0))
 }
 
-fn format_usage(u: &Usage) -> String {
-    let i = human(u.input_tokens);
-    let o = human(u.output_tokens);
-    let cache = human(u.cache_read_tokens);
-    let reasoning = human(u.reasoning_tokens);
-    let mut s = format!("{i} in · {o} out · {cache} cache");
-    if u.reasoning_tokens > 0 {
-        let _ = write!(s, " · {reasoning} reasoning");
-    }
-    s
+/// Share of the last turn's prompt-side tokens (`input + cache reads`, the
+/// accounting the app itself uses) that the cache answered; `None` while no
+/// prompt-side token has been recorded.
+fn cache_hit_percent(u: &Usage) -> Option<u32> {
+    let prompt = u.input_tokens.saturating_add(u.cache_read_tokens);
+    (prompt > 0).then(|| {
+        u32::try_from(u64::from(u.cache_read_tokens) * 100 / u64::from(prompt)).unwrap_or(0)
+    })
 }
 
 fn human(n: u32) -> String {
@@ -322,243 +360,50 @@ fn human(n: u32) -> String {
     }
 }
 
-pub(crate) fn truncate_str(s: &str, max_width: usize) -> String {
-    if s.width() <= max_width {
-        return s.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut width = 0;
-    for ch in s.chars() {
-        let cw = ch.width().unwrap_or(0);
-        if width + cw > max_width.saturating_sub(1) {
-            break;
-        }
-        out.push(ch);
-        width += cw;
-    }
-    out.push('…');
-    out
-}
-
-fn truncate_line(line: Line<'_>, max_width: usize) -> Line<'_> {
-    let mut spans = Vec::new();
-    let mut width = 0usize;
-    for span in line.spans {
-        let text = truncate_str(&span.content, max_width.saturating_sub(width));
-        let span_width = text.width();
-        if span_width > 0 {
-            spans.push(Span::styled(text, span.style));
-        }
-        width += span_width;
-        if width >= max_width {
-            break;
-        }
-    }
-    Line::from(spans)
-}
-
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 || text.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    for raw in text.lines() {
-        if raw.is_empty() {
-            lines.push(String::new());
-            continue;
-        }
-        let mut current = String::new();
-        let mut current_w = 0;
-        for ch in raw.chars() {
-            let cw = ch.width().unwrap_or(0);
-            if current_w + cw > width && !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
-                current_w = 0;
-            }
-            current.push(ch);
-            current_w += cw;
-        }
-        lines.push(current);
-    }
-    lines
-}
-
-/// Absolute path with `~` in place of the home directory, if it lives there.
-fn display_path(path: &Path) -> String {
-    let Some(home) = std::env::var_os("HOME") else {
-        return path.display().to_string();
-    };
-    let home = Path::new(&home);
-    let home = home.canonicalize().unwrap_or_else(|_| home.to_owned());
-    display_path_with_home(path, &home)
-}
-
-fn display_path_with_home(path: &Path, home: &Path) -> String {
-    if path == home {
-        return "~".into();
-    }
-    if let Ok(rest) = path.strip_prefix(home) {
-        return format!("~/{}", rest.display());
-    }
-    path.display().to_string()
-}
-
 #[cfg(test)]
 mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+
     use super::*;
+
+    const MODEL: &str = "deepseek-chat";
+    const ROOT: &str = "rust/oven";
+    const CTX: &str = "ctx 42% · cache 39%";
+    /// The same bar with no context window known: the count stands in for the
+    /// share.
+    const COUNTED: &str = "ctx 2.0k · cache 39%";
+    const SHORT_REPLY: &str = "current model: gpt-4o";
+
+    fn usage() -> Usage {
+        Usage {
+            input_tokens: 1200,
+            output_tokens: 56,
+            cache_read_tokens: 789,
+            reasoning_tokens: 10,
+        }
+    }
+
+    fn bar() -> StatusBar {
+        StatusBar::new(MODEL, Path::new("/home/code/rust/oven"), usage())
+            .with_effort(Some(ReasoningEffort::High))
+    }
+
     fn agent_event(event: AgentEvent) -> AppEvent {
         AppEvent::agent(event)
     }
 
-    #[test]
-    fn history_cleared_resets_usage() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.usage = Usage {
-            input_tokens: 1000,
-            output_tokens: 2000,
-            cache_read_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
-            usage: Usage::default(),
-        }));
-        assert_eq!(bar.usage, Usage::default());
+    fn row(width: u16, bar: &StatusBar, state: &State) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal.draw(|f| bar.draw_bar(f, f.area(), state)).unwrap();
+        (0..width)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol().to_string())
+            .collect()
     }
 
-    #[test]
-    fn done_updates_token_usage() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let usage = Usage {
-            input_tokens: 1234,
-            output_tokens: 56,
-            cache_read_tokens: 789,
-            reasoning_tokens: 10,
-        };
-        bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
-            usage,
-            duration_ms: 0,
-        })));
-        assert_eq!(bar.usage, usage);
-    }
-
-    #[test]
-    fn usage_event_updates_token_usage() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let usage = Usage {
-            input_tokens: 1234,
-            output_tokens: 56,
-            cache_read_tokens: 789,
-            reasoning_tokens: 10,
-        };
-        bar.on_event(&agent_event(AgentEvent::Usage { usage }));
-        assert_eq!(bar.usage, usage);
-    }
-
-    #[test]
-    fn completed_replaces_usage_with_last_turn() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
-            usage: Usage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_read_tokens: 0,
-                reasoning_tokens: 0,
-            },
-            duration_ms: 0,
-        })));
-        bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
-            usage: Usage {
-                input_tokens: 20,
-                output_tokens: 8,
-                cache_read_tokens: 0,
-                reasoning_tokens: 0,
-            },
-            duration_ms: 0,
-        })));
-        assert_eq!(bar.usage.input_tokens, 20);
-        assert_eq!(bar.usage.output_tokens, 8);
-    }
-
-    #[test]
-    fn rewound_syncs_token_usage() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.usage = Usage {
-            input_tokens: 1000,
-            output_tokens: 2000,
-            cache_read_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let usage = Usage {
-            input_tokens: 500,
-            output_tokens: 100,
-            cache_read_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
-            usage,
-        }));
-        assert_eq!(bar.usage, usage);
-    }
-
-    #[test]
-    fn model_changed_updates_model_and_effort() {
-        let mut bar = StatusBar::new("gpt-4o", Path::new("/tmp"), Usage::default());
-        bar.on_event(&AppEvent::state_changed(StateChange::ModelChanged {
-            model: "deepseek-chat".into(),
-            reasoning_effort: Some(ReasoningEffort::High),
-        }));
-        assert_eq!(bar.model, "deepseek-chat");
-        assert_eq!(bar.effort, Some(ReasoningEffort::High));
-
-        bar.on_event(&AppEvent::state_changed(StateChange::ModelChanged {
-            model: "gpt-4o".into(),
-            reasoning_effort: None,
-        }));
-        assert_eq!(bar.model, "gpt-4o");
-        assert_eq!(bar.effort, None);
-    }
-
-    #[test]
-    fn with_effort_sets_initial_effort() {
-        let bar = StatusBar::new("gpt-4o", Path::new("/tmp"), Usage::default())
-            .with_effort(Some(ReasoningEffort::Medium));
-        assert_eq!(bar.effort, Some(ReasoningEffort::Medium));
-    }
-
-    #[test]
-    fn initial_usage_seeds_total() {
-        let usage = Usage {
-            input_tokens: 4200,
-            output_tokens: 1300,
-            cache_read_tokens: 900,
-            reasoning_tokens: 0,
-        };
-        let bar = StatusBar::new("m", Path::new("/tmp"), usage);
-        assert_eq!(bar.usage, usage);
-    }
-
-    #[test]
-    fn reply_event_sets_reply() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&AppEvent::notification("current model: gpt-4o"));
-        assert_eq!(bar.reply.as_deref(), Some("current model: gpt-4o"));
-        assert!(bar.has_reply());
-        assert!(!bar.expire_reply());
-    }
-
-    fn notify(text: &str) -> AppEvent {
-        AppEvent::notification(text)
-    }
-
-    fn draw_reply_overlay_buffer(bar: &StatusBar) -> ratatui::buffer::Buffer {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let backend = TestBackend::new(40, 6);
-        let mut terminal = Terminal::new(backend).unwrap();
+    fn toast_buffer(bar: &StatusBar, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| bar.draw_reply_overlay(f, f.area()))
             .unwrap();
@@ -570,147 +415,238 @@ mod tests {
     }
 
     #[test]
-    fn reply_toast_never_rises_above_its_anchor() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&notify(&"reply ".repeat(120)));
-        // The transcript band, which starts below the pinned prompt.
-        let anchor = Rect::new(0, 1, 40, 9);
-
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
-        terminal
-            .draw(|f| bar.draw_reply_overlay(f, anchor))
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        assert_eq!(buf.area, Rect::new(0, 0, 40, 10));
-        // Row 0 is the pinned prompt band: it must stay untouched.
-        let top: String = (0..40).map(|x| buf[(x, 0)].symbol()).collect();
-        assert!(top.trim().is_empty(), "{top:?}");
-        assert!(buffer_text(buf).contains("reply"));
+    fn full_width_row_carries_every_segment() {
+        let bar = bar().with_context(42_000, Some(100_000));
+        let state = State::new();
+        let rendered = row(120, &bar, &state);
+        assert!(rendered.starts_with(&format!("{MODEL} high · agent · {ROOT} · {CTX}")));
     }
 
     #[test]
-    fn first_notify_does_not_flash() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&notify("Copied!"));
-        assert!(!bar.is_flashing());
-        assert!(bar.has_reply());
-        let buf = draw_reply_overlay_buffer(&bar);
-        assert!(buffer_text(&buf).contains("Copied!"));
-        assert_eq!(buf[(28, 2)].symbol(), "╭");
-        assert_eq!(buf[(38, 2)].symbol(), "╮");
-        assert_eq!(
-            buf[(30, 3)].style().fg,
-            Some(ratatui::style::Color::Rgb(255, 140, 0))
+    fn busy_row_leads_with_a_spinner() {
+        let bar = bar();
+        let mut state = State::new();
+        state.busy = true;
+        let rendered = row(120, &bar, &state);
+        assert!(rendered.starts_with(SPIN_FRAMES[0]), "{rendered}");
+    }
+
+    #[test]
+    fn narrow_row_drops_the_tail_before_cutting_numbers() {
+        let bar = bar().with_context(42_000, Some(100_000));
+        let state = State::new();
+        let rendered = row(43, &bar, &state);
+        assert!(rendered.starts_with(&format!("{MODEL} high · agent · {ROOT}")));
+        assert!(!rendered.contains(CTX), "{rendered}");
+        assert!(!rendered.contains("…"), "{rendered}");
+
+        let tight = row(31, &bar, &state);
+        assert!(
+            tight.starts_with(&format!("{MODEL} high · agent")),
+            "{tight}"
         );
+        assert!(!tight.contains(ROOT), "{tight}");
     }
 
     #[test]
-    fn new_notify_replaces_previous_notify() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&notify("Copied!"));
-        bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
-        bar.on_event(&notify("Model changed"));
+    fn the_row_reports_ratios_not_token_counts() {
+        let bar = bar().with_context(42_000, Some(100_000));
+        let rendered = row(80, &bar, &State::new());
+        assert!(rendered.contains(CTX), "{rendered}");
+        assert!(!rendered.contains(" in "), "{rendered}");
+        assert!(!rendered.contains(" out "), "{rendered}");
+        assert!(!rendered.contains("789"), "{rendered}");
 
-        assert_eq!(bar.reply.as_deref(), Some("Model changed"));
-        assert!(bar.is_flashing());
-        bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
-        let text = buffer_text(&draw_reply_overlay_buffer(&bar));
-        assert!(!text.contains("Copied!"));
-        assert!(text.contains("Model changed"));
+        let unwalked = StatusBar::new(MODEL, Path::new("/tmp"), Usage::default())
+            .with_context(42_000, Some(100_000));
+        let rendered = row(80, &unwalked, &State::new());
+        assert!(rendered.contains("ctx 42%"), "{rendered}");
+        assert!(!rendered.contains("cache"), "{rendered}");
     }
 
     #[test]
-    fn repeat_notify_flashes_then_restores() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&notify("Copied!"));
-        bar.on_event(&notify("Copied!"));
-        assert!(bar.is_flashing());
-        assert!(bar.has_reply());
-        let buf = draw_reply_overlay_buffer(&bar);
-        assert!(!buffer_text(&buf).contains("Copied!"));
-
-        bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
-        assert!(!bar.is_flashing());
-        let buf = draw_reply_overlay_buffer(&bar);
-        assert!(buffer_text(&buf).contains("Copied!"));
-        assert_eq!(
-            buf[(30, 3)].style().fg,
-            Some(ratatui::style::Color::Rgb(255, 140, 0))
+    fn an_unknown_window_falls_back_to_the_prompt_size() {
+        let bar = bar().with_context(1989, None);
+        let rendered = row(80, &bar, &State::new());
+        assert!(
+            rendered.starts_with(&format!("{MODEL} high · agent · {ROOT} · {COUNTED}")),
+            "{rendered}"
         );
+
+        let nothing = StatusBar::new(MODEL, Path::new("/tmp"), Usage::default());
+        let rendered = row(80, &nothing, &State::new());
+        assert!(!rendered.contains("ctx"), "{rendered}");
     }
 
     #[test]
-    fn reply_expires_once_ttl_elapses() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.reply = Some("hi".into());
-        bar.reply_until = Some(Instant::now() + Duration::from_secs(3));
-        assert!(!bar.expire_reply());
-        assert_eq!(bar.reply.as_deref(), Some("hi"));
-
-        bar.reply_until = Some(Instant::now() - Duration::from_millis(1));
-        assert!(bar.expire_reply());
-        assert!(bar.reply.is_none());
-        assert!(!bar.has_reply());
+    fn cache_hit_is_the_share_of_prompt_tokens_read_from_cache() {
+        assert_eq!(cache_hit_percent(&Usage::default()), None);
+        let hit = |input: u32, cache: u32| Usage {
+            input_tokens: input,
+            output_tokens: 0,
+            cache_read_tokens: cache,
+            reasoning_tokens: 0,
+        };
+        assert_eq!(cache_hit_percent(&hit(100, 0)), Some(0));
+        assert_eq!(cache_hit_percent(&hit(100, 50)), Some(33));
+        assert_eq!(cache_hit_percent(&hit(50, 50)), Some(50));
+        assert_eq!(cache_hit_percent(&hit(0, 50)), Some(100));
     }
 
     #[test]
-    fn history_cleared_and_rewound_drop_reply() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.reply = Some("hi".into());
+    fn effort_and_model_follow_the_state() {
+        let mut bar = bar();
+        assert_eq!(bar.model_label(), format!("{MODEL} high"));
+
+        bar.on_event(&AppEvent::state_changed(StateChange::ModelChanged {
+            model: "mini".into(),
+            reasoning_effort: None,
+        }));
+        assert_eq!(bar.model_label(), "mini");
+    }
+
+    #[test]
+    fn usage_events_replace_the_row_usage() {
+        let mut bar = bar();
+        bar.usage = Usage::default();
+        bar.on_event(&agent_event(AgentEvent::Turn(TurnEvent::Completed {
+            usage: usage(),
+            duration_ms: 0,
+        })));
+        assert_eq!(bar.usage, usage());
+
+        let rewound = Usage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
+            usage: rewound,
+        }));
+        assert_eq!(bar.usage, rewound);
+    }
+
+    #[test]
+    fn history_and_usage_changes_drop_the_reply() {
+        let mut bar = bar();
+        bar.on_event(&AppEvent::notification("Copied!"));
         bar.on_event(&AppEvent::state_changed(StateChange::HistoryChanged {
             revision: 1,
             reason: oven_app::HistoryChangeReason::Rewound,
         }));
-        assert!(bar.reply.is_none());
+        assert!(!bar.has_reply());
 
-        bar.reply = Some("hi".into());
+        bar.on_event(&AppEvent::notification("Copied!"));
         bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
             usage: Usage::default(),
         }));
-        assert!(bar.reply.is_none());
+        assert!(!bar.has_reply());
     }
 
     #[test]
-    fn context_changed_shows_ctx_percent() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&AppEvent::state_changed(StateChange::ContextChanged {
-            tokens: 42_000,
-            window: Some(100_000),
-        }));
+    fn reply_toast_sits_on_the_bottom_right() {
+        let mut bar = bar();
+        bar.on_event(&AppEvent::notification(SHORT_REPLY));
+        let buf = toast_buffer(&bar, 40, 6);
+        assert!(buffer_text(&buf).contains(SHORT_REPLY));
+        assert_eq!(buf.area, Rect::new(0, 0, 40, 6));
+        assert!(buffer_text(&buf).contains('╭'));
+        assert!(buffer_text(&buf).contains('╰'));
+        let orange = Color::Rgb(255, 140, 0);
+        assert!(
+            buf.content()
+                .iter()
+                .any(|cell| cell.symbol() == "c" && cell.style().fg == Some(orange))
+        );
+    }
+
+    #[test]
+    fn a_short_toast_fits_its_text() {
+        let mut bar = bar();
+        bar.on_event(&AppEvent::notification(SHORT_REPLY));
+        let buf = toast_buffer(&bar, 40, 6);
+
+        let top = (0..6)
+            .find(|y| (0..40).any(|x| buf[(x, *y)].symbol() == "╭"))
+            .unwrap();
+        let bottom = (0..6)
+            .find(|y| (0..40).any(|x| buf[(x, *y)].symbol() == "╰"))
+            .unwrap();
+        let left = (0u16..40).find(|x| buf[(*x, top)].symbol() == "╭").unwrap();
+        let right = (0u16..40).find(|x| buf[(*x, top)].symbol() == "╮").unwrap();
+
+        assert_eq!(
+            right - left + 1,
+            u16::try_from(SHORT_REPLY.width()).unwrap() + FRAME_SPAN,
+            "the box closes in around its text"
+        );
+        assert_eq!(
+            bottom - top + 1,
+            FRAME_SPAN + 1,
+            "a one-row reply is a one-row box"
+        );
+        assert!(left > 0, "the box stays clear of the left edge");
+    }
+
+    #[test]
+    fn toast_never_rises_above_its_anchor() {
+        let mut bar = bar();
+        bar.on_event(&AppEvent::notification("reply ".repeat(120)));
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        terminal
+            .draw(|f| bar.draw_reply_overlay(f, Rect::new(0, 1, 40, 9)))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let top: String = (0..40).map(|x| buf[(x, 0)].symbol()).collect();
+        assert_eq!(top.trim(), "", "{top:?}");
+        assert!(buffer_text(buf).contains("reply"));
+    }
+
+    #[test]
+    fn repeat_notification_flashes_before_it_is_read() {
+        let mut bar = bar();
+        bar.on_event(&AppEvent::notification("Copied!"));
+        assert!(!bar.is_flashing());
+
+        bar.on_event(&AppEvent::notification("Copied!"));
+        assert!(bar.is_flashing());
+        assert!(!buffer_text(&toast_buffer(&bar, 40, 6)).contains("Copied!"));
+
+        bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(buffer_text(&toast_buffer(&bar, 40, 6)).contains("Copied!"));
+    }
+
+    #[test]
+    fn reply_expires_once_the_ttl_elapses() {
+        let mut bar = bar();
+        bar.on_event(&AppEvent::notification("Copied!"));
+        assert!(!bar.expire_reply());
+
+        bar.reply_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(bar.expire_reply());
+        assert!(!bar.has_reply());
+    }
+
+    #[test]
+    fn a_new_notification_replaces_the_previous_one() {
+        let mut bar = bar();
+        bar.on_event(&AppEvent::notification("Copied!"));
+        bar.on_event(&AppEvent::notification("Model changed"));
+        assert_eq!(bar.reply.as_deref(), Some("Model changed"));
+    }
+
+    #[test]
+    fn compaction_replaces_the_context_share() {
+        let mut bar = bar().with_context(42_000, Some(100_000));
         let state = State::new();
-        let (row, _) = draw_status_bar_row(&mut bar, &state);
-        assert!(row.contains("ctx 42%"), "status bar was {row:?}");
-    }
+        assert!(row(120, &bar, &state).contains(CTX));
 
-    #[test]
-    fn ctx_percent_hidden_without_window_or_tokens() {
-        assert_eq!(context_percent(0, Some(100)), None);
-        assert_eq!(context_percent(50, None), None);
-        assert_eq!(context_percent(50, Some(0)), None);
-        assert_eq!(context_percent(50, Some(100)), Some(50));
-
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&AppEvent::state_changed(StateChange::ContextChanged {
-            tokens: 42_000,
-            window: None,
-        }));
-        let state = State::new();
-        let (row, _) = draw_status_bar_row(&mut bar, &state);
-        assert!(!row.contains("ctx"), "status bar was {row:?}");
-    }
-
-    #[test]
-    fn compaction_events_toggle_compacting_segment() {
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
         bar.on_event(&AppEvent::new(AppEventKind::Compaction(
             CompactionEvent::Started,
         )));
-        let state = State::new();
-        let (row, _) = draw_status_bar_row(&mut bar, &state);
-        assert!(row.contains("compacting context"), "status bar was {row:?}");
+        assert!(row(120, &bar, &state).contains(COMPACTING));
 
         bar.on_event(&AppEvent::new(AppEventKind::Compaction(
             CompactionEvent::Completed {
@@ -718,9 +654,6 @@ mod tests {
                 after_tokens: 10,
             },
         )));
-        let (row, _) = draw_status_bar_row(&mut bar, &state);
-        assert!(!row.contains("compacting"), "status bar was {row:?}");
-
         bar.on_event(&AppEvent::new(AppEventKind::Compaction(
             CompactionEvent::Started,
         )));
@@ -729,153 +662,49 @@ mod tests {
                 error: "boom".into(),
             },
         )));
-        let (row, _) = draw_status_bar_row(&mut bar, &state);
-        assert!(!row.contains("compacting"), "status bar was {row:?}");
-    }
-
-    fn draw_status_bar_row(
-        bar: &mut StatusBar,
-        state: &State,
-    ) -> (String, ratatui::buffer::Buffer) {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-
-        let backend = TestBackend::new(80, 1);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                bar.draw_bar(f, f.area(), state, StatusHint::Idle);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let row: String = (0..80).map(|x| buf[(x, 0)].symbol().to_string()).collect();
-        (row, buf)
+        let rendered = row(120, &bar, &state);
+        assert!(!rendered.contains(COMPACTING), "{rendered}");
+        assert!(rendered.contains(CTX), "{rendered}");
     }
 
     #[test]
-    fn effort_follows_model_with_space_and_matching_color() {
-        use ratatui::style::Color;
+    fn context_share_stays_hidden_without_window_or_tokens() {
+        assert_eq!(context_percent(0, Some(100)), None);
+        assert_eq!(context_percent(50, None), None);
+        assert_eq!(context_percent(50, Some(0)), None);
+        assert_eq!(context_percent(50, Some(100)), Some(50));
 
-        let mut bar = StatusBar::new("gpt-4o", Path::new("/tmp"), Usage::default())
-            .with_effort(Some(ReasoningEffort::High));
-        let state = State::new();
-        let (row, buf) = draw_status_bar_row(&mut bar, &state);
-        assert!(row.contains("gpt-4o high"), "status bar was {row:?}");
-        assert!(!row.contains("effort"), "status bar was {row:?}");
-        let model_at = row.find("gpt-4o").unwrap();
-        let effort_at = row.find("high").unwrap();
-        assert_eq!(effort_at, model_at + "gpt-4o ".len());
-        assert_eq!(
-            buf[(model_at as u16, 0)].style().fg,
-            Some(Color::LightYellow)
-        );
-        assert_eq!(
-            buf[(effort_at as u16, 0)].style().fg,
-            Some(Color::LightYellow)
-        );
+        let bar = bar().with_context(42_000, None);
+        assert!(!row(120, &bar, &State::new()).contains(CTX));
     }
 
     #[test]
-    fn agent_mode_appears_on_the_status_bar() {
-        use ratatui::style::Color;
-
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let state = State::new();
-        let (row, buf) = draw_status_bar_row(&mut bar, &state);
-        assert!(row.contains("agent"), "status bar was {row:?}");
-        let agent_at = row.find("agent").unwrap();
-        assert_eq!(buf[(agent_at as u16, 0)].style().fg, Some(Color::DarkGray));
+    fn mode_styles_each_agent_mode() {
+        for (mode, color) in [
+            (AgentMode::Agent, Color::DarkGray),
+            (AgentMode::Plan, Color::LightMagenta),
+            (AgentMode::Ask, Color::Green),
+        ] {
+            let bar = bar();
+            let mut state = State::new();
+            state.mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(80, 1)).unwrap();
+            terminal
+                .draw(|f| bar.draw_bar(f, f.area(), &state))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let rendered: String = (0..80).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+            let at = rendered
+                .find(mode.label())
+                .unwrap_or_else(|| panic!("{mode:?}"));
+            assert_eq!(buf[(at as u16, 0)].style().fg, Some(color), "{mode:?}");
+        }
     }
 
     #[test]
-    fn plan_mode_appears_on_the_status_bar() {
-        use ratatui::style::Color;
-
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        let mut state = State::new();
-        state.mode = AgentMode::Plan;
-        let (row, buf) = draw_status_bar_row(&mut bar, &state);
-        assert!(row.contains("plan"), "status bar was {row:?}");
-        let plan_at = row.find("plan").unwrap();
-        assert_eq!(
-            buf[(plan_at as u16, 0)].style().fg,
-            Some(Color::LightMagenta)
-        );
-    }
-
-    #[test]
-    fn reply_overlay_paints_orange_with_rounded_border() {
-        use ratatui::style::Color;
-
-        let mut bar = StatusBar::new("m", Path::new("/tmp"), Usage::default());
-        bar.on_event(&AppEvent::notification("current model: gpt-4o"));
-        let buf = draw_reply_overlay_buffer(&bar);
-        let text = buffer_text(&buf);
-
-        assert!(text.contains("current model: gpt-4o"));
-        assert!(text.contains("╭"));
-        assert!(text.contains("╰"));
-        assert!(buf.content().iter().any(|cell| {
-            cell.symbol() == "c" && cell.style().fg == Some(Color::Rgb(255, 140, 0))
-        }));
-    }
-
-    #[test]
-    fn wrap_text_splits_on_width_and_newlines() {
-        assert!(wrap_text("", 10).is_empty());
-        assert_eq!(wrap_text("abcd", 2), vec!["ab", "cd"]);
-        assert_eq!(wrap_text("a\nb", 10), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn usage_hidden_while_default() {
-        let gray = theme::dim();
-        assert!(usage_spans(&Usage::default(), gray).is_empty());
-    }
-
-    #[test]
-    fn usage_shown_once_recorded() {
-        let gray = theme::dim();
-        let usage = Usage {
-            input_tokens: 1200,
-            output_tokens: 30,
-            cache_read_tokens: 0,
-            reasoning_tokens: 0,
-        };
-        let spans = usage_spans(&usage, gray);
-        assert_eq!(spans.len(), 2);
-        assert!(spans[1].content.as_ref().contains("1.2k in"));
-    }
-
-    #[test]
-    fn home_dir_itself_becomes_tilde() {
-        assert_eq!(
-            display_path_with_home(Path::new("/home/u"), Path::new("/home/u")),
-            "~"
-        );
-    }
-
-    #[test]
-    fn path_under_home_uses_tilde_prefix() {
-        assert_eq!(
-            display_path_with_home(Path::new("/home/u/code/oven"), Path::new("/home/u")),
-            "~/code/oven"
-        );
-    }
-
-    #[test]
-    fn path_outside_home_stays_absolute() {
-        assert_eq!(
-            display_path_with_home(Path::new("/tmp/oven"), Path::new("/home/u")),
-            "/tmp/oven"
-        );
-    }
-
-    #[test]
-    fn similar_prefix_is_not_treated_as_home() {
-        assert_eq!(
-            display_path_with_home(Path::new("/home/user2/x"), Path::new("/home/user")),
-            "/home/user2/x"
-        );
+    fn short_root_keeps_the_last_two_components() {
+        assert_eq!(short_root(Path::new("/home/u/code/oven")), "code/oven");
+        assert_eq!(short_root(Path::new("/tmp")), "tmp");
+        assert_eq!(short_root(Path::new("/")), "/");
     }
 }

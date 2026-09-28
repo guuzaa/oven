@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::Style;
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use tui_textarea::{CursorMove, CursorRenderMode, TextArea, WrapMode};
 
@@ -36,7 +36,6 @@ pub enum Overlay {
     Model,
     Setup,
 }
-
 pub struct InputView {
     textarea: TextArea<'static>,
     slash_command: SlashCommandPopup,
@@ -131,6 +130,17 @@ impl InputView {
         }
     }
 
+    /// The keys the open popup answers, so the composer can state them on its
+    /// own border instead of the popup borrowing a row.
+    pub(crate) fn overlay_hint(&self) -> Option<&'static str> {
+        match self.overlay() {
+            Overlay::None | Overlay::Setup => None,
+            Overlay::Model => Some(ModelPicker::HINT),
+            Overlay::Slash => Some(SlashCommandPopup::HINT),
+            Overlay::Mention => Some(FileMentionPopup::HINT),
+        }
+    }
+
     pub fn draw_overlay(&mut self, f: &mut Frame<'_>, area: Rect) {
         match self.overlay() {
             Overlay::None => {}
@@ -139,6 +149,38 @@ impl InputView {
             Overlay::Slash => self.slash_command.draw(f, area),
             Overlay::Mention => self.file_mention.draw(f, area),
         }
+    }
+
+    pub(crate) fn draw_composer(
+        &mut self,
+        f: &mut Frame<'_>,
+        area: Rect,
+        state: &State,
+        hint: Option<&'static str>,
+    ) {
+        self.area = area;
+        let inner = draw_composer_border(f, area, self.border_style(state), hint);
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(PROMPT_COLS), Constraint::Min(1)])
+            .split(inner);
+        let active = shell::is_active(&self.text());
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                shell::prompt(state.busy, active),
+                shell::prompt_style(active),
+            )),
+            chunks[0],
+        );
+        if self.setup.is_open() {
+            draw_setup_prompt(f, chunks[1], &self.setup);
+            return;
+        }
+        self.textarea.set_style(shell::text_style(active));
+        self.textarea.set_cursor_line_style(Style::default());
+        self.textarea
+            .set_placeholder_text(shell::placeholder(active));
+        f.render_widget(&self.textarea, chunks[1]);
     }
 
     pub(crate) fn open_setup(&mut self) {
@@ -352,29 +394,7 @@ impl Component for InputView {
     }
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        self.area = area;
-        let inner = draw_composer_border(f, area, self.border_style(state));
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(PROMPT_COLS), Constraint::Min(1)])
-            .split(inner);
-        let active = shell::is_active(&self.text());
-        f.render_widget(
-            Paragraph::new(Span::styled(
-                shell::prompt(state.busy, active),
-                shell::prompt_style(active),
-            )),
-            chunks[0],
-        );
-        if self.setup.is_open() {
-            draw_setup_prompt(f, chunks[1], &self.setup);
-            return;
-        }
-        self.textarea.set_style(shell::text_style(active));
-        self.textarea.set_cursor_line_style(Style::default());
-        self.textarea
-            .set_placeholder_text(shell::placeholder(active));
-        f.render_widget(&self.textarea, chunks[1]);
+        self.draw_composer(f, area, state, None);
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
@@ -485,13 +505,23 @@ fn fits_border(area: Rect) -> bool {
     area.height > BORDER_ROWS && area.width > PROMPT_COLS + BORDER_COLS
 }
 
-fn draw_composer_border(f: &mut Frame<'_>, area: Rect, style: Style) -> Rect {
+fn draw_composer_border(
+    f: &mut Frame<'_>,
+    area: Rect,
+    style: Style,
+    hint: Option<&'static str>,
+) -> Rect {
     if !fits_border(area) {
         return area;
     }
-    let block = Block::bordered()
+    let mut block = Block::bordered()
         .border_type(theme::border_type())
         .border_style(style);
+    if let Some(hint) = hint {
+        let title =
+            Line::from(vec![Span::raw(" "), Span::styled(hint, theme::dim())]).right_aligned();
+        block = block.title_bottom(title);
+    }
     let inner = block.inner(area);
     f.render_widget(block, area);
     inner
@@ -1316,6 +1346,28 @@ mod tests {
             !out.contains("exit") && !out.contains("End the session"),
             "slash popup must not paint inside the input box: {out}"
         );
+    }
+
+    #[test]
+    fn the_composer_states_its_keys_on_the_bottom_border() {
+        const HINT: &str = "enter send · shift-tab mode";
+        let mut view = view();
+        let state = State::new();
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        terminal
+            .draw(|f| view.draw_composer(f, f.area(), &state, Some(HINT)))
+            .unwrap();
+        let bottom = |y| {
+            (0..40)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        assert!(bottom(2).contains(HINT), "{:?}", bottom(2));
+        assert_eq!(bottom(2).trim_matches(['╰', '╯', '─', ' ']), HINT);
+        assert!(!bottom(0).contains(HINT), "{:?}", bottom(0));
     }
 
     #[test]

@@ -21,7 +21,7 @@ use crate::components::paste_burst::{self, Burst};
 use crate::components::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::components::queue;
 use crate::components::shell;
-use crate::components::status::{StatusBar, StatusHint};
+use crate::components::status::StatusBar;
 use crate::components::todos::TodosWidget;
 use crate::components::transcript::Transcript;
 
@@ -30,6 +30,10 @@ use crate::components::{layout, terminal};
 /// Esc only acts when it is pressed twice inside this window, so a stray
 /// press cannot cancel a turn or rewind the transcript.
 const ESC_CONFIRM_WINDOW: Duration = Duration::from_secs(1);
+const IDLE_HINT: &str = "enter send · shift-tab mode · esc undo";
+const BUSY_HINT: &str = "esc cancel · enter queue";
+const ESC_HINT: &str = "esc again to confirm";
+const ANSWER_HINT: &str = "enter send · esc back";
 
 enum OverlayPrompt {
     Approval {
@@ -65,6 +69,14 @@ impl OverlayPrompt {
     /// Whether the open question expects its answer typed into the input box.
     fn awaits_typed_answer(&self) -> bool {
         matches!(self, Self::Question { popup, .. } if popup.awaits_typed_answer())
+    }
+
+    /// The keys the open prompt answers.
+    fn hint(&self) -> &'static str {
+        match self {
+            Self::Approval { popup, .. } | Self::LoopLimit { popup, .. } => popup.hint(),
+            Self::Question { .. } => QuestionPrompt::HINT,
+        }
     }
 }
 
@@ -656,24 +668,24 @@ impl Ui {
         if let Some(todos) = regions.todos {
             self.todos.draw(f, todos);
         }
-        self.input.draw(f, regions.input, &self.state);
+        self.input.draw_composer(
+            f,
+            regions.input,
+            &self.state,
+            composer_hint(
+                &self.input,
+                self.state.busy,
+                self.prompt.as_ref(),
+                self.esc_armed(),
+            ),
+        );
         if let Some(overlay) = regions.overlay {
             match self.prompt.as_ref() {
                 Some(prompt) => prompt.draw(f, overlay),
                 None => self.input.draw_overlay(f, overlay),
             }
         }
-        self.status.draw_bar(
-            f,
-            regions.status,
-            &self.state,
-            status_hint(
-                self.input.overlay(),
-                self.state.busy,
-                self.prompt.as_ref(),
-                self.esc_armed(),
-            ),
-        );
+        self.status.draw_bar(f, regions.status, &self.state);
         self.status.draw_reply_overlay(f, regions.transcript);
     }
 
@@ -705,34 +717,32 @@ fn is_mode_toggle(key: KeyEvent) -> bool {
         || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
-fn status_hint(
-    overlay: Overlay,
+/// The keys that apply right now, drawn on the composer border: whichever box
+/// owns the keyboard states them, and the composer falls back to its own.
+fn composer_hint(
+    input: &InputView,
     busy: bool,
     prompt: Option<&OverlayPrompt>,
     esc_armed: bool,
-) -> StatusHint {
-    match prompt {
-        Some(OverlayPrompt::Approval { .. }) => return StatusHint::Approval,
-        Some(OverlayPrompt::LoopLimit { .. }) => return StatusHint::LoopLimit,
-        Some(prompt) if prompt.awaits_typed_answer() => return StatusHint::AnswerTyping,
-        Some(OverlayPrompt::Question { .. }) => return StatusHint::Question,
-        None => {}
+) -> Option<&'static str> {
+    if let Some(prompt) = prompt {
+        return if prompt.awaits_typed_answer() {
+            Some(ANSWER_HINT)
+        } else {
+            Some(prompt.hint())
+        };
     }
-    match overlay {
-        Overlay::Slash | Overlay::Mention => StatusHint::Slash,
-        Overlay::Model | Overlay::Setup => StatusHint::Modal,
-        Overlay::None => {
-            if esc_armed {
-                StatusHint::EscArmed
-            } else if busy {
-                StatusHint::Busy
-            } else {
-                StatusHint::Idle
-            }
-        }
+    if let Some(hint) = input.overlay_hint() {
+        return Some(hint);
     }
+    Some(if esc_armed {
+        ESC_HINT
+    } else if busy {
+        BUSY_HINT
+    } else {
+        IDLE_HINT
+    })
 }
-
 enum EscAction {
     PopQueue,
     Cancel,
@@ -774,6 +784,11 @@ fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::input::InputView;
+    use crate::components::slash_command_popup::SlashCommandPopup;
+    use oven_app::config::ProviderConfig;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn esc_action_priority_queue_then_cancel_then_rewind() {
@@ -889,53 +904,55 @@ mod tests {
         assert_eq!(remaining, vec!["two", "three"]);
     }
 
+    #[tokio::test]
+    async fn the_open_popup_states_its_keys_on_the_composer_border() {
+        let root = tempdir::TempDir::new("oven-ui-hint").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.input.set_text("/");
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        terminal.draw(|f| ui.draw(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..6)
+            .map(|y| (0..60).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect();
+        let hinted = rows
+            .iter()
+            .filter(|row: &&String| row.contains(SlashCommandPopup::HINT))
+            .count();
+        assert_eq!(hinted, 1, "{rows:?}");
+        assert!(
+            rows[3].contains(SlashCommandPopup::HINT) && rows[3].contains('╰'),
+            "the hint belongs on the composer's bottom border: {rows:?}"
+        );
+    }
+
     #[test]
-    fn status_hint_follows_overlay_then_busy() {
+    fn composer_hint_follows_focus_then_state() {
+        fn input() -> InputView {
+            InputView::new(Vec::new(), ProviderConfig::default())
+        }
+
+        assert_eq!(composer_hint(&input(), true, None, false), Some(BUSY_HINT));
+        assert_eq!(composer_hint(&input(), false, None, false), Some(IDLE_HINT));
         assert_eq!(
-            status_hint(Overlay::Slash, true, None, false),
-            StatusHint::Slash
-        );
-        assert_eq!(
-            status_hint(Overlay::Setup, false, None, false),
-            StatusHint::Modal
-        );
-        assert_eq!(
-            status_hint(Overlay::Model, false, None, false),
-            StatusHint::Modal
-        );
-        assert_eq!(
-            status_hint(Overlay::None, true, None, false),
-            StatusHint::Busy
-        );
-        assert_eq!(
-            status_hint(Overlay::None, false, None, false),
-            StatusHint::Idle
-        );
-        assert_eq!(
-            status_hint(Overlay::None, false, None, true),
-            StatusHint::EscArmed,
+            composer_hint(&input(), false, None, true),
+            Some(ESC_HINT),
             "the armed Esc overrides the idle hint"
         );
-        let approval = OverlayPrompt::Approval {
-            request_id: ApprovalRequestId(1),
-            popup: ChoicePopup::approval("bash", "run ls"),
+
+        let question = OverlayPrompt::Question {
+            request_id: QuestionRequestId(1),
+            popup: QuestionPrompt::new("which one?".into(), Vec::new()),
         };
         assert_eq!(
-            status_hint(Overlay::None, true, Some(&approval), false),
-            StatusHint::Approval
+            composer_hint(&input(), false, Some(&question), false),
+            Some(QuestionPrompt::HINT),
+            "the prompt states its own keys"
         );
         assert_eq!(
-            status_hint(Overlay::None, true, Some(&approval), true),
-            StatusHint::Approval,
-            "an open prompt outranks the armed Esc"
-        );
-        let loop_limit = OverlayPrompt::LoopLimit {
-            request_id: LoopLimitRequestId(1),
-            popup: ChoicePopup::loop_limit(100),
-        };
-        assert_eq!(
-            status_hint(Overlay::None, true, Some(&loop_limit), false),
-            StatusHint::LoopLimit
+            composer_hint(&input(), true, Some(&answering_prompt()), true),
+            Some(ANSWER_HINT)
         );
     }
 

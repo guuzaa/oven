@@ -48,6 +48,8 @@ pub(crate) struct ModelPicker {
 }
 
 impl ModelPicker {
+    pub(crate) const HINT: &str = "enter select · tab complete · esc back";
+
     pub(crate) fn new(models: Vec<(String, String)>) -> Self {
         Self {
             models,

@@ -26,6 +26,8 @@ pub(crate) struct SlashCommandPopup {
 }
 
 impl SlashCommandPopup {
+    pub(crate) const HINT: &str = "tab fill · enter run · esc close";
+
     pub(crate) fn new(commands: Vec<(String, String)>) -> Self {
         Self {
             commands,

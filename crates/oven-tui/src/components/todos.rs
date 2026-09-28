@@ -5,7 +5,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::status::truncate_str;
+use super::list::truncate_str;
 use super::theme;
 
 const MAX_HEIGHT: u16 = 6;

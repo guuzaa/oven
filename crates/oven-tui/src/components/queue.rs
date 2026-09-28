@@ -3,7 +3,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
-use super::status::truncate_str;
+use super::list::truncate_str;
 use super::theme;
 
 /// Row the queued-message banner occupies, zero when nothing is queued.

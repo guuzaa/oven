@@ -6,12 +6,14 @@ use super::list;
 
 const NO_CHOICES: &str = "no choices";
 const APPROVAL_TITLE: &str = "permission required";
+const APPROVAL_HINT: &str = "y approve · n reject · ctrl-c cancel";
 const APPROVAL_ITEMS: [(&str, &str); 2] = [
     ("Approve", "run this tool"),
     ("Reject", "do not run this tool"),
 ];
 
 const LOOP_LIMIT_TITLE: &str = "agent loop limit reached";
+const LOOP_LIMIT_HINT: &str = "y continue · n exit · ctrl-c cancel";
 const LOOP_LIMIT_ITEMS: [(&str, &str); 2] = [
     ("Continue", "run another round"),
     ("Exit", "stop this turn"),
@@ -26,6 +28,7 @@ pub(crate) enum ChoicePopupAction {
 pub(crate) struct ChoicePopup {
     title: String,
     detail: String,
+    hint: &'static str,
     items: &'static [(&'static str, &'static str)],
     selected: usize,
 }
@@ -35,6 +38,7 @@ impl ChoicePopup {
         Self {
             title: format!("{APPROVAL_TITLE} · {name}"),
             detail: summary.to_string(),
+            hint: APPROVAL_HINT,
             items: &APPROVAL_ITEMS,
             selected: 0,
         }
@@ -44,6 +48,7 @@ impl ChoicePopup {
         Self {
             title: LOOP_LIMIT_TITLE.to_string(),
             detail: format!("ran {max_iters} iterations"),
+            hint: LOOP_LIMIT_HINT,
             items: &LOOP_LIMIT_ITEMS,
             selected: 0,
         }
@@ -63,6 +68,12 @@ impl ChoicePopup {
             self.items.iter().copied(),
             self.selected,
         );
+    }
+
+    /// The keys this popup answers, shown on the composer border while it
+    /// is open.
+    pub(crate) fn hint(&self) -> &'static str {
+        self.hint
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> ChoicePopupAction {

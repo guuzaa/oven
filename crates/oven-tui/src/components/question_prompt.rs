@@ -37,6 +37,8 @@ pub(crate) struct QuestionPrompt {
 }
 
 impl QuestionPrompt {
+    pub(crate) const HINT: &str = "enter answer · esc skip · ctrl-c cancel";
+
     pub(crate) fn new(question: String, options: Vec<QuestionOption>) -> Self {
         Self {
             question,

@@ -31,6 +31,8 @@ pub(crate) struct FileMentionPopup {
 }
 
 impl FileMentionPopup {
+    pub(crate) const HINT: &str = "tab insert · enter fill · esc close";
+
     pub(crate) fn new() -> Self {
         Self {
             text: String::new(),

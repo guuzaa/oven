@@ -63,6 +63,7 @@ impl From<ProviderError> for AgentError {
                 format!("model '{model}' is not available; run /setup to configure that provider")
             }
             ProviderError::NoProviderRegistered => "no provider registered; run /setup".to_string(),
+            ProviderError::InvalidRequest(reason) => format!("provider: invalid request: {reason}"),
             _ => format!("provider: {err}"),
         };
         Self { message }
