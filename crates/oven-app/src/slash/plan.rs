@@ -1,6 +1,6 @@
-use oven_agent::{Agent, AgentMode};
+use oven_agent::AgentMode;
 
-use super::{CommandOutcome, SlashCommand};
+use super::{CommandContext, CommandOutcome, SlashCommand};
 use crate::AppError;
 
 pub struct Plan;
@@ -14,13 +14,16 @@ impl SlashCommand for Plan {
         "Switch plan mode: /plan [on|off]"
     }
 
-    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
+    fn execute(&self, cx: &mut CommandContext<'_>, args: &str) -> Result<CommandOutcome, AppError> {
         match args.trim().to_ascii_lowercase().as_str() {
-            "" => Ok(CommandOutcome::Reply(format!(
-                "current mode: {}\n{}",
-                agent.mode().label(),
-                agent.todos().summary()
-            ))),
+            "" => {
+                let agent = cx.agent()?;
+                Ok(CommandOutcome::Reply(format!(
+                    "current mode: {}\n{}",
+                    agent.mode().label(),
+                    agent.todos().summary()
+                )))
+            }
             "on" => Ok(CommandOutcome::ModeChanged {
                 mode: AgentMode::Plan,
             }),
@@ -35,8 +38,10 @@ impl SlashCommand for Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subagent::Subagents;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
+    use oven_agent::Agent;
     use oven_llm::{
         ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
         Result as LlmResult, Router, StreamEvent,
@@ -79,7 +84,13 @@ mod tests {
     }
 
     fn run(args: &str) -> Result<CommandOutcome, AppError> {
-        Plan.execute(&mut fresh_agent(), args)
+        with_context(|cx| Plan.execute(cx, args))
+    }
+
+    fn with_context<T>(run: impl FnOnce(&mut CommandContext<'_>) -> T) -> T {
+        let mut agent = fresh_agent();
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        run(&mut CommandContext::with_agent(&mut agent, &subagents))
     }
 
     #[test]
@@ -92,7 +103,10 @@ mod tests {
                 status: oven_agent::TodoStatus::Pending,
             }],
         });
-        let out = Plan.execute(&mut agent, "").unwrap();
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        let out = Plan
+            .execute(&mut CommandContext::with_agent(&mut agent, &subagents), "")
+            .unwrap();
         let CommandOutcome::Reply(text) = out else {
             panic!("expected Reply, got {out:?}");
         };

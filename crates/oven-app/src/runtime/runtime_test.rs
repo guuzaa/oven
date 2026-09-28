@@ -3,7 +3,8 @@ use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent};
 use crate::session::{Session, canonical_root};
 use crate::state::{AppPhase, HistoryChangeReason, StateChange, StateEvent};
-use crate::{App, AppBuilder};
+use crate::subagent::{SubagentParts, Subagents};
+use crate::{App, AppBuilder, NodeStatus};
 use crate::{LocalShell, runtime::*};
 use std::borrow::Borrow;
 use std::sync::Mutex;
@@ -21,17 +22,41 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-fn agent_from(provider: Box<dyn Provider>) -> Agent {
+fn agent_from(provider: Box<dyn Provider>) -> AppAgents {
     let mut router = Router::new();
     router.register(provider);
-    Agent::new(router, Vec::new())
+    agents_from(Agent::new(router, Vec::new()))
+}
+
+/// Wire a bare agent onto its own event channel and an empty subagent
+/// supervisor: these tests drive the runtime, not delegation.
+fn agents_from(agent: Agent) -> AppAgents {
+    let (events, event_rx) = mpsc::unbounded_channel();
+    let (wake, wake_rx) = mpsc::unbounded_channel();
+    let subagents = Subagents::new(SubagentParts {
+        parent: agent.id(),
+        router: agent.router_handle(),
+        roles: Vec::new(),
+        max_concurrent: 1,
+        max_iters: 1,
+        events: events.clone(),
+        wake: wake.clone(),
+    });
+    drop(wake);
+    AppAgents {
+        main: agent,
+        subagents,
+        events,
+        event_rx,
+        wake_rx,
+    }
 }
 
 async fn spawn_app(app: &AppBuilder, provider: Box<dyn Provider>) -> App {
-    let agent = app.build_agent_with_provider(provider).await.unwrap();
+    let agents = app.build_agent_with_provider(provider).await.unwrap();
     spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         app.root().to_path_buf(),
         app.config().clone(),
@@ -41,18 +66,18 @@ async fn spawn_app(app: &AppBuilder, provider: Box<dyn Provider>) -> App {
 
 async fn spawn_app_session(app: &AppBuilder, provider: Box<dyn Provider>, session: Session) -> App {
     let prior = session.load_records().unwrap();
-    let mut agent = app.build_agent_with_provider(provider).await.unwrap();
+    let mut agents = app.build_agent_with_provider(provider).await.unwrap();
     let records: Vec<_> = prior
         .iter()
         .filter(|r| !matches!(r, Record::Message { message, .. } if message.role == Role::System))
         .cloned()
         .collect();
-    agent.restore_history(records);
-    hydrate_session(&mut agent, &prior);
-    agent.ensure_session_meta(canonical_root(app.root()));
+    agents.main.restore_history(records);
+    hydrate_session(&mut agents.main, &prior);
+    agents.main.ensure_session_meta(canonical_root(app.root()));
     spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         Some(session),
         app.root().to_path_buf(),
         app.config().clone(),
@@ -399,7 +424,9 @@ async fn handle_exposes_slash_commands() {
         .collect();
     assert_eq!(
         names,
-        ["clear", "compact", "exit", "model", "setup", "plan"]
+        [
+            "clear", "compact", "exit", "model", "setup", "plan", "agents"
+        ]
     );
     assert!(handle.slash_commands().iter().all(|(_, d)| !d.is_empty()));
 
@@ -436,10 +463,11 @@ async fn plan_slash_on_idle_switches() {
 #[tokio::test]
 async fn model_slash_switch_uses_request_model() {
     let seen = recorder();
-    let agent = agent_from(Box::new(RecordingProvider::new(seen.clone()))).with_model("gpt-4o");
+    let mut agents = agent_from(Box::new(RecordingProvider::new(seen.clone())));
+    agents.main.set_model("gpt-4o");
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         PathBuf::from("/tmp"),
         AppConfig::default(),
@@ -806,12 +834,14 @@ async fn slash_exit_returns_goodbye() {
 #[tokio::test]
 async fn model_slash_model_only_keeps_effort() {
     let seen = recorder();
-    let agent = agent_from(Box::new(RecordingProvider::new(seen.clone())))
-        .with_model("gpt-4o")
-        .with_reasoning_effort(oven_llm::ReasoningEffort::Low);
+    let mut agents = agent_from(Box::new(RecordingProvider::new(seen.clone())));
+    agents.main.set_model("gpt-4o");
+    agents
+        .main
+        .set_reasoning_effort(Some(oven_llm::ReasoningEffort::Low));
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         PathBuf::from("/tmp"),
         AppConfig::default(),
@@ -831,10 +861,10 @@ async fn model_slash_model_only_keeps_effort() {
 async fn setup_slash_persists_and_registers_provider() {
     let tmp = tempdir::TempDir::new("app-runtime-setup").unwrap();
     let cfg_path = tmp.path().join("config.toml");
-    let agent = agent_from(Box::new(MockProvider::new(vec![])));
+    let agents = agent_from(Box::new(MockProvider::new(vec![])));
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         tmp.path().to_path_buf(),
         AppConfig::default(),
@@ -885,43 +915,32 @@ async fn setup_slash_persists_and_registers_provider() {
     handle.shutdown().await;
 }
 
+/// `/setup` rebuilds the router from config, so a vendor configured earlier
+/// has to stay registered: switching to it must still resolve afterwards.
 #[tokio::test]
 async fn setup_registers_without_dropping_existing_vendor() {
-    let seen = recorder();
     let tmp = tempdir::TempDir::new("app-runtime-setup-keep").unwrap();
-    let agent = agent_from(Box::new(RecordingProvider::new(seen.clone()))).with_model("mock/echo");
+    let agents = agent_from(Box::new(MockProvider::new(vec![])));
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         tmp.path().to_path_buf(),
         AppConfig::default(),
         None,
     );
 
-    let mut rx = handle.subscribe();
-    handle
-        .send(AppCommand::Prompt(
-            "/setup name=deepseek api_key=sk-test".into(),
-        ))
-        .unwrap();
-    loop {
-        match rx.recv().await {
-            Some(ev)
-                if notification(&ev).is_some() || matches!(ev.kind, AppEventKind::Error { .. }) =>
-            {
-                break;
-            }
-            Some(_) => {}
-            None => panic!("channel closed before notify"),
-        }
-    }
-    let switched = handle.prompt("/model mock/echo").await.unwrap();
+    wait_setup(&handle, "/setup name=xai api_key=xai-key").await;
+    wait_setup(&handle, "/setup name=deepseek api_key=sk-test").await;
+
+    let providers = handle.configured_providers();
+    assert!(providers.contains(&"xai".to_string()), "{providers:?}");
+    assert!(providers.contains(&"deepseek".to_string()), "{providers:?}");
+    let switched = handle.prompt("/model xai/grok-4.6").await.unwrap();
     assert!(
-        switched.contains("model switched to mock/echo"),
+        switched.contains("model switched to xai/grok-4.6"),
         "{switched}"
     );
-    assert_eq!(handle.prompt("hello").await.unwrap(), "echo:mock/echo");
     handle.shutdown().await;
 }
 
@@ -929,10 +948,10 @@ async fn setup_registers_without_dropping_existing_vendor() {
 async fn model_slash_persists_model_and_effort() {
     let tmp = tempdir::TempDir::new("app-runtime-model-save").unwrap();
     let cfg_path = tmp.path().join("config.toml");
-    let agent = agent_from(Box::new(MockProvider::new(vec![])));
+    let agents = agent_from(Box::new(MockProvider::new(vec![])));
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         tmp.path().to_path_buf(),
         AppConfig::default(),
@@ -954,11 +973,13 @@ async fn model_slash_persists_model_and_effort() {
 async fn setup_uses_target_provider_reasoning_effort() {
     let tmp = tempdir::TempDir::new("app-runtime-setup-keep-effort").unwrap();
     let cfg_path = tmp.path().join("config.toml");
-    let agent = agent_from(Box::new(MockProvider::new(vec![])))
-        .with_reasoning_effort(oven_llm::ReasoningEffort::High);
+    let mut agents = agent_from(Box::new(MockProvider::new(vec![])));
+    agents
+        .main
+        .set_reasoning_effort(Some(oven_llm::ReasoningEffort::High));
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         tmp.path().to_path_buf(),
         AppConfig {
@@ -1026,10 +1047,10 @@ async fn wait_setup(handle: &App, input: &str) -> String {
 async fn setup_persists_multiple_vendors_and_reuses_saved_key() {
     let tmp = tempdir::TempDir::new("app-runtime-setup-multi").unwrap();
     let cfg_path = tmp.path().join("config.toml");
-    let agent = agent_from(Box::new(MockProvider::new(vec![])));
+    let agents = agent_from(Box::new(MockProvider::new(vec![])));
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         tmp.path().to_path_buf(),
         AppConfig::default(),
@@ -1064,10 +1085,10 @@ async fn setup_persists_multiple_vendors_and_reuses_saved_key() {
 #[tokio::test]
 async fn setup_new_vendor_without_key_errors() {
     let tmp = tempdir::TempDir::new("app-runtime-setup-need-key").unwrap();
-    let agent = agent_from(Box::new(MockProvider::new(vec![])));
+    let agents = agent_from(Box::new(MockProvider::new(vec![])));
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         tmp.path().to_path_buf(),
         AppConfig::default(),
@@ -2009,10 +2030,11 @@ async fn model_slash_switches_immediately_during_turn() {
         release: Mutex::new(Some(release_rx)),
     };
 
-    let agent = agent_from(Box::new(provider)).with_model("gpt-4o");
+    let mut agents = agent_from(Box::new(provider));
+    agents.main.set_model("gpt-4o");
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         PathBuf::from("/tmp"),
         AppConfig::default(),
@@ -2146,13 +2168,13 @@ async fn mid_turn_model_switch_publishes_the_new_context_window() {
         windowed_model(MODEL_WITH_SMALL_WINDOW, SMALL_WINDOW),
         windowed_model(MODEL_WITH_LARGE_WINDOW, LARGE_WINDOW),
     ];
-    let agent = agent_from(Box::new(GatedWindowProvider::new(
+    let mut agents = agent_from(Box::new(GatedWindowProvider::new(
         models, entered_tx, release_rx,
-    )))
-    .with_model(MODEL_WITH_SMALL_WINDOW);
+    )));
+    agents.main.set_model(MODEL_WITH_SMALL_WINDOW);
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         PathBuf::from("/tmp"),
         AppConfig::default(),
@@ -2264,11 +2286,11 @@ async fn set_mode_applies_during_in_flight_turn() {
         release: Mutex::new(Some(release_rx)),
     };
 
-    let agent = agent_from(Box::new(provider));
-    assert_eq!(agent.mode(), AgentMode::Agent);
+    let agents = agent_from(Box::new(provider));
+    assert_eq!(agents.main.mode(), AgentMode::Agent);
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         PathBuf::from("/tmp"),
         AppConfig::default(),
@@ -2488,17 +2510,16 @@ async fn spawn_loop_limit_app(tmp: &tempdir::TempDir) -> App {
         tool_response("c3", "file_read", serde_json::json!({"path": "note.txt"})),
         text_response("done"),
     ]);
-    let agent = app
-        .build_agent_with_provider(Box::new(mock))
-        .await
-        .unwrap()
-        .with_max_iters(2);
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
     spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         tmp.path().to_path_buf(),
-        AppConfig::default(),
+        AppConfig {
+            max_iters: 2,
+            ..AppConfig::default()
+        },
         None,
     )
 }
@@ -2678,13 +2699,13 @@ async fn cancel_does_not_roll_back_todos() {
     };
     let tmp = tempdir::TempDir::new("app-runtime-todo-cancel").unwrap();
     let app = AppBuilder::new(tmp.path());
-    let agent = app
+    let agents = app
         .build_agent_with_provider(Box::new(provider))
         .await
         .unwrap();
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         None,
         tmp.path().to_path_buf(),
         AppConfig::default(),
@@ -2758,10 +2779,10 @@ async fn rewind_restores_previous_todo_list() {
         text_response("second"),
     ]);
     let session = Session::open(&dir, "s1").unwrap();
-    let agent = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         Some(session),
         tmp.path().to_path_buf(),
         AppConfig::default(),
@@ -2889,10 +2910,10 @@ async fn slash_clear_does_not_copy_todos_to_new_session() {
         text_response("fresh"),
     ]);
     let session = Session::open(&dir, "s1").unwrap();
-    let agent = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
     let handle = spawn_runtime(
         AppId::next(),
-        agent,
+        agents,
         Some(session),
         tmp.path().to_path_buf(),
         AppConfig::default(),
@@ -3293,5 +3314,646 @@ async fn bang_shell_queues_behind_agent_turn() {
     assert_eq!(texts[0], "block");
     let parsed = LocalShell::try_parse(&texts[1]).unwrap();
     assert_eq!(parsed.command, "echo queued");
+    handle.shutdown().await;
+}
+
+/// A response that reports its own token usage, so a test can tell whose
+/// usage reached published state.
+fn text_response_using(text: &str, usage: Usage) -> Response {
+    Response {
+        usage: Some(usage),
+        ..text_response(text)
+    }
+}
+
+const CHILD_USAGE: Usage = Usage {
+    input_tokens: 900,
+    output_tokens: 100,
+    cache_read_tokens: 0,
+    reasoning_tokens: 0,
+};
+
+#[tokio::test]
+async fn task_runs_a_subagent_and_returns_its_report() {
+    let tmp = tempdir::TempDir::new("app-runtime-subagent").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "c1",
+            "task",
+            serde_json::json!({
+                "description": "read note.txt",
+                "prompt": "read note.txt and report what it says",
+                "role": "explore",
+            }),
+        ),
+        text_response_using("the file says hello", CHILD_USAGE),
+        text_response("done"),
+    ]);
+    let app = AppBuilder::new(tmp.path());
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let main_id = agents.main.id();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+    let mut rx = handle.subscribe();
+
+    assert_eq!(handle.prompt("delegate it").await.unwrap(), "done");
+
+    let subagents = handle.subagents();
+    assert_eq!(subagents.len(), 1, "{subagents:?}");
+    assert_eq!(subagents[0].name, "explore#1");
+    assert_eq!(subagents[0].role, "explore");
+    assert_eq!(subagents[0].label, "read note.txt");
+    assert_eq!(subagents[0].steps, 1, "the subagent ran one step");
+    assert!(matches!(subagents[0].status, NodeStatus::Completed));
+
+    let report_reached_the_model = history(&handle).iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::ToolResult { content, .. } => content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("the file says hello"))),
+            _ => false,
+        })
+    });
+    assert!(
+        report_reached_the_model,
+        "the subagent's report is the tool result"
+    );
+
+    let mut child_events = 0;
+    let mut child_ids = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEventKind::Agent(env) = &ev.kind
+            && env.agent_id != main_id
+        {
+            child_events += 1;
+            if !child_ids.contains(&env.agent_id) {
+                child_ids.push(env.agent_id);
+            }
+        }
+    }
+    assert_eq!(child_ids.len(), 1, "one subagent reported");
+    assert!(child_events > 0, "its events reached subscribers");
+    handle.shutdown().await;
+}
+
+/// With subagents disabled the delegation tools are not mounted at all, so a
+/// call to one fails the way any unknown tool does.
+#[tokio::test]
+async fn subagents_can_be_turned_off() {
+    let tmp = tempdir::TempDir::new("app-runtime-subagent-off").unwrap();
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "c1",
+            "task",
+            serde_json::json!({ "description": "x", "prompt": "y" }),
+        ),
+        text_response("no subagent for me"),
+    ]);
+    let app = AppBuilder::new(tmp.path()).with_config(AppConfig {
+        subagents: crate::config::SubagentConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..AppConfig::default()
+    });
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        app.config().clone(),
+        None,
+    );
+
+    assert_eq!(
+        handle.prompt("delegate it").await.unwrap(),
+        "no subagent for me"
+    );
+    assert!(handle.subagents().is_empty());
+    let refused = history(&handle).iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::ToolResult { content, .. } => content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if text.contains("unknown tool: task"))),
+            _ => false,
+        })
+    });
+    assert!(refused, "the unmounted tool is reported as unknown");
+    handle.shutdown().await;
+}
+
+/// A response carrying several tool calls, which the model emits whenever it
+/// wants work done in parallel.
+fn parallel_tool_response(calls: &[(&str, &str, serde_json::Value)]) -> Response {
+    Response {
+        content: calls
+            .iter()
+            .map(|(id, name, input)| ContentBlock::ToolUse {
+                id: (*id).into(),
+                name: (*name).into(),
+                input: input.clone(),
+                raw_arguments: None,
+            })
+            .collect(),
+        ..tool_response(calls[0].0, calls[0].1, calls[0].2.clone())
+    }
+}
+
+/// Answers subagents only once both of them have asked: a driver that runs
+/// its calls one after another can therefore never finish the turn.
+struct RendezvousProvider {
+    responses: std::sync::Mutex<std::collections::VecDeque<Response>>,
+    arrived: tokio::sync::Barrier,
+}
+
+impl RendezvousProvider {
+    fn new(responses: Vec<Response>) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses.into()),
+            arrived: tokio::sync::Barrier::new(2),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for RendezvousProvider {
+    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        if is_subagent(req) {
+            self.arrived.wait().await;
+            return Ok(text_response("the subagent's report"));
+        }
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more mock responses".into(),
+            })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+        None
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("rendezvous".into())
+    }
+}
+
+/// Two subagents asked for in one response have to run at the same time: each
+/// waits for the other to arrive before answering.
+#[tokio::test]
+async fn tool_calls_in_one_step_run_concurrently() {
+    let tmp = tempdir::TempDir::new("app-runtime-parallel-tasks").unwrap();
+    let delegate = |id: &'static str, label: &str| {
+        (
+            id as &'static str,
+            "task",
+            serde_json::json!({
+                "description": label,
+                "prompt": format!("look into {label}"),
+                "role": "explore",
+            }),
+        )
+    };
+    let mock = RendezvousProvider::new(vec![
+        parallel_tool_response(&[delegate("c1", "one"), delegate("c2", "two")]),
+        text_response("both done"),
+    ]);
+    let app = AppBuilder::new(tmp.path());
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+
+    let out = tokio::time::timeout(Duration::from_secs(5), handle.prompt("delegate both"))
+        .await
+        .expect("both subagents must be able to run at once")
+        .unwrap();
+    assert_eq!(out, "both done");
+    assert_eq!(handle.subagents().len(), 2);
+    handle.shutdown().await;
+}
+
+/// A subagent's usage is its own: the driver's context readout must not move
+/// when a subagent finishes.
+#[tokio::test]
+async fn a_subagent_usage_does_not_become_the_drivers_context() {
+    let tmp = tempdir::TempDir::new("app-runtime-subagent-usage").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "c1",
+            "task",
+            serde_json::json!({
+                "description": "read note.txt",
+                "prompt": "read note.txt",
+                "role": "explore",
+            }),
+        ),
+        text_response_using("report", CHILD_USAGE),
+        text_response("done"),
+    ]);
+    let app = AppBuilder::new(tmp.path());
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+
+    assert_eq!(handle.prompt("delegate it").await.unwrap(), "done");
+
+    let state = handle.state();
+    assert_eq!(
+        state.last_turn_usage.input_tokens, 10,
+        "published usage is the driver's last response"
+    );
+    assert_eq!(
+        state.subagents[0].usage, CHILD_USAGE,
+        "the subagent keeps its own"
+    );
+    handle.shutdown().await;
+}
+
+/// Answers a subagent's request slowly and the driver's from a script, so a
+/// test can cancel while a subagent is mid-flight.
+struct SlowSubagentProvider {
+    responses: std::sync::Mutex<std::collections::VecDeque<Response>>,
+    delay: Duration,
+}
+
+impl SlowSubagentProvider {
+    fn new(responses: Vec<Response>, delay: Duration) -> Self {
+        Self {
+            responses: std::sync::Mutex::new(responses.into()),
+            delay,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for SlowSubagentProvider {
+    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        if is_subagent(req) {
+            tokio::time::sleep(self.delay).await;
+            return Ok(text_response("the subagent's report"));
+        }
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more mock responses".into(),
+            })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+        None
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("slow-subagent".into())
+    }
+}
+
+/// A subagent runs with its own system prompt, which is what tells its
+/// requests apart from the driver's.
+fn is_subagent(req: &Request) -> bool {
+    req.system
+        .as_deref()
+        .is_some_and(|system| system.contains("You are a subagent"))
+}
+
+/// A view command has to work while the turn that spawned the subagent is
+/// still running: deferring `/agents` until the reply lands would mean you can
+/// never watch a subagent work. Commands that need the driver still wait.
+#[tokio::test]
+async fn agents_applies_mid_turn_while_clear_waits() {
+    let tmp = tempdir::TempDir::new("app-runtime-agents-mid-turn").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mock = SlowSubagentProvider::new(
+        vec![tool_response(
+            "c1",
+            "task",
+            serde_json::json!({
+                "description": "read note.txt",
+                "prompt": "read note.txt",
+                "role": "explore",
+            }),
+        )],
+        Duration::from_secs(30),
+    );
+    let app = AppBuilder::new(tmp.path());
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+    let mut rx = handle.subscribe();
+    handle
+        .send(AppCommand::Prompt("delegate it".into()))
+        .unwrap();
+
+    let mut asked = false;
+    let mut listed = false;
+    let mut cleared_queued = false;
+    while let Some(ev) = rx.recv().await {
+        match &ev.kind {
+            AppEventKind::Notification { text } if text.contains("queued:") => {
+                assert!(
+                    text.contains("/clear"),
+                    "only the command that needs the driver may wait: {text}"
+                );
+                cleared_queued = true;
+            }
+            AppEventKind::Notification { text } if text.contains("explore#1") => {
+                assert!(asked, "the listing answers the command we sent");
+                listed = true;
+            }
+            AppEventKind::StateChanged(StateEvent { change, .. }) => {
+                if let StateChange::SubagentsChanged { subagents } = change
+                    && !asked
+                    && subagents.iter().any(|agent| agent.status.is_active())
+                {
+                    asked = true;
+                    assert!(
+                        handle.state().phase.is_active(),
+                        "the turn is still running"
+                    );
+                    handle.send(AppCommand::Prompt("/agents".into())).unwrap();
+                    handle.send(AppCommand::Prompt("/clear".into())).unwrap();
+                }
+            }
+            _ => {}
+        }
+        if listed && cleared_queued {
+            break;
+        }
+    }
+    assert!(listed, "the listing arrived while the turn ran");
+    assert!(cleared_queued, "the history-clearing command waited");
+    handle.shutdown().await;
+}
+
+/// The text of the last thing the user said, which is what tells one turn of
+/// a scripted conversation from the next.
+fn user_prompt(req: &Request) -> String {
+    req.messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)
+        .map(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        })
+        .unwrap_or_default()
+}
+
+fn already_ran_a_tool(req: &Request) -> bool {
+    req.messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    })
+}
+
+/// A first turn that delegates to a subagent the test releases by hand, and a
+/// second that never finishes — enough to hold a message in the queue for as
+/// long as the assertion needs.
+struct UnsentProvider {
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl UnsentProvider {
+    fn new() -> (Self, Arc<tokio::sync::Notify>) {
+        let release = Arc::new(tokio::sync::Notify::new());
+        (
+            Self {
+                release: Arc::clone(&release),
+            },
+            release,
+        )
+    }
+}
+
+#[async_trait]
+impl Provider for UnsentProvider {
+    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        if is_subagent(req) {
+            self.release.notified().await;
+            return Ok(text_response("the subagent's report"));
+        }
+        if user_prompt(req).contains("two") {
+            std::future::pending::<()>().await;
+        }
+        if already_ran_a_tool(req) {
+            return Ok(text_response("the first turn is done"));
+        }
+        Ok(tool_response(
+            "c1",
+            "task",
+            serde_json::json!({
+                "description": "read note.txt",
+                "prompt": "read note.txt",
+                "role": "explore",
+            }),
+        ))
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+        None
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("unsent".into())
+    }
+}
+
+/// A message handed over while a turn runs never gets its turn if the app
+/// quits first, so the runtime counts it and hands the number back.
+#[tokio::test]
+async fn shutdown_reports_prompts_that_never_ran() {
+    let tmp = tempdir::TempDir::new("app-runtime-unsent").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let (mock, release) = UnsentProvider::new();
+    let app = AppBuilder::new(tmp.path());
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+    let main = handle.agent_id();
+    let mut rx = handle.subscribe();
+    handle.send(AppCommand::Prompt("one".into())).unwrap();
+
+    // Both arrive while the first turn is still waiting on its subagent, so
+    // neither can start a turn yet.
+    let mut queued = false;
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind
+            && let StateChange::SubagentsChanged { subagents } = change
+            && !queued
+            && subagents.iter().any(|agent| agent.status.is_active())
+        {
+            queued = true;
+            handle.send(AppCommand::Prompt("two".into())).unwrap();
+            handle.send(AppCommand::Prompt("three".into())).unwrap();
+            break;
+        }
+    }
+    assert!(
+        queued,
+        "the first turn was busy when the two messages arrived"
+    );
+
+    // Let the subagent go: the runtime takes the first of the two messages
+    // and starts a turn for it, which stays open. The second waits behind it.
+    release.notify_one();
+    let mut started = 0;
+    while let Some(ev) = rx.recv().await {
+        if matches!(
+            ev.kind,
+            AppEventKind::Agent(ref env)
+                if env.agent_id == main
+                    && matches!(env.event, AgentEvent::Turn(TurnEvent::Started))
+        ) {
+            started += 1;
+            if started == 2 {
+                break;
+            }
+        }
+    }
+
+    assert_eq!(
+        handle.shutdown().await,
+        1,
+        "only the message still waiting went unsent"
+    );
+}
+
+/// Cancelling a turn cancels the subagent it spawned, rather than leaving it
+/// running behind an abandoned tool call.
+#[tokio::test]
+async fn cancelling_a_turn_cancels_its_subagent() {
+    let tmp = tempdir::TempDir::new("app-runtime-subagent-cancel").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mock = SlowSubagentProvider::new(
+        vec![tool_response(
+            "c1",
+            "task",
+            serde_json::json!({
+                "description": "read note.txt",
+                "prompt": "read note.txt",
+                "role": "explore",
+            }),
+        )],
+        Duration::from_secs(30),
+    );
+    let app = AppBuilder::new(tmp.path());
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+    let mut rx = handle.subscribe();
+    handle
+        .send(AppCommand::Prompt("delegate it".into()))
+        .unwrap();
+
+    let mut cancelled = false;
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind
+            && let StateChange::SubagentsChanged { subagents } = change
+            && !cancelled
+            && subagents.iter().any(|agent| agent.status.is_active())
+        {
+            cancelled = true;
+            let turn_id = handle.state().phase.turn_id().expect("turn is running");
+            handle
+                .send(AppCommand::Control(ControlCommand::Cancel { turn_id }))
+                .unwrap();
+        }
+        if cancelled && matches!(handle.state().phase, AppPhase::Idle) {
+            break;
+        }
+    }
+
+    assert!(
+        cancelled,
+        "the subagent started before the turn was cancelled"
+    );
+    let subagents = handle.subagents();
+    assert!(
+        matches!(subagents[0].status, NodeStatus::Cancelled),
+        "{subagents:?}"
+    );
     handle.shutdown().await;
 }

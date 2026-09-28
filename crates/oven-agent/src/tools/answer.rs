@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolContext, ToolView};
+use crate::turn::TurnContext;
+
+use super::{Tool, ToolCaps, ToolView};
 use crate::error::AgentError;
 use crate::question::{AnswerResponse, Question, QuestionOption};
 
@@ -79,6 +81,15 @@ impl Tool for AnswerTool {
         Self::view_input(input)
     }
 
+    fn caps(&self) -> ToolCaps {
+        // A frontend shows one question at a time: a second one asked while
+        // the first waits would replace it and strand the answer.
+        ToolCaps {
+            exclusive: true,
+            ..Default::default()
+        }
+    }
+
     fn description(&self) -> &'static str {
         "Ask the user a question and wait for their answer. Use it when the request\n\
          is ambiguous, when a choice changes what you are about to build, or before\n\
@@ -125,9 +136,9 @@ impl Tool for AnswerTool {
         })
     }
 
-    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
         let question = Self::parse(args).map_err(AgentError::from)?;
-        match ctx.ask(question).await? {
+        match cx.ask(question).await? {
             AnswerResponse::Answered { answer } => Ok(format!(
                 "{USER_ANSWER_PREFIX}{}",
                 clamp(&answer, MAX_ANSWER_CHARS)
@@ -150,11 +161,9 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::question::{QuestionRequest, QuestionSender};
-    use crate::tools::NO_USER_TO_ANSWER;
+    use crate::question::{NO_USER_TO_ANSWER, QuestionRequest, QuestionSender};
     use serde_json::json;
     use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
 
     const QUESTION: &str = "which database?";
     const ANSWER: &str = "postgres";
@@ -166,10 +175,10 @@ mod tests {
     async fn run_with(
         tx: &QuestionSender,
         args: Value,
-        cancel: Option<&CancellationToken>,
+        cx: TurnContext,
     ) -> Result<String, AgentError> {
-        let ctx = ToolContext::new(cancel, Some(tx));
-        AnswerTool.run(&args, &ctx).await
+        let cx = cx.with_question_sender(tx.clone());
+        AnswerTool.run(&args, &cx).await
     }
 
     #[test]
@@ -284,9 +293,13 @@ mod tests {
                 })
                 .unwrap();
         });
-        let output = run_with(&tx, json!({ "question": QUESTION }), None)
-            .await
-            .unwrap();
+        let output = run_with(
+            &tx,
+            json!({ "question": QUESTION }),
+            TurnContext::for_test(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
         asker.await.unwrap();
     }
@@ -302,9 +315,13 @@ mod tests {
                 .send(AnswerResponse::Declined)
                 .unwrap();
         });
-        let output = run_with(&tx, json!({ "question": QUESTION }), None)
-            .await
-            .unwrap();
+        let output = run_with(
+            &tx,
+            json!({ "question": QUESTION }),
+            TurnContext::for_test(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output, USER_SKIPPED);
         asker.await.unwrap();
     }
@@ -326,7 +343,7 @@ mod tests {
                 .unwrap();
         });
         let verbose = "context ".repeat(MAX_QUESTION_CHARS);
-        let output = run_with(&tx, json!({ "question": verbose }), None)
+        let output = run_with(&tx, json!({ "question": verbose }), TurnContext::for_test())
             .await
             .unwrap();
         assert_eq!(output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
@@ -346,9 +363,13 @@ mod tests {
                 .send(AnswerResponse::Answered { answer })
                 .unwrap();
         });
-        let output = run_with(&tx, json!({ "question": QUESTION }), None)
-            .await
-            .unwrap();
+        let output = run_with(
+            &tx,
+            json!({ "question": QUESTION }),
+            TurnContext::for_test(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             output.chars().count(),
             USER_ANSWER_PREFIX.chars().count() + MAX_ANSWER_CHARS
@@ -360,9 +381,8 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_frontend_the_tool_fails() {
-        let ctx = ToolContext::new(None, None);
         let error = AnswerTool
-            .run(&json!({ "question": QUESTION }), &ctx)
+            .run(&json!({ "question": QUESTION }), &TurnContext::for_test())
             .await
             .unwrap_err();
         assert_eq!(error.message, NO_USER_TO_ANSWER);
@@ -371,9 +391,9 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_turn_stops_waiting() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let error = run_with(&tx, json!({ "question": QUESTION }), Some(&cancel))
+        let cx = TurnContext::for_test();
+        cx.cancellation.cancel();
+        let error = run_with(&tx, json!({ "question": QUESTION }), cx)
             .await
             .unwrap_err();
         assert!(error.is_cancelled());
@@ -383,7 +403,7 @@ mod tests {
     async fn malformed_arguments_never_reach_the_user() {
         let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
         assert!(
-            run_with(&tx, json!({ "question": "   " }), None)
+            run_with(&tx, json!({ "question": "   " }), TurnContext::for_test())
                 .await
                 .is_err()
         );

@@ -288,6 +288,16 @@ impl Transcript {
             .unwrap_or_else(|| self.total_lines().saturating_sub(self.height()))
     }
 
+    /// Scrolls the view by `n` wrapped lines, the same step a wheel notch
+    /// takes. A view with no composer to move a cursor in — the subagent
+    /// viewer — binds the arrow keys to this.
+    pub(crate) fn scroll_lines(&mut self, up: bool, n: u16) {
+        match up {
+            true => self.scroll_up(n),
+            false => self.scroll_down(n),
+        }
+    }
+
     pub(super) fn scroll_up(&mut self, n: u16) {
         self.top = Some(self.current_top().saturating_sub(n as usize));
     }
@@ -931,6 +941,8 @@ impl Component for Transcript {
                 AgentEvent::Tool(ToolEvent::OutputDelta { .. })
                 | AgentEvent::Tool(ToolEvent::QuestionAsked { .. })
                 | AgentEvent::Turn(TurnEvent::Started)
+                | AgentEvent::Turn(TurnEvent::StepStarted { .. })
+                | AgentEvent::Turn(TurnEvent::StepFinished { .. })
                 | AgentEvent::Usage { .. }
                 | AgentEvent::TodosChanged { .. } => {}
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
@@ -989,6 +1001,7 @@ impl Component for Transcript {
             }
             AppEventKind::StateChanged(_)
             | AppEventKind::Exited
+            | AppEventKind::Subagent(_)
             | AppEventKind::Notification { .. } => {}
             AppEventKind::Error { message } => {
                 self.close_tool_burst();

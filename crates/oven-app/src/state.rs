@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use oven_agent::{
-    Agent, AgentMode, ApprovalRequestId, LoopLimitRequestId, Question, QuestionRequestId, TodoList,
-    ToolCallId, ToolView, TurnId,
+    Agent, AgentId, AgentMode, ApprovalRequestId, LoopLimitRequestId, NodeInfo, Question,
+    QuestionRequestId, TodoList, ToolCallId, ToolView, TurnId,
 };
 use oven_llm::{Message, ModelId, Provider, ReasoningEffort, Router, Usage};
 
@@ -11,6 +11,13 @@ use crate::config::ProviderConfig;
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub phase: AppPhase,
+    /// The conversation driver. Every other agent a view sees is a subagent,
+    /// which is how an event is routed to the transcript it belongs to.
+    pub agent_id: AgentId,
+    /// Subagents in spawn order, mirrored from the registry. Shared, so
+    /// publishing state and telling the frontend it moved cost a refcount
+    /// rather than a copy of every subagent.
+    pub subagents: Arc<Vec<NodeInfo>>,
     pub mode: AgentMode,
     pub model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -44,6 +51,8 @@ impl AppState {
     ) -> Self {
         Self {
             phase: AppPhase::Idle,
+            agent_id: agent.id(),
+            subagents: Arc::new(Vec::new()),
             mode: agent.mode(),
             model: agent.model().to_string(),
             reasoning_effort: agent.reasoning_effort(),
@@ -210,5 +219,8 @@ pub enum StateChange {
     },
     ModelsChanged {
         models: Vec<(String, String)>,
+    },
+    SubagentsChanged {
+        subagents: Arc<Vec<NodeInfo>>,
     },
 }

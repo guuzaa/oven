@@ -1,19 +1,23 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, AnswerResponse, App, AppCommand, AppEvent, AppEventKind, ApprovalDecision,
+    AgentEvent, AgentId, AnswerResponse, App, AppCommand, AppEvent, AppEventKind, ApprovalDecision,
     ApprovalRequestId, CompactionEvent, ControlCommand, LoopLimitDecision, LoopLimitRequestId,
-    QuestionRequestId, ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent, invokes_command,
+    NodeInfo, QuestionRequestId, ShellEvent, StateChange, StateEvent, SubagentEvent, ToolEvent,
+    TurnEvent, invokes_command,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
+use crate::components::agents;
 use crate::components::choice_popup::{ChoicePopup, ChoicePopupAction};
 use crate::components::component::{Action, Component, KeyResult, State};
 use crate::components::input::{InputView, Overlay, display_user_input};
@@ -31,6 +35,11 @@ use crate::components::{layout, terminal};
 /// press cannot cancel a turn or rewind the transcript.
 const ESC_CONFIRM_WINDOW: Duration = Duration::from_secs(1);
 const IDLE_HINT: &str = "enter send · shift-tab mode · esc undo";
+const VIEWER_HINT: &str = "esc back to the chat · ↑↓ scroll · x stop";
+/// Lines an arrow key scrolls a subagent's transcript by.
+const VIEWER_SCROLL_LINES: u16 = 1;
+/// The viewer replaces the composer with a single hint row.
+const VIEWER_ROWS: u16 = 1;
 const BUSY_HINT: &str = "esc cancel · enter queue";
 const ESC_HINT: &str = "esc again to confirm";
 const ANSWER_HINT: &str = "enter send · esc back";
@@ -107,6 +116,18 @@ pub struct Ui {
     esc_confirm_until: Option<Instant>,
 
     transcript: Transcript,
+    /// One transcript per subagent, built from the events it reports. The
+    /// driver's own conversation stays in `transcript`.
+    views: BTreeMap<AgentId, Transcript>,
+    /// The driver. Anything else is a subagent, and its events belong to
+    /// `views`.
+    main_agent: AgentId,
+    agents: Vec<NodeInfo>,
+    /// The subagent whose transcript has taken over the screen.
+    focus: Option<AgentId>,
+    /// Where the strip was drawn, so a click can be mapped back to a row.
+    agents_area: Option<Rect>,
+
     status: StatusBar,
     input: InputView,
     todos: TodosWidget,
@@ -129,22 +150,33 @@ impl Ui {
             (state.context_tokens, state.context_window)
         };
         let todos = app.todos();
+        let agents = app.subagents();
         let configured = app.configured_providers();
         let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
         input.set_configured(configured.clone());
         if configured.is_empty() && provider.needs_setup() {
             input.open_setup();
         }
+        let main_agent = app.agent_id();
+        let state = State {
+            agents: active_agents(&agents),
+            ..State::new()
+        };
         Self {
             app,
             events,
-            state: State::new(),
+            state,
             quit: false,
             rewinding: false,
             pending: Vec::new(),
             esc_confirm_until: None,
 
             transcript: Transcript::new(),
+            views: BTreeMap::new(),
+            main_agent,
+            agents,
+            focus: None,
+            agents_area: None,
             status: StatusBar::new(model, &root, last_turn_usage)
                 .with_effort(provider.reasoning_effort)
                 .with_context(context_tokens, context_window),
@@ -167,8 +199,15 @@ impl Ui {
         let mut terminal = terminal::setup()?;
         let result = self.event_loop(&mut terminal).await;
         terminal::restore(&mut terminal)?;
+        // Whatever the user queued and never sent dies with the app, so say
+        // so where they can still read it: the alternate screen is gone by
+        // now, and a notice drawn a moment before quitting would not be.
+        let queued = std::mem::take(&mut self.pending);
         let session_id = self.app.session_id();
-        self.app.shutdown().await;
+        let unsent = self.app.shutdown().await + queued.len();
+        if unsent > 0 {
+            println!("{}", unsent_notice(unsent));
+        }
         if let Some(id) = session_id {
             println!("oven -s {id}");
         }
@@ -239,7 +278,7 @@ impl Ui {
                 self.input.paste(&text);
                 self.suppress_completions();
             }
-            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Mouse(mouse) => self.handle_mouse(mouse, self.agents_area),
             _ => {}
         }
         Ok(false)
@@ -268,6 +307,17 @@ impl Ui {
     fn apply_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Exited => self.quit = true,
+            AppEventKind::Subagent(SubagentEvent::Focus { id }) => self.focus_agent(*id),
+            // A subagent's turn is not the driver's: its events feed its own
+            // transcript and nothing else. Only the notification that it
+            // finished reaches the composer and the status bar.
+            AppEventKind::Agent(env) if env.agent_id != self.main_agent => {
+                self.views
+                    .entry(env.agent_id)
+                    .or_insert_with(Transcript::new)
+                    .on_event(ev);
+                return;
+            }
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Turn(TurnEvent::Started) => self.state.busy = true,
                 AgentEvent::Turn(TurnEvent::LoopLimitReached {
@@ -325,6 +375,7 @@ impl Ui {
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
                 StateChange::ModeChanged { mode } => self.state.mode = *mode,
                 StateChange::HistoryChanged { .. } => self.reload_history(),
+                StateChange::SubagentsChanged { subagents } => self.on_subagents(subagents),
                 _ => {}
             },
             AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {
@@ -338,6 +389,37 @@ impl Ui {
         self.input.on_event(ev);
         self.todos.on_event(ev);
         self.maybe_flush();
+    }
+
+    /// Opens a subagent's transcript, building it on first view.
+    ///
+    /// A subagent that has not said anything yet — one waiting for a slot, or
+    /// one just spawned — has no transcript of its own, and opening nothing
+    /// is worse than opening a page that says what it was asked to do. The
+    /// task's label is that page: its events fill in under it as they arrive.
+    fn focus_agent(&mut self, id: AgentId) {
+        if !self.views.contains_key(&id) {
+            let mut view = Transcript::new();
+            match self.agents.iter().find(|agent| agent.id == id) {
+                Some(agent) if !agent.label.is_empty() => view.start_user_turn(&agent.label),
+                _ => {}
+            }
+            self.views.insert(id, view);
+        }
+        self.focus = Some(id);
+    }
+
+    /// Mirrors the registry into the strip and drops what it no longer
+    /// holds: a view of a subagent nobody can reach is only memory.
+    fn on_subagents(&mut self, subagents: &[NodeInfo]) {
+        self.agents.clear();
+        self.agents.extend_from_slice(subagents);
+        self.state.agents = active_agents(subagents);
+        self.views
+            .retain(|id, _| self.agents.iter().any(|agent| agent.id == *id));
+        if self.focus.is_some_and(|id| !self.views.contains_key(&id)) {
+            self.focus = None;
+        }
     }
 
     fn maybe_flush(&mut self) {
@@ -369,6 +451,19 @@ impl Ui {
             PromptDisplay::User(text) => self.transcript.start_user_turn(&text),
             PromptDisplay::Shell(command) => self.transcript.start_shell_turn(&command),
             PromptDisplay::Quiet => {}
+        }
+    }
+
+    /// Stops what is still running before the process goes away: the turn
+    /// first, then the subagents it may have spawned. `App::shutdown` cancels
+    /// the supervisor as a backstop, but a subagent that is asked to stop is
+    /// stopped in the registry too, which is what the last frame shows.
+    fn shutdown_in_flight(&self) {
+        if self.state.busy {
+            self.send_cancel();
+        }
+        if !self.agents.is_empty() {
+            self.control(ControlCommand::StopSubagents);
         }
     }
 
@@ -492,12 +587,28 @@ impl Ui {
         true
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent) {
-        match self.transcript.handle_mouse(mouse, &self.state) {
+    fn handle_mouse(&mut self, mouse: MouseEvent, agents_area: Option<Rect>) {
+        if let Some(area) = agents_area
+            && let Some(id) = agents::row_at(area, &self.agents, mouse.row)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            self.focus_agent(id);
+            return;
+        }
+        // Whichever transcript is on screen takes the mouse: sending it to the
+        // hidden one would scroll what nobody can see, and copy the wrong text
+        // to the clipboard.
+        let result = match self.focus.and_then(|id| self.views.get_mut(&id)) {
+            Some(view) => view.handle_mouse(mouse, &self.state),
+            None => self.transcript.handle_mouse(mouse, &self.state),
+        };
+        match result {
             KeyResult::Action(Action::Notify(text)) => {
                 self.apply_event(&AppEvent::notification(text));
             }
-            KeyResult::Ignored => {
+            // The composer is not drawn while a viewer is open, so there is
+            // nothing under the mouse there to hand the event to either.
+            KeyResult::Ignored if self.focus.is_none() => {
                 self.input.handle_mouse(mouse, &self.state);
             }
             _ => {}
@@ -514,6 +625,7 @@ impl Ui {
                 self.suppress_completions();
                 result
             }
+            PromptFlow::Free if self.focus.is_some() => self.handle_viewer_key(key, esc_armed),
             PromptFlow::Free => match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     KeyResult::Action(Action::Quit)
@@ -538,9 +650,7 @@ impl Ui {
         match result {
             KeyResult::Ignored | KeyResult::Handled => false,
             KeyResult::Action(Action::Quit) => {
-                if self.state.busy {
-                    self.send_cancel();
-                }
+                self.shutdown_in_flight();
                 true
             }
             KeyResult::Action(Action::Cancel) => {
@@ -579,6 +689,40 @@ impl Ui {
         }
     }
 
+    /// A subagent's transcript has the keyboard while it is open: the
+    /// composer is not drawn, so nothing typed can leak into it. `Ctrl-C`
+    /// still quits — a modal must not be able to trap the user — and the
+    /// arrows scroll, because there is no composer cursor here to move.
+    fn handle_viewer_key(&mut self, key: KeyEvent, esc_armed: bool) -> KeyResult {
+        match key.code {
+            KeyCode::Esc => return self.handle_esc(esc_armed),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return KeyResult::Action(Action::Quit);
+            }
+            KeyCode::Char('x') if key.modifiers.is_empty() => {
+                if let Some(id) = self.focus {
+                    self.control(ControlCommand::StopSubagent { id });
+                }
+                return KeyResult::Handled;
+            }
+            KeyCode::Up | KeyCode::Down => {
+                if let Some(view) = self.focus.and_then(|id| self.views.get_mut(&id)) {
+                    view.scroll_lines(key.code == KeyCode::Up, VIEWER_SCROLL_LINES);
+                }
+                return KeyResult::Handled;
+            }
+            _ => {}
+        }
+        let result = match self.focus.and_then(|id| self.views.get_mut(&id)) {
+            Some(view) => view.handle_key(key, &self.state),
+            None => KeyResult::Ignored,
+        };
+        if let KeyResult::Action(Action::Notify(text)) = result {
+            self.apply_event(&AppEvent::notification(text));
+        }
+        KeyResult::Handled
+    }
+
     fn esc_armed(&self) -> bool {
         self.esc_confirm_until
             .is_some_and(|until| Instant::now() < until)
@@ -607,11 +751,15 @@ impl Ui {
         if matches!(action, EscAction::Ignore) {
             return KeyResult::Handled;
         }
-        if !armed {
+        if !armed && !action.acts_immediately() {
             self.esc_confirm_until = Some(Instant::now() + ESC_CONFIRM_WINDOW);
             return KeyResult::Handled;
         }
         match action {
+            EscAction::CloseViewer => {
+                self.focus = None;
+                KeyResult::Handled
+            }
             EscAction::PopQueue => {
                 if let Some(text) = self.pending.pop() {
                     self.input.set_text(&text);
@@ -641,6 +789,7 @@ impl Ui {
     fn esc_action(&self) -> EscAction {
         EscAction::new(
             self.pending.last().map(String::as_str),
+            self.focus.is_some(),
             self.state.busy,
             self.rewinding,
             self.transcript.rewind_text().as_deref(),
@@ -649,24 +798,42 @@ impl Ui {
 
     fn draw(&mut self, f: &mut Frame<'_>) {
         let area = f.area();
+        let focused = self.focus.and_then(|id| self.views.get_mut(&id));
         let overlay_height = match self.prompt.as_ref() {
             Some(prompt) => prompt.height(area.width),
             None => self.input.overlay_height(),
         };
+        let input_h = match self.focus {
+            Some(_) => VIEWER_ROWS,
+            None => self.input.height(area.width),
+        };
         let regions = layout::split(
             area,
-            self.input.height(area.width),
+            input_h,
             queue::height(&self.pending),
+            agents::height(&self.agents),
             self.todos.height(),
             overlay_height,
         );
+        self.agents_area = regions.agents;
 
-        self.transcript.draw(f, regions.transcript, &self.state);
+        match focused {
+            Some(view) => view.draw(f, regions.transcript, &self.state),
+            None => self.transcript.draw(f, regions.transcript, &self.state),
+        }
         if let Some(queue) = regions.queue {
             queue::draw(f, queue, &self.pending);
         }
+        if let Some(agents) = regions.agents {
+            agents::draw(f, agents, &self.agents);
+        }
         if let Some(todos) = regions.todos {
             self.todos.draw(f, todos);
+        }
+        if let Some(id) = self.focus {
+            self.draw_viewer_hint(f, regions.input, id);
+            self.status.draw_bar(f, regions.status, &self.state);
+            return;
         }
         self.input.draw_composer(
             f,
@@ -689,9 +856,26 @@ impl Ui {
         self.status.draw_reply_overlay(f, regions.transcript);
     }
 
-    fn wants_tick(&self) -> bool {
-        self.state.busy || self.status.has_reply() || self.esc_armed()
+    /// While a subagent's transcript owns the screen the composer has no
+    /// work to do, so its row states what the viewer answers to instead.
+    fn draw_viewer_hint(&self, f: &mut Frame<'_>, area: Rect, id: AgentId) {
+        let Some(agent) = self.agents.iter().find(|agent| agent.id == id) else {
+            return;
+        };
+        let text = format!("{} · {} · {VIEWER_HINT}", agent.name, agent.status.label());
+        agents::draw_hint(f, area, &text);
     }
+
+    fn wants_tick(&self) -> bool {
+        self.state.working() || self.status.has_reply() || self.esc_armed()
+    }
+}
+
+fn active_agents(agents: &[NodeInfo]) -> usize {
+    agents
+        .iter()
+        .filter(|agent| agent.status.is_active())
+        .count()
 }
 
 /// Classifies submitted text by the kind of turn it starts. Control commands
@@ -743,17 +927,36 @@ fn composer_hint(
         IDLE_HINT
     })
 }
+#[derive(Debug)]
 enum EscAction {
     PopQueue,
+    CloseViewer,
     Cancel,
     Rewind,
     Ignore,
 }
 
 impl EscAction {
-    fn new(queued: Option<&str>, busy: bool, rewinding: bool, last_user: Option<&str>) -> Self {
+    /// Whether the action happens on the first press. Everything that throws
+    /// work away waits for a second one; leaving a subagent's transcript
+    /// throws nothing away — the view is still there to reopen — and a screen
+    /// that ignores the first `Esc` reads as one you are stuck on.
+    fn acts_immediately(&self) -> bool {
+        matches!(self, Self::CloseViewer)
+    }
+
+    fn new(
+        queued: Option<&str>,
+        focused: bool,
+        busy: bool,
+        rewinding: bool,
+        last_user: Option<&str>,
+    ) -> Self {
         if queued.is_some() {
             return EscAction::PopQueue;
+        }
+        if focused {
+            return EscAction::CloseViewer;
         }
         if busy {
             return EscAction::Cancel;
@@ -766,6 +969,14 @@ impl EscAction {
         }
         EscAction::Ignore
     }
+}
+
+fn unsent_notice(count: usize) -> String {
+    let noun = match count {
+        1 => "message",
+        _ => "messages",
+    };
+    format!("dropped {count} queued {noun} (never sent)")
 }
 
 fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<String> {
@@ -791,37 +1002,57 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
-    fn esc_action_priority_queue_then_cancel_then_rewind() {
+    fn esc_action_priority_queue_then_viewer_then_cancel_then_rewind() {
         assert!(matches!(
-            EscAction::new(Some("q"), true, false, Some("u")),
+            EscAction::new(Some("q"), true, true, false, Some("u")),
             EscAction::PopQueue
         ));
         assert!(matches!(
-            EscAction::new(Some("q"), true, true, None),
+            EscAction::new(Some("q"), true, true, true, None),
             EscAction::PopQueue
         ));
         assert!(matches!(
-            EscAction::new(None, true, false, Some("u")),
+            EscAction::new(None, true, true, false, Some("u")),
+            EscAction::CloseViewer
+        ));
+        assert!(matches!(
+            EscAction::new(None, false, true, false, Some("u")),
             EscAction::Cancel
         ));
         assert!(matches!(
-            EscAction::new(None, false, true, Some("u")),
+            EscAction::new(None, false, false, true, Some("u")),
             EscAction::Ignore
         ));
         assert!(matches!(
-            EscAction::new(None, false, false, Some("u")),
+            EscAction::new(None, false, false, false, Some("u")),
             EscAction::Rewind
         ));
         assert!(matches!(
-            EscAction::new(None, false, false, None),
+            EscAction::new(None, false, false, false, None),
             EscAction::Ignore
         ));
     }
 
     #[test]
+    fn only_leaving_a_view_acts_on_the_first_press() {
+        assert!(EscAction::CloseViewer.acts_immediately());
+        for action in [
+            EscAction::PopQueue,
+            EscAction::Cancel,
+            EscAction::Rewind,
+            EscAction::Ignore,
+        ] {
+            assert!(
+                !action.acts_immediately(),
+                "{action:?} throws work away and must be confirmed"
+            );
+        }
+    }
+
+    #[test]
     fn empty_prompt_cannot_trigger_rewind() {
         assert!(matches!(
-            EscAction::new(None, false, false, None),
+            EscAction::new(None, false, false, false, None),
             EscAction::Ignore
         ));
     }
@@ -874,6 +1105,12 @@ mod tests {
             classify_prompt_for_display("/setup name=deepseek api_key=sk-secret"),
             PromptDisplay::Quiet
         ));
+    }
+
+    #[test]
+    fn the_unsent_notice_counts_messages() {
+        assert_eq!(unsent_notice(1), "dropped 1 queued message (never sent)");
+        assert_eq!(unsent_notice(3), "dropped 3 queued messages (never sent)");
     }
 
     #[test]

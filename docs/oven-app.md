@@ -26,7 +26,9 @@ App::send(AppCommand)  ──▶  Runtime::run  ──▶  AppEvent  ──▶  
 | `src/lib.rs` | re-exports the public surface. |
 | `src/app.rs` | the `App` handle: command sender, event subscriptions, state accessors. |
 | `src/builder.rs` | service composition: config → tools, MCP servers, skills, agent. |
-| `src/runtime/mod.rs` | the runtime task itself — command loop, turn execution, persistence. |
+| `src/runtime/mod.rs` | the runtime actor — command loop, idle select, dispatch, persistence. |
+| `src/runtime/turn.rs` | what happens while a turn runs — the driver turn, shell, mid-turn `/model`, deferral. |
+| `src/subagent.rs` | delegated runs — the registry, the concurrency cap, one task per subagent. |
 
 `App` has three constructors:
 
@@ -42,6 +44,9 @@ uses the non-interactive one. `open_session(None)` resolves the newest session
 for the canonicalized root through the `cwd_latest.json` index, or starts a fresh
 one with a uuid v7 id the caller never supplies. `AppBuilder::with_config`
 bypasses the filesystem entirely, which is how the tests build an app.
+
+`App::shutdown` returns how many queued prompts the runtime dropped without
+ever running them, so a frontend can tell the user what it lost on the way out.
 
 `App::prompt` is the convenience path used by both `App::query` and the tests: it
 subscribes, sends `AppCommand::Prompt`, then collects text deltas until the turn
@@ -176,12 +181,27 @@ a session that was opened but never persisted stays invisible to `/continue`.
 `slash/` defines one trait and six built-ins; the registry is extensible:
 
 ```rust
+pub struct CommandContext<'a> {
+    pub agent: &'a mut Agent,
+    pub subagents: &'a Subagents,
+}
+
 pub trait SlashCommand: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError>;
+    fn execute(&self, cx: &mut CommandContext<'_>, args: &str) -> Result<CommandOutcome, AppError>;
 }
 ```
+
+A command reaches the driver and the subagent registry, and returns an outcome
+the runtime applies. The registry is shared state a command may act on directly
+— stopping or dropping a subagent is the registry's own business — while
+anything that moves app state still comes back as an outcome.
+
+`cx.agent()` hands back the driver, or `AppError::AgentBusy` while a running turn
+holds it. That one call is what decides whether a command applies mid-turn or
+waits: `/agents` never asks, so it works while a subagent is being watched;
+`/clear`, `/setup`, `/plan`, `/model` and `/compact` all ask, so they queue.
 
 | Command | Does |
 | --- | --- |
@@ -191,6 +211,7 @@ pub trait SlashCommand: Send + Sync {
 | `/clear` | clears history, todos and session |
 | `/exit` | emits `goodbye` and `Exited` |
 | `/plan on/off` | toggles plan mode, replying with the current mode and the mode list |
+| `/agents [stop <name\|all> \| forget <name>]` | lists subagents, or focuses, stops and drops one |
 
 Commands return a `CommandOutcome` the runtime interprets — `Reply` becomes a
 notification, `Passthrough` falls through to an agent turn, `Exit` emits
@@ -239,6 +260,42 @@ defaults; unknown names are skipped silently.
 awaits the reply, which comes back as the tool's result. It needs a frontend, so
 it fails with `no user is available to answer the question` on a bare
 `Agent`.
+
+## Subagents
+
+`subagent.rs` supervises delegated work: one registry, one concurrency cap, one
+tokio task per subagent. [`subagents.md`](./subagents.md) is the full design.
+
+`AppBuilder` composes it with the driver, because the two have to share a
+router and an event channel from the start:
+
+```text
+AppBuilder::build_agent_with_router
+  ├── tools ──► Subagents::new(roles, router, settings)
+  ├── main Agent::with_router(router, tools + task + task_output)
+  └── AppAgents { main, subagents, events, event_rx, wake_rx }
+```
+
+`AppAgents` is what `spawn_runtime` takes. The channel is the reason it exists:
+every agent — the driver and each subagent — reports there, so the runtime
+drains it in its outer loop while it is idle, not only inside a turn. The
+supervisor keeps the matching `wake` sender: a ping with no payload that says
+the registry moved, so the runtime can read the snapshot and publish
+`StateChange::SubagentsChanged` only when it actually differs.
+
+The registry is the single source of truth. `AppState.subagents` mirrors it,
+`/agents` reads it, and `task_output` reads it, so a panel and a tool can never
+disagree. Subagents are never persisted: only the `task` call and its result
+are in the driver's session, so a resumed session shows no subagents.
+
+Config:
+
+```toml
+[subagents]
+enabled = true        # mount task / task_output
+max_concurrent = 4    # further spawns wait in `queued`
+max_iters = 60        # provider round trips one subagent may take
+```
 
 `mcp/` declares MCP servers in config (`mcps.<id>`, stdio via `command`/`args`/
 `env`, or streamable HTTP via `url`/`headers`) and connects them at agent build

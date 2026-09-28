@@ -27,6 +27,15 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEvent {
     Started,
+    /// A provider round trip begins. `index` counts from 1 within the turn,
+    /// so a driver can report loop progress without reading the agent.
+    StepStarted {
+        index: usize,
+    },
+    StepFinished {
+        index: usize,
+        stop: StepStop,
+    },
     Completed {
         usage: Usage,
         duration_ms: u64,
@@ -42,6 +51,15 @@ pub enum TurnEvent {
         request_id: LoopLimitRequestId,
         max_iters: usize,
     },
+}
+
+/// Why a step ended, which is also what the loop does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStop {
+    /// The assistant asked for tools; the loop runs them and continues.
+    ToolUse,
+    /// The assistant answered; the loop stops.
+    FinalAnswer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +118,16 @@ pub enum ToolOutputStream {
     Stderr,
 }
 
+/// How a tool call ended, without its output: the output is the tool-result
+/// message the step appended to the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallOutcome {
+    Success,
+    Failed,
+    Rejected,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolResult {
     Success {
@@ -118,6 +146,15 @@ pub enum ToolResult {
 impl ToolResult {
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Success { .. })
+    }
+
+    pub fn outcome(&self) -> CallOutcome {
+        match self {
+            Self::Success { .. } => CallOutcome::Success,
+            Self::Failed { .. } => CallOutcome::Failed,
+            Self::Rejected { .. } => CallOutcome::Rejected,
+            Self::Cancelled => CallOutcome::Cancelled,
+        }
     }
 
     pub fn output(&self) -> &str {

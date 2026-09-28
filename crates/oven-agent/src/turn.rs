@@ -8,13 +8,44 @@ use crate::approval::{
     ApprovalDecision, ApprovalSender, LoopLimitDecision, LoopLimitPrompt, LoopLimitRequestId,
     LoopLimitSender, ToolApproval,
 };
+use crate::error::AgentError;
+use crate::event::{CallOutcome, StepStop};
 use crate::identity::ToolCallId;
 use crate::identity::TurnId;
 use crate::mode::AgentMode;
-use crate::question::QuestionSender;
+use crate::question::{
+    AnswerResponse, NO_USER_TO_ANSWER, Question, QuestionRequest, QuestionRequestId, QuestionSender,
+};
 use crate::tools::ToolView;
 
-type ModelSelection = (ModelId, Option<ReasoningEffort>);
+pub const DEFAULT_MAX_ITERS: usize = 200;
+
+pub type ModelSelection = (ModelId, Option<ReasoningEffort>);
+
+/// How much one run may spend before it stops on its own.
+///
+/// This belongs to the run rather than to `Agent`: the conversation driver
+/// outlives any single run, while a subagent or a graph node is entitled to
+/// its own budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunPolicy {
+    pub max_iters: usize,
+}
+
+impl Default for RunPolicy {
+    fn default() -> Self {
+        Self {
+            max_iters: DEFAULT_MAX_ITERS,
+        }
+    }
+}
+
+impl RunPolicy {
+    pub fn with_max_iters(mut self, max_iters: usize) -> Self {
+        self.max_iters = max_iters;
+        self
+    }
+}
 
 /// Shared, per-turn state that a running turn re-reads at each step.
 ///
@@ -28,6 +59,7 @@ pub struct TurnContext {
     pub cancellation: CancellationToken,
     mode: Arc<Mutex<AgentMode>>,
     model: Arc<Mutex<ModelSelection>>,
+    policy: RunPolicy,
     approval_sender: Option<ApprovalSender>,
     loop_limit_sender: Option<LoopLimitSender>,
     question_sender: Option<QuestionSender>,
@@ -46,10 +78,20 @@ impl TurnContext {
             cancellation,
             mode: Arc::new(Mutex::new(mode)),
             model: Arc::new(Mutex::new((model, reasoning_effort))),
+            policy: RunPolicy::default(),
             approval_sender: None,
             loop_limit_sender: None,
             question_sender: None,
         }
+    }
+
+    pub fn with_policy(mut self, policy: RunPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn policy(&self) -> RunPolicy {
+        self.policy
     }
 
     pub fn with_approval_sender(mut self, approval_sender: ApprovalSender) -> Self {
@@ -103,6 +145,28 @@ impl TurnContext {
         }
     }
 
+    /// Puts `question` to the user and waits for the reply, giving up as
+    /// cancelled when the turn is cancelled or the frontend goes away.
+    pub async fn ask(&self, question: Question) -> Result<AnswerResponse, AgentError> {
+        let asker = self
+            .question_sender
+            .as_ref()
+            .ok_or_else(|| AgentError::from(NO_USER_TO_ANSWER))?;
+        let (responder, response) = oneshot::channel();
+        asker
+            .send(QuestionRequest {
+                request_id: QuestionRequestId::next(),
+                question,
+                responder,
+            })
+            .map_err(|_| AgentError::from(NO_USER_TO_ANSWER))?;
+        tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => Err(AgentError::cancelled()),
+            reply = response => reply.map_err(|_| AgentError::cancelled()),
+        }
+    }
+
     pub async fn request_loop_continue(
         &self,
         request_id: LoopLimitRequestId,
@@ -150,6 +214,55 @@ impl TurnContext {
 pub struct TurnOutput {
     pub response: Message,
     pub usage: Usage,
+}
+
+/// What one provider round trip did: the assistant reply, the tool calls it
+/// asked for, and what the provider charged for it.
+///
+/// This is what a loop strategy reads between steps. Tool output is not
+/// repeated here — it is the tool-result message the step appended to the
+/// history — so a step carrying a huge `file_read` result stays cheap.
+#[derive(Debug, Clone)]
+pub struct Step {
+    pub text: String,
+    pub calls: Vec<StepCall>,
+    pub usage: Option<Usage>,
+}
+
+impl Step {
+    /// A step that asked for no tool calls ends the loop.
+    pub fn is_final(&self) -> bool {
+        self.calls.is_empty()
+    }
+
+    pub fn stop(&self) -> StepStop {
+        match self.is_final() {
+            true => StepStop::FinalAnswer,
+            false => StepStop::ToolUse,
+        }
+    }
+}
+
+/// One tool call a step dispatched, as the loop sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepCall {
+    pub call_id: ToolCallId,
+    pub name: String,
+    pub outcome: CallOutcome,
+}
+
+#[cfg(test)]
+impl TurnContext {
+    /// A bare context for tests that exercise a tool without driving a turn.
+    pub(crate) fn for_test() -> Self {
+        Self::new(
+            TurnId::next(),
+            CancellationToken::new(),
+            AgentMode::Agent,
+            ModelId::new("default"),
+            None,
+        )
+    }
 }
 
 impl TurnOutput {

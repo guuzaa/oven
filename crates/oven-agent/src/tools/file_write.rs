@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolContext, ToolPermission, ToolView, require_str, resolve_within};
+use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
+
 use crate::error::AgentError;
+use crate::turn::TurnContext;
 
 pub struct FileWriteTool {
     root: PathBuf,
@@ -50,6 +52,7 @@ impl Tool for FileWriteTool {
     fn caps(&self) -> ToolCaps {
         ToolCaps {
             permission: ToolPermission::Write,
+            exclusive: true,
             ..Default::default()
         }
     }
@@ -66,7 +69,7 @@ impl Tool for FileWriteTool {
             "required": ["path", "content"]
         })
     }
-    async fn run(&self, args: &Value, _ctx: &ToolContext<'_>) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;
         let content = require_str(args, "content", Self::NAME)?;
         let path = resolve_within(&self.root, path_str)?;
@@ -83,7 +86,9 @@ impl Tool for FileWriteTool {
 
 #[cfg(test)]
 mod tests {
-    const CTX: ToolContext<'static> = ToolContext::new(None, None);
+    fn turn() -> TurnContext {
+        TurnContext::for_test()
+    }
     use super::super::FileReadTool;
     use super::*;
     use serde_json::json;
@@ -119,13 +124,16 @@ mod tests {
         let out = write
             .run(
                 &json!({"path": "hello.txt", "content": "line one\nline two"}),
-                &CTX,
+                &turn(),
             )
             .await
             .unwrap();
         assert!(out.contains("wrote"));
         let read = FileReadTool::new(root);
-        let content = read.run(&json!({"path": "hello.txt"}), &CTX).await.unwrap();
+        let content = read
+            .run(&json!({"path": "hello.txt"}), &turn())
+            .await
+            .unwrap();
         assert_eq!(
             content,
             "file: hello.txt\nlines: 1-2\n\nL1→line one\nL2→line two"

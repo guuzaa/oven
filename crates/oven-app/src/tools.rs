@@ -9,11 +9,12 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::string::String;
+use std::sync::Arc;
 
 use oven_agent::{BUILTIN_TOOLS, Tool};
 
 /// A factory producing one tool instance. Tools are rebuilt on every agent
-/// spawn, so the registry hands out fresh `Box<dyn Tool>`s on demand.
+/// spawn, so the registry hands out fresh instances on demand.
 type ToolFactory = Box<dyn Fn() -> Box<dyn Tool> + Send + Sync>;
 
 /// Registry of named tools to mount on every agent.
@@ -75,9 +76,14 @@ impl ToolRegistry {
         self.tools.keys().map(String::as_str).collect()
     }
 
-    /// Fresh tool instances for one agent, in registry order.
-    pub fn merged_tools(&self) -> Vec<Box<dyn Tool>> {
-        self.tools.values().map(|make| make()).collect()
+    /// Fresh tool instances for one agent, in registry order. They come back
+    /// as shared handles so the main agent and the subagents it spawns mount
+    /// the same instances instead of reconnecting MCP servers per child.
+    pub fn merged_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.tools
+            .values()
+            .map(|make| Arc::from(make()) as Arc<dyn Tool>)
+            .collect()
     }
 }
 

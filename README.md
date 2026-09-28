@@ -90,6 +90,12 @@ completions format, so any compatible provider works (OpenAI `gpt-*`,
 DeepSeek `deepseek-*`, Zhipu `glm-*`, Kimi `kimi-*`). The model can read
 and write files and run shell commands; responses stream back in real time.
 
+The model can also delegate: `task` hands a self-contained job to a subagent
+with its own context — `explore` reads and searches, `general` writes and runs
+commands — and only its final answer comes back. Subagents appear in a strip
+above the composer; `/agents` lists them and each one's transcript opens in
+place of the driver's. Design notes: [`docs/subagents.md`](docs/subagents.md).
+
 ## Configuration
 
 Config lives in `.oven.toml` at the project root, or globally at
@@ -103,6 +109,14 @@ tools = ["file_read", "file_write", "bash"]
 # compaction after a turn completes. 0 disables auto-compaction; /compact
 # still works. Ignored when the active model's window size is unknown.
 compact_threshold = 0.8
+
+# Provider round trips one turn may take before the loop asks to continue.
+max_iters = 200
+
+[subagents]
+enabled = true
+max_concurrent = 4
+max_iters = 60
 
 [provider]
 name = "deepseek"
@@ -120,6 +134,9 @@ reasoning_effort = "low"
 
 - `tools` — capabilities the agent can invoke (`file_read`, `file_write`,
   `bash`, `glob`, `grep`); an empty list means the defaults.
+- `max_iters` — provider round trips one turn may take before the loop asks
+  whether to continue; `[subagents]` tunes delegation (`enabled`,
+  `max_concurrent`, and the subagents' own `max_iters`).
 - `[mcps]` — MCP servers: stdio (`command`/`args`/`env`) or remote
   streamable HTTP (`url`/`headers`); their tools are mounted as
   `<server>_<tool>`.
@@ -150,6 +167,7 @@ session id is printed so you can resume with `--session <id>`.
 | `/model` | Switch model: `/model <id> [none\|low\|medium\|high]` |
 | `/setup` | Configure provider: `/setup name=... api_key=...` |
 | `/plan`  | Toggle plan mode: `/plan [on\|off]` |
+| `/agents` | List subagents; `/agents <name>` opens one, `/agents stop <name\|all>` stops them |
 | `/compact`  | Compact conversation history into a summary; auto-compaction triggers at `compact_threshold`. |
 
 ## Build from source

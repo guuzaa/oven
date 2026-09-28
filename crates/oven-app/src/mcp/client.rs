@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
-use oven_agent::{AgentError, Tool, ToolCaps, ToolContext, ToolPermission};
+use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, TurnContext};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ResourceContents};
 use rmcp::service::{RoleClient, RunningService, serve_client};
 use rmcp::transport::TokioChildProcess;
@@ -245,7 +245,7 @@ impl Tool for McpTool {
         }
     }
 
-    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
         let arguments = args.as_object().cloned().ok_or_else(|| {
             AgentError::from(format!(
                 "mcp:{}: arguments must be an object",
@@ -255,14 +255,10 @@ impl Tool for McpTool {
         let request =
             CallToolRequestParams::new(self.remote_name.clone()).with_arguments(arguments);
 
-        let result = if let Some(cancel) = ctx.cancel() {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Err(AgentError::cancelled()),
-                res = self.caller.call_tool(request) => res,
-            }
-        } else {
-            self.caller.call_tool(request).await
+        let result = tokio::select! {
+            biased;
+            () = cx.cancellation.cancelled() => return Err(AgentError::cancelled()),
+            res = self.caller.call_tool(request) => res,
         };
         let result = result.map_err(|e| {
             AgentError::from(format!(

@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
+pub const NO_USER_TO_ANSWER: &str = "no user is available to answer the question";
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct QuestionOption {
     pub label: String,

@@ -1,5 +1,5 @@
 use oven_agent::{
-    AgentMode, AnswerResponse, ApprovalDecision, ApprovalRequestId, LoopLimitDecision,
+    AgentId, AgentMode, AnswerResponse, ApprovalDecision, ApprovalRequestId, LoopLimitDecision,
     LoopLimitRequestId, QuestionRequestId, TurnId,
 };
 
@@ -42,4 +42,10 @@ pub enum ControlCommand {
         response: AnswerResponse,
     },
     Rewind,
+    /// Stop one subagent. Cheap enough to apply mid-turn: it only cancels a
+    /// token, so nothing here waits on `&mut Agent`.
+    StopSubagent {
+        id: AgentId,
+    },
+    StopSubagents,
 }

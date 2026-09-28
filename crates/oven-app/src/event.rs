@@ -25,12 +25,21 @@ pub struct AppEvent {
 #[derive(Debug, Clone)]
 pub enum AppEventKind {
     Agent(AgentEventEnvelope),
+    Subagent(SubagentEvent),
     StateChanged(StateEvent),
     Shell(ShellEvent),
     Compaction(CompactionEvent),
     Notification { text: String },
     Error { message: String },
     Exited,
+}
+
+/// Something a frontend should do about subagents, as opposed to what they
+/// are, which is `AppState::subagents`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubagentEvent {
+    /// Open a view on one subagent.
+    Focus { id: AgentId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +99,10 @@ impl AppEvent {
 
     pub fn shell(event: ShellEvent) -> Self {
         Self::new(AppEventKind::Shell(event))
+    }
+
+    pub fn subagent(event: SubagentEvent) -> Self {
+        Self::new(AppEventKind::Subagent(event))
     }
 
     pub fn compaction(event: CompactionEvent) -> Self {

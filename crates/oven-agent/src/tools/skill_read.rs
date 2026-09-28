@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::error::AgentError;
-use crate::tools::{Tool, ToolContext};
+use crate::tools::Tool;
+
+use crate::turn::TurnContext;
 
 /// Reads the full content of a skill's `SKILL.md` by id. The system prompt
 /// only lists skill descriptions; this tool is how the model gets the body.
@@ -46,7 +48,7 @@ impl Tool for SkillReadTool {
         })
     }
 
-    async fn run(&self, args: &Value, _ctx: &ToolContext<'_>) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
         let id = args
             .get("skill_id")
             .and_then(|v| v.as_str())
@@ -63,7 +65,9 @@ impl Tool for SkillReadTool {
 
 #[cfg(test)]
 mod tests {
-    const CTX: ToolContext<'static> = ToolContext::new(None, None);
+    fn turn() -> TurnContext {
+        TurnContext::for_test()
+    }
     use super::*;
     use crate::skills::SKILL_FILE;
     use serde_json::json;
@@ -76,12 +80,18 @@ mod tests {
         let sources = Arc::new(BTreeMap::from([("files".to_string(), file.clone())]));
         let tool = SkillReadTool::new(sources);
 
-        let out = tool.run(&json!({"skill_id": "files"}), &CTX).await.unwrap();
+        let out = tool
+            .run(&json!({"skill_id": "files"}), &turn())
+            .await
+            .unwrap();
         assert_eq!(out, "full body\n");
 
         // Content is re-read from disk on every call.
         std::fs::write(&file, "updated body\n").unwrap();
-        let out = tool.run(&json!({"skill_id": "files"}), &CTX).await.unwrap();
+        let out = tool
+            .run(&json!({"skill_id": "files"}), &turn())
+            .await
+            .unwrap();
         assert_eq!(out, "updated body\n");
     }
 
@@ -89,7 +99,7 @@ mod tests {
     async fn unknown_skill_errors() {
         let tool = SkillReadTool::new(Arc::new(BTreeMap::new()));
         let err = tool
-            .run(&json!({"skill_id": "nope"}), &CTX)
+            .run(&json!({"skill_id": "nope"}), &turn())
             .await
             .unwrap_err();
         assert!(err.message.contains("unknown skill"));

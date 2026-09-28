@@ -1,3 +1,4 @@
+mod agents;
 mod clear;
 mod compact;
 mod exit;
@@ -5,17 +6,56 @@ mod model;
 mod plan;
 mod setup;
 
-use oven_agent::{Agent, AgentMode};
+use oven_agent::{Agent, AgentId, AgentMode};
 
 use crate::AppError;
 use crate::config::ProviderConfig;
+use crate::subagent::Subagents;
 
+pub use agents::Agents;
 pub use clear::Clear;
 pub use compact::Compact;
 pub use exit::Exit;
 pub(crate) use model::{Model, ModelDirective};
 pub use plan::Plan;
 pub use setup::Setup;
+
+/// What a command may reach: the conversation driver it configures, and the
+/// subagents it may list or stop. Commands stay read-mostly — anything that
+/// changes app state comes back as a [`CommandOutcome`] the runtime applies —
+/// but the subagent registry is shared state a command may act on directly.
+///
+/// The driver is optional because a running turn holds it exclusively. A
+/// command that asks for it mid-turn is deferred rather than failed, which is
+/// what keeps `/clear` and `/setup` off a turn in flight while letting
+/// `/agents` — which only ever touches the registry — apply immediately.
+pub struct CommandContext<'a> {
+    agent: Option<&'a mut Agent>,
+    pub subagents: &'a Subagents,
+}
+
+impl<'a> CommandContext<'a> {
+    /// A command running with the driver free to use.
+    pub fn with_agent(agent: &'a mut Agent, subagents: &'a Subagents) -> Self {
+        Self {
+            agent: Some(agent),
+            subagents,
+        }
+    }
+
+    /// A command running while a turn holds the driver.
+    pub fn shared(subagents: &'a Subagents) -> Self {
+        Self {
+            agent: None,
+            subagents,
+        }
+    }
+
+    /// The driver, or [`AppError::AgentBusy`] when a turn holds it.
+    pub fn agent(&mut self) -> Result<&mut Agent, AppError> {
+        self.agent.as_deref_mut().ok_or(AppError::AgentBusy)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum CommandOutcome {
@@ -33,13 +73,16 @@ pub enum CommandOutcome {
     ModeChanged {
         mode: AgentMode,
     },
+    FocusSubagent {
+        id: AgentId,
+    },
     Passthrough,
 }
 
 pub trait SlashCommand: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError>;
+    fn execute(&self, cx: &mut CommandContext<'_>, args: &str) -> Result<CommandOutcome, AppError>;
 }
 
 pub struct SlashRegistry {
@@ -61,6 +104,7 @@ impl SlashRegistry {
         r.register(Box::new(Model));
         r.register(Box::new(Setup));
         r.register(Box::new(Plan));
+        r.register(Box::new(Agents));
         r
     }
 
@@ -79,7 +123,7 @@ impl SlashRegistry {
 
     pub fn parse_and_run(
         &self,
-        agent: &mut Agent,
+        cx: &mut CommandContext<'_>,
         input: &str,
     ) -> Result<CommandOutcome, AppError> {
         let trimmed = input.trim_start();
@@ -94,7 +138,23 @@ impl SlashRegistry {
         let Some(command) = self.commands.iter().find(|c| c.name() == name) else {
             return Ok(CommandOutcome::Passthrough);
         };
-        command.execute(agent, args)
+        command.execute(cx, args)
+    }
+
+    /// Runs `input` with no driver, which succeeds only for commands that
+    /// never ask for one. `Ok(None)` means the command needs the driver, so
+    /// the runtime should defer it until the running turn ends.
+    pub fn parse_and_run_shared(
+        &self,
+        subagents: &Subagents,
+        input: &str,
+    ) -> Result<Option<CommandOutcome>, AppError> {
+        let mut cx = CommandContext::shared(subagents);
+        match self.parse_and_run(&mut cx, input) {
+            Ok(CommandOutcome::Passthrough) | Err(AppError::AgentBusy) => Ok(None),
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(error) => Err(error),
+        }
     }
 
     /// Returns the registered command name `input` invokes, without
@@ -132,6 +192,7 @@ impl Default for SlashRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subagent::Subagents;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_llm::{
@@ -175,19 +236,24 @@ mod tests {
         Agent::new(router, Vec::new())
     }
 
+    fn with_context<T>(run: impl FnOnce(&mut CommandContext<'_>) -> T) -> T {
+        let mut agent = fresh_agent();
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        let mut cx = CommandContext::with_agent(&mut agent, &subagents);
+        run(&mut cx)
+    }
+
     #[test]
     fn passthrough_when_not_slash() {
         let reg = SlashRegistry::with_builtin();
-        let mut agent = fresh_agent();
-        let outcome = reg.parse_and_run(&mut agent, "hi there").unwrap();
+        let outcome = with_context(|cx| reg.parse_and_run(cx, "hi there")).unwrap();
         assert!(matches!(outcome, CommandOutcome::Passthrough));
     }
 
     #[test]
     fn passthrough_when_unknown_command() {
         let reg = SlashRegistry::with_builtin();
-        let mut agent = fresh_agent();
-        let outcome = reg.parse_and_run(&mut agent, "/nope").unwrap();
+        let outcome = with_context(|cx| reg.parse_and_run(cx, "/nope")).unwrap();
         assert!(matches!(outcome, CommandOutcome::Passthrough));
     }
 
@@ -211,6 +277,8 @@ mod tests {
             "/setup name=deepseek api_key=sk-secret",
             "/plan on",
             "  /plan",
+            "/agents",
+            "/agents stop all",
         ] {
             assert!(invokes_command(text), "{text} must be a control command");
         }
@@ -223,13 +291,14 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 6);
+        assert_eq!(cmds.len(), 7);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "compact" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
         assert!(cmds.iter().any(|(n, d)| n == "model" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "setup" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "plan" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, d)| n == "agents" && !d.is_empty()));
     }
 
     #[test]
@@ -244,7 +313,13 @@ mod tests {
                 status: oven_agent::TodoStatus::Pending,
             }],
         });
-        let outcome = reg.parse_and_run(&mut agent, "/clear").unwrap();
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        let outcome = reg
+            .parse_and_run(
+                &mut CommandContext::with_agent(&mut agent, &subagents),
+                "/clear",
+            )
+            .unwrap();
         assert!(matches!(outcome, CommandOutcome::Cleared));
         assert_eq!(agent.history().len(), 0);
         assert!(agent.todos().is_empty());
@@ -253,8 +328,7 @@ mod tests {
     #[test]
     fn exit_returns_exit_outcome() {
         let reg = SlashRegistry::with_builtin();
-        let mut agent = fresh_agent();
-        let outcome = reg.parse_and_run(&mut agent, "/exit").unwrap();
+        let outcome = with_context(|cx| reg.parse_and_run(cx, "/exit")).unwrap();
         assert!(matches!(outcome, CommandOutcome::Exit));
     }
 
@@ -268,16 +342,17 @@ mod tests {
             fn description(&self) -> &str {
                 ""
             }
-            fn execute(&self, _a: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
+            fn execute(
+                &self,
+                _cx: &mut CommandContext<'_>,
+                args: &str,
+            ) -> Result<CommandOutcome, AppError> {
                 Ok(CommandOutcome::Reply(args.to_string()))
             }
         }
         let mut reg = SlashRegistry::new();
         reg.register(Box::new(Echo));
-        let mut agent = fresh_agent();
-        let out = reg
-            .parse_and_run(&mut agent, "/echo   hello world")
-            .unwrap();
+        let out = with_context(|cx| reg.parse_and_run(cx, "/echo   hello world")).unwrap();
         match out {
             CommandOutcome::Reply(s) => assert_eq!(s, "hello world"),
             _ => panic!("expected Reply"),

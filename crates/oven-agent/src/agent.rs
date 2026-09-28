@@ -2,6 +2,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, Provider, ReasoningEffort, Request, Response, Role,
     Router, SamplingParams, StreamCollector, StreamEvent as LlmStreamEvent, ThinkingMode,
@@ -12,17 +13,16 @@ use oven_host::{as_ms, now_ms};
 
 use crate::approval::{ApprovalDecision, ApprovalRequestId, LoopLimitDecision, LoopLimitRequestId};
 use crate::error::{AgentError, MAX_ITERS_EXCEEDED};
-use crate::event::{AgentEvent, StreamEvent, ToolEvent, ToolResult, TurnEvent};
+use crate::event::{AgentEvent, CallOutcome, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
 use crate::identity::{AgentId, ToolCallId};
 use crate::mode::{AgentMode, ToolAccess};
 use crate::prompt_template;
 use crate::sink::EventSink;
 use crate::todo::TodoList;
-use crate::tools::{Tool, ToolContext};
-use crate::turn::{TurnContext, TurnOutput};
+use crate::tools::Tool;
+use crate::turn::{Step, StepCall, TurnContext, TurnOutput};
 
-const DEFAULT_MAX_ITERS: usize = 200;
 /// Cap on a tool's output as it enters the conversation, keeping a single
 /// huge `file_read`/`bash` result from being carried (and re-encoded on
 /// every request) forever.
@@ -32,31 +32,43 @@ const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 /// (e.g. to validate a model switch) without the exclusive `&mut Agent`
 /// access a running turn holds. Reading clones the inner `Arc<Router>`
 /// snapshot (cheap, safe to hold across `.await`); mutating goes through
-/// [`Agent::update_router`].
+/// [`Agent::replace_router`].
 pub type RouterHandle = Arc<RwLock<Arc<Router>>>;
+
+/// A handle onto `router`, for callers that need the conversation driver and
+/// the agents it spawns to share one router from the start.
+pub fn router_handle(router: Router) -> RouterHandle {
+    Arc::new(RwLock::new(Arc::new(router)))
+}
 
 /// The conversation driver. Holds tools and dispatches tool calls returned by
 /// the provider until the provider replies without tool calls.
 pub struct Agent {
     id: AgentId,
     router: RouterHandle,
-    pub(crate) tools: Vec<Box<dyn Tool>>,
+    pub(crate) tools: Vec<Arc<dyn Tool>>,
     pub(crate) history: History,
     model: ModelId,
     system: Option<String>,
     mode: AgentMode,
     todos: TodoList,
     reasoning_effort: Option<ReasoningEffort>,
-    max_iters: usize,
     todo_written_this_turn: bool,
     todo_dirty: bool,
 }
 
 impl Agent {
-    pub fn new(router: Router, tools: Vec<Box<dyn Tool>>) -> Self {
+    pub fn new(router: Router, tools: Vec<Arc<dyn Tool>>) -> Self {
+        Self::with_router(router_handle(router), tools)
+    }
+
+    /// Build an agent on a router it shares with whoever handed the handle
+    /// over. A subagent joins the conversation driver's router rather than
+    /// snapshotting it, so a `/setup` or `/model` switch reaches both.
+    pub fn with_router(router: RouterHandle, tools: Vec<Arc<dyn Tool>>) -> Self {
         Self {
             id: AgentId::next(),
-            router: Arc::new(RwLock::new(Arc::new(router))),
+            router,
             tools,
             history: History::new(),
             model: ModelId::new("default"),
@@ -64,7 +76,6 @@ impl Agent {
             mode: AgentMode::Agent,
             todos: TodoList::default(),
             reasoning_effort: None,
-            max_iters: DEFAULT_MAX_ITERS,
             todo_written_this_turn: false,
             todo_dirty: false,
         }
@@ -113,18 +124,14 @@ impl Agent {
         Arc::clone(&self.router)
     }
 
-    /// Mutates the router in place (e.g. `/setup` registering a new
-    /// provider). Requires `&mut Agent`, so this only ever runs when no
-    /// turn holds the agent, which guarantees no [`Agent::router`] snapshot
-    /// is outstanding for `Arc::get_mut` to contend with.
-    ///
-    /// # Panics
-    /// Panics if a [`Agent::router`] snapshot is still alive when `f` runs.
-    pub fn update_router(&mut self, f: impl FnOnce(&mut Router)) {
+    /// Swaps in a freshly built router (e.g. `/setup` registering a new
+    /// provider). Replacing the snapshot rather than mutating it in place is
+    /// what makes this safe while another agent shares the same handle: a
+    /// reader that captured the old router finishes its request on it, and
+    /// the next reader gets the new one.
+    pub fn replace_router(&mut self, router: Router) {
         let mut guard = self.router.write().unwrap_or_else(PoisonError::into_inner);
-        let router =
-            Arc::get_mut(&mut guard).expect("router mutated while a snapshot was outstanding");
-        f(router);
+        *guard = Arc::new(router);
     }
 
     pub fn set_model(&mut self, model: impl Into<ModelId>) {
@@ -169,11 +176,6 @@ impl Agent {
     /// Set the reasoning effort for provider calls.
     pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
         self.reasoning_effort = Some(effort);
-        self
-    }
-
-    pub fn with_max_iters(mut self, n: usize) -> Self {
-        self.max_iters = n;
         self
     }
 
@@ -310,21 +312,6 @@ impl Agent {
         }
     }
 
-    async fn dispatch(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        ctx: &TurnContext,
-    ) -> Result<String, AgentError> {
-        let tool = self
-            .tools
-            .iter()
-            .find(|t| t.name() == name)
-            .ok_or_else(|| AgentError::from(format!("unknown tool: {name}")))?;
-        let tool_ctx = ToolContext::new(Some(&ctx.cancellation), ctx.question_sender());
-        tool.run(args, &tool_ctx).await
-    }
-
     async fn complete_response(
         &mut self,
         sink: &mut impl EventSink,
@@ -405,42 +392,20 @@ impl Agent {
         }
     }
 
-    async fn run_tool(
-        &mut self,
-        name: &str,
-        input: &serde_json::Value,
-        ctx: &TurnContext,
-        writes_todos: bool,
-        wrote_todo: &mut bool,
-        sink: &mut impl EventSink,
-    ) -> ToolResult {
-        match self.dispatch(name, input, ctx).await {
-            Ok(output) => {
-                if writes_todos && let Ok(list) = TodoList::parse(input) {
-                    self.todos = list.clone();
-                    self.todo_written_this_turn = true;
-                    *wrote_todo = true;
-                    sink.emit(AgentEvent::TodosChanged { todos: list });
-                }
-                ToolResult::Success {
-                    output: truncate(&output, MAX_TOOL_OUTPUT_BYTES),
-                }
-            }
-            Err(error) => {
-                let output = truncate(&format!("error: {error}"), MAX_TOOL_OUTPUT_BYTES);
-                ToolResult::Failed {
-                    error: error.to_string(),
-                    output: Some(output),
-                }
-            }
-        }
-    }
-
-    async fn step(
+    /// One provider round trip: ask, commit the reply, run the tools it asked
+    /// for. [`Agent::run`] is one loop policy over this; a strategy of its own
+    /// drives it step by step instead, and reads the returned [`Step`] to
+    /// decide what to do next.
+    ///
+    /// The calls of one step run at the same time. That is what the system
+    /// prompt promises the model when it asks it to batch independent calls,
+    /// and it is the difference between three subagents working in parallel
+    /// and three subagents working one after another.
+    pub async fn step(
         &mut self,
         sink: &mut impl EventSink,
         ctx: &TurnContext,
-    ) -> Result<Option<String>, AgentError> {
+    ) -> Result<Step, AgentError> {
         self.mode = ctx.mode();
         (self.model, self.reasoning_effort) = ctx.model();
         let (response, thinking) = self.complete_response(sink).await?;
@@ -455,83 +420,90 @@ impl Agent {
             sink.emit(AgentEvent::Usage { usage: *usage });
         }
 
+        let text = response.text();
+        let usage = response.usage;
         if !response.has_tool_use() {
-            let text = response.text();
-            return Ok(Some(text));
+            return Ok(Step {
+                text,
+                calls: Vec::new(),
+                usage,
+            });
         }
 
-        let mut wrote_todo = false;
-        for block in response.tool_uses() {
-            let ContentBlock::ToolUse {
-                id, name, input, ..
-            } = block
-            else {
-                continue;
-            };
-            let view = crate::tools::present_tool(name, input);
-            let tool = self.tools.iter().find(|tool| tool.name() == name);
-            let writes_todos = tool.is_some_and(|tool| tool.caps().writes_todos);
-            let access = tool.map(|tool| ctx.mode().tool_access(tool.caps().permission));
-            let call_id = ToolCallId::next();
-            let started = Instant::now();
-            let result = match access {
-                None => ToolResult::Failed {
-                    error: format!("unknown tool: {name}"),
-                    output: Some(format!("unknown tool: {name}")),
-                },
-                Some(ToolAccess::Hidden) => ToolResult::Rejected {
-                    reason: format!("tool '{name}' is unavailable in Ask mode"),
-                },
-                Some(ToolAccess::RequiresApproval) => {
-                    let request_id = ApprovalRequestId::next();
-                    sink.emit(AgentEvent::Tool(ToolEvent::ApprovalRequested {
-                        request_id,
-                        call_id,
-                        name: name.clone(),
-                        view: view.clone(),
-                    }));
-                    match ctx
-                        .request_approval(request_id, call_id, name.clone(), view.clone())
-                        .await
-                    {
-                        Some(ApprovalDecision::Approved) => {
-                            sink.emit(AgentEvent::Tool(ToolEvent::Started {
-                                call_id,
-                                name: name.clone(),
-                                view,
-                            }));
-                            log_tool_started(name, call_id);
-                            self.run_tool(name, input, ctx, writes_todos, &mut wrote_todo, sink)
-                                .await
-                        }
-                        Some(ApprovalDecision::Rejected) => ToolResult::Rejected {
-                            reason:
-                                "tool execution was not performed: the user declined permission"
-                                    .into(),
-                        },
-                        None => return Err(AgentError::cancelled()),
-                    }
-                }
-                Some(ToolAccess::Allowed) => {
-                    sink.emit(AgentEvent::Tool(ToolEvent::Started {
-                        call_id,
-                        name: name.clone(),
-                        view,
-                    }));
-                    log_tool_started(name, call_id);
-                    self.run_tool(name, input, ctx, writes_todos, &mut wrote_todo, sink)
-                        .await
-                }
-            };
-            log_tool_finished(name, call_id, &result, started);
-            let summary = result.output().to_string();
-            let is_error = !result.is_success();
-            sink.emit(AgentEvent::Tool(ToolEvent::Finished { call_id, result }));
-            self.history
-                .push(Message::tool_result(id.clone(), summary, is_error));
-        }
+        let planned = self.plan_calls(&response);
+        let gates = gate_calls(&planned, ctx, sink).await?;
+        let records = run_calls(&planned, gates, ctx, sink).await;
+        let (calls, wrote_todo) = self.commit_calls(&planned, records, sink);
         self.todo_dirty = !wrote_todo;
-        Ok(None)
+        Ok(Step { text, calls, usage })
+    }
+
+    /// Resolves the response's calls against the mounted tools before any of
+    /// them runs.
+    fn plan_calls(&self, response: &Response) -> Vec<PlannedCall> {
+        response
+            .tool_uses()
+            .filter_map(|block| {
+                let ContentBlock::ToolUse {
+                    id, name, input, ..
+                } = block
+                else {
+                    return None;
+                };
+                let tool = self.tools.iter().find(|tool| tool.name() == name).cloned();
+                let caps = tool.as_ref().map(|tool| tool.caps());
+                Some(PlannedCall {
+                    id: id.clone(),
+                    call_id: ToolCallId::next(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    view: crate::tools::present_tool(name, input),
+                    writes_todos: caps.is_some_and(|caps| caps.writes_todos),
+                    exclusive: caps.is_some_and(|caps| caps.exclusive),
+                    tool,
+                })
+            })
+            .collect()
+    }
+
+    /// Writes what each call left behind, in the order the model asked for it:
+    /// a provider expects one tool result per call, in that order.
+    fn commit_calls(
+        &mut self,
+        planned: &[PlannedCall],
+        records: Vec<CallRecord>,
+        sink: &mut impl EventSink,
+    ) -> (Vec<StepCall>, bool) {
+        let mut calls = Vec::with_capacity(planned.len());
+        let mut wrote_todo = false;
+        for (call, record) in planned.iter().zip(records) {
+            calls.push(StepCall {
+                call_id: call.call_id,
+                name: call.name.clone(),
+                outcome: record.outcome,
+            });
+            wrote_todo |= self.commit_todo(call, sink);
+            self.history.push(Message::tool_result(
+                call.id.clone(),
+                record.summary,
+                record.is_error,
+            ));
+        }
+        (calls, wrote_todo)
+    }
+
+    /// A `todo_write` call replaces the checklist with what its arguments say.
+    fn commit_todo(&mut self, call: &PlannedCall, sink: &mut impl EventSink) -> bool {
+        if !call.writes_todos {
+            return false;
+        }
+        let Ok(list) = TodoList::parse(&call.input) else {
+            return false;
+        };
+        self.todos = list.clone();
+        self.todo_written_this_turn = true;
+        sink.emit(AgentEvent::TodosChanged { todos: list });
+        true
     }
 
     #[tracing::instrument(name = "agent.turn", skip_all, fields(turn_id = ctx.turn_id.0, model = %self.model))]
@@ -546,26 +518,31 @@ impl Agent {
 
         self.todo_written_this_turn = false;
         self.dismiss_finished_todos(sink);
+        let policy = ctx.policy();
         let turn = async {
             self.history.push(Message::user_text(input));
 
+            let mut index = 0;
             loop {
-                for _ in 0..self.max_iters {
-                    match self.step(sink, ctx).await {
-                        Ok(Some(final_text)) => {
-                            let usage = self.last_turn_usage();
-                            let duration_ms = self.history.elapsed_ms();
-                            sink.emit(AgentEvent::Turn(TurnEvent::Completed {
-                                usage,
-                                duration_ms,
-                            }));
-                            return Ok(TurnOutput {
-                                response: Message::assistant_text(final_text),
-                                usage,
-                            });
-                        }
-                        Ok(None) => {}
-                        Err(e) => return Err(e),
+                for _ in 0..policy.max_iters {
+                    index += 1;
+                    sink.emit(AgentEvent::Turn(TurnEvent::StepStarted { index }));
+                    let step = self.step(sink, ctx).await?;
+                    sink.emit(AgentEvent::Turn(TurnEvent::StepFinished {
+                        index,
+                        stop: step.stop(),
+                    }));
+                    if step.is_final() {
+                        let usage = self.last_turn_usage();
+                        let duration_ms = self.history.elapsed_ms();
+                        sink.emit(AgentEvent::Turn(TurnEvent::Completed {
+                            usage,
+                            duration_ms,
+                        }));
+                        return Ok(TurnOutput {
+                            response: Message::assistant_text(step.text),
+                            usage,
+                        });
                     }
                 }
                 match self.ask_loop_continue(sink, ctx).await? {
@@ -618,16 +595,17 @@ impl Agent {
         sink: &mut impl EventSink,
         ctx: &TurnContext,
     ) -> Result<LoopLimitDecision, AgentError> {
+        let max_iters = ctx.policy().max_iters;
         if !ctx.has_loop_limit_sender() {
             return Err(AgentError::max_iters_exceeded());
         }
-        tracing::warn!(max_iters = self.max_iters, "{MAX_ITERS_EXCEEDED}");
+        tracing::warn!(max_iters, "{MAX_ITERS_EXCEEDED}");
         let request_id = LoopLimitRequestId::next();
         sink.emit(AgentEvent::Turn(TurnEvent::LoopLimitReached {
             request_id,
-            max_iters: self.max_iters,
+            max_iters,
         }));
-        match ctx.request_loop_continue(request_id, self.max_iters).await {
+        match ctx.request_loop_continue(request_id, max_iters).await {
             Some(decision) => Ok(decision),
             None => Err(AgentError::cancelled()),
         }
@@ -638,6 +616,195 @@ impl Agent {
     pub fn last_turn_usage(&self) -> Usage {
         self.history.last_turn_usage()
     }
+}
+
+/// One tool call from a response, resolved against the mounted tools before
+/// anything runs.
+struct PlannedCall {
+    /// The provider's id for the call, echoed back with its result.
+    id: String,
+    call_id: ToolCallId,
+    name: String,
+    input: serde_json::Value,
+    view: crate::tools::ToolView,
+    /// Whether a `todo_write` argument replaces the checklist.
+    writes_todos: bool,
+    /// Whether this call has to run on its own. A tool that rewrites a file
+    /// from what it read would otherwise lose one of two edits to the same
+    /// file, and a tool that asks the user something would lose the question.
+    exclusive: bool,
+    tool: Option<Arc<dyn Tool>>,
+}
+
+/// What a call may do: run with the tool it resolved to, or report without
+/// running anything.
+enum Gate {
+    Run(Arc<dyn Tool>),
+    Refused(ToolResult),
+}
+
+/// What a finished call leaves for the commit phase. The output is kept as
+/// the string the history needs rather than the whole result, which the
+/// transcript has already been handed.
+struct CallRecord {
+    summary: String,
+    is_error: bool,
+    outcome: CallOutcome,
+}
+
+impl CallRecord {
+    fn of(result: &ToolResult) -> Self {
+        Self {
+            summary: result.output().to_string(),
+            is_error: !result.is_success(),
+            outcome: result.outcome(),
+        }
+    }
+}
+
+/// Decides what each call may do. Approvals are asked one at a time and in
+/// the order the model asked: a frontend answers a single prompt at a time,
+/// so asking for them all at once would strand every answer but one.
+async fn gate_calls(
+    planned: &[PlannedCall],
+    ctx: &TurnContext,
+    sink: &mut impl EventSink,
+) -> Result<Vec<Gate>, AgentError> {
+    let mut gates = Vec::with_capacity(planned.len());
+    for call in planned {
+        // A gate that runs carries the tool it runs, so no later stage has to
+        // go looking for one again — and an unmounted tool cannot run.
+        let Some(tool) = call.tool.clone() else {
+            let error = format!("unknown tool: {}", call.name);
+            gates.push(Gate::Refused(ToolResult::Failed {
+                error: error.clone(),
+                output: Some(error),
+            }));
+            continue;
+        };
+        let gate = match ctx.mode().tool_access(tool.caps().permission) {
+            ToolAccess::Hidden => Gate::Refused(ToolResult::Rejected {
+                reason: format!("tool '{}' is unavailable in Ask mode", call.name),
+            }),
+            ToolAccess::RequiresApproval => {
+                let request_id = ApprovalRequestId::next();
+                sink.emit(AgentEvent::Tool(ToolEvent::ApprovalRequested {
+                    request_id,
+                    call_id: call.call_id,
+                    name: call.name.clone(),
+                    view: call.view.clone(),
+                }));
+                match ctx
+                    .request_approval(
+                        request_id,
+                        call.call_id,
+                        call.name.clone(),
+                        call.view.clone(),
+                    )
+                    .await
+                {
+                    Some(ApprovalDecision::Approved) => Gate::Run(tool),
+                    Some(ApprovalDecision::Rejected) => Gate::Refused(ToolResult::Rejected {
+                        reason: "tool execution was not performed: the user declined permission"
+                            .into(),
+                    }),
+                    None => return Err(AgentError::cancelled()),
+                }
+            }
+            ToolAccess::Allowed => Gate::Run(tool),
+        };
+        gates.push(gate);
+    }
+    Ok(gates)
+}
+
+/// Runs everything the gates allowed. `Started` is reported for all of them
+/// first so a frontend shows what is in flight; `Finished` follows as each
+/// call actually lands, which is not the order they started in.
+///
+/// Calls run at the same time except for the tools that declare themselves
+/// exclusive, which take a turn each: two edits to one file must see each
+/// other's work, and two questions would leave the first one unanswered.
+///
+/// Every call leaves a record, in the order the model asked for them, so a
+/// caller commits a history entry per call without re-checking which ran.
+async fn run_calls(
+    planned: &[PlannedCall],
+    gates: Vec<Gate>,
+    ctx: &TurnContext,
+    sink: &mut impl EventSink,
+) -> Vec<CallRecord> {
+    let mut pending: Vec<Option<CallRecord>> = planned.iter().map(|_| None).collect();
+    let mut running = FuturesUnordered::new();
+    let exclusive = Arc::new(tokio::sync::Mutex::new(()));
+    for (index, (call, gate)) in planned.iter().zip(gates).enumerate() {
+        match gate {
+            Gate::Refused(result) => {
+                log_tool_finished(&call.name, call.call_id, &result, Instant::now());
+                pending[index] = Some(CallRecord::of(&result));
+                sink.emit(AgentEvent::Tool(ToolEvent::Finished {
+                    call_id: call.call_id,
+                    result,
+                }));
+            }
+            Gate::Run(tool) => {
+                sink.emit(AgentEvent::Tool(ToolEvent::Started {
+                    call_id: call.call_id,
+                    name: call.name.clone(),
+                    view: call.view.clone(),
+                }));
+                log_tool_started(&call.name, call.call_id);
+                let input = call.input.clone();
+                let cx = ctx.clone();
+                let exclusive = call.exclusive.then(|| Arc::clone(&exclusive));
+                running.push(async move {
+                    let _guard = match &exclusive {
+                        Some(lock) => Some(lock.lock().await),
+                        None => None,
+                    };
+                    let started = Instant::now();
+                    (index, tool.run(&input, &cx).await, started)
+                });
+            }
+        }
+    }
+
+    while let Some((index, outcome, started)) = running.next().await {
+        let call = &planned[index];
+        let result = match outcome {
+            Ok(output) => ToolResult::Success {
+                output: truncate(&output, MAX_TOOL_OUTPUT_BYTES),
+            },
+            Err(error) => ToolResult::Failed {
+                error: error.to_string(),
+                output: Some(truncate(&format!("error: {error}"), MAX_TOOL_OUTPUT_BYTES)),
+            },
+        };
+        log_tool_finished(&call.name, call.call_id, &result, started);
+        pending[index] = Some(CallRecord::of(&result));
+        sink.emit(AgentEvent::Tool(ToolEvent::Finished {
+            call_id: call.call_id,
+            result,
+        }));
+    }
+    pending
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| match record {
+            Some(record) => record,
+            // A gate that allowed a call the loop never awaited cannot happen:
+            // the loop only ends once every running call has landed, so this
+            // keeps the promise of one record per call even if that breaks.
+            None => {
+                let call = &planned[index];
+                tracing::error!(tool = %call.name, "a running tool call left no record");
+                CallRecord::of(&ToolResult::Failed {
+                    error: format!("tool '{}' was never run", call.name),
+                    output: Some(format!("tool '{}' was never run", call.name)),
+                })
+            }
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -769,6 +936,8 @@ mod truncate_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RunPolicy;
+    use crate::StepStop;
     use crate::TurnId;
     use crate::identity::ToolCallId;
     use crate::question::AnswerResponse;
@@ -802,7 +971,15 @@ mod tests {
         }
     }
 
+    /// Bounds a test turn so a provider script that runs short fails on the
+    /// script rather than on an unbounded loop.
+    const TEST_MAX_ITERS: usize = 8;
+
     fn turn_ctx() -> TurnContext {
+        turn_ctx_with(TEST_MAX_ITERS)
+    }
+
+    fn turn_ctx_with(max_iters: usize) -> TurnContext {
         TurnContext::new(
             TurnId::next(),
             CancellationToken::new(),
@@ -810,6 +987,7 @@ mod tests {
             ModelId::new("default"),
             None,
         )
+        .with_policy(RunPolicy::default().with_max_iters(max_iters))
     }
 
     async fn run_text(agent: &mut Agent, input: &str) -> String {
@@ -820,7 +998,8 @@ mod tests {
             agent.mode(),
             agent.model().clone(),
             agent.reasoning_effort(),
-        );
+        )
+        .with_policy(RunPolicy::default().with_max_iters(TEST_MAX_ITERS));
         agent.run(input, &ctx, &mut sink).await.unwrap().text()
     }
 
@@ -856,6 +1035,20 @@ mod tests {
         assert_eq!(started, 1, "exactly one Started: {events:?}");
         let terminals = events.iter().filter(|e| is_terminal(e)).count();
         assert_eq!(terminals, 1, "exactly one terminal: {events:?}");
+
+        let mut open_step = 0;
+        for event in events {
+            match event {
+                AgentEvent::Turn(TurnEvent::StepStarted { index }) => {
+                    assert_eq!(*index, open_step + 1, "steps count from 1: {events:?}");
+                    open_step = *index;
+                }
+                AgentEvent::Turn(TurnEvent::StepFinished { index, .. }) => {
+                    assert_eq!(*index, open_step, "StepFinished must match its step");
+                }
+                _ => {}
+            }
+        }
         assert!(
             is_terminal(events.last().unwrap()),
             "last event must be terminal: {events:?}"
@@ -1123,11 +1316,11 @@ mod tests {
             text_response("done"),
         ]);
 
-        let tools: Vec<Box<dyn Tool>> = vec![
-            Box::new(FileReadTool::new(root)),
-            Box::new(FileWriteTool::new(root)),
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(FileReadTool::new(root)),
+            Arc::new(FileWriteTool::new(root)),
         ];
-        let mut agent = Agent::new(router_with(Box::new(mock)), tools).with_max_iters(4);
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools);
         let result = run_text(&mut agent, "read note.txt").await;
         assert_eq!(result, "done");
         assert!(agent.history.iter().any(|m| content_has(m, "hello world")));
@@ -1146,7 +1339,7 @@ mod tests {
         ]);
         let mut agent = Agent::new(
             router_with(Box::new(mock)),
-            vec![Box::new(FileWriteTool::new(tmp.path()))],
+            vec![Arc::new(FileWriteTool::new(tmp.path()))],
         );
         agent.set_mode(AgentMode::Ask);
 
@@ -1171,7 +1364,7 @@ mod tests {
         ]);
         let mut agent = Agent::new(
             router_with(Box::new(mock)),
-            vec![Box::new(BashTool::new(tmp.path()))],
+            vec![Arc::new(BashTool::new(tmp.path()))],
         );
         agent.set_mode(AgentMode::Ask);
         let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1214,7 +1407,7 @@ mod tests {
             ),
             text_response("done"),
         ]);
-        let mut agent = Agent::new(router_with(Box::new(mock)), vec![Box::new(AnswerTool)]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), vec![Arc::new(AnswerTool)]);
         let (question_tx, mut question_rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = turn_ctx().with_question_sender(question_tx);
         let mut sink = NullSink;
@@ -1256,10 +1449,8 @@ mod tests {
             text_response("all good"),
         ]);
 
-        let tools: Vec<Box<dyn Tool>> = vec![Box::new(FileReadTool::new(root))];
-        let mut agent = Agent::new(router_with(Box::new(mock)), tools)
-            .with_id(AgentId(7))
-            .with_max_iters(4);
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(root))];
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools).with_id(AgentId(7));
 
         let mut sink = VecEventSink::default();
         let result = run_with(&mut agent, "read it", &turn_ctx(), &mut sink)
@@ -1296,12 +1487,301 @@ mod tests {
             events.last(),
             Some(AgentEvent::Turn(TurnEvent::Completed { .. }))
         ));
+        let steps: Vec<(usize, StepStop)> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Turn(TurnEvent::StepFinished { index, stop }) => Some((*index, *stop)),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            events
+            steps,
+            [(1, StepStop::ToolUse), (2, StepStop::FinalAnswer)],
+            "one step per provider response"
+        );
+    }
+
+    /// A response with several calls, which is how the model asks for work
+    /// to be done at the same time.
+    fn calls_response(calls: &[(&str, &str)]) -> Response {
+        Response {
+            content: calls
                 .iter()
-                .filter(|e| matches!(e, AgentEvent::Turn(_)))
-                .count(),
-            2
+                .map(|(id, name)| ContentBlock::ToolUse {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                    input: json!({}),
+                    raw_arguments: None,
+                })
+                .collect(),
+            ..tool_response(calls[0].0, calls[0].1, json!({}))
+        }
+    }
+
+    /// Finishes only once the other one has: whichever runs second lets the
+    /// first one go.
+    struct PairedTool {
+        name: &'static str,
+        signal: Arc<tokio::sync::Notify>,
+        waits: bool,
+    }
+
+    #[async_trait]
+    impl Tool for PairedTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn run(
+            &self,
+            _args: &serde_json::Value,
+            _cx: &TurnContext,
+        ) -> Result<String, AgentError> {
+            match self.waits {
+                true => {
+                    self.signal.notified().await;
+                    Ok(format!("{} last", self.name))
+                }
+                false => {
+                    self.signal.notify_one();
+                    Ok(format!("{} first", self.name))
+                }
+            }
+        }
+    }
+
+    /// Records what it is doing so a test can tell whether two calls of one
+    /// step overlapped.
+    struct ExclusiveTool {
+        name: &'static str,
+        log: Arc<Mutex<Vec<String>>>,
+        exclusive: bool,
+    }
+
+    #[async_trait]
+    impl Tool for ExclusiveTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        fn caps(&self) -> crate::tools::ToolCaps {
+            crate::tools::ToolCaps {
+                exclusive: self.exclusive,
+                ..Default::default()
+            }
+        }
+
+        async fn run(
+            &self,
+            _args: &serde_json::Value,
+            _cx: &TurnContext,
+        ) -> Result<String, AgentError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("enter {}", self.name));
+            tokio::task::yield_now().await;
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("leave {}", self.name));
+            Ok(self.name.to_string())
+        }
+    }
+
+    /// A tool that rewrites a file from what it read cannot run beside
+    /// another: two edits to one file would lose one of them. Everything else
+    /// runs at the same time, which is what makes several subagents at once
+    /// work.
+    #[tokio::test]
+    async fn exclusive_tools_take_turns_and_the_rest_overlap() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(ExclusiveTool {
+                name: "write_a",
+                log: Arc::clone(&log),
+                exclusive: true,
+            }),
+            Arc::new(ExclusiveTool {
+                name: "write_b",
+                log: Arc::clone(&log),
+                exclusive: true,
+            }),
+        ];
+        let mock = MockProvider::new(vec![
+            calls_response(&[("c1", "write_a"), ("c2", "write_b")]),
+            text_response("done"),
+        ]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools);
+        run_with(&mut agent, "go", &turn_ctx(), &mut VecEventSink::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            log.lock().unwrap().as_slice(),
+            [
+                "enter write_a",
+                "leave write_a",
+                "enter write_b",
+                "leave write_b"
+            ],
+            "exclusive calls must not overlap"
+        );
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(ExclusiveTool {
+                name: "read_a",
+                log: Arc::clone(&log),
+                exclusive: false,
+            }),
+            Arc::new(ExclusiveTool {
+                name: "read_b",
+                log: Arc::clone(&log),
+                exclusive: false,
+            }),
+        ];
+        let mock = MockProvider::new(vec![
+            calls_response(&[("c1", "read_a"), ("c2", "read_b")]),
+            text_response("done"),
+        ]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools);
+        run_with(&mut agent, "go", &turn_ctx(), &mut VecEventSink::default())
+            .await
+            .unwrap();
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 4, "{log:?}");
+        assert!(
+            log[0].starts_with("enter") && log[1].starts_with("enter"),
+            "both calls must be in flight before either leaves: {log:?}"
+        );
+    }
+
+    /// Calls finish in whatever order they finish, but a provider expects one
+    /// tool result per call in the order it asked, so the history has to put
+    /// them back in that order.
+    #[tokio::test]
+    async fn tool_results_keep_the_order_the_model_asked_for() {
+        let signal = Arc::new(tokio::sync::Notify::new());
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(PairedTool {
+                name: "slow",
+                signal: Arc::clone(&signal),
+                waits: true,
+            }),
+            Arc::new(PairedTool {
+                name: "fast",
+                signal,
+                waits: false,
+            }),
+        ];
+        let mock = MockProvider::new(vec![
+            calls_response(&[("c1", "slow"), ("c2", "fast")]),
+            text_response("done"),
+        ]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools);
+        let mut sink = VecEventSink::default();
+        run_with(&mut agent, "go", &turn_ctx(), &mut sink)
+            .await
+            .unwrap();
+
+        let started: Vec<ToolCallId> = sink
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Tool(ToolEvent::Started { call_id, .. }) => Some(*call_id),
+                _ => None,
+            })
+            .collect();
+        let finished: Vec<ToolCallId> = sink
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Tool(ToolEvent::Finished { call_id, .. }) => Some(*call_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started.len(), 2, "both calls started");
+        assert_eq!(finished.len(), 2, "both calls finished");
+        assert_eq!(finished[0], started[1], "the second call landed first");
+
+        let results: Vec<String> = agent
+            .history()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(
+                    content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            results,
+            ["slow last", "fast first"],
+            "history keeps the order the model asked for"
+        );
+    }
+
+    /// A call to a tool that is not mounted still owes the provider a tool
+    /// result, and it owes it in the order the calls were asked for. Losing it
+    /// would desync the provider's tool ids for the whole conversation.
+    #[tokio::test]
+    async fn an_unmounted_tool_still_gets_a_result() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(PairedTool {
+            name: "known",
+            signal: Arc::new(tokio::sync::Notify::new()),
+            waits: false,
+        })];
+        let mock = MockProvider::new(vec![
+            calls_response(&[("c1", "known"), ("c2", "invented")]),
+            text_response("done"),
+        ]);
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools);
+        run_with(&mut agent, "go", &turn_ctx(), &mut VecEventSink::default())
+            .await
+            .unwrap();
+
+        let results: Vec<String> = agent
+            .history()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|block| match block {
+                ContentBlock::ToolResult { content, .. } => Some(
+                    content
+                        .iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            results,
+            ["known first", "unknown tool: invented"],
+            "one result per call, in the order the model asked"
         );
     }
 
@@ -1469,7 +1949,7 @@ mod tests {
         let mut call = tool_response("c1", "todo_write", todos);
         call.content.insert(0, ContentBlock::thinking(THINKING));
         let mock = MockProvider::new(vec![call, text_response("done")]);
-        let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
+        let mut agent = agent_with_todo_write(Box::new(mock));
         let mut sink = VecEventSink::default();
         run_with(&mut agent, "plan it", &turn_ctx(), &mut sink)
             .await
@@ -1549,8 +2029,8 @@ mod tests {
             tool_response("call_1", "file_read", json!({"path": "note.txt"})),
             text_response("done"),
         ]);
-        let tools: Vec<Box<dyn Tool>> = vec![Box::new(FileReadTool::new(tmp.path()))];
-        let mut agent = Agent::new(router_with(Box::new(mock)), tools).with_max_iters(4);
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(tmp.path()))];
+        let mut agent = Agent::new(router_with(Box::new(mock)), tools);
         let mut sink = VecEventSink::default();
         run_with(&mut agent, "read note.txt", &turn_ctx(), &mut sink)
             .await
@@ -1627,9 +2107,8 @@ mod tests {
     fn looping_read_agent(responses: Vec<Response>) -> (Agent, tempdir::TempDir) {
         let tmp = tmp_dir();
         std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
-        let tools: Vec<Box<dyn Tool>> = vec![Box::new(FileReadTool::new(tmp.path()))];
-        let agent = Agent::new(router_with(Box::new(MockProvider::new(responses))), tools)
-            .with_max_iters(2);
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(tmp.path()))];
+        let agent = Agent::new(router_with(Box::new(MockProvider::new(responses))), tools);
         (agent, tmp)
     }
 
@@ -1646,7 +2125,7 @@ mod tests {
             text_response("done"),
         ]);
         let mut sink = VecEventSink::default();
-        let err = run_with(&mut agent, "read it", &turn_ctx(), &mut sink)
+        let err = run_with(&mut agent, "read it", &turn_ctx_with(2), &mut sink)
             .await
             .unwrap_err();
         assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
@@ -1673,7 +2152,7 @@ mod tests {
             text_response("done"),
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = turn_ctx().with_loop_limit_sender(tx);
+        let ctx = turn_ctx_with(2).with_loop_limit_sender(tx);
         let mut sink = VecEventSink::default();
         let text = {
             let turn = agent.run("read it", &ctx, &mut sink);
@@ -1708,7 +2187,7 @@ mod tests {
             text_response("done"),
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = turn_ctx().with_loop_limit_sender(tx);
+        let ctx = turn_ctx_with(2).with_loop_limit_sender(tx);
         let mut sink = VecEventSink::default();
         let err = {
             let turn = agent.run("read it", &ctx, &mut sink);
@@ -1851,7 +2330,7 @@ mod tests {
     fn agent_with_todo_write(provider: Box<dyn Provider>) -> Agent {
         Agent::new(
             router_with(provider),
-            vec![Box::new(crate::tools::TodoWriteTool)],
+            vec![Arc::new(crate::tools::TodoWriteTool)],
         )
     }
 
@@ -1859,11 +2338,10 @@ mod tests {
         Agent::new(
             router_with(provider),
             vec![
-                Box::new(FileReadTool::new(root)),
-                Box::new(crate::tools::TodoWriteTool),
+                Arc::new(FileReadTool::new(root)),
+                Arc::new(crate::tools::TodoWriteTool),
             ],
         )
-        .with_max_iters(4)
     }
 
     #[tokio::test]
@@ -1887,11 +2365,11 @@ mod tests {
         let mut agent = Agent::new(
             router_with(Box::new(mock)),
             vec![
-                Box::new(FileReadTool::new(tmp.path())),
-                Box::new(FileEditTool::new(tmp.path())),
-                Box::new(FileWriteTool::new(tmp.path())),
-                Box::new(BashTool::new(tmp.path())),
-                Box::new(TodoWriteTool),
+                Arc::new(FileReadTool::new(tmp.path())),
+                Arc::new(FileEditTool::new(tmp.path())),
+                Arc::new(FileWriteTool::new(tmp.path())),
+                Arc::new(BashTool::new(tmp.path())),
+                Arc::new(TodoWriteTool),
             ],
         );
         agent.set_mode(AgentMode::Ask);
@@ -1927,7 +2405,7 @@ mod tests {
             tool_response("c1", "todo_write", todos.clone()),
             text_response("done"),
         ]);
-        let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
+        let mut agent = agent_with_todo_write(Box::new(mock));
         let mut sink = VecEventSink::default();
         let result = run_with(&mut agent, "plan it", &turn_ctx(), &mut sink)
             .await
@@ -1964,7 +2442,7 @@ mod tests {
             ),
             text_response("done"),
         ]);
-        let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
+        let mut agent = agent_with_todo_write(Box::new(mock));
         agent.set_todos(crate::todo::TodoList {
             items: vec![crate::todo::TodoItem {
                 id: "keep".into(),
@@ -2158,7 +2636,7 @@ mod tests {
             tool_response("c1", "todo_write", todos),
             text_response("done"),
         ]);
-        let mut agent = agent_with_todo_write(Box::new(mock)).with_max_iters(4);
+        let mut agent = agent_with_todo_write(Box::new(mock));
         agent.set_mode(AgentMode::Plan);
         run_text(&mut agent, "plan it").await;
         assert_eq!(agent.todos().items.len(), 1);
@@ -2242,7 +2720,7 @@ mod tests {
             tool_response("c2", "todo_write", todos),
             text_response("done"),
         ]);
-        let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path()).with_max_iters(6);
+        let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
         agent.set_todos(crate::todo::TodoList {
             items: vec![pending_item()],

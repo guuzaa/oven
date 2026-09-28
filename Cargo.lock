@@ -2030,6 +2030,7 @@ dependencies = [
  "futures",
  "mockall",
  "oven-app",
+ "oven-host",
  "oven-llm",
  "ratatui",
  "serde_json",

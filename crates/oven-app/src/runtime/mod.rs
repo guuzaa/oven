@@ -1,19 +1,18 @@
 use std::collections::VecDeque;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
-use std::sync::PoisonError;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use std::collections::HashSet;
 use std::time::Duration;
 
 use oven_agent::{
-    Agent, AgentEvent, AgentEventEnvelope, AgentMode, CancellationToken, ChannelEventSink,
-    LoopLimitPrompt, QuestionRequest, Record, RouterHandle, TodoList, ToolApproval, ToolEvent,
-    TurnContext, TurnId, restore_todos,
+    Agent, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, Record, RouterHandle, RunPolicy,
+    TodoList, restore_todos,
 };
-use oven_host::run_shell_command;
 use oven_llm::{
-    Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Router,
+    ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Router,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
@@ -21,22 +20,34 @@ use tracing::Instrument;
 use crate::App;
 use crate::command::{AppCommand, ControlCommand};
 use crate::config::{AppConfig, ProviderConfig};
-use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
+use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
 use crate::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,
 };
-use crate::shell;
-use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
+use crate::slash::{CommandOutcome, SlashRegistry};
 use crate::state::{
-    AppPhase, AppState, HistoryChangeReason, PendingQuestion, PendingToolApproval, SessionState,
-    StateChange, context_tokens, context_tokens_of, context_window, context_window_of,
+    AppPhase, AppState, HistoryChangeReason, SessionState, StateChange, context_tokens,
+    context_tokens_of, context_window,
 };
+use crate::subagent::Subagents;
 
-const EMPTY_SHELL: &str = "empty shell command";
-const QUEUED_NOTICE_SUFFIX: &str = "queued: will apply once the current reply finishes";
-const REWIND_QUEUED_NOTICE: &str = "rewind queued: will apply once the current reply finishes";
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
+
+/// One app's agents and the channel they all report on.
+///
+/// The main agent and every subagent it spawns share one event channel, so a
+/// subagent's turn reaches the frontend while the runtime is idle between
+/// turns of its own. `wake` is the separate signal that the subagent registry
+/// changed, which is cheap to send and never carries a payload the runtime
+/// could get stale.
+pub(crate) struct AppAgents {
+    pub(crate) main: Agent,
+    pub(crate) subagents: Arc<Subagents>,
+    pub(crate) events: mpsc::UnboundedSender<AgentEventEnvelope>,
+    pub(crate) event_rx: mpsc::UnboundedReceiver<AgentEventEnvelope>,
+    pub(crate) wake_rx: mpsc::UnboundedReceiver<()>,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Control {
@@ -46,6 +57,15 @@ pub(crate) enum Control {
 
 pub(crate) struct Runtime {
     pub(crate) agent: Agent,
+    pub(crate) subagents: Arc<Subagents>,
+    /// Every agent's events, drained whether or not a turn of our own runs.
+    pub(crate) event_rx: mpsc::UnboundedReceiver<AgentEventEnvelope>,
+    pub(crate) events_tx: mpsc::UnboundedSender<AgentEventEnvelope>,
+    /// "The subagent registry changed"; the snapshot is read on demand.
+    pub(crate) wake_rx: mpsc::UnboundedReceiver<()>,
+    /// How many queued prompts went unsent when the app shut down, for the
+    /// frontend that queued them to report once it has the terminal back.
+    pub(crate) unsent: Arc<AtomicUsize>,
     /// Independent of `&mut agent`, so `/model` can be validated and
     /// applied while a turn holds the agent's exclusive borrow.
     pub(crate) router: RouterHandle,
@@ -57,6 +77,12 @@ pub(crate) struct Runtime {
     pub(crate) user_config_path: Option<PathBuf>,
     pub(crate) events: EventBus,
     pub(crate) slash: SlashRegistry,
+    /// What one user turn may spend. Derived from config at startup so the
+    /// same budget reaches every run the runtime starts.
+    pub(crate) policy: RunPolicy,
+    /// The subagent registry's revision as last mirrored into state, so a
+    /// signal that carried no change is dropped without copying the list.
+    subagent_revision: u64,
     /// Messages already written to the current session file; everything past
     /// it is appended after each turn.
     pub(crate) persisted_messages: usize,
@@ -67,7 +93,7 @@ pub(crate) struct Runtime {
 impl Runtime {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        agent: Agent,
+        agents: AppAgents,
         root: PathBuf,
         session: Option<SessionStore>,
         config: AppConfig,
@@ -75,15 +101,29 @@ impl Runtime {
         events: EventBus,
         state: AppState,
         state_tx: watch::Sender<AppState>,
+        unsent: Arc<AtomicUsize>,
     ) -> Self {
         let persisted_messages = match &session {
-            Some(store) if store.current().path().exists() => agent.history().len(),
+            Some(store) if store.current().path().exists() => agents.main.history().len(),
             _ => 0,
         };
-        let persisted_rev = agent.history_revision();
-        let router = agent.router_handle();
+        let persisted_rev = agents.main.history_revision();
+        let router = agents.main.router_handle();
+        let policy = RunPolicy::default().with_max_iters(config.max_iters);
+        let AppAgents {
+            main: agent,
+            subagents,
+            events: events_tx,
+            event_rx,
+            wake_rx,
+        } = agents;
         Self {
             agent,
+            subagents,
+            event_rx,
+            events_tx,
+            wake_rx,
+            unsent,
             router,
             root,
             state,
@@ -93,6 +133,8 @@ impl Runtime {
             user_config_path,
             events,
             slash: SlashRegistry::with_builtin(),
+            policy,
+            subagent_revision: 0,
             persisted_messages,
             persisted_rev,
             pending: VecDeque::new(),
@@ -102,11 +144,24 @@ impl Runtime {
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<AppCommand>) {
         self.bootstrap().await;
         loop {
+            // Idle turns still have to serve subagents: their events must
+            // reach the frontend and their registry changes must be mirrored
+            // even when no turn of ours is running.
             let cmd = match self.pending.pop_front() {
                 Some(cmd) => cmd,
-                None => match rx.recv().await {
-                    Some(cmd) => cmd,
-                    None => break,
+                None => tokio::select! {
+                    cmd = rx.recv() => match cmd {
+                        Some(cmd) => cmd,
+                        None => break,
+                    },
+                    Some(()) = self.wake_rx.recv() => {
+                        self.sync_subagents();
+                        continue;
+                    }
+                    Some(event) = self.event_rx.recv() => {
+                        self.on_agent_event(event);
+                        continue;
+                    }
                 },
             };
             if let AppCommand::Shutdown = cmd {
@@ -132,6 +187,14 @@ impl Runtime {
                 self.set_mode(mode);
                 Control::Continue
             }
+            AppCommand::Control(ControlCommand::StopSubagent { id }) => {
+                self.stop_subagent(id);
+                Control::Continue
+            }
+            AppCommand::Control(ControlCommand::StopSubagents) => {
+                self.stop_subagents();
+                Control::Continue
+            }
             AppCommand::Control(
                 ControlCommand::Cancel { .. }
                 | ControlCommand::RespondToolApproval { .. }
@@ -144,238 +207,6 @@ impl Runtime {
             }
             AppCommand::Prompt(input) => self.start_turn(input, rx).await,
         }
-    }
-
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the turn loop must borrow agent fields individually while the turn future runs"
-    )]
-    pub(crate) async fn start_turn(
-        &mut self,
-        input: String,
-        cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
-    ) -> Control {
-        if let Some(shell) = shell::ShellInput::parse(&input) {
-            return match shell.command() {
-                Some(command) => self.run_shell(command.to_string(), cmd_rx).await,
-                None => self.reject_empty_shell(),
-            };
-        }
-
-        match self.slash.parse_and_run(&mut self.agent, &input) {
-            Ok(CommandOutcome::Passthrough) => {}
-            Ok(outcome) => {
-                if let Some(name) = self.slash.recognized_name(&input) {
-                    tracing::info!(name, "slash command");
-                }
-                self.apply_slash(outcome).await;
-                return Control::Continue;
-            }
-            Err(e) => {
-                self.emit_error(e.to_string());
-                return Control::Continue;
-            }
-        }
-
-        let turn_id = TurnId::next();
-        tracing::info!(
-            turn_id = turn_id.0,
-            mode = self.agent.mode().label(),
-            model = %self.agent.model(),
-            "turn started"
-        );
-        self.state.phase = AppPhase::Running { turn_id };
-        self.publish();
-
-        let cancel = CancellationToken::new();
-        let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
-        let (approval_tx, mut approval_rx) = mpsc::unbounded_channel::<ToolApproval>();
-        let (loop_limit_tx, mut loop_limit_rx) = mpsc::unbounded_channel::<LoopLimitPrompt>();
-        let (question_tx, mut question_rx) = mpsc::unbounded_channel::<QuestionRequest>();
-        let mut pending_approval = None;
-        let mut pending_loop_limit = None;
-        let mut pending_question = None;
-        let mut sink = ChannelEventSink::new(agent_tx, self.agent.id(), turn_id);
-        let ctx = TurnContext::new(
-            turn_id,
-            cancel.clone(),
-            self.agent.mode(),
-            self.agent.model().clone(),
-            self.agent.reasoning_effort(),
-        )
-        .with_approval_sender(approval_tx)
-        .with_loop_limit_sender(loop_limit_tx)
-        .with_question_sender(question_tx);
-
-        let agent_id = self.agent.id();
-        let result = {
-            let turn = self.agent.run(input, &ctx, &mut sink);
-            tokio::pin!(turn);
-
-            loop {
-                tokio::select! {
-                    biased;
-                    cmd = cmd_rx.recv() => {
-                        match cmd {
-                            None | Some(AppCommand::Shutdown) => {
-                                self.state.phase = AppPhase::ShuttingDown;
-                                let _ = self.state_tx.send(self.state.clone());
-                                cancel.cancel();
-                                let _ = turn.await;
-                                return Control::Shutdown;
-                            }
-                            Some(AppCommand::Control(ControlCommand::Cancel { turn_id: id }))
-                                if id == turn_id =>
-                            {
-                                cancel_turn(&mut self.state, &self.state_tx, turn_id, &cancel);
-                            }
-                            Some(AppCommand::Control(ControlCommand::Cancel { .. })) => {}
-                            Some(AppCommand::Control(ControlCommand::RespondToolApproval { request_id, decision })) => {
-                                if pending_approval
-                                    .as_ref()
-                                    .is_some_and(|approval: &ToolApproval| approval.request_id == request_id)
-                                    && let Some(approval) = pending_approval.take()
-                                {
-                                    let _ = approval.responder.send(decision);
-                                    self.state.phase = AppPhase::Running { turn_id };
-                                    let _ = self.state_tx.send(self.state.clone());
-                                }
-                            }
-                            Some(AppCommand::Control(ControlCommand::RespondLoopLimit { request_id, decision })) => {
-                                if pending_loop_limit
-                                    .as_ref()
-                                    .is_some_and(|prompt: &LoopLimitPrompt| prompt.request_id == request_id)
-                                    && let Some(prompt) = pending_loop_limit.take()
-                                {
-                                    let _ = prompt.responder.send(decision);
-                                    self.state.phase = AppPhase::Running { turn_id };
-                                    let _ = self.state_tx.send(self.state.clone());
-                                }
-                            }
-                            Some(AppCommand::Control(ControlCommand::RespondQuestion { request_id, response })) => {
-                                if pending_question
-                                    .as_ref()
-                                    .is_some_and(|question: &QuestionRequest| question.request_id == request_id)
-                                    && let Some(question) = pending_question.take()
-                                {
-                                    let _ = question.responder.send(response);
-                                    self.state.phase = AppPhase::Running { turn_id };
-                                    let _ = self.state_tx.send(self.state.clone());
-                                }
-                            }
-                            Some(AppCommand::Control(ControlCommand::SetMode { mode })) => {
-                                ctx.set_mode(mode);
-                                self.state.mode = mode;
-                                let _ = self.state_tx.send(self.state.clone());
-                                self.events.emit_state(StateChange::ModeChanged { mode });
-                            }
-                            Some(cmd) => {
-                                match model_command_args(&cmd) {
-                                    Some(args) => apply_model_during_turn(
-                                        args,
-                                        &ctx,
-                                        &self.router,
-                                        &mut self.config,
-                                        &mut self.state,
-                                        &self.state_tx,
-                                        self.user_config_path.as_deref(),
-                                        &mut self.events,
-                                    ),
-                                    None => {
-                                        defer_command(
-                                            cmd,
-                                            &self.slash,
-                                            &mut self.events,
-                                            &mut self.pending,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    approval = approval_rx.recv() => {
-                        if let Some(approval) = approval {
-                            self.state.phase = AppPhase::AwaitingToolApproval {
-                                turn_id,
-                                request: PendingToolApproval {
-                                    request_id: approval.request_id,
-                                    call_id: approval.call_id,
-                                    name: approval.name.clone(),
-                                    view: approval.view.clone(),
-                                },
-                            };
-                            let _ = self.state_tx.send(self.state.clone());
-                            pending_approval = Some(approval);
-                        }
-                    }
-                    prompt = loop_limit_rx.recv() => {
-                        if let Some(prompt) = prompt {
-                            self.state.phase = AppPhase::AwaitingLoopLimit {
-                                turn_id,
-                                request_id: prompt.request_id,
-                                max_iters: prompt.max_iters,
-                            };
-                            let _ = self.state_tx.send(self.state.clone());
-                            pending_loop_limit = Some(prompt);
-                        }
-                    }
-                    question = question_rx.recv() => {
-                        if let Some(question) = question {
-                            self.events.emit_agent(
-                                agent_id,
-                                turn_id,
-                                AgentEvent::Tool(ToolEvent::QuestionAsked {
-                                    request_id: question.request_id,
-                                    question: question.question.clone(),
-                                }),
-                            );
-                            self.state.phase = AppPhase::AwaitingAnswer {
-                                turn_id,
-                                request: PendingQuestion {
-                                    request_id: question.request_id,
-                                    question: question.question.clone(),
-                                },
-                            };
-                            let _ = self.state_tx.send(self.state.clone());
-                            pending_question = Some(question);
-                        }
-                    }
-                    ev = agent_rx.recv() => {
-                        match ev {
-                            Some(event) => forward_agent_event(
-                                event,
-                                &mut self.events,
-                                &mut self.state,
-                                &self.state_tx,
-                            ),
-                            None => break turn.await,
-                        }
-                    }
-                    res = &mut turn => break res,
-                }
-            }
-        };
-
-        if let Some(store) = &self.session {
-            self.agent.ensure_session_meta(store.root.clone());
-        }
-
-        while let Ok(event) = agent_rx.try_recv() {
-            forward_agent_event(event, &mut self.events, &mut self.state, &self.state_tx);
-        }
-
-        if result.is_ok() {
-            self.persist_turn();
-        }
-
-        self.sync_state();
-        self.emit_context_changed();
-        if result.is_ok() && self.should_auto_compact() {
-            self.compact_history().await;
-        }
-        self.state.phase = AppPhase::Idle;
-        self.publish();
-        Control::Continue
     }
 
     pub(crate) fn persist_turn(&mut self) {
@@ -416,97 +247,6 @@ impl Runtime {
         self.publish();
     }
 
-    pub(crate) async fn run_shell(
-        &mut self,
-        command: String,
-        cmd_rx: &mut mpsc::UnboundedReceiver<AppCommand>,
-    ) -> Control {
-        let turn_id = TurnId::next();
-        tracing::info!(turn_id = turn_id.0, "shell started");
-        self.state.phase = AppPhase::Running { turn_id };
-        self.publish();
-        self.emit(AppEventKind::Shell(ShellEvent::Started {
-            command: command.clone(),
-        }));
-
-        let cancel = CancellationToken::new();
-        let root = self.root.clone();
-        let run = run_shell_command(&command, &root, shell::HOST_SHELL_TIMEOUT, Some(&cancel));
-        tokio::pin!(run);
-
-        let result = loop {
-            tokio::select! {
-                biased;
-                cmd = cmd_rx.recv() => {
-                    match cmd {
-                        None | Some(AppCommand::Shutdown) => {
-                            self.state.phase = AppPhase::ShuttingDown;
-                            self.publish();
-                            cancel.cancel();
-                            let _ = run.await;
-                            return Control::Shutdown;
-                        }
-                        Some(AppCommand::Control(ControlCommand::Cancel { turn_id: id }))
-                            if id == turn_id =>
-                        {
-                            cancel_turn(&mut self.state, &self.state_tx, turn_id, &cancel);
-                        }
-                        Some(AppCommand::Control(ControlCommand::Cancel { .. })) => {}
-                        Some(AppCommand::Control(ControlCommand::SetMode { mode })) => {
-                            self.set_mode(mode);
-                        }
-                        Some(cmd) => {
-                            defer_command(cmd, &self.slash, &mut self.events, &mut self.pending);
-                        }
-                    }
-                }
-                res = &mut run => break res,
-            }
-        };
-
-        if let Some(store) = &self.session {
-            self.agent.ensure_session_meta(store.root.clone());
-        }
-
-        let shell = shell::commit_shell(&command, result);
-        match &shell.error {
-            None => {
-                let exit_code = shell.exit_code.unwrap_or(0);
-                tracing::info!(exit_code, "shell finished");
-                self.emit(AppEventKind::Shell(ShellEvent::Finished {
-                    command: command.clone(),
-                    output: shell.output.clone(),
-                    exit_code,
-                }));
-            }
-            Some(error) => {
-                tracing::warn!(error = %error, "shell failed");
-                self.emit(AppEventKind::Shell(ShellEvent::Failed {
-                    command: command.clone(),
-                    error: error.clone(),
-                    output: shell.output.clone(),
-                }));
-            }
-        }
-
-        self.agent
-            .push_history(Message::user_text(shell.to_string()));
-        self.persist_turn();
-        self.sync_state();
-        if !matches!(self.state.phase, AppPhase::ShuttingDown) {
-            self.state.phase = AppPhase::Idle;
-            self.publish();
-        }
-        Control::Continue
-    }
-
-    pub(crate) fn reject_empty_shell(&mut self) -> Control {
-        self.emit(AppEventKind::Notification {
-            text: EMPTY_SHELL.into(),
-        });
-        Control::Continue
-    }
-
     async fn bootstrap(&mut self) {
         let model = self.agent.model().to_string();
         let router = self.agent.router();
@@ -518,6 +258,8 @@ impl Runtime {
 
     fn shutdown(&mut self) {
         self.state.phase = AppPhase::ShuttingDown;
+        self.subagents.shutdown();
+        report_unsent(&self.pending, &self.unsent);
         self.publish();
     }
 
@@ -631,6 +373,37 @@ impl Runtime {
         }
     }
 
+    fn stop_subagent(&mut self, id: AgentId) {
+        stop_subagent(&self.subagents, &mut self.events, id);
+        self.sync_subagents();
+    }
+
+    pub(crate) fn stop_subagents(&mut self) {
+        stop_subagents(&self.subagents, &mut self.events);
+        self.sync_subagents();
+    }
+
+    fn on_agent_event(&mut self, event: AgentEventEnvelope) {
+        let main = self.agent.id();
+        forward_agent_event(
+            main,
+            event,
+            &mut self.events,
+            &mut self.state,
+            &self.state_tx,
+        );
+    }
+
+    pub(crate) fn sync_subagents(&mut self) {
+        sync_subagents(
+            &self.subagents,
+            &mut self.subagent_revision,
+            &mut self.state,
+            &mut self.events,
+            &self.state_tx,
+        );
+    }
+
     pub(crate) fn publish(&self) {
         let _ = self.state_tx.send(self.state.clone());
     }
@@ -681,12 +454,17 @@ impl Runtime {
                     text: format!("mode switched to {}", mode.label()),
                 });
             }
+            CommandOutcome::FocusSubagent { id } => {
+                self.emit(AppEventKind::Subagent(SubagentEvent::Focus { id }));
+            }
         }
     }
 
     fn clear_session(&mut self) {
         self.agent.clear_history();
         self.agent.set_todos(TodoList::default());
+        self.subagents.clear();
+        self.sync_subagents();
         self.switch_session();
         if let Some(store) = &self.session {
             self.agent.ensure_session_meta(store.root.clone());
@@ -777,54 +555,61 @@ impl Runtime {
             .active_provider_config()
             .expect("active provider inserted before build")
             .effective_model();
-        match crate::provider::build_client(
-            next.active_provider_config()
-                .expect("active provider inserted before build"),
-        ) {
-            Ok(client) => {
-                self.config = next;
-                self.agent.update_router(|router| {
-                    router.upsert(crate::provider::retrying(&self.config, client));
-                });
-                self.agent.set_model(model.clone());
-                self.agent.set_reasoning_effort(
-                    self.config
-                        .active_provider_config()
-                        .and_then(|provider| provider.reasoning_effort),
-                );
-                let saved = self.save_provider_overlay(&overlay);
-                self.state.provider = public_provider(
-                    self.config
-                        .active_provider_config()
-                        .expect("active provider exists after update"),
-                );
-                self.state.configured_providers = self.config.configured_providers();
-                self.state.model.clone_from(&model);
-                self.state.reasoning_effort = self.agent.reasoning_effort();
-                self.publish();
-                self.emit_state(StateChange::ProviderChanged {
-                    provider: self.state.provider.clone(),
-                    configured_providers: self.state.configured_providers.clone(),
-                });
-                self.emit_state(StateChange::ModelChanged {
-                    model: model.clone(),
-                    reasoning_effort: self.agent.reasoning_effort(),
-                });
-                self.emit_context_changed();
-                let router = self.agent.router();
-                let (models, auth_error) =
-                    refresh_model_choices(router.as_ref(), &model, &self.config).await;
-                self.state.models.clone_from(&models);
-                self.publish();
-                self.emit_state(StateChange::ModelsChanged { models });
-                self.emit(AppEventKind::Notification {
-                    text: summarize_setup(&overlay, saved.as_deref()),
-                });
-                if let Some(body) = auth_error {
-                    self.emit_error(format!("API key rejected: {body}"));
-                }
+        let active = next
+            .active_provider_config()
+            .expect("active provider inserted before build");
+        if let Err(e) = crate::provider::build_client(active) {
+            self.emit_error(e.to_string());
+            return;
+        }
+        // Rebuild the whole router rather than upserting one entry: the swap
+        // is a single snapshot replacement, so a subagent holding the old
+        // router finishes its request on it instead of racing the mutation.
+        let router = match crate::provider::build_router(&next) {
+            Ok(router) => router,
+            Err(e) => {
+                self.emit_error(e.to_string());
+                return;
             }
-            Err(e) => self.emit_error(e.to_string()),
+        };
+        self.config = next;
+        self.agent.replace_router(router);
+        self.agent.set_model(model.clone());
+        self.agent.set_reasoning_effort(
+            self.config
+                .active_provider_config()
+                .and_then(|provider| provider.reasoning_effort),
+        );
+        let saved = self.save_provider_overlay(&overlay);
+        self.state.provider = public_provider(
+            self.config
+                .active_provider_config()
+                .expect("active provider exists after update"),
+        );
+        self.state.configured_providers = self.config.configured_providers();
+        self.state.model.clone_from(&model);
+        self.state.reasoning_effort = self.agent.reasoning_effort();
+        self.publish();
+        self.emit_state(StateChange::ProviderChanged {
+            provider: self.state.provider.clone(),
+            configured_providers: self.state.configured_providers.clone(),
+        });
+        self.emit_state(StateChange::ModelChanged {
+            model: model.clone(),
+            reasoning_effort: self.agent.reasoning_effort(),
+        });
+        self.emit_context_changed();
+        let router = self.agent.router();
+        let (models, auth_error) =
+            refresh_model_choices(router.as_ref(), &model, &self.config).await;
+        self.state.models.clone_from(&models);
+        self.publish();
+        self.emit_state(StateChange::ModelsChanged { models });
+        self.emit(AppEventKind::Notification {
+            text: summarize_setup(&overlay, saved.as_deref()),
+        });
+        if let Some(body) = auth_error {
+            self.emit_error(format!("API key rejected: {body}"));
         }
     }
 
@@ -890,50 +675,6 @@ impl Runtime {
     }
 }
 
-fn cancel_turn(
-    state: &mut AppState,
-    state_tx: &watch::Sender<AppState>,
-    turn_id: TurnId,
-    cancel: &CancellationToken,
-) {
-    state.phase = AppPhase::Cancelling { turn_id };
-    let _ = state_tx.send(state.clone());
-    cancel.cancel();
-}
-
-/// Defers a command that arrived while a turn holds `&mut Agent` exclusively.
-/// Anything the user can recognize as a command (a slash command, or a
-/// rewind) gets an immediate acknowledgement so the UI never looks stuck
-/// while the deferred command waits in `pending`.
-fn defer_command(
-    cmd: AppCommand,
-    slash: &SlashRegistry,
-    events: &mut EventBus,
-    pending: &mut VecDeque<AppCommand>,
-) {
-    if let Some(notice) = deferred_notice(&cmd, slash) {
-        events.emit(AppEventKind::Notification { text: notice });
-    }
-    pending.push_back(cmd);
-}
-
-fn deferred_notice(cmd: &AppCommand, slash: &SlashRegistry) -> Option<String> {
-    match cmd {
-        AppCommand::Control(ControlCommand::Rewind) => Some(REWIND_QUEUED_NOTICE.to_string()),
-        AppCommand::Prompt(text) => slash
-            .recognized_name(text)
-            .map(|name| format!("/{name} {QUEUED_NOTICE_SUFFIX}")),
-        AppCommand::Control(
-            ControlCommand::Cancel { .. }
-            | ControlCommand::SetMode { .. }
-            | ControlCommand::RespondToolApproval { .. }
-            | ControlCommand::RespondLoopLimit { .. }
-            | ControlCommand::RespondQuestion { .. },
-        )
-        | AppCommand::Shutdown => None,
-    }
-}
-
 struct ModelSwitchOutcome {
     model: String,
     reasoning_effort: Option<ReasoningEffort>,
@@ -992,6 +733,8 @@ fn command_kind(cmd: &AppCommand) -> &'static str {
         AppCommand::Control(ControlCommand::RespondLoopLimit { .. }) => "loop_limit",
         AppCommand::Control(ControlCommand::RespondQuestion { .. }) => "question",
         AppCommand::Control(ControlCommand::Rewind) => "rewind",
+        AppCommand::Control(ControlCommand::StopSubagent { .. }) => "stop_subagent",
+        AppCommand::Control(ControlCommand::StopSubagents) => "stop_subagents",
         AppCommand::Shutdown => "shutdown",
     }
 }
@@ -1023,98 +766,93 @@ fn save_provider_overlay(
     }
 }
 
-/// If `cmd` is a `/model` command, returns its argument string. `/model`
-/// is the one slash command that can run mid-turn (see
-/// `apply_model_during_turn`): validating it only needs a `Router`
-/// snapshot and applying it only needs `TurnContext`, neither of which
-/// requires the `&mut Agent` a running turn holds exclusively.
-fn model_command_args(cmd: &AppCommand) -> Option<&str> {
-    let AppCommand::Prompt(text) = cmd else {
-        return None;
-    };
-    let body = text.trim_start().strip_prefix('/')?;
-    let (name, args) = match body.split_once(char::is_whitespace) {
-        Some((n, rest)) => (n, rest.trim()),
-        None => (body, ""),
-    };
-    (name == Model::NAME).then_some(args)
+/// Prompts deferred while a turn ran never got their turn. A frontend queued
+/// some of the user's messages itself; these are the ones it had already
+/// handed over, and they are counted here so the two can be reported as one
+/// number. Takes the fields it needs rather than `&self`, because a running
+/// turn holds the agent.
+pub(crate) fn report_unsent(pending: &VecDeque<AppCommand>, unsent: &AtomicUsize) {
+    let count = pending
+        .iter()
+        .filter(|cmd| matches!(cmd, AppCommand::Prompt(_)))
+        .count();
+    if count > 0 {
+        tracing::info!(unsent = count, "queued prompts dropped at shutdown");
+    }
+    unsent.store(count, Ordering::Relaxed);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_model_during_turn(
-    args: &str,
-    ctx: &TurnContext,
-    router: &RouterHandle,
-    config: &mut AppConfig,
-    state: &mut AppState,
-    state_tx: &watch::Sender<AppState>,
-    user_config_path: Option<&Path>,
-    events: &mut EventBus,
-) {
-    let snapshot = router
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone();
-    let current_effort = ctx.model().1;
-    match Model::resolve(&snapshot, current_effort, args) {
-        Ok(ModelDirective::Query) => {
-            let (model, effort) = ctx.model();
-            events.emit(AppEventKind::Notification {
-                text: Model::describe(model.as_str(), effort),
-            });
-        }
-        Ok(ModelDirective::Switch {
-            model,
-            reasoning_effort,
-        }) => {
-            let outcome = resolve_model_switch(&snapshot, config, model, reasoning_effort);
-            ctx.set_model(
-                ModelId::from(outcome.model.as_str()),
-                outcome.reasoning_effort,
-            );
-            state.model.clone_from(&outcome.model);
-            state.reasoning_effort = outcome.reasoning_effort;
-            state.context_window = context_window_of(&snapshot, &outcome.model);
-            let _ = state_tx.send(state.clone());
-            events.emit_state(StateChange::ModelChanged {
-                model: outcome.model.clone(),
-                reasoning_effort: outcome.reasoning_effort,
-            });
-            let saved = save_provider_overlay(user_config_path, &outcome.overlay, events);
-            let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
-            if let Some(path) = saved {
-                let _ = write!(text, "\nsaved to {}", path.display());
-            }
-            events.emit(AppEventKind::Notification { text });
-        }
-        Err(e) => events.emit_error(e.to_string()),
+fn stop_subagent(subagents: &Subagents, events: &mut EventBus, id: AgentId) {
+    if !subagents.cancel(id) {
+        events.emit_error(format!("no subagent {id:?} to stop"));
     }
 }
 
+fn stop_subagents(subagents: &Subagents, events: &mut EventBus) {
+    let stopped = subagents.active();
+    subagents.cancel_all();
+    events.emit(AppEventKind::Notification {
+        text: format!("cancelled {stopped} subagents"),
+    });
+}
+
+/// Mirrors the subagent registry into published state. The registry is the
+/// truth; `revision` is what it read last, so a signal the registry did not
+/// change is dropped without copying the list — a subagent reports on every
+/// tool call it starts.
+fn sync_subagents(
+    subagents: &Subagents,
+    revision: &mut u64,
+    state: &mut AppState,
+    events: &mut EventBus,
+    state_tx: &watch::Sender<AppState>,
+) {
+    let current = subagents.revision();
+    if current == *revision {
+        return;
+    }
+    *revision = current;
+    let snapshot = Arc::new(subagents.snapshot());
+    state.subagents.clone_from(&snapshot);
+    let _ = state_tx.send(state.clone());
+    events.emit_state(StateChange::SubagentsChanged {
+        subagents: snapshot,
+    });
+}
+
+/// Forwards one agent event to the frontend.
+///
+/// Only the conversation driver's own events may move app state: a subagent's
+/// usage is its own, and its todo list, had it one, is not the user's. Every
+/// event still reaches subscribers, which is how a view can show a subagent's
+/// transcript.
 fn forward_agent_event(
+    main: AgentId,
     event: AgentEventEnvelope,
     events: &mut EventBus,
     state: &mut AppState,
     state_tx: &watch::Sender<AppState>,
 ) {
-    match &event.event {
-        AgentEvent::TodosChanged { todos } => {
-            state.todos = todos.clone();
-            let _ = state_tx.send(state.clone());
-            events.emit_state(StateChange::TodosChanged {
-                todos: todos.clone(),
-            });
+    if event.agent_id == main {
+        match &event.event {
+            AgentEvent::TodosChanged { todos } => {
+                state.todos = todos.clone();
+                let _ = state_tx.send(state.clone());
+                events.emit_state(StateChange::TodosChanged {
+                    todos: todos.clone(),
+                });
+            }
+            AgentEvent::Usage { usage } => {
+                state.last_turn_usage = *usage;
+                state.context_tokens = context_tokens_of(usage);
+                let _ = state_tx.send(state.clone());
+                events.emit_state(StateChange::ContextChanged {
+                    tokens: state.context_tokens,
+                    window: state.context_window,
+                });
+            }
+            _ => {}
         }
-        AgentEvent::Usage { usage } => {
-            state.last_turn_usage = *usage;
-            state.context_tokens = context_tokens_of(usage);
-            let _ = state_tx.send(state.clone());
-            events.emit_state(StateChange::ContextChanged {
-                tokens: state.context_tokens,
-                window: state.context_window,
-            });
-        }
-        _ => {}
     }
     events.emit(AppEventKind::Agent(event));
 }
@@ -1125,7 +863,7 @@ pub(crate) fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
 
 pub(crate) fn spawn_runtime(
     app_id: AppId,
-    agent: Agent,
+    agents: AppAgents,
     session: Option<Session>,
     root: PathBuf,
     config: AppConfig,
@@ -1143,7 +881,7 @@ pub(crate) fn spawn_runtime(
     let span = current_or_session_span(session.as_ref().map(Session::id));
     let (session_store, session_state) = match session {
         Some(s) => {
-            let has_content = agent.history().len() != 0;
+            let has_content = agents.main.history().len() != 0;
             let id = has_content.then(|| s.id().to_string());
             (
                 Some(SessionStore::new(s, &root, has_content)),
@@ -1152,10 +890,11 @@ pub(crate) fn spawn_runtime(
         }
         None => (None, SessionState { id: None }),
     };
-    let state = AppState::from_agent(&agent, provider, configured_providers, session_state);
+    let state = AppState::from_agent(&agents.main, provider, configured_providers, session_state);
     let (state_tx, state_rx) = watch::channel(state.clone());
+    let unsent = Arc::new(AtomicUsize::new(0));
     let runtime = Runtime::new(
-        agent,
+        agents,
         root.clone(),
         session_store,
         config,
@@ -1163,6 +902,7 @@ pub(crate) fn spawn_runtime(
         events,
         state,
         state_tx,
+        Arc::clone(&unsent),
     );
     let join = tokio::spawn(runtime.run(cmd_rx).instrument(span));
     App::new(
@@ -1173,6 +913,7 @@ pub(crate) fn spawn_runtime(
         slash_commands,
         root,
         state_rx,
+        unsent,
     )
 }
 
@@ -1290,6 +1031,8 @@ fn slug_without_variant(raw: &str) -> String {
         None => id.wire_id().to_string(),
     }
 }
+
+mod turn;
 
 #[cfg(test)]
 #[path = "runtime_test.rs"]

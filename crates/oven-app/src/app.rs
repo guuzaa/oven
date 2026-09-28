@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::string::String;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
 
 use oven_agent::AgentError;
@@ -26,6 +27,10 @@ pub enum AppError {
     Agent(#[from] AgentError),
     #[error("app channel closed")]
     ChannelClosed,
+    /// A command asked for the conversation driver while a turn holds it.
+    /// The runtime reads this as "defer the command", not as a failure.
+    #[error("the agent is busy with a running turn")]
+    AgentBusy,
     #[error("{0}")]
     Runtime(String),
     #[error("provider: {0}")]
@@ -50,6 +55,9 @@ pub struct App {
     cmd_tx: mpsc::UnboundedSender<AppCommand>,
     subscribers: Subscribers,
     join: JoinHandle<()>,
+    /// Queued prompts the runtime never got to run, filled in as it shuts
+    /// down so a frontend can report them once it has the terminal back.
+    unsent: Arc<AtomicUsize>,
     slash_commands: Vec<(String, String)>,
     root: PathBuf,
     state: watch::Receiver<AppState>,
@@ -76,6 +84,10 @@ impl App {
         out
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the handle is assembled once from the pieces spawn_runtime already holds"
+    )]
     pub(crate) fn new(
         id: AppId,
         cmd_tx: mpsc::UnboundedSender<AppCommand>,
@@ -84,12 +96,14 @@ impl App {
         slash_commands: Vec<(String, String)>,
         root: PathBuf,
         state: watch::Receiver<AppState>,
+        unsent: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             id,
             cmd_tx,
             subscribers,
             join,
+            unsent,
             slash_commands,
             root,
             state,
@@ -98,6 +112,16 @@ impl App {
 
     pub fn id(&self) -> AppId {
         self.id
+    }
+
+    /// The conversation driver. Anything else a view sees is a subagent.
+    pub fn agent_id(&self) -> oven_agent::AgentId {
+        self.state.borrow().agent_id
+    }
+
+    /// Subagents in spawn order, mirrored from the registry.
+    pub fn subagents(&self) -> Vec<oven_agent::NodeInfo> {
+        self.state.borrow().subagents.as_ref().clone()
     }
 
     pub fn send(&self, cmd: AppCommand) -> Result<(), AppError> {
@@ -170,6 +194,7 @@ impl App {
 
     pub async fn prompt(&self, input: impl Into<String>) -> Result<String, AppError> {
         let mut rx = self.subscribe();
+        let main = self.state().agent_id;
         self.send(AppCommand::Prompt(input.into()))?;
 
         let mut text = String::new();
@@ -179,7 +204,7 @@ impl App {
                 Some(AppEvent {
                     kind: AppEventKind::Agent(env),
                     ..
-                }) => match env.event {
+                }) if env.agent_id == main => match env.event {
                     AgentEvent::Turn(TurnEvent::Started) => {
                         in_turn = true;
                         text.clear();
@@ -241,8 +266,11 @@ impl App {
         }
     }
 
-    pub async fn shutdown(self) {
+    /// Shuts the runtime down and reports how many queued prompts were
+    /// dropped without ever running, so a frontend can say so.
+    pub async fn shutdown(self) -> usize {
         let _ = self.cmd_tx.send(AppCommand::Shutdown);
         let _ = self.join.await;
+        self.unsent.load(Ordering::Relaxed)
     }
 }

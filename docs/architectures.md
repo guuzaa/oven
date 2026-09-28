@@ -43,14 +43,16 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | Crate | Owns |
 | --- | --- |
 | `oven-llm` | `Message`, `Usage`, provider I/O |
-| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, turn execution, tool protocol, `AgentEvent`, `EventSink`, history/todo domain models, provider retry decoration |
+| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `AgentEvent`, `EventSink`, history/todo domain models, the `SubagentSpawner` protocol and its `NodeInfo`/`NodeStatus` vocabulary, provider retry decoration |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
-| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `ControlCommand`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, tracing subscriber install |
+| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `ControlCommand`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, subagent supervision, tracing subscriber install |
 | `oven-tui` | render events and state; send commands |
 
 `oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
 
-TUI internals are documented in [`oven-tui.md`](./oven-tui.md).
+TUI internals are documented in [`oven-tui.md`](./oven-tui.md), the app layer in
+[`oven-app.md`](./oven-app.md), and subagents — with the seams they leave for
+loop and graph engineering — in [`subagents.md`](./subagents.md).
 
 The dependency direction is:
 
@@ -84,8 +86,15 @@ oven-agent::Tool
   ├── FileReadTool / FileEditTool / SkillReadTool ──► tokio::fs
   ├── FileWriteTool / FileEditTool                ──► oven-host write
   ├── BashTool                                    ──► oven-host process
-  └── GlobTool / GrepTool                         ──► oven-agent matching + oven-host walk
+  ├── GlobTool / GrepTool                         ──► oven-agent matching + oven-host walk
+  └── TaskTool / TaskOutputTool                   ──► oven-agent SubagentSpawner (oven-app implements it)
 ```
+
+`Tool::run(&self, args, cx: &TurnContext)` receives the whole run context rather
+than a bag of options, so a tool that starts work of its own — a subagent, a
+nested loop — inherits the run it was called from instead of guessing. Tools
+mount as `Arc<dyn Tool>`: the driver and every subagent it spawns share one
+instance each, so spawning never reconnects an MCP server.
 
 ## App facade
 
@@ -102,14 +111,16 @@ AppBuilder ──open──► App ──AppCommand──► Runtime
 
 ```text
 AppId
- └── AgentId
-       └── TurnId          created by the app runtime
+ └── AgentId            the conversation driver, or a subagent it spawned
+       └── TurnId          created by whoever runs the turn
              └── ToolCallId  created by the agent
 ```
 
 IDs start at 1. There is no `Default` sentinel of `0`.
 
-A turn is an app-level user request. The runtime allocates `TurnId` and passes it into `Agent::run` via `TurnContext`. `TurnContext` also holds live `mode` and `model` so `SetMode` / `/model` can take effect at the next agent step without waiting for `&mut Agent`.
+A turn is an app-level user request. The runtime allocates `TurnId` and passes it into `Agent::run` via `TurnContext`; a subagent's spawner does the same for its own turn. `TurnContext` also holds the run's `RunPolicy` (what one run may spend) and live `mode` and `model`, so `SetMode` / `/model` can take effect at the next agent step without waiting for `&mut Agent`.
+
+`AgentId` is ordered, which is what lets a frontend keep one view per subagent in a `BTreeMap` with a stable order.
 
 ---
 
@@ -151,6 +162,7 @@ A running turn holds `&mut Agent` exclusively. Incoming commands split on whethe
 | `Control::Cancel { matching turn_id }` | cancel immediately |
 | `Control::SetMode` | apply immediately via `TurnContext` + `AppState` |
 | `Prompt("/model …")` | apply immediately via `RouterHandle` + `TurnContext` |
+| `Prompt("/agents …")`, `Prompt("/exit")` | apply immediately: neither asks for the agent, which is what `CommandContext::agent()` reports |
 | `Control::RespondToolApproval` | consumed by the turn's select loop; phase returns to `Running` |
 | `Control::RespondLoopLimit` | consumed by the turn's select loop; continues or fails the turn |
 | `Control::RespondQuestion` | consumed by the turn's select loop; resumes the tool waiting for the answer |
@@ -160,7 +172,10 @@ A running turn holds `&mut Agent` exclusively. Incoming commands split on whethe
 
 `TurnContext` carries `mode` and `model` behind a lock so those two can change without `&mut Agent`. The agent re-reads them at each step and at turn end. `TurnContext` also carries the approval, loop-limit and question reply channels, so the turn can consume those replies directly instead of going through `pending`. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::update_router`, so it waits.
 
-Queued commands drain after the turn ends, in arrival order. Keyboard mode toggle is `Control::SetMode` and applies live; `/plan` is Prompt slash and therefore waits until the agent is free.
+A command that never asks for the agent — `/agents`, `/exit` — is applied mid-turn
+instead of queued: `CommandContext::agent()` returns `AgentBusy` for the ones that
+do need it, and the runtime reads that as "wait". Queued commands drain after the
+turn ends, in arrival order. Keyboard mode toggle is `Control::SetMode` and applies live; `/plan` is Prompt slash and therefore waits until the agent is free.
 
 ---
 
@@ -191,6 +206,7 @@ pub enum AgentEvent {
 
 ```text
 TurnEvent     Started | Completed { usage, duration_ms }
+              StepStarted { index } | StepFinished { index, stop }
               Cancelled { duration_ms } | Failed { error, duration_ms }
               LoopLimitReached { request_id, max_iters }
 StreamEvent   TextDelta { text } | ThinkingDelta { text }
@@ -201,6 +217,16 @@ ToolEvent     ApprovalRequested { request_id, call_id, name, view }
               OutputDelta { call_id, stream, text }
               Finished { call_id, result }
 ```
+
+`StepStarted` / `StepFinished` bound one provider round trip, `index` counting
+from 1. The calls inside one step run at the same time — `Started` is reported
+for all of them, then `Finished` as each lands — so a response that asks for
+three subagents gets three working at once. Approvals are still asked one at a
+time, tools that declare `ToolCaps::exclusive` (the ones that rewrite a file
+from what they read, and the one that asks the user something) take a turn
+each, and the tool results enter the history in the order the model asked for
+them, which is the order a provider expects them back in. They are what lets a driver — or a strip on screen — report loop
+progress and a stop reason without reading the agent.
 
 `ThinkingDone` closes the thinking window the agent timed: it fires the moment
 the reasoning phase ends, ahead of the answer text or the tool call that ended
@@ -229,12 +255,19 @@ pub struct AppEvent {
 
 pub enum AppEventKind {
     Agent(AgentEventEnvelope),
+    Subagent(SubagentEvent),
     StateChanged(StateEvent),
     Shell(ShellEvent),
     Compaction(CompactionEvent),
     Notification { text: String },
     Error { message: String },
     Exited,
+}
+
+pub enum SubagentEvent {
+    /// Open a view on one subagent. A command asks for it; the frontend
+    /// decides what a view is.
+    Focus { id: AgentId },
 }
 
 pub enum CompactionEvent {
@@ -252,6 +285,11 @@ pub enum ShellEvent {
 
 There is no `Idle` event. Turn completion is `TurnEvent::Completed | Cancelled | Failed`. App idleness is `AppState.phase`.
 
+`SubagentEvent` is what a frontend should *do*; `AppState.subagents` is what is
+*true*. Subagent turns report as ordinary `AgentEventEnvelope`s carrying the
+subagent's `agent_id`, so a view can render one with the same code as the
+driver's transcript.
+
 Subscribers get a lossless unbounded channel. `App::state()` / `watch_state()` is the current snapshot.
 
 ## Agent API
@@ -259,11 +297,24 @@ Subscribers get a lossless unbounded channel. `App::state()` / `watch_state()` i
 ```rust
 agent.run(input, &TurnContext::new(turn_id, cancellation, mode, model, effort), &mut sink)
     -> Result<TurnOutput, AgentError>
+
+agent.step(&mut sink, &cx) -> Result<Step, AgentError>
 ```
+
+`run` is one loop policy over `step`, and `step` is public so a strategy of its
+own can drive it: ask, commit the reply, run the tools it asked for, and hand
+back a `Step { text, calls, usage }`. `Step::is_final` — a step that asked for
+no tools — is what ends the default loop. Tool output is not repeated on the
+step; it is the tool-result message the step already pushed into the history,
+so a step carrying a huge `file_read` stays cheap. `RunPolicy::max_iters` rides
+`TurnContext` because it bounds one run, not the conversation driver: a
+subagent gets its own.
 
 `mode` and `model` are shared (`Arc<Mutex<_>>`) so the runtime can update them while the turn holds `&mut Agent`. The agent copies both onto itself at the start of every step. `TurnContext` also carries the approval, loop-limit and question reply channels, which is how those replies reach the running turn without needing `&mut Agent`.
 
-The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`. A tool receives a `ToolContext` holding the turn's cancellation token and, when a frontend is attached, the channel it asks the user a question on.
+The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`. A tool receives the `TurnContext` of the run it belongs to, which is where it finds cancellation and, when a frontend is attached, the channels it asks the user on.
+
+`Agent::with_router(RouterHandle, tools)` joins a router someone else owns, and `Agent::replace_router` swaps the snapshot rather than mutating it in place: a reader that captured the old router finishes its request on it, which is what makes a mid-flight `/setup` safe while a subagent is still running.
 
 `EventSink::emit` is synchronous. Production uses `ChannelEventSink`; tests use `VecEventSink`.
 
@@ -279,6 +330,10 @@ TurnOutput  = function return value
 ```rust
 pub struct AppState {
     pub phase: AppPhase,
+    /// The conversation driver; every other agent is a subagent.
+    pub agent_id: AgentId,
+    /// Subagents in spawn order, mirrored from the registry.
+    pub subagents: Vec<NodeInfo>,
     pub mode: AgentMode,
     pub model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -314,7 +369,7 @@ pub enum AppPhase {
 ```text
 ModelChanged | ModeChanged | TodosChanged | HistoryChanged
 SessionChanged | UsageChanged | ContextChanged | ProviderChanged
-ModelsChanged
+ModelsChanged | SubagentsChanged
 ```
 
 `UsageChanged` carries `last_turn_usage` — tokens for the most recent agent turn, not a session total. `ContextChanged` carries `context_tokens` / `context_window` (prompt-side tokens of the latest response, and the model's window when known). A mid-turn `AgentEvent::Usage` updates the `AppState` usage and context fields and emits `ContextChanged`, while `UsageChanged` is the turn-end delta. `ProviderChanged` includes `configured_providers` (canonical slugs saved under `[providers.<slug>]`).
@@ -444,6 +499,39 @@ Then runtime sets `phase = Idle`. `TurnCompleted` is the fact; `Idle` is the pha
 
 ---
 
+# Subagents
+
+A subagent is another `Agent` running its own turn in its own task, over the
+driver's router and the same tool instances. `oven-agent` owns the vocabulary —
+`SubagentSpawner`, `SpawnRequest`, `NodeHandle`, `NodeInfo`, `NodeStatus`,
+`RoleSpec` — and `oven-app::SubagentParts`/`Subagents` owns the machinery. That
+split is what lets a tool delegate without knowing how a subagent is built.
+
+```text
+task / task_output ──► Arc<dyn SubagentSpawner> ──► Subagents
+                                                      ├── registry (the truth)
+                                                      ├── Semaphore(max_concurrent)
+                                                      └── tokio task per subagent
+```
+
+| Concern | How |
+| --- | --- |
+| Roles | `explore` mounts the read-only tools, `general` mounts everything except the tools that speak to the user, manage the driver's plan, or would nest delegation. Partitioning is by `ToolCaps::permission`, so a new read-only tool reaches `explore` on its own. |
+| Addressing | `role#n`, unique for the app run; `1` also means "the first in the listing". |
+| Concurrency | A `Semaphore`; a spawn without a permit waits in `Pending` rather than being refused. |
+| Cancellation | One token per subagent, cancelled by name, by the turn that spawned it, or by app shutdown. |
+| Prompts | A subagent's `TurnContext` carries no approval, loop-limit or question channel, so it can never park waiting on a user. It runs in `AgentMode::Agent`; what it may do comes from its role. |
+| Status | The registry is the single source of truth; `AppState.subagents` mirrors it, `/agents` reads it, and `task_output` reads it, so the three cannot disagree. |
+| Results | A foreground `task` returns the report as its tool result; a background one returns a name to poll with `task_output`. |
+| Persistence | None. Subagents live for the app run; only the tool call and its result are in the driver's history, so `/agents` after a resume shows nothing. |
+
+Subagents are deliberately one-shot: a finished subagent's `Agent` is dropped
+and only its report and counters are kept. Revisiting a node — a graph loop —
+therefore produces a fresh `AgentId` and `TurnId` by construction, with no
+"visit" concept to invent.
+
+---
+
 # Flows
 
 ## Normal turn
@@ -518,17 +606,22 @@ The TUI shows the typed `!` line as a user row and the last 100 output lines as 
 
 # Invariants
 
-1. `Running(turn_id)` means exactly one active request: an agent turn **or** a bang-shell command.
-2. Every `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running`, `AwaitingToolApproval`, `AwaitingLoopLimit`, `AwaitingAnswer`, or `Cancelling`. Agent envelopes are not emitted for bang-shell.
-3. Each agent turn emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`. Each bang-shell request emits exactly one `Shell::Started` and exactly one of `Finished | Failed`.
-4. `ToolFinished` is always preceded by `ToolStarted` for the same `ToolCallId`.
-5. While `Running` or `Cancelling`, only `Cancel`, `SetMode`, `/model`, the approval / loop-limit / question replies, and `Shutdown` are applied immediately. Everything else waits in `pending`.
+1. `Running(turn_id)` means exactly one active request **of the driver's**: its own agent turn, or a bang-shell command. A subagent's turn runs alongside and never enters `AppPhase`; its progress is `AppState.subagents`.
+2. Every driver `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running`, `AwaitingToolApproval`, `AwaitingLoopLimit`, `AwaitingAnswer`, or `Cancelling`. Agent envelopes are not emitted for bang-shell, and a subagent's envelope carries its own `agent_id` and `turn_id` instead.
+3. Each agent turn — the driver's or a subagent's — emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`. Each bang-shell request emits exactly one `Shell::Started` and exactly one of `Finished | Failed`.
+4. `ToolFinished` always follows the `ToolStarted` of the same `ToolCallId`. A call that never ran — a tool hidden in Ask mode, an approval the user declined — reports `ToolFinished` alone, because nothing started.
+5. While `Running` or `Cancelling`, only `Cancel`, `SetMode`, `/model`, `StopSubagent`, `StopSubagents`, the approval / loop-limit / question replies, and `Shutdown` are applied immediately. Everything else waits in `pending`.
+6. Only the driver's own events move app state. A subagent's `Usage` is its own and its `TodosChanged` is not the user's, so the runtime mirrors neither; both still reach subscribers.
+7. A subagent's events reach the frontend while the runtime is idle: every agent reports on one channel that the runtime drains whether or not a turn of its own is running.
 
 Runtime is a single app actor. It is not the `oven-host` crate:
 
 ```rust
 struct Runtime {
     agent: Agent,
+    subagents: Arc<Subagents>,
+    event_rx: Receiver<AgentEventEnvelope>,   // every agent reports here
+    wake_rx: Receiver<()>,                    // the registry changed
     router: RouterHandle,  // independent of `&mut agent`
     root: PathBuf,
     state: AppState,
@@ -552,4 +645,9 @@ impl Runtime {
 }
 ```
 
-`runtime/mod.rs` owns select, command dispatch, mid-turn `/model`, the `pending` queue, and `start_turn` / `cancel_turn` / `persist_turn`. `builder.rs` owns construction.
+`runtime/mod.rs` owns the actor: the command loop, the idle select that also
+serves subagent events, command dispatch, the `pending` queue, and persistence.
+`runtime/turn.rs` owns what happens while a turn runs — `start_turn`,
+`run_shell`, mid-turn `/model`, and the deferral of anything that has to wait
+for `&mut Agent`. `builder.rs` owns construction; `subagent.rs` owns delegated
+runs.
