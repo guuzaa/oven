@@ -1,5 +1,5 @@
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
@@ -26,6 +26,10 @@ use crate::components::todos::TodosWidget;
 use crate::components::transcript::Transcript;
 
 use crate::components::{layout, terminal};
+
+/// Esc only acts when it is pressed twice inside this window, so a stray
+/// press cannot cancel a turn or rewind the transcript.
+const ESC_CONFIRM_WINDOW: Duration = Duration::from_secs(1);
 
 enum OverlayPrompt {
     Approval {
@@ -87,6 +91,8 @@ pub struct Ui {
     /// desync the transcript from the backend.
     rewinding: bool,
     pending: Vec<String>,
+    /// Deadline for the Esc press that confirms a previous one.
+    esc_confirm_until: Option<Instant>,
 
     transcript: Transcript,
     status: StatusBar,
@@ -124,6 +130,7 @@ impl Ui {
             quit: false,
             rewinding: false,
             pending: Vec::new(),
+            esc_confirm_until: None,
 
             transcript: Transcript::new(),
             status: StatusBar::new(model, &root, last_turn_usage)
@@ -171,6 +178,7 @@ impl Ui {
                         self.state.frame = self.state.frame.wrapping_add(1);
                     }
                     self.status.expire_reply();
+                    self.expire_esc_confirm();
                 }
                 Some(ev) = term_events.next() => {
                     if self.handle_term_event(ev?)? {
@@ -205,6 +213,7 @@ impl Ui {
                         }
                     }
                     Burst::Paste(text) => {
+                        self.clear_esc_confirm();
                         self.input.paste(&text);
                         self.suppress_completions();
                     }
@@ -214,6 +223,7 @@ impl Ui {
                 }
             }
             Event::Paste(text) => {
+                self.clear_esc_confirm();
                 self.input.paste(&text);
                 self.suppress_completions();
             }
@@ -483,6 +493,8 @@ impl Ui {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        let esc_armed = self.esc_armed();
+        self.clear_esc_confirm();
         let result = match self.handle_prompt_key(key) {
             PromptFlow::Kept | PromptFlow::Closed => return false,
             PromptFlow::Typing => {
@@ -501,31 +513,7 @@ impl Ui {
                     });
                     KeyResult::Handled
                 }
-                KeyCode::Esc if self.input.overlay() == Overlay::None => match EscAction::new(
-                    self.pending.pop(),
-                    self.state.busy,
-                    self.rewinding,
-                    self.transcript.rewind_text(),
-                ) {
-                    EscAction::PopQueue(text) => {
-                        self.input.set_text(&text);
-                        KeyResult::Handled
-                    }
-                    EscAction::Cancel => KeyResult::Action(Action::Cancel),
-                    EscAction::Rewind(text) => {
-                        self.input.set_text(&text);
-                        self.rewinding = true;
-                        if self
-                            .app
-                            .send(AppCommand::Control(ControlCommand::Rewind))
-                            .is_err()
-                        {
-                            self.rewinding = false;
-                        }
-                        KeyResult::Handled
-                    }
-                    EscAction::Ignore => KeyResult::Handled,
-                },
+                KeyCode::Esc if self.input.overlay() == Overlay::None => self.handle_esc(esc_armed),
                 // Plain Enter during rewind would submit before history is truncated.
                 KeyCode::Enter if self.rewinding && key.modifiers.is_empty() => KeyResult::Handled,
                 _ => match self.transcript.handle_key(key, &self.state) {
@@ -579,6 +567,74 @@ impl Ui {
         }
     }
 
+    fn esc_armed(&self) -> bool {
+        self.esc_confirm_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Drops an expired arm so the next Esc starts the confirm pair over.
+    fn expire_esc_confirm(&mut self) {
+        if self
+            .esc_confirm_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            self.esc_confirm_until = None;
+        }
+    }
+
+    /// Drops a pending arm, so nothing but a second Esc inside the window
+    /// confirms the first one.
+    fn clear_esc_confirm(&mut self) {
+        self.esc_confirm_until = None;
+    }
+
+    /// The first press only arms the action the status bar announces; the
+    /// second, inside the window, performs it.
+    fn handle_esc(&mut self, armed: bool) -> KeyResult {
+        let action = self.esc_action();
+        if matches!(action, EscAction::Ignore) {
+            return KeyResult::Handled;
+        }
+        if !armed {
+            self.esc_confirm_until = Some(Instant::now() + ESC_CONFIRM_WINDOW);
+            return KeyResult::Handled;
+        }
+        match action {
+            EscAction::PopQueue => {
+                if let Some(text) = self.pending.pop() {
+                    self.input.set_text(&text);
+                }
+                KeyResult::Handled
+            }
+            EscAction::Cancel => KeyResult::Action(Action::Cancel),
+            EscAction::Rewind => {
+                let Some(text) = self.transcript.rewind_text() else {
+                    return KeyResult::Handled;
+                };
+                self.input.set_text(&text);
+                self.rewinding = true;
+                if self
+                    .app
+                    .send(AppCommand::Control(ControlCommand::Rewind))
+                    .is_err()
+                {
+                    self.rewinding = false;
+                }
+                KeyResult::Handled
+            }
+            EscAction::Ignore => KeyResult::Handled,
+        }
+    }
+
+    fn esc_action(&self) -> EscAction {
+        EscAction::new(
+            self.pending.last().map(String::as_str),
+            self.state.busy,
+            self.rewinding,
+            self.transcript.rewind_text().as_deref(),
+        )
+    }
+
     fn draw(&mut self, f: &mut Frame<'_>) {
         let area = f.area();
         let overlay_height = match self.prompt.as_ref() {
@@ -611,13 +667,18 @@ impl Ui {
             f,
             regions.status,
             &self.state,
-            status_hint(self.input.overlay(), self.state.busy, self.prompt.as_ref()),
+            status_hint(
+                self.input.overlay(),
+                self.state.busy,
+                self.prompt.as_ref(),
+                self.esc_armed(),
+            ),
         );
         self.status.draw_reply_overlay(f, regions.transcript);
     }
 
     fn wants_tick(&self) -> bool {
-        self.state.busy || self.status.has_reply()
+        self.state.busy || self.status.has_reply() || self.esc_armed()
     }
 }
 
@@ -644,7 +705,12 @@ fn is_mode_toggle(key: KeyEvent) -> bool {
         || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT))
 }
 
-fn status_hint(overlay: Overlay, busy: bool, prompt: Option<&OverlayPrompt>) -> StatusHint {
+fn status_hint(
+    overlay: Overlay,
+    busy: bool,
+    prompt: Option<&OverlayPrompt>,
+    esc_armed: bool,
+) -> StatusHint {
     match prompt {
         Some(OverlayPrompt::Approval { .. }) => return StatusHint::Approval,
         Some(OverlayPrompt::LoopLimit { .. }) => return StatusHint::LoopLimit,
@@ -655,22 +721,29 @@ fn status_hint(overlay: Overlay, busy: bool, prompt: Option<&OverlayPrompt>) -> 
     match overlay {
         Overlay::Slash | Overlay::Mention => StatusHint::Slash,
         Overlay::Model | Overlay::Setup => StatusHint::Modal,
-        Overlay::None if busy => StatusHint::Busy,
-        Overlay::None => StatusHint::Idle,
+        Overlay::None => {
+            if esc_armed {
+                StatusHint::EscArmed
+            } else if busy {
+                StatusHint::Busy
+            } else {
+                StatusHint::Idle
+            }
+        }
     }
 }
 
 enum EscAction {
-    PopQueue(String),
+    PopQueue,
     Cancel,
-    Rewind(String),
+    Rewind,
     Ignore,
 }
 
 impl EscAction {
-    fn new(queued: Option<String>, busy: bool, rewinding: bool, last_user: Option<String>) -> Self {
-        if let Some(text) = queued {
-            return EscAction::PopQueue(text);
+    fn new(queued: Option<&str>, busy: bool, rewinding: bool, last_user: Option<&str>) -> Self {
+        if queued.is_some() {
+            return EscAction::PopQueue;
         }
         if busy {
             return EscAction::Cancel;
@@ -678,10 +751,10 @@ impl EscAction {
         if rewinding {
             return EscAction::Ignore;
         }
-        match last_user {
-            Some(text) => EscAction::Rewind(text),
-            None => EscAction::Ignore,
+        if last_user.is_some() {
+            return EscAction::Rewind;
         }
+        EscAction::Ignore
     }
 }
 
@@ -705,24 +778,24 @@ mod tests {
     #[test]
     fn esc_action_priority_queue_then_cancel_then_rewind() {
         assert!(matches!(
-            EscAction::new(Some("q".into()), true, false, Some("u".into())),
-            EscAction::PopQueue(t) if t == "q"
+            EscAction::new(Some("q"), true, false, Some("u")),
+            EscAction::PopQueue
         ));
         assert!(matches!(
-            EscAction::new(Some("q".into()), true, true, None),
-            EscAction::PopQueue(t) if t == "q"
+            EscAction::new(Some("q"), true, true, None),
+            EscAction::PopQueue
         ));
         assert!(matches!(
-            EscAction::new(None, true, false, Some("u".into())),
+            EscAction::new(None, true, false, Some("u")),
             EscAction::Cancel
         ));
         assert!(matches!(
-            EscAction::new(None, false, true, Some("u".into())),
+            EscAction::new(None, false, true, Some("u")),
             EscAction::Ignore
         ));
         assert!(matches!(
-            EscAction::new(None, false, false, Some("u".into())),
-            EscAction::Rewind(t) if t == "u"
+            EscAction::new(None, false, false, Some("u")),
+            EscAction::Rewind
         ));
         assert!(matches!(
             EscAction::new(None, false, false, None),
@@ -818,25 +891,50 @@ mod tests {
 
     #[test]
     fn status_hint_follows_overlay_then_busy() {
-        assert_eq!(status_hint(Overlay::Slash, true, None), StatusHint::Slash);
-        assert_eq!(status_hint(Overlay::Setup, false, None), StatusHint::Modal);
-        assert_eq!(status_hint(Overlay::Model, false, None), StatusHint::Modal);
-        assert_eq!(status_hint(Overlay::None, true, None), StatusHint::Busy);
-        assert_eq!(status_hint(Overlay::None, false, None), StatusHint::Idle);
+        assert_eq!(
+            status_hint(Overlay::Slash, true, None, false),
+            StatusHint::Slash
+        );
+        assert_eq!(
+            status_hint(Overlay::Setup, false, None, false),
+            StatusHint::Modal
+        );
+        assert_eq!(
+            status_hint(Overlay::Model, false, None, false),
+            StatusHint::Modal
+        );
+        assert_eq!(
+            status_hint(Overlay::None, true, None, false),
+            StatusHint::Busy
+        );
+        assert_eq!(
+            status_hint(Overlay::None, false, None, false),
+            StatusHint::Idle
+        );
+        assert_eq!(
+            status_hint(Overlay::None, false, None, true),
+            StatusHint::EscArmed,
+            "the armed Esc overrides the idle hint"
+        );
         let approval = OverlayPrompt::Approval {
             request_id: ApprovalRequestId(1),
             popup: ChoicePopup::approval("bash", "run ls"),
         };
         assert_eq!(
-            status_hint(Overlay::None, true, Some(&approval)),
+            status_hint(Overlay::None, true, Some(&approval), false),
             StatusHint::Approval
+        );
+        assert_eq!(
+            status_hint(Overlay::None, true, Some(&approval), true),
+            StatusHint::Approval,
+            "an open prompt outranks the armed Esc"
         );
         let loop_limit = OverlayPrompt::LoopLimit {
             request_id: LoopLimitRequestId(1),
             popup: ChoicePopup::loop_limit(100),
         };
         assert_eq!(
-            status_hint(Overlay::None, true, Some(&loop_limit)),
+            status_hint(Overlay::None, true, Some(&loop_limit), false),
             StatusHint::LoopLimit
         );
     }
@@ -951,6 +1049,92 @@ mod tests {
         ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
+    }
+
+    fn esc() -> KeyEvent {
+        key(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    /// A finished turn: its prompt is the rewindable row and nothing runs.
+    async fn finished_turn_ui(root: &tempdir::TempDir) -> Ui {
+        let mut ui = test_ui(root).await;
+        ui.input.set_text(TEST_ANSWER);
+        ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+        ui.state.busy = false;
+        ui
+    }
+
+    #[tokio::test]
+    async fn a_single_esc_only_arms_the_rewind() {
+        let root = tempdir::TempDir::new("oven-ui-esc-arm").unwrap();
+        let mut ui = finished_turn_ui(&root).await;
+
+        ui.handle_key(esc());
+
+        assert!(!ui.rewinding, "one press must not rewind the transcript");
+        assert!(ui.esc_armed(), "the press arms the status bar hint");
+        assert_eq!(
+            ui.transcript.rewind_text().as_deref(),
+            Some(TEST_ANSWER),
+            "the prompt stays in the transcript until the confirm"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_esc_inside_the_window_rewinds() {
+        let root = tempdir::TempDir::new("oven-ui-esc-rewind").unwrap();
+        let mut ui = finished_turn_ui(&root).await;
+
+        ui.handle_key(esc());
+        ui.handle_key(esc());
+
+        assert!(ui.rewinding, "the confirm rewinds the transcript");
+        assert!(!ui.esc_armed(), "the confirm consumes the arm");
+    }
+
+    #[tokio::test]
+    async fn an_expired_esc_arm_starts_over() {
+        let root = tempdir::TempDir::new("oven-ui-esc-expired").unwrap();
+        let mut ui = finished_turn_ui(&root).await;
+
+        ui.handle_key(esc());
+        ui.esc_confirm_until = Some(Instant::now() - Duration::from_millis(1));
+        ui.expire_esc_confirm();
+        assert!(!ui.esc_armed(), "the window closed in between");
+        ui.handle_key(esc());
+
+        assert!(!ui.rewinding, "the late press is too late to rewind");
+        assert!(ui.esc_armed(), "it only armed the next pair");
+    }
+
+    #[tokio::test]
+    async fn any_other_key_drops_the_esc_arm() {
+        let root = tempdir::TempDir::new("oven-ui-esc-interrupted").unwrap();
+        let mut ui = finished_turn_ui(&root).await;
+
+        ui.handle_key(esc());
+        ui.handle_key(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        ui.handle_key(esc());
+
+        assert!(!ui.rewinding, "typing broke the pair apart");
+        assert!(ui.esc_armed(), "the second Esc is a first press again");
+    }
+
+    #[tokio::test]
+    async fn queued_text_waits_for_the_esc_confirm() {
+        let root = tempdir::TempDir::new("oven-ui-esc-queue").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.state.busy = true;
+        ui.pending.push(TEST_ANSWER.to_string());
+
+        ui.handle_key(esc());
+
+        assert_eq!(ui.pending.len(), 1, "one press must not touch the queue");
+        assert!(ui.esc_armed());
+
+        ui.handle_key(esc());
+
+        assert!(ui.pending.is_empty(), "the confirm pops the queue");
     }
 
     #[tokio::test]

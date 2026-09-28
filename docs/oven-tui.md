@@ -58,7 +58,8 @@ delta. A disconnected channel settles the live transcript response and clears
 
 `apply_event` maps each event onto four things:
 
-- `Ui`'s own `state.busy` / `state.mode` / `rewinding` / `quit`
+- `Ui`'s own `state.busy` / `state.mode` / `rewinding` / `quit` /
+  `esc_confirm_until`
 - transcript, status, input, and todos widgets via `on_event`
 - overlay prompts (`OverlayPrompt`) for tool approval, loop limit, and a
   question from the `answer` tool that is answered either by picking an offered
@@ -82,6 +83,13 @@ transcript; shell prompts come back in their bang form. During a rewind the
 `rewinding` flag blocks a plain Enter until `HistoryChanged` arrives, so the
 user cannot submit before the backend has truncated history; that event then
 rebuilds the transcript from the truncated history.
+
+The resolved action only fires when Esc is pressed twice inside
+`ESC_CONFIRM_WINDOW` (1 s), so a stray press cannot cancel a turn or rewind the
+transcript. The first press arms it and the status bar switches to the
+`EscArmed` hint; the arm expires on the next tick after the window closes, and
+any other key drops it. An action the key cannot perform (`Ignore`) never arms
+anything.
 
 ### Component contract
 
@@ -249,6 +257,7 @@ prefixed while busy. The trailing hint is context-sensitive:
 | `Modal` | `enter · esc` |
 | `Approval` | `enter/y approve · esc/n reject · ctrl-c cancel` |
 | `LoopLimit` | `enter/y continue · esc/n exit · ctrl-c cancel` |
+| `EscArmed` | `esc again to confirm` |
 
 When the row does not fit, the hint is dropped and the left side is truncated
 with `…` by display width.

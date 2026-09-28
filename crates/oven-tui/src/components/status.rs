@@ -32,6 +32,23 @@ pub enum StatusHint {
     LoopLimit,
     Question,
     AnswerTyping,
+    EscArmed,
+}
+
+impl StatusHint {
+    fn label(&self) -> &str {
+        match self {
+            StatusHint::Slash => "tab fill · enter · esc",
+            StatusHint::Modal => "enter · esc",
+            StatusHint::Approval => "enter/y approve · esc/n reject · ctrl-c cancel",
+            StatusHint::LoopLimit => "enter/y continue · esc/n exit · ctrl-c cancel",
+            StatusHint::Question => "enter answer · esc skip · ctrl-c cancel",
+            StatusHint::AnswerTyping => "enter send · esc back",
+            StatusHint::EscArmed => "esc again to confirm",
+            StatusHint::Busy => "shift-tab mode · esc cancel · enter queue",
+            StatusHint::Idle => "shift-tab mode · enter send · alt-enter newline · esc undo",
+        }
+    }
 }
 
 /// Single status row below the input: model [effort] · mode · root · usage
@@ -192,25 +209,16 @@ impl StatusBar {
             spans.push(Span::styled(" · ", gray));
             spans.push(Span::styled(format!("ctx {pct}%"), gray));
         }
-        let hint = match hint {
-            StatusHint::Slash => "tab fill · enter · esc",
-            StatusHint::Modal => "enter · esc",
-            StatusHint::Approval => "enter/y approve · esc/n reject · ctrl-c cancel",
-            StatusHint::LoopLimit => "enter/y continue · esc/n exit · ctrl-c cancel",
-            StatusHint::Question => "enter answer · esc skip · ctrl-c cancel",
-            StatusHint::AnswerTyping => "enter send · esc back",
-            StatusHint::Busy => "shift-tab mode · esc cancel · enter queue",
-            StatusHint::Idle => "shift-tab mode · enter send · alt-enter newline · esc undo",
-        };
+        let hint_label = hint.label();
         let max = area.width as usize;
-        let hint_w = hint.width();
+        let hint_w = hint_label.width();
         let left = Line::from(spans);
         let left_w = left.width();
         let line = if hint_w + 1 < max && left_w + 1 + hint_w <= max {
             let pad = max - left_w - hint_w;
             let mut spans = left.spans;
             spans.push(Span::raw(" ".repeat(pad)));
-            spans.push(Span::styled(hint.to_string(), gray));
+            spans.push(Span::styled(hint_label, gray));
             Line::from(spans)
         } else {
             truncate_line(left, max.saturating_sub(1))
