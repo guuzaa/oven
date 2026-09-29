@@ -1,15 +1,13 @@
 use oven_llm::Usage;
 
-use crate::approval::{ApprovalRequestId, LoopLimitRequestId};
 use crate::error::AgentError;
 use crate::identity::{AgentId, ToolCallId, TurnId};
-use crate::question::{Question, QuestionRequestId};
+use crate::interaction::{Question, UserRequestId};
 use crate::todo::TodoList;
 use crate::tools::ToolView;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentEventEnvelope {
-    pub seq: u64,
     pub agent_id: AgentId,
     pub turn_id: TurnId,
     pub event: AgentEvent,
@@ -27,6 +25,15 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEvent {
     Started,
+    /// A provider round trip begins. `index` counts from 1 within the turn,
+    /// so a driver can report loop progress without reading the agent.
+    StepStarted {
+        index: usize,
+    },
+    StepFinished {
+        index: usize,
+        stop: StepStop,
+    },
     Completed {
         usage: Usage,
         duration_ms: u64,
@@ -39,9 +46,18 @@ pub enum TurnEvent {
         duration_ms: u64,
     },
     LoopLimitReached {
-        request_id: LoopLimitRequestId,
+        request_id: UserRequestId,
         max_iters: usize,
     },
+}
+
+/// Why a step ended, which is also what the loop does next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStop {
+    /// The assistant asked for tools; the loop runs them and continues.
+    ToolUse,
+    /// The assistant answered; the loop stops.
+    FinalAnswer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,7 +81,7 @@ pub enum StreamEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolEvent {
     ApprovalRequested {
-        request_id: ApprovalRequestId,
+        request_id: UserRequestId,
         call_id: ToolCallId,
         name: String,
         view: ToolView,
@@ -75,12 +91,11 @@ pub enum ToolEvent {
         name: String,
         view: ToolView,
     },
-    /// A tool is waiting for the user to answer `question`. A question
-    /// originates inside the tool call that asked it, so this event is
-    /// emitted by the frontend that owns the answer channel rather than by
-    /// the agent loop.
+    /// A tool is waiting for the user to answer `question`. The runtime
+    /// projects this from the request, as it does for an approval and the
+    /// loop limit: the agent loop does not emit user prompts itself.
     QuestionAsked {
-        request_id: QuestionRequestId,
+        request_id: UserRequestId,
         question: Question,
     },
     OutputDelta {
@@ -98,6 +113,16 @@ pub enum ToolEvent {
 pub enum ToolOutputStream {
     Stdout,
     Stderr,
+}
+
+/// How a tool call ended, without its output: the output is the tool-result
+/// message the step appended to the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallOutcome {
+    Success,
+    Failed,
+    Rejected,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +143,15 @@ pub enum ToolResult {
 impl ToolResult {
     pub fn is_success(&self) -> bool {
         matches!(self, Self::Success { .. })
+    }
+
+    pub fn outcome(&self) -> CallOutcome {
+        match self {
+            Self::Success { .. } => CallOutcome::Success,
+            Self::Failed { .. } => CallOutcome::Failed,
+            Self::Rejected { .. } => CallOutcome::Rejected,
+            Self::Cancelled => CallOutcome::Cancelled,
+        }
     }
 
     pub fn output(&self) -> &str {

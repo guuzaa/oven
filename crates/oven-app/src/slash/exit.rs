@@ -1,6 +1,4 @@
-use oven_agent::Agent;
-
-use super::{CommandOutcome, SlashCommand};
+use super::{CommandContext, CommandOutcome, SlashCommand};
 use crate::AppError;
 
 pub struct Exit;
@@ -12,7 +10,11 @@ impl SlashCommand for Exit {
     fn description(&self) -> &'static str {
         "End the session."
     }
-    fn execute(&self, _agent: &mut Agent, _args: &str) -> Result<CommandOutcome, AppError> {
+    fn execute(
+        &self,
+        _cx: &mut CommandContext<'_>,
+        _args: &str,
+    ) -> Result<CommandOutcome, AppError> {
         Ok(CommandOutcome::Exit)
     }
 }

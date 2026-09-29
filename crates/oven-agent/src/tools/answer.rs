@@ -2,9 +2,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolContext, ToolView};
+use crate::turn::TurnContext;
+
+use super::{Tool, ToolCaps, ToolView};
 use crate::error::AgentError;
-use crate::question::{AnswerResponse, Question, QuestionOption};
+use crate::interaction::{AnswerResponse, Question, QuestionOption};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";
 const USER_SKIPPED: &str = "the user skipped the question without answering";
@@ -79,6 +81,15 @@ impl Tool for AnswerTool {
         Self::view_input(input)
     }
 
+    fn caps(&self) -> ToolCaps {
+        // A frontend shows one question at a time: a second one asked while
+        // the first waits would replace it and strand the answer.
+        ToolCaps {
+            exclusive: true,
+            ..Default::default()
+        }
+    }
+
     fn description(&self) -> &'static str {
         "Ask the user a question and wait for their answer. Use it when the request\n\
          is ambiguous, when a choice changes what you are about to build, or before\n\
@@ -125,9 +136,9 @@ impl Tool for AnswerTool {
         })
     }
 
-    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
         let question = Self::parse(args).map_err(AgentError::from)?;
-        match ctx.ask(question).await? {
+        match cx.ask(question).await? {
             AnswerResponse::Answered { answer } => Ok(format!(
                 "{USER_ANSWER_PREFIX}{}",
                 clamp(&answer, MAX_ANSWER_CHARS)
@@ -150,11 +161,10 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::question::{QuestionRequest, QuestionSender};
-    use crate::tools::NO_USER_TO_ANSWER;
+    use crate::interaction::{NO_USER_TO_ANSWER, PendingRequest, UserRequest};
     use serde_json::json;
-    use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, oneshot};
 
     const QUESTION: &str = "which database?";
     const ANSWER: &str = "postgres";
@@ -164,12 +174,31 @@ mod tests {
     }
 
     async fn run_with(
-        tx: &QuestionSender,
+        tx: &mpsc::UnboundedSender<PendingRequest>,
         args: Value,
-        cancel: Option<&CancellationToken>,
+        cx: TurnContext,
     ) -> Result<String, AgentError> {
-        let ctx = ToolContext::new(cancel, Some(tx));
-        AnswerTool.run(&args, &ctx).await
+        let cx = cx.with_requests(Arc::new(tx.clone()));
+        AnswerTool.run(&args, &cx).await
+    }
+
+    /// The parts of a question a test checks and answers with.
+    struct Asked {
+        question: Question,
+        responder: oneshot::Sender<AnswerResponse>,
+    }
+
+    fn asked(request: PendingRequest) -> Asked {
+        match request.request {
+            UserRequest::Question {
+                question,
+                responder,
+            } => Asked {
+                question,
+                responder,
+            },
+            _ => panic!("the answer tool must ask a question"),
+        }
     }
 
     #[test]
@@ -273,52 +302,55 @@ mod tests {
 
     #[tokio::test]
     async fn returns_what_the_user_picked() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         let asker = tokio::spawn(async move {
-            let request = rx.recv().await.unwrap();
-            assert_eq!(request.question.question, QUESTION);
-            request
+            let asked = asked(rx.recv().await.unwrap());
+            assert_eq!(asked.question.question, QUESTION);
+            asked
                 .responder
                 .send(AnswerResponse::Answered {
                     answer: ANSWER.into(),
                 })
                 .unwrap();
         });
-        let output = run_with(&tx, json!({ "question": QUESTION }), None)
-            .await
-            .unwrap();
+        let output = run_with(
+            &tx,
+            json!({ "question": QUESTION }),
+            TurnContext::for_test(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
         asker.await.unwrap();
     }
 
     #[tokio::test]
     async fn a_skipped_question_is_not_an_error() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         let asker = tokio::spawn(async move {
-            rx.recv()
-                .await
-                .unwrap()
+            asked(rx.recv().await.unwrap())
                 .responder
                 .send(AnswerResponse::Declined)
                 .unwrap();
         });
-        let output = run_with(&tx, json!({ "question": QUESTION }), None)
-            .await
-            .unwrap();
+        let output = run_with(
+            &tx,
+            json!({ "question": QUESTION }),
+            TurnContext::for_test(),
+        )
+        .await
+        .unwrap();
         assert_eq!(output, USER_SKIPPED);
         asker.await.unwrap();
     }
 
     #[tokio::test]
     async fn a_verbose_question_still_reaches_the_user() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         let asker = tokio::spawn(async move {
-            let request = rx.recv().await.unwrap();
-            assert_eq!(
-                request.question.question.chars().count(),
-                MAX_QUESTION_CHARS
-            );
-            request
+            let asked = asked(rx.recv().await.unwrap());
+            assert_eq!(asked.question.question.chars().count(), MAX_QUESTION_CHARS);
+            asked
                 .responder
                 .send(AnswerResponse::Answered {
                     answer: ANSWER.into(),
@@ -326,7 +358,7 @@ mod tests {
                 .unwrap();
         });
         let verbose = "context ".repeat(MAX_QUESTION_CHARS);
-        let output = run_with(&tx, json!({ "question": verbose }), None)
+        let output = run_with(&tx, json!({ "question": verbose }), TurnContext::for_test())
             .await
             .unwrap();
         assert_eq!(output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
@@ -336,19 +368,21 @@ mod tests {
     #[tokio::test]
     async fn a_pasted_answer_is_capped_before_it_reaches_the_model() {
         const TAIL: &str = "hidden tail";
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         let answer = format!("{}{TAIL}", "x".repeat(MAX_ANSWER_CHARS * 2));
         let asker = tokio::spawn(async move {
-            rx.recv()
-                .await
-                .unwrap()
+            asked(rx.recv().await.unwrap())
                 .responder
                 .send(AnswerResponse::Answered { answer })
                 .unwrap();
         });
-        let output = run_with(&tx, json!({ "question": QUESTION }), None)
-            .await
-            .unwrap();
+        let output = run_with(
+            &tx,
+            json!({ "question": QUESTION }),
+            TurnContext::for_test(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             output.chars().count(),
             USER_ANSWER_PREFIX.chars().count() + MAX_ANSWER_CHARS
@@ -360,9 +394,8 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_frontend_the_tool_fails() {
-        let ctx = ToolContext::new(None, None);
         let error = AnswerTool
-            .run(&json!({ "question": QUESTION }), &ctx)
+            .run(&json!({ "question": QUESTION }), &TurnContext::for_test())
             .await
             .unwrap_err();
         assert_eq!(error.message, NO_USER_TO_ANSWER);
@@ -371,9 +404,9 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_turn_stops_waiting() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let error = run_with(&tx, json!({ "question": QUESTION }), Some(&cancel))
+        let cx = TurnContext::for_test();
+        cx.cancellation.cancel();
+        let error = run_with(&tx, json!({ "question": QUESTION }), cx)
             .await
             .unwrap_err();
         assert!(error.is_cancelled());
@@ -381,9 +414,9 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_arguments_never_reach_the_user() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         assert!(
-            run_with(&tx, json!({ "question": "   " }), None)
+            run_with(&tx, json!({ "question": "   " }), TurnContext::for_test())
                 .await
                 .is_err()
         );

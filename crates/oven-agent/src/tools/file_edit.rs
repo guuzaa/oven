@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolContext, ToolPermission, ToolView, require_str, resolve_within};
+use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
+
 use crate::error::AgentError;
+use crate::turn::TurnContext;
 
 pub struct FileEditTool {
     root: PathBuf,
@@ -53,6 +55,7 @@ impl Tool for FileEditTool {
     fn caps(&self) -> ToolCaps {
         ToolCaps {
             permission: ToolPermission::Write,
+            exclusive: true,
             ..Default::default()
         }
     }
@@ -73,7 +76,7 @@ impl Tool for FileEditTool {
             "required": ["path", "old_string", "new_string"]
         })
     }
-    async fn run(&self, args: &Value, _ctx: &ToolContext<'_>) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;
         let old_string = require_str(args, "old_string", Self::NAME)?;
         let new_string = require_str(args, "new_string", Self::NAME)?;
@@ -126,7 +129,9 @@ impl Tool for FileEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const CTX: ToolContext<'static> = ToolContext::new(None, None);
+    fn turn() -> TurnContext {
+        TurnContext::for_test()
+    }
     use serde_json::json;
 
     fn tmp_dir() -> tempdir::TempDir {
@@ -164,7 +169,7 @@ mod tests {
         let edit = FileEditTool::new(tmp.path());
         edit.run(
             &json!({"path": "a.txt", "old_string": "two", "new_string": "2"}),
-            &CTX,
+            &turn(),
         )
         .await
         .unwrap();
@@ -179,7 +184,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "a.txt", "old_string": "a", "new_string": "b"}),
-                &CTX,
+                &turn(),
             )
             .await
             .unwrap_err();
@@ -194,7 +199,7 @@ mod tests {
         let edit = FileEditTool::new(tmp.path());
         edit.run(
             &json!({"path": "a.txt", "old_string": "a", "new_string": "b", "replace_all": true}),
-            &CTX,
+            &turn(),
         )
         .await
         .unwrap();
@@ -209,7 +214,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "a.txt", "old_string": "zzz", "new_string": "x"}),
-                &CTX,
+                &turn(),
             )
             .await
             .unwrap_err();
@@ -224,7 +229,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "../a.txt", "old_string": "a", "new_string": "b"}),
-                &CTX,
+                &turn(),
             )
             .await
             .unwrap_err();

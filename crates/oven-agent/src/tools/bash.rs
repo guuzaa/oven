@@ -5,7 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolContext, ToolPermission, ToolView, labeled, require_str};
+use crate::turn::TurnContext;
+
+use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str};
 use crate::error::AgentError;
 use oven_host::{CommandError, run_shell_command};
 
@@ -60,9 +62,9 @@ impl Tool for BashTool {
             "required": ["command"]
         })
     }
-    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
         let command = require_str(args, "command", Self::NAME)?;
-        let output = run_shell_command(command, &self.root, self.timeout, ctx.cancel())
+        let output = run_shell_command(command, &self.root, self.timeout, Some(&cx.cancellation))
             .await
             .map_err(|error| match error {
                 CommandError::Cancelled { .. } => AgentError::cancelled(),
@@ -100,9 +102,10 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::path::PathBuf;
-    use tokio_util::sync::CancellationToken;
 
-    const CTX: ToolContext<'static> = ToolContext::new(None, None);
+    fn turn() -> TurnContext {
+        TurnContext::for_test()
+    }
 
     fn tmp_dir() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-test").unwrap()
@@ -135,7 +138,7 @@ mod tests {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path());
         let out = bash
-            .run(&json!({"command": "echo hi"}), &CTX)
+            .run(&json!({"command": "echo hi"}), &turn())
             .await
             .unwrap();
         assert!(out.contains("hi"), "{out}");
@@ -145,7 +148,10 @@ mod tests {
     async fn bash_reports_nonzero_exit() {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path());
-        let out = bash.run(&json!({"command": "exit 7"}), &CTX).await.unwrap();
+        let out = bash
+            .run(&json!({"command": "exit 7"}), &turn())
+            .await
+            .unwrap();
         assert!(out.contains("[exit code: 7]"), "{out}");
     }
 
@@ -154,7 +160,7 @@ mod tests {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path()).with_timeout(Duration::from_millis(100));
         let err = bash
-            .run(&json!({"command": sleep_command(5)}), &CTX)
+            .run(&json!({"command": sleep_command(5)}), &turn())
             .await
             .unwrap_err();
         assert!(err.message.contains("timed out"), "{}", err.message);
@@ -167,7 +173,7 @@ mod tests {
         std::fs::write(root.join("marker.txt"), "found").unwrap();
         let bash = BashTool::new(&root);
         let out = bash
-            .run(&json!({"command": read_marker_command()}), &CTX)
+            .run(&json!({"command": read_marker_command()}), &turn())
             .await
             .unwrap();
         assert_eq!(out.trim(), "found");
@@ -177,16 +183,13 @@ mod tests {
     async fn bash_cancel_aborts_and_returns_cancelled() {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path());
-        let cancel = CancellationToken::new();
+        let turn = TurnContext::for_test();
+        let cancel = turn.cancellation.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        let cancel_for_task = cancel.clone();
         let handle = tokio::spawn(async move {
             let result = bash
-                .run(
-                    &json!({"command": sleep_command(60)}),
-                    &ToolContext::new(Some(&cancel_for_task), None),
-                )
+                .run(&json!({"command": sleep_command(60)}), &turn)
                 .await;
             let _ = tx.send(result);
         });

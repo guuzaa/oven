@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, ApprovalRequestId, LocalShell, LoopLimitRequestId, ShellEvent,
-    StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, present_tool,
+    AgentEvent, AppEvent, LocalShell, ShellEvent, StreamEvent, ToolCallId, ToolEvent, ToolResult,
+    TurnEvent, UserRequestId, present_tool,
 };
 use oven_llm::{ContentBlock, Message};
 use ratatui::Terminal;
@@ -499,7 +499,7 @@ fn cancelled() -> AppEvent {
 
 fn loop_limit_reached(max_iters: usize) -> AppEvent {
     agent(AgentEvent::Turn(TurnEvent::LoopLimitReached {
-        request_id: LoopLimitRequestId(1),
+        request_id: UserRequestId(1),
         max_iters,
     }))
 }
@@ -1095,7 +1095,7 @@ fn burst_keeps_its_own_row_when_another_row_interleaves() {
     ));
     t.on_event(&tool_end(1, true, "ok"));
     t.on_event(&agent(AgentEvent::Tool(ToolEvent::ApprovalRequested {
-        request_id: ApprovalRequestId(1),
+        request_id: UserRequestId(1),
         call_id: ToolCallId(2),
         name: "bash".into(),
         view: present_tool("bash", &serde_json::json!({ "command": "rm -rf /" })),

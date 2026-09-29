@@ -1,7 +1,6 @@
-use oven_agent::Agent;
 use oven_llm::canonical_vendor;
 
-use super::{CommandOutcome, SlashCommand};
+use super::{CommandContext, CommandOutcome, SlashCommand};
 use crate::AppError;
 use crate::config::ProviderConfig;
 
@@ -58,11 +57,11 @@ impl SlashCommand for Setup {
         "Configure provider: /setup name=... api_key=..."
     }
 
-    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
+    fn execute(&self, cx: &mut CommandContext<'_>, args: &str) -> Result<CommandOutcome, AppError> {
         if args.trim().is_empty() {
             return Ok(CommandOutcome::Reply(format!(
                 "current model: {}\nusage: /setup name=<provider> api_key=<key>",
-                agent.model().as_str()
+                cx.agent()?.model().as_str()
             )));
         }
         Ok(CommandOutcome::ProviderChanged {
@@ -74,8 +73,10 @@ impl SlashCommand for Setup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subagent::Subagents;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
+    use oven_agent::Agent;
     use oven_llm::{
         ModelId, ModelInfo, Provider, ProviderError, ProviderKind, ProviderName, Request, Response,
         Result as LlmResult, Router, StreamEvent,
@@ -118,7 +119,13 @@ mod tests {
     }
 
     fn run(args: &str) -> Result<CommandOutcome, AppError> {
-        Setup.execute(&mut fresh_agent(), args)
+        with_context(|cx| Setup.execute(cx, args))
+    }
+
+    fn with_context<T>(run: impl FnOnce(&mut CommandContext<'_>) -> T) -> T {
+        let mut agent = fresh_agent();
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        run(&mut CommandContext::with_agent(&mut agent, &subagents))
     }
 
     #[test]

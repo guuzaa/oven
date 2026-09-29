@@ -3,6 +3,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use oven_agent::DEFAULT_MAX_ITERS;
 use oven_llm::{ModelId, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -300,9 +301,16 @@ pub struct AppConfig {
     /// effect when the active model's window size is unknown.
     #[serde(default = "default_compact_threshold")]
     pub compact_threshold: f64,
+    /// Provider round trips one turn may take before the loop asks whether to
+    /// keep going. Bounds what a single user request can spend.
+    #[serde(default = "default_max_iters")]
+    pub max_iters: usize,
     /// Tools to mount, by name (`file_read`, `file_write`, `bash`). Empty
     /// means the built-in default set.
     pub tools: Vec<String>,
+    /// Delegation to subagents.
+    #[serde(default)]
+    pub subagents: SubagentConfig,
     /// MCP server declarations. Key is the local id used to refer to a server.
     pub mcps: BTreeMap<String, McpServerConfig>,
 }
@@ -326,10 +334,39 @@ struct RawAppConfig {
     base_backoff_ms: u64,
     #[serde(default = "default_compact_threshold")]
     compact_threshold: f64,
+    #[serde(default = "default_max_iters")]
+    max_iters: usize,
     #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
+    subagents: SubagentConfig,
+    #[serde(default)]
     mcps: BTreeMap<String, McpServerConfig>,
+}
+
+/// How subagents are allowed to run. The tools a subagent may use come from
+/// its role, not from here.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubagentConfig {
+    /// Mount the delegation tools. Disabled hides `task` and `task_output`.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Subagents allowed to run at once. Further spawns wait for a slot.
+    #[serde(default = "default_subagent_concurrent")]
+    pub max_concurrent: usize,
+    /// Provider round trips one subagent may take.
+    #[serde(default = "default_subagent_iters")]
+    pub max_iters: usize,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            max_concurrent: default_subagent_concurrent(),
+            max_iters: default_subagent_iters(),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for AppConfig {
@@ -347,7 +384,9 @@ impl<'de> Deserialize<'de> for AppConfig {
             max_retries: raw.max_retries,
             base_backoff_ms: raw.base_backoff_ms,
             compact_threshold: raw.compact_threshold,
+            max_iters: raw.max_iters,
             tools: raw.tools,
+            subagents: raw.subagents,
             mcps: raw.mcps,
         };
 
@@ -401,6 +440,18 @@ fn default_base_backoff_ms() -> u64 {
 fn default_compact_threshold() -> f64 {
     0.8
 }
+fn default_max_iters() -> usize {
+    DEFAULT_MAX_ITERS
+}
+fn default_true() -> bool {
+    true
+}
+fn default_subagent_concurrent() -> usize {
+    4
+}
+fn default_subagent_iters() -> usize {
+    60
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -421,7 +472,9 @@ impl Default for AppConfig {
             max_retries: default_max_retries(),
             base_backoff_ms: default_base_backoff_ms(),
             compact_threshold: default_compact_threshold(),
+            max_iters: default_max_iters(),
             tools: Vec::new(),
+            subagents: SubagentConfig::default(),
             mcps: BTreeMap::new(),
         }
     }

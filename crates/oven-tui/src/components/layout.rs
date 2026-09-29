@@ -6,6 +6,7 @@ const STATUS_H: u16 = 1;
 pub struct Regions {
     pub transcript: Rect,
     pub queue: Option<Rect>,
+    pub agents: Option<Rect>,
     pub todos: Option<Rect>,
     pub input: Rect,
     pub overlay: Option<Rect>,
@@ -16,6 +17,7 @@ pub fn split(
     area: Rect,
     mut input_h: u16,
     mut queue_h: u16,
+    mut agents_h: u16,
     mut todos_h: u16,
     mut overlay_h: u16,
 ) -> Regions {
@@ -23,12 +25,17 @@ pub fn split(
     let transcript_min = TRANSCRIPT_MIN.min(body);
     input_h = input_h.min(body.saturating_sub(transcript_min));
     queue_h = queue_h.min(body.saturating_sub(transcript_min + input_h));
-    todos_h = todos_h.min(body.saturating_sub(transcript_min + input_h + queue_h));
-    overlay_h = overlay_h.min(body.saturating_sub(transcript_min + input_h + queue_h + todos_h));
+    agents_h = agents_h.min(body.saturating_sub(transcript_min + input_h + queue_h));
+    todos_h = todos_h.min(body.saturating_sub(transcript_min + input_h + queue_h + agents_h));
+    overlay_h =
+        overlay_h.min(body.saturating_sub(transcript_min + input_h + queue_h + agents_h + todos_h));
 
     let mut constraints = vec![Constraint::Min(transcript_min)];
     if queue_h > 0 {
         constraints.push(Constraint::Length(queue_h));
+    }
+    if agents_h > 0 {
+        constraints.push(Constraint::Length(agents_h));
     }
     if todos_h > 0 {
         constraints.push(Constraint::Length(todos_h));
@@ -52,6 +59,11 @@ pub fn split(
         i += 1;
         area
     });
+    let agents = (agents_h > 0).then(|| {
+        let area = chunks[i];
+        i += 1;
+        area
+    });
     let todos = (todos_h > 0).then(|| {
         let area = chunks[i];
         i += 1;
@@ -69,6 +81,7 @@ pub fn split(
     Regions {
         transcript,
         queue,
+        agents,
         todos,
         input,
         overlay,
@@ -87,6 +100,7 @@ mod tests {
     fn assert_tiles(regions: &Regions, area: Rect) {
         let mut bands = vec![regions.transcript];
         bands.extend(regions.queue);
+        bands.extend(regions.agents);
         bands.extend(regions.todos);
         bands.push(regions.input);
         bands.extend(regions.overlay);
@@ -102,7 +116,7 @@ mod tests {
 
     #[test]
     fn idle_layout_is_transcript_input_status() {
-        let regions = split(area(80, 24), 1, 0, 0, 0);
+        let regions = split(area(80, 24), 1, 0, 0, 0, 0);
         assert_eq!(regions.transcript, Rect::new(0, 0, 80, 22));
         assert_eq!(regions.input, Rect::new(0, 22, 80, 1));
         assert_eq!(regions.status, Rect::new(0, 23, 80, 1));
@@ -110,10 +124,11 @@ mod tests {
     }
 
     #[test]
-    fn queue_overlay_and_todos_take_named_rows() {
-        let regions = split(area(80, 24), 2, 1, 3, 4);
-        assert_eq!(regions.transcript.height, 13);
-        assert_eq!(regions.queue, Some(Rect::new(0, 13, 80, 1)));
+    fn queue_agents_overlay_and_todos_take_named_rows() {
+        let regions = split(area(80, 24), 2, 1, 2, 3, 4);
+        assert_eq!(regions.transcript.height, 11);
+        assert_eq!(regions.queue, Some(Rect::new(0, 11, 80, 1)));
+        assert_eq!(regions.agents, Some(Rect::new(0, 12, 80, 2)));
         assert_eq!(regions.todos, Some(Rect::new(0, 14, 80, 3)));
         assert_eq!(regions.input, Rect::new(0, 17, 80, 2));
         assert_eq!(regions.overlay, Some(Rect::new(0, 19, 80, 4)));
@@ -123,7 +138,7 @@ mod tests {
 
     #[test]
     fn short_terminal_preserves_transcript_and_status() {
-        let regions = split(area(20, 2), 4, 1, 3, 2);
+        let regions = split(area(20, 2), 4, 1, 3, 3, 2);
         assert_eq!(regions.transcript.height, TRANSCRIPT_MIN);
         assert_eq!(regions.input.height, 0);
         assert_eq!(regions.status.height, STATUS_H);
@@ -132,7 +147,7 @@ mod tests {
 
     #[test]
     fn one_row_terminal_keeps_only_the_status() {
-        let regions = split(area(20, 1), 1, 1, 1, 1);
+        let regions = split(area(20, 1), 1, 1, 1, 1, 1);
         assert_eq!(regions.transcript.height, 0);
         assert_eq!(regions.status.height, STATUS_H);
         assert_tiles(&regions, area(20, 1));

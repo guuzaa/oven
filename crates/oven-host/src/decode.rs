@@ -20,18 +20,8 @@ pub fn decode_command_output(bytes: &[u8]) -> String {
 
 #[cfg(windows)]
 fn decode_acp(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
     const CP_ACP: u32 = 0;
-
-    unsafe extern "system" {
-        fn MultiByteToWideChar(
-            code_page: u32,
-            flags: u32,
-            bytes: *const u8,
-            nbytes: i32,
-            wide: *mut u16,
-            nwide: i32,
-        ) -> i32;
-    }
 
     let nbytes = i32::try_from(bytes.len()).ok()?;
     // SAFETY: `bytes` points to a valid slice of `nbytes`; a null output pointer

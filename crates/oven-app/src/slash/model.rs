@@ -1,7 +1,6 @@
-use oven_agent::Agent;
 use oven_llm::{ModelId, ReasoningEffort, Router, RouterError};
 
-use super::{CommandOutcome, SlashCommand};
+use super::{CommandContext, CommandOutcome, SlashCommand};
 use crate::AppError;
 
 const USAGE: &str = "usage: /model <id> [none|low|medium|high]";
@@ -89,7 +88,8 @@ impl SlashCommand for Model {
         "Switch model and reasoning effort: /model <id> [none|low|medium|high]"
     }
 
-    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
+    fn execute(&self, cx: &mut CommandContext<'_>, args: &str) -> Result<CommandOutcome, AppError> {
+        let agent = cx.agent()?;
         match Self::resolve(&agent.router(), agent.reasoning_effort(), args)? {
             ModelDirective::Query => Ok(CommandOutcome::Reply(Self::describe(
                 agent.model().as_str(),
@@ -109,8 +109,10 @@ impl SlashCommand for Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subagent::Subagents;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
+    use oven_agent::Agent;
     use oven_llm::{
         ModelInfo, Provider, ProviderError, ProviderName, Request, Response, Result as LlmResult,
         Router, StreamEvent,
@@ -153,7 +155,13 @@ mod tests {
     }
 
     fn run(args: &str) -> Result<CommandOutcome, AppError> {
-        Model.execute(&mut fresh_agent(), args)
+        with_context(|cx| Model.execute(cx, args))
+    }
+
+    fn with_context<T>(run: impl FnOnce(&mut CommandContext<'_>) -> T) -> T {
+        let mut agent = fresh_agent();
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        run(&mut CommandContext::with_agent(&mut agent, &subagents))
     }
 
     #[test]
@@ -170,7 +178,9 @@ mod tests {
     fn model_only_keeps_current_effort() {
         let mut agent = fresh_agent();
         agent.set_reasoning_effort(Some(ReasoningEffort::High));
-        let out = Model.execute(&mut agent, "deepseek-chat").unwrap();
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        let mut cx = CommandContext::with_agent(&mut agent, &subagents);
+        let out = Model.execute(&mut cx, "deepseek-chat").unwrap();
         assert!(matches!(
             out,
             CommandOutcome::ModelChanged {

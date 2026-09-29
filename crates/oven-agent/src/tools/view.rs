@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::{
     AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,
-    TodoWriteTool,
+    TaskOutputTool, TaskTool, TodoWriteTool,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,8 +35,13 @@ pub enum ToolPermission {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ToolCaps {
     pub plan_only: bool,
-    pub writes_todos: bool,
     pub permission: ToolPermission,
+    /// Runs on its own, never alongside another call of the same step.
+    ///
+    /// A step's calls run at the same time, so a tool that reads a file,
+    /// changes it and writes it back would lose one of two edits to the same
+    /// file; so would a tool that needs the frontend's attention to itself.
+    pub exclusive: bool,
 }
 
 pub fn present_tool(name: &str, input: &Value) -> ToolView {
@@ -48,6 +53,8 @@ pub fn present_tool(name: &str, input: &Value) -> ToolView {
         GlobTool::NAME => GlobTool::view_input(input),
         GrepTool::NAME => GrepTool::view_input(input),
         TodoWriteTool::NAME => TodoWriteTool::view_input(input),
+        TaskTool::NAME => TaskTool::view_input(input),
+        TaskOutputTool::NAME => TaskOutputTool::view_input(input),
         AnswerTool::NAME => AnswerTool::view_input(input),
         _ => ToolView::named(name),
     }
@@ -150,6 +157,18 @@ mod tests {
         );
         assert!(present_tool(TodoWriteTool::NAME, &json!({})).summary == TodoWriteTool::NAME);
         assert!(!present_tool(TodoWriteTool::NAME, &json!({})).collapse);
+        assert_eq!(
+            present_tool(
+                TaskTool::NAME,
+                &json!({ "description": "find it", "role": "explore" })
+            )
+            .summary,
+            "Agent explore: find it"
+        );
+        assert_eq!(
+            present_tool(TaskOutputTool::NAME, &json!({ "name": "explore#1" })).summary,
+            "Agent status: explore#1"
+        );
         assert_eq!(
             present_tool(AnswerTool::NAME, &json!({ "question": "which database?" })).summary,
             "Ask which database?"

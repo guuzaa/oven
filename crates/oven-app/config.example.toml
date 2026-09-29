@@ -17,6 +17,10 @@ base_backoff_ms = 500
 # still works. Ignored when the active model's window size is unknown.
 compact_threshold = 0.8
 
+# Provider round trips one turn may take before the loop asks whether to keep
+# going. Bounds what a single request can spend.
+max_iters = 200
+
 # Tools to mount. Empty means the built-in default set
 # (file_read, file_write, bash).
 # tools = ["file_read", "file_write", "bash"]
@@ -54,6 +58,16 @@ name = "deepseek"
 # [providers.xai]
 # api_key = "xai-..."
 # reasoning_effort = "low"
+
+# Subagents. `task` delegates a self-contained job to another agent; the roles
+# (explore, general) decide which tools it may use, not this block.
+[subagents]
+# Mount the delegation tools. false hides `task` and `task_output`.
+enabled = true
+# Subagents allowed to run at once; further spawns wait, reported as `queued`.
+max_concurrent = 4
+# Provider round trips one subagent may take.
+max_iters = 60
 
 # MCP servers to connect to at startup: stdio via command/args/env, or a
 # remote streamable HTTP endpoint via url (headers optional). Each server's

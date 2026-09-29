@@ -1,3 +1,4 @@
+mod agents;
 mod clear;
 mod compact;
 mod exit;
@@ -5,17 +6,56 @@ mod model;
 mod plan;
 mod setup;
 
-use oven_agent::{Agent, AgentMode};
+use oven_agent::{Agent, AgentId, AgentMode};
 
 use crate::AppError;
 use crate::config::ProviderConfig;
+use crate::subagent::Subagents;
 
+pub use agents::Agents;
 pub use clear::Clear;
 pub use compact::Compact;
 pub use exit::Exit;
 pub(crate) use model::{Model, ModelDirective};
 pub use plan::Plan;
 pub use setup::Setup;
+
+/// What a command may reach: the conversation driver it configures, and the
+/// subagents it may list or stop. Commands stay read-mostly — anything that
+/// changes app state comes back as a [`CommandOutcome`] the runtime applies —
+/// but the subagent registry is shared state a command may act on directly.
+///
+/// The driver is optional because a running turn holds it exclusively. A
+/// command that asks for it mid-turn is deferred rather than failed, which is
+/// what keeps `/clear` and `/setup` off a turn in flight while letting
+/// `/agents` — which only ever touches the registry — apply immediately.
+pub struct CommandContext<'a> {
+    agent: Option<&'a mut Agent>,
+    pub subagents: &'a Subagents,
+}
+
+impl<'a> CommandContext<'a> {
+    /// A command running with the driver free to use.
+    pub fn with_agent(agent: &'a mut Agent, subagents: &'a Subagents) -> Self {
+        Self {
+            agent: Some(agent),
+            subagents,
+        }
+    }
+
+    /// A command running while a turn holds the driver.
+    pub fn shared(subagents: &'a Subagents) -> Self {
+        Self {
+            agent: None,
+            subagents,
+        }
+    }
+
+    /// The driver, or [`AppError::AgentBusy`] when a turn holds it.
+    pub fn agent(&mut self) -> Result<&mut Agent, AppError> {
+        self.agent.as_deref_mut().ok_or(AppError::AgentBusy)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum CommandOutcome {
@@ -33,13 +73,16 @@ pub enum CommandOutcome {
     ModeChanged {
         mode: AgentMode,
     },
+    FocusSubagent {
+        id: AgentId,
+    },
     Passthrough,
 }
 
 pub trait SlashCommand: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn execute(&self, agent: &mut Agent, args: &str) -> Result<CommandOutcome, AppError>;
+    fn execute(&self, cx: &mut CommandContext<'_>, args: &str) -> Result<CommandOutcome, AppError>;
 }
 
 pub struct SlashRegistry {
@@ -61,6 +104,7 @@ impl SlashRegistry {
         r.register(Box::new(Model));
         r.register(Box::new(Setup));
         r.register(Box::new(Plan));
+        r.register(Box::new(Agents));
         r
     }
 
@@ -77,50 +121,50 @@ impl SlashRegistry {
             .collect()
     }
 
-    pub fn parse_and_run(
-        &self,
-        agent: &mut Agent,
-        input: &str,
-    ) -> Result<CommandOutcome, AppError> {
-        let trimmed = input.trim_start();
-        if !trimmed.starts_with('/') {
-            return Ok(CommandOutcome::Passthrough);
-        }
-        let body = &trimmed[1..];
+    /// The registered command `input` invokes and its trimmed arguments, or
+    /// `None` when `input` is not a slash invocation or names an unknown
+    /// command. The one parser every entry point shares, so the registry
+    /// cannot disagree with itself about what counts as a command.
+    pub fn invocation<'a>(&self, input: &'a str) -> Option<(&'a str, &'a str)> {
+        let body = input.trim_start().strip_prefix('/')?;
         let (name, args) = match body.split_once(char::is_whitespace) {
-            Some((n, rest)) => (n, rest.trim()),
+            Some((name, rest)) => (name, rest.trim()),
             None => (body, ""),
         };
-        let Some(command) = self.commands.iter().find(|c| c.name() == name) else {
-            return Ok(CommandOutcome::Passthrough);
-        };
-        command.execute(agent, args)
-    }
-
-    /// Returns the registered command name `input` invokes, without
-    /// executing it. Lets callers classify text as a control command
-    /// (e.g. to acknowledge it was queued) without needing `&mut Agent`.
-    pub fn recognized_name<'a>(&self, input: &'a str) -> Option<&'a str> {
-        let name = input
-            .trim_start()
-            .strip_prefix('/')?
-            .split_whitespace()
-            .next()?;
         self.commands
             .iter()
             .any(|c| c.name() == name)
-            .then_some(name)
+            .then_some((name, args))
     }
-}
 
-/// Whether `text` invokes a builtin slash command: a control command that
-/// configures the runtime instead of sending a turn to the agent. Mirrors the
-/// dispatch `Runtime::start_turn` performs, so callers can classify composer
-/// text without executing anything.
-pub fn invokes_command(text: &str) -> bool {
-    SlashRegistry::with_builtin()
-        .recognized_name(text)
-        .is_some()
+    pub fn run(
+        &self,
+        cx: &mut CommandContext<'_>,
+        name: &str,
+        args: &str,
+    ) -> Result<CommandOutcome, AppError> {
+        match self.commands.iter().find(|c| c.name() == name) {
+            Some(command) => command.execute(cx, args),
+            None => Ok(CommandOutcome::Passthrough),
+        }
+    }
+
+    /// Runs a command with no driver, which succeeds only for commands that
+    /// never ask for one. `Ok(None)` means the command needs the driver, so
+    /// the runtime should defer it until the running turn ends.
+    pub fn run_shared(
+        &self,
+        subagents: &Subagents,
+        name: &str,
+        args: &str,
+    ) -> Result<Option<CommandOutcome>, AppError> {
+        let mut cx = CommandContext::shared(subagents);
+        match self.run(&mut cx, name, args) {
+            Ok(CommandOutcome::Passthrough) | Err(AppError::AgentBusy) => Ok(None),
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 impl Default for SlashRegistry {
@@ -132,6 +176,7 @@ impl Default for SlashRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subagent::Subagents;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_llm::{
@@ -175,33 +220,31 @@ mod tests {
         Agent::new(router, Vec::new())
     }
 
-    #[test]
-    fn passthrough_when_not_slash() {
-        let reg = SlashRegistry::with_builtin();
+    fn with_context<T>(run: impl FnOnce(&mut CommandContext<'_>) -> T) -> T {
         let mut agent = fresh_agent();
-        let outcome = reg.parse_and_run(&mut agent, "hi there").unwrap();
-        assert!(matches!(outcome, CommandOutcome::Passthrough));
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        let mut cx = CommandContext::with_agent(&mut agent, &subagents);
+        run(&mut cx)
     }
 
     #[test]
     fn passthrough_when_unknown_command() {
         let reg = SlashRegistry::with_builtin();
-        let mut agent = fresh_agent();
-        let outcome = reg.parse_and_run(&mut agent, "/nope").unwrap();
+        let outcome = with_context(|cx| reg.run(cx, "nope", "")).unwrap();
         assert!(matches!(outcome, CommandOutcome::Passthrough));
     }
 
     #[test]
-    fn recognized_name_matches_registered_command_with_or_without_args() {
+    fn invocation_splits_name_from_trimmed_args() {
         let reg = SlashRegistry::with_builtin();
-        assert_eq!(reg.recognized_name("/model gpt-4o"), Some("model"));
-        assert_eq!(reg.recognized_name("/model"), Some("model"));
-        assert_eq!(reg.recognized_name("/nope"), None);
-        assert_eq!(reg.recognized_name("hello there"), None);
+        assert_eq!(reg.invocation("/model gpt-4o"), Some(("model", "gpt-4o")));
+        assert_eq!(reg.invocation("  /plan   on  "), Some(("plan", "on")));
+        assert_eq!(reg.invocation("/model"), Some(("model", "")));
     }
 
     #[test]
-    fn invokes_command_recognizes_only_registered_commands() {
+    fn invocation_recognizes_only_registered_commands() {
+        let reg = SlashRegistry::with_builtin();
         for text in [
             "/clear",
             "/compact",
@@ -211,11 +254,19 @@ mod tests {
             "/setup name=deepseek api_key=sk-secret",
             "/plan on",
             "  /plan",
+            "/agents",
+            "/agents stop all",
         ] {
-            assert!(invokes_command(text), "{text} must be a control command");
+            assert!(
+                reg.invocation(text).is_some(),
+                "{text} must be a control command"
+            );
         }
         for text in ["hello there", "/nope", "! ls", " /nope args"] {
-            assert!(!invokes_command(text), "{text} must reach the agent");
+            assert!(
+                reg.invocation(text).is_none(),
+                "{text} must reach the agent"
+            );
         }
     }
 
@@ -223,13 +274,14 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 6);
+        assert_eq!(cmds.len(), 7);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "compact" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
         assert!(cmds.iter().any(|(n, d)| n == "model" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "setup" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "plan" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, d)| n == "agents" && !d.is_empty()));
     }
 
     #[test]
@@ -244,7 +296,14 @@ mod tests {
                 status: oven_agent::TodoStatus::Pending,
             }],
         });
-        let outcome = reg.parse_and_run(&mut agent, "/clear").unwrap();
+        let subagents = Subagents::bare(agent.id(), agent.router_handle());
+        let outcome = reg
+            .run(
+                &mut CommandContext::with_agent(&mut agent, &subagents),
+                "clear",
+                "",
+            )
+            .unwrap();
         assert!(matches!(outcome, CommandOutcome::Cleared));
         assert_eq!(agent.history().len(), 0);
         assert!(agent.todos().is_empty());
@@ -253,8 +312,7 @@ mod tests {
     #[test]
     fn exit_returns_exit_outcome() {
         let reg = SlashRegistry::with_builtin();
-        let mut agent = fresh_agent();
-        let outcome = reg.parse_and_run(&mut agent, "/exit").unwrap();
+        let outcome = with_context(|cx| reg.run(cx, "exit", "")).unwrap();
         assert!(matches!(outcome, CommandOutcome::Exit));
     }
 
@@ -268,16 +326,17 @@ mod tests {
             fn description(&self) -> &str {
                 ""
             }
-            fn execute(&self, _a: &mut Agent, args: &str) -> Result<CommandOutcome, AppError> {
+            fn execute(
+                &self,
+                _cx: &mut CommandContext<'_>,
+                args: &str,
+            ) -> Result<CommandOutcome, AppError> {
                 Ok(CommandOutcome::Reply(args.to_string()))
             }
         }
         let mut reg = SlashRegistry::new();
         reg.register(Box::new(Echo));
-        let mut agent = fresh_agent();
-        let out = reg
-            .parse_and_run(&mut agent, "/echo   hello world")
-            .unwrap();
+        let out = with_context(|cx| reg.run(cx, "echo", "hello world")).unwrap();
         match out {
             CommandOutcome::Reply(s) => assert_eq!(s, "hello world"),
             _ => panic!("expected Reply"),

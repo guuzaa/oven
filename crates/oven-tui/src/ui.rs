@@ -1,26 +1,29 @@
+use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent,
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, AnswerResponse, App, AppCommand, AppEvent, AppEventKind, ApprovalDecision,
-    ApprovalRequestId, CompactionEvent, ControlCommand, LoopLimitDecision, LoopLimitRequestId,
-    QuestionRequestId, ShellEvent, StateChange, StateEvent, ToolEvent, TurnEvent, invokes_command,
+    AgentEvent, AgentId, AnswerResponse, App, AppEvent, AppEventKind, AppState, ApprovalDecision,
+    Input, LoopLimitDecision, NodeInfo, SubagentEvent, ToolEvent, TurnEvent, UserRequestId,
+    UserResponse,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
+use crate::components::agents;
 use crate::components::choice_popup::{ChoicePopup, ChoicePopupAction};
 use crate::components::component::{Action, Component, KeyResult, State};
 use crate::components::input::{InputView, Overlay, display_user_input};
 use crate::components::paste_burst::{self, Burst};
 use crate::components::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::components::queue;
-use crate::components::shell;
 use crate::components::status::StatusBar;
 use crate::components::todos::TodosWidget;
 use crate::components::transcript::Transcript;
@@ -31,21 +34,26 @@ use crate::components::{layout, terminal};
 /// press cannot cancel a turn or rewind the transcript.
 const ESC_CONFIRM_WINDOW: Duration = Duration::from_secs(1);
 const IDLE_HINT: &str = "enter send · shift-tab mode · esc undo";
+const VIEWER_HINT: &str = "esc back to the chat · ↑↓ scroll · x stop";
+/// Lines an arrow key scrolls a subagent's transcript by.
+const VIEWER_SCROLL_LINES: u16 = 1;
+/// The viewer replaces the composer with a single hint row.
+const VIEWER_ROWS: u16 = 1;
 const BUSY_HINT: &str = "esc cancel · enter queue";
 const ESC_HINT: &str = "esc again to confirm";
 const ANSWER_HINT: &str = "enter send · esc back";
 
 enum OverlayPrompt {
     Approval {
-        request_id: ApprovalRequestId,
+        request_id: UserRequestId,
         popup: ChoicePopup,
     },
     LoopLimit {
-        request_id: LoopLimitRequestId,
+        request_id: UserRequestId,
         popup: ChoicePopup,
     },
     Question {
-        request_id: QuestionRequestId,
+        request_id: UserRequestId,
         popup: QuestionPrompt,
     },
 }
@@ -69,6 +77,14 @@ impl OverlayPrompt {
     /// Whether the open question expects its answer typed into the input box.
     fn awaits_typed_answer(&self) -> bool {
         matches!(self, Self::Question { popup, .. } if popup.awaits_typed_answer())
+    }
+
+    fn request_id(&self) -> UserRequestId {
+        match self {
+            Self::Approval { request_id, .. }
+            | Self::LoopLimit { request_id, .. }
+            | Self::Question { request_id, .. } => *request_id,
+        }
     }
 
     /// The keys the open prompt answers.
@@ -97,6 +113,9 @@ enum PromptFlow {
 pub struct Ui {
     app: App,
     events: mpsc::UnboundedReceiver<AppEvent>,
+    /// The app's levels — phase, mode, model, subagents — which the UI reads
+    /// as they stand rather than replaying what changed.
+    state_rx: watch::Receiver<AppState>,
     state: State,
     quit: bool,
     /// Esc is ignored until `Rewound` arrives so a second rewind cannot
@@ -107,6 +126,18 @@ pub struct Ui {
     esc_confirm_until: Option<Instant>,
 
     transcript: Transcript,
+    /// One transcript per subagent, built from the events it reports. The
+    /// driver's own conversation stays in `transcript`.
+    views: BTreeMap<AgentId, Transcript>,
+    /// The driver. Anything else is a subagent, and its events belong to
+    /// `views`.
+    main_agent: AgentId,
+    agents: Vec<NodeInfo>,
+    /// The subagent whose transcript has taken over the screen.
+    focus: Option<AgentId>,
+    /// Where the strip was drawn, so a click can be mapped back to a row.
+    agents_area: Option<Rect>,
+
     status: StatusBar,
     input: InputView,
     todos: TodosWidget,
@@ -116,40 +147,45 @@ pub struct Ui {
 impl Ui {
     pub fn new(app: App) -> Self {
         let events = app.subscribe();
-        let slash_commands = app.slash_commands().to_vec();
-        let model = app.model();
-        let provider = app.provider_config();
+        let state_rx = app.watch_state();
+        let snapshot = app.state();
         let root = app
             .root()
             .canonicalize()
             .unwrap_or_else(|_| app.root().to_owned());
-        let last_turn_usage = app.last_turn_usage();
-        let (context_tokens, context_window) = {
-            let state = app.state();
-            (state.context_tokens, state.context_window)
-        };
-        let todos = app.todos();
-        let configured = app.configured_providers();
-        let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
-        input.set_configured(configured.clone());
-        if configured.is_empty() && provider.needs_setup() {
+        let mut input =
+            InputView::new(app.slash_commands(), snapshot.provider.clone()).with_root(&root);
+        input.sync(&snapshot);
+        if snapshot.configured_providers.is_empty() && snapshot.provider.needs_setup() {
             input.open_setup();
         }
+        let state = State {
+            busy: snapshot.phase.is_active(),
+            agents: active_agents(&snapshot.subagents),
+            mode: snapshot.mode,
+            ..State::new()
+        };
         Self {
             app,
             events,
-            state: State::new(),
+            state_rx,
+            state,
             quit: false,
             rewinding: false,
             pending: Vec::new(),
             esc_confirm_until: None,
 
             transcript: Transcript::new(),
-            status: StatusBar::new(model, &root, last_turn_usage)
-                .with_effort(provider.reasoning_effort)
-                .with_context(context_tokens, context_window),
+            views: BTreeMap::new(),
+            main_agent: snapshot.agent_id,
+            agents: snapshot.subagents.to_vec(),
+            focus: None,
+            agents_area: None,
+            status: StatusBar::new(snapshot.model.clone(), &root, snapshot.last_turn_usage)
+                .with_effort(snapshot.reasoning_effort)
+                .with_context(snapshot.context_tokens, snapshot.context_window),
             input,
-            todos: TodosWidget::new(todos),
+            todos: TodosWidget::new(snapshot.todos.clone()),
             prompt: None,
         }
     }
@@ -157,7 +193,7 @@ impl Ui {
     /// Rebuilds the single scrollable transcript from backend history.
     fn reload_history(&mut self) {
         let mut transcript = Transcript::new();
-        transcript.seed_timed(&self.app.history_timed_shared());
+        transcript.seed_timed(&self.state_rx.borrow().history_timed_shared());
         self.transcript = transcript;
         self.rewinding = false;
     }
@@ -167,8 +203,15 @@ impl Ui {
         let mut terminal = terminal::setup()?;
         let result = self.event_loop(&mut terminal).await;
         terminal::restore(&mut terminal)?;
+        // Whatever the user queued and never sent dies with the app, so say
+        // so where they can still read it: the alternate screen is gone by
+        // now, and a notice drawn a moment before quitting would not be.
+        let queued = std::mem::take(&mut self.pending);
         let session_id = self.app.session_id();
-        self.app.shutdown().await;
+        let unsent = self.app.shutdown().await + queued.len();
+        if unsent > 0 {
+            println!("{}", unsent_notice(unsent));
+        }
         if let Some(id) = session_id {
             println!("oven -s {id}");
         }
@@ -207,6 +250,7 @@ impl Ui {
                         break;
                     }
                 }
+                Ok(()) = self.state_rx.changed() => self.sync_state(),
             }
             terminal.draw(|f| self.draw(f))?;
         }
@@ -239,7 +283,7 @@ impl Ui {
                 self.input.paste(&text);
                 self.suppress_completions();
             }
-            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Mouse(mouse) => self.handle_mouse(mouse, self.agents_area),
             _ => {}
         }
         Ok(false)
@@ -268,8 +312,18 @@ impl Ui {
     fn apply_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Exited => self.quit = true,
+            AppEventKind::Subagent(SubagentEvent::Focus { id }) => self.focus_agent(*id),
+            // A subagent's turn is not the driver's: its events feed its own
+            // transcript and nothing else. Only the notification that it
+            // finished reaches the composer and the status bar.
+            AppEventKind::Agent(env) if env.agent_id != self.main_agent => {
+                self.views
+                    .entry(env.agent_id)
+                    .or_insert_with(Transcript::new)
+                    .on_event(ev);
+                return;
+            }
             AppEventKind::Agent(env) => match &env.event {
-                AgentEvent::Turn(TurnEvent::Started) => self.state.busy = true,
                 AgentEvent::Turn(TurnEvent::LoopLimitReached {
                     request_id,
                     max_iters,
@@ -278,14 +332,6 @@ impl Ui {
                         request_id: *request_id,
                         popup: ChoicePopup::loop_limit(*max_iters),
                     });
-                }
-                AgentEvent::Turn(
-                    TurnEvent::Completed { .. }
-                    | TurnEvent::Cancelled { .. }
-                    | TurnEvent::Failed { .. },
-                ) => {
-                    self.state.busy = false;
-                    self.prompt = None;
                 }
                 AgentEvent::Tool(ToolEvent::ApprovalRequested {
                     request_id,
@@ -310,34 +356,73 @@ impl Ui {
                         ),
                     });
                 }
-                AgentEvent::Tool(ToolEvent::Finished { .. }) => self.prompt = None,
                 _ => {}
             },
-            AppEventKind::Shell(ev) => match ev {
-                ShellEvent::Started { .. } => self.state.busy = true,
-                ShellEvent::Finished { .. } | ShellEvent::Failed { .. } => {
-                    self.state.busy = false;
-                }
-            },
-            AppEventKind::Compaction(ev) => {
-                self.state.busy = matches!(ev, CompactionEvent::Started);
-            }
-            AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
-                StateChange::ModeChanged { mode } => self.state.mode = *mode,
-                StateChange::HistoryChanged { .. } => self.reload_history(),
-                _ => {}
-            },
-            AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {
-                if !self.app.state().phase.is_active() {
-                    self.state.busy = false;
+            AppEventKind::RequestResolved { request_id } => {
+                if self
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.request_id() == *request_id)
+                {
+                    self.prompt = None;
                 }
             }
+            AppEventKind::HistoryChanged { .. } => self.reload_history(),
+            AppEventKind::Shell(_)
+            | AppEventKind::Compaction(_)
+            | AppEventKind::Notification { .. }
+            | AppEventKind::Error { .. } => {}
         }
         self.transcript.on_event(ev);
         self.status.on_event(ev);
-        self.input.on_event(ev);
         self.todos.on_event(ev);
+    }
+
+    /// Follows the levels the app reports. What the driver is doing is read
+    /// from its phase, so the composer is busy exactly while the app is.
+    fn sync_state(&mut self) {
+        let subagents = {
+            let state = self.state_rx.borrow_and_update();
+            self.state.busy = state.phase.is_active();
+            self.state.mode = state.mode;
+            self.status.sync(&state);
+            self.input.sync(&state);
+            self.todos.sync(&state);
+            Arc::clone(&state.subagents)
+        };
+        self.on_subagents(&subagents);
         self.maybe_flush();
+    }
+
+    /// Opens a subagent's transcript, building it on first view.
+    ///
+    /// A subagent that has not said anything yet — one waiting for a slot, or
+    /// one just spawned — has no transcript of its own, and opening nothing
+    /// is worse than opening a page that says what it was asked to do. The
+    /// task's label is that page: its events fill in under it as they arrive.
+    fn focus_agent(&mut self, id: AgentId) {
+        if !self.views.contains_key(&id) {
+            let mut view = Transcript::new();
+            match self.agents.iter().find(|agent| agent.id == id) {
+                Some(agent) if !agent.label.is_empty() => view.start_user_turn(&agent.label),
+                _ => {}
+            }
+            self.views.insert(id, view);
+        }
+        self.focus = Some(id);
+    }
+
+    /// Mirrors the registry into the strip and drops what it no longer
+    /// holds: a view of a subagent nobody can reach is only memory.
+    fn on_subagents(&mut self, subagents: &[NodeInfo]) {
+        self.agents.clear();
+        self.agents.extend_from_slice(subagents);
+        self.state.agents = active_agents(subagents);
+        self.views
+            .retain(|id, _| self.agents.iter().any(|agent| agent.id == *id));
+        if self.focus.is_some_and(|id| !self.views.contains_key(&id)) {
+            self.focus = None;
+        }
     }
 
     fn maybe_flush(&mut self) {
@@ -345,40 +430,48 @@ impl Ui {
             return;
         }
         let texts = std::mem::take(&mut self.pending);
-        self.state.busy = true;
         let remaining = send_each(texts, |text| {
-            if self.app.send(AppCommand::Prompt(text.to_string())).is_ok() {
-                self.push_submitted(text);
-                true
-            } else {
-                false
-            }
+            self.app
+                .submit(text)
+                .inspect(|input| self.push_submitted(input))
+                .is_ok()
         });
         if !remaining.is_empty() {
             let mut rest = remaining;
             rest.append(&mut self.pending);
             self.pending = rest;
-            self.state.busy = false;
         }
     }
 
     /// A submitted turn enters the transcript before response events, so its
     /// prompt and response always share one scroll coordinate system.
-    fn push_submitted(&mut self, text: &str) {
-        match classify_prompt_for_display(text) {
-            PromptDisplay::User(text) => self.transcript.start_user_turn(&text),
-            PromptDisplay::Shell(command) => self.transcript.start_shell_turn(&command),
-            PromptDisplay::Quiet => {}
+    fn push_submitted(&mut self, input: &Input) {
+        match input {
+            Input::Chat(text) => self.transcript.start_user_turn(&display_user_input(text)),
+            Input::Shell(command) if !command.is_empty() => {
+                self.transcript.start_shell_turn(command);
+            }
+            Input::Shell(_) | Input::Slash { .. } | Input::Rewind => {}
         }
     }
 
-    fn control(&self, command: ControlCommand) {
-        let _ = self.app.send(AppCommand::Control(command));
+    /// Stops what is still running before the process goes away: the turn
+    /// first, then the subagents it may have spawned. `App::shutdown` cancels
+    /// the supervisor as a backstop, but a subagent that is asked to stop is
+    /// stopped in the registry too, which is what the last frame shows.
+    fn shutdown_in_flight(&self) {
+        if self.state.busy {
+            self.send_cancel();
+        }
+        if !self.agents.is_empty() {
+            self.app.stop_subagents();
+        }
     }
 
     fn send_cancel(&self) {
-        if let Some(turn_id) = self.app.state().phase.turn_id() {
-            self.control(ControlCommand::Cancel { turn_id });
+        let turn_id = self.state_rx.borrow().phase.turn_id();
+        if let Some(turn_id) = turn_id {
+            self.app.cancel(turn_id);
         }
     }
 
@@ -399,10 +492,8 @@ impl Ui {
                     } else {
                         ApprovalDecision::Rejected
                     };
-                    self.control(ControlCommand::RespondToolApproval {
-                        request_id: *request_id,
-                        decision,
-                    });
+                    self.app
+                        .respond(*request_id, UserResponse::Approval(decision));
                     PromptFlow::Closed
                 }
                 ChoicePopupAction::Cancel => {
@@ -418,10 +509,8 @@ impl Ui {
                     } else {
                         LoopLimitDecision::Exit
                     };
-                    self.control(ControlCommand::RespondLoopLimit {
-                        request_id: *request_id,
-                        decision,
-                    });
+                    self.app
+                        .respond(*request_id, UserResponse::LoopLimit(decision));
                     PromptFlow::Closed
                 }
                 ChoicePopupAction::Cancel => {
@@ -465,11 +554,8 @@ impl Ui {
         }
     }
 
-    fn respond_question(&self, request_id: QuestionRequestId, response: AnswerResponse) {
-        self.control(ControlCommand::RespondQuestion {
-            request_id,
-            response,
-        });
+    fn respond_question(&self, request_id: UserRequestId, response: AnswerResponse) {
+        self.app.respond(request_id, UserResponse::Answer(response));
     }
 
     /// Routes submitted text to the open question when it is waiting for a
@@ -492,12 +578,28 @@ impl Ui {
         true
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent) {
-        match self.transcript.handle_mouse(mouse, &self.state) {
+    fn handle_mouse(&mut self, mouse: MouseEvent, agents_area: Option<Rect>) {
+        if let Some(area) = agents_area
+            && let Some(id) = agents::row_at(area, &self.agents, mouse.row)
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            self.focus_agent(id);
+            return;
+        }
+        // Whichever transcript is on screen takes the mouse: sending it to the
+        // hidden one would scroll what nobody can see, and copy the wrong text
+        // to the clipboard.
+        let result = match self.focus.and_then(|id| self.views.get_mut(&id)) {
+            Some(view) => view.handle_mouse(mouse, &self.state),
+            None => self.transcript.handle_mouse(mouse, &self.state),
+        };
+        match result {
             KeyResult::Action(Action::Notify(text)) => {
                 self.apply_event(&AppEvent::notification(text));
             }
-            KeyResult::Ignored => {
+            // The composer is not drawn while a viewer is open, so there is
+            // nothing under the mouse there to hand the event to either.
+            KeyResult::Ignored if self.focus.is_none() => {
                 self.input.handle_mouse(mouse, &self.state);
             }
             _ => {}
@@ -514,15 +616,14 @@ impl Ui {
                 self.suppress_completions();
                 result
             }
+            PromptFlow::Free if self.focus.is_some() => self.handle_viewer_key(key, esc_armed),
             PromptFlow::Free => match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     KeyResult::Action(Action::Quit)
                 }
                 _ if is_mode_toggle(key) => {
                     self.state.mode = self.state.mode.toggle();
-                    self.control(ControlCommand::SetMode {
-                        mode: self.state.mode,
-                    });
+                    self.app.set_mode(self.state.mode);
                     KeyResult::Handled
                 }
                 KeyCode::Esc if self.input.overlay() == Overlay::None => self.handle_esc(esc_armed),
@@ -538,9 +639,7 @@ impl Ui {
         match result {
             KeyResult::Ignored | KeyResult::Handled => false,
             KeyResult::Action(Action::Quit) => {
-                if self.state.busy {
-                    self.send_cancel();
-                }
+                self.shutdown_in_flight();
                 true
             }
             KeyResult::Action(Action::Cancel) => {
@@ -557,18 +656,16 @@ impl Ui {
                 if self.answer_question_with(&text) {
                     return false;
                 }
-                self.push_submitted(&text);
                 self.status.clear_reply();
                 self.input.clear();
-                self.state.busy = true;
-                if self.app.send(AppCommand::Prompt(text)).is_err() {
-                    self.state.busy = false;
+                if let Ok(input) = self.app.submit(&text) {
+                    self.push_submitted(&input);
                 }
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
                 if !self.answer_question_with(&text) {
-                    let _ = self.app.send(AppCommand::Prompt(text));
+                    let _ = self.app.submit(&text);
                 }
                 false
             }
@@ -577,6 +674,40 @@ impl Ui {
                 false
             }
         }
+    }
+
+    /// A subagent's transcript has the keyboard while it is open: the
+    /// composer is not drawn, so nothing typed can leak into it. `Ctrl-C`
+    /// still quits — a modal must not be able to trap the user — and the
+    /// arrows scroll, because there is no composer cursor here to move.
+    fn handle_viewer_key(&mut self, key: KeyEvent, esc_armed: bool) -> KeyResult {
+        match key.code {
+            KeyCode::Esc => return self.handle_esc(esc_armed),
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return KeyResult::Action(Action::Quit);
+            }
+            KeyCode::Char('x') if key.modifiers.is_empty() => {
+                if let Some(id) = self.focus {
+                    self.app.stop_subagent(id);
+                }
+                return KeyResult::Handled;
+            }
+            KeyCode::Up | KeyCode::Down => {
+                if let Some(view) = self.focus.and_then(|id| self.views.get_mut(&id)) {
+                    view.scroll_lines(key.code == KeyCode::Up, VIEWER_SCROLL_LINES);
+                }
+                return KeyResult::Handled;
+            }
+            _ => {}
+        }
+        let result = match self.focus.and_then(|id| self.views.get_mut(&id)) {
+            Some(view) => view.handle_key(key, &self.state),
+            None => KeyResult::Ignored,
+        };
+        if let KeyResult::Action(Action::Notify(text)) = result {
+            self.apply_event(&AppEvent::notification(text));
+        }
+        KeyResult::Handled
     }
 
     fn esc_armed(&self) -> bool {
@@ -607,11 +738,15 @@ impl Ui {
         if matches!(action, EscAction::Ignore) {
             return KeyResult::Handled;
         }
-        if !armed {
+        if !armed && !action.acts_immediately() {
             self.esc_confirm_until = Some(Instant::now() + ESC_CONFIRM_WINDOW);
             return KeyResult::Handled;
         }
         match action {
+            EscAction::CloseViewer => {
+                self.focus = None;
+                KeyResult::Handled
+            }
             EscAction::PopQueue => {
                 if let Some(text) = self.pending.pop() {
                     self.input.set_text(&text);
@@ -625,11 +760,7 @@ impl Ui {
                 };
                 self.input.set_text(&text);
                 self.rewinding = true;
-                if self
-                    .app
-                    .send(AppCommand::Control(ControlCommand::Rewind))
-                    .is_err()
-                {
+                if self.app.rewind().is_err() {
                     self.rewinding = false;
                 }
                 KeyResult::Handled
@@ -641,6 +772,7 @@ impl Ui {
     fn esc_action(&self) -> EscAction {
         EscAction::new(
             self.pending.last().map(String::as_str),
+            self.focus.is_some(),
             self.state.busy,
             self.rewinding,
             self.transcript.rewind_text().as_deref(),
@@ -649,24 +781,42 @@ impl Ui {
 
     fn draw(&mut self, f: &mut Frame<'_>) {
         let area = f.area();
+        let focused = self.focus.and_then(|id| self.views.get_mut(&id));
         let overlay_height = match self.prompt.as_ref() {
             Some(prompt) => prompt.height(area.width),
             None => self.input.overlay_height(),
         };
+        let input_h = match self.focus {
+            Some(_) => VIEWER_ROWS,
+            None => self.input.height(area.width),
+        };
         let regions = layout::split(
             area,
-            self.input.height(area.width),
+            input_h,
             queue::height(&self.pending),
+            agents::height(&self.agents),
             self.todos.height(),
             overlay_height,
         );
+        self.agents_area = regions.agents;
 
-        self.transcript.draw(f, regions.transcript, &self.state);
+        match focused {
+            Some(view) => view.draw(f, regions.transcript, &self.state),
+            None => self.transcript.draw(f, regions.transcript, &self.state),
+        }
         if let Some(queue) = regions.queue {
             queue::draw(f, queue, &self.pending);
         }
+        if let Some(agents) = regions.agents {
+            agents::draw(f, agents, &self.agents);
+        }
         if let Some(todos) = regions.todos {
             self.todos.draw(f, todos);
+        }
+        if let Some(id) = self.focus {
+            self.draw_viewer_hint(f, regions.input, id);
+            self.status.draw_bar(f, regions.status, &self.state);
+            return;
         }
         self.input.draw_composer(
             f,
@@ -689,27 +839,26 @@ impl Ui {
         self.status.draw_reply_overlay(f, regions.transcript);
     }
 
+    /// While a subagent's transcript owns the screen the composer has no
+    /// work to do, so its row states what the viewer answers to instead.
+    fn draw_viewer_hint(&self, f: &mut Frame<'_>, area: Rect, id: AgentId) {
+        let Some(agent) = self.agents.iter().find(|agent| agent.id == id) else {
+            return;
+        };
+        let text = format!("{} · {} · {VIEWER_HINT}", agent.name, agent.status.label());
+        agents::draw_hint(f, area, &text);
+    }
+
     fn wants_tick(&self) -> bool {
-        self.state.busy || self.status.has_reply() || self.esc_armed()
+        self.state.working() || self.status.has_reply() || self.esc_armed()
     }
 }
 
-/// Classifies submitted text by the kind of turn it starts. Control commands
-/// do not create transcript rows.
-enum PromptDisplay {
-    User(String),
-    Shell(String),
-    Quiet,
-}
-
-fn classify_prompt_for_display(text: &str) -> PromptDisplay {
-    if let Some(command) = shell::command(text) {
-        return PromptDisplay::Shell(command.to_string());
-    }
-    if invokes_command(text) {
-        return PromptDisplay::Quiet;
-    }
-    PromptDisplay::User(display_user_input(text))
+fn active_agents(agents: &[NodeInfo]) -> usize {
+    agents
+        .iter()
+        .filter(|agent| agent.status.is_active())
+        .count()
 }
 
 fn is_mode_toggle(key: KeyEvent) -> bool {
@@ -743,17 +892,36 @@ fn composer_hint(
         IDLE_HINT
     })
 }
+#[derive(Debug)]
 enum EscAction {
     PopQueue,
+    CloseViewer,
     Cancel,
     Rewind,
     Ignore,
 }
 
 impl EscAction {
-    fn new(queued: Option<&str>, busy: bool, rewinding: bool, last_user: Option<&str>) -> Self {
+    /// Whether the action happens on the first press. Everything that throws
+    /// work away waits for a second one; leaving a subagent's transcript
+    /// throws nothing away — the view is still there to reopen — and a screen
+    /// that ignores the first `Esc` reads as one you are stuck on.
+    fn acts_immediately(&self) -> bool {
+        matches!(self, Self::CloseViewer)
+    }
+
+    fn new(
+        queued: Option<&str>,
+        focused: bool,
+        busy: bool,
+        rewinding: bool,
+        last_user: Option<&str>,
+    ) -> Self {
         if queued.is_some() {
             return EscAction::PopQueue;
+        }
+        if focused {
+            return EscAction::CloseViewer;
         }
         if busy {
             return EscAction::Cancel;
@@ -766,6 +934,14 @@ impl EscAction {
         }
         EscAction::Ignore
     }
+}
+
+fn unsent_notice(count: usize) -> String {
+    let noun = match count {
+        1 => "message",
+        _ => "messages",
+    };
+    format!("dropped {count} queued {noun} (never sent)")
 }
 
 fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<String> {
@@ -787,93 +963,70 @@ mod tests {
     use crate::components::input::InputView;
     use crate::components::slash_command_popup::SlashCommandPopup;
     use oven_app::config::ProviderConfig;
+    use oven_app::{ToolCallId, ToolResult};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     #[test]
-    fn esc_action_priority_queue_then_cancel_then_rewind() {
+    fn esc_action_priority_queue_then_viewer_then_cancel_then_rewind() {
         assert!(matches!(
-            EscAction::new(Some("q"), true, false, Some("u")),
+            EscAction::new(Some("q"), true, true, false, Some("u")),
             EscAction::PopQueue
         ));
         assert!(matches!(
-            EscAction::new(Some("q"), true, true, None),
+            EscAction::new(Some("q"), true, true, true, None),
             EscAction::PopQueue
         ));
         assert!(matches!(
-            EscAction::new(None, true, false, Some("u")),
+            EscAction::new(None, true, true, false, Some("u")),
+            EscAction::CloseViewer
+        ));
+        assert!(matches!(
+            EscAction::new(None, false, true, false, Some("u")),
             EscAction::Cancel
         ));
         assert!(matches!(
-            EscAction::new(None, false, true, Some("u")),
+            EscAction::new(None, false, false, true, Some("u")),
             EscAction::Ignore
         ));
         assert!(matches!(
-            EscAction::new(None, false, false, Some("u")),
+            EscAction::new(None, false, false, false, Some("u")),
             EscAction::Rewind
         ));
         assert!(matches!(
-            EscAction::new(None, false, false, None),
+            EscAction::new(None, false, false, false, None),
             EscAction::Ignore
         ));
     }
 
     #[test]
-    fn empty_prompt_cannot_trigger_rewind() {
-        assert!(matches!(
-            EscAction::new(None, false, false, None),
-            EscAction::Ignore
-        ));
-    }
-
-    #[test]
-    fn classify_starts_user_turn_for_ordinary_text() {
-        assert!(matches!(
-            classify_prompt_for_display("why is the build slow?"),
-            PromptDisplay::User(text) if text == "why is the build slow?"
-        ));
-    }
-
-    #[test]
-    fn classify_starts_shell_turn_for_shell_commands() {
-        assert!(matches!(
-            classify_prompt_for_display("! ls -la"),
-            PromptDisplay::Shell(text) if text == "ls -la"
-        ));
-    }
-
-    #[test]
-    fn classify_starts_user_turn_for_unknown_slash_commands() {
-        assert!(matches!(
-            classify_prompt_for_display("/nope"),
-            PromptDisplay::User(text) if text == "/nope"
-        ));
-    }
-
-    #[test]
-    fn classify_keeps_control_commands_out_of_the_transcript() {
-        for text in [
-            "/clear",
-            "/compact",
-            "/exit",
-            "/model",
-            "/model gpt-4o high",
-            "/plan on",
-            "/setup name=deepseek api_key=sk-secret",
+    fn only_leaving_a_view_acts_on_the_first_press() {
+        assert!(EscAction::CloseViewer.acts_immediately());
+        for action in [
+            EscAction::PopQueue,
+            EscAction::Cancel,
+            EscAction::Rewind,
+            EscAction::Ignore,
         ] {
             assert!(
-                matches!(classify_prompt_for_display(text), PromptDisplay::Quiet),
-                "{text} configures the runtime and produces no response"
+                !action.acts_immediately(),
+                "{action:?} throws work away and must be confirmed"
             );
         }
     }
 
     #[test]
-    fn classified_setup_command_never_starts_a_turn() {
+    fn empty_prompt_cannot_trigger_rewind() {
         assert!(matches!(
-            classify_prompt_for_display("/setup name=deepseek api_key=sk-secret"),
-            PromptDisplay::Quiet
+            EscAction::new(None, false, false, false, None),
+            EscAction::Ignore
         ));
+    }
+
+    #[test]
+    fn the_unsent_notice_counts_messages() {
+        assert_eq!(unsent_notice(1), "dropped 1 queued message (never sent)");
+        assert_eq!(unsent_notice(3), "dropped 3 queued messages (never sent)");
     }
 
     #[test]
@@ -942,7 +1095,7 @@ mod tests {
         );
 
         let question = OverlayPrompt::Question {
-            request_id: QuestionRequestId(1),
+            request_id: UserRequestId(1),
             popup: QuestionPrompt::new("which one?".into(), Vec::new()),
         };
         assert_eq!(
@@ -1018,7 +1171,7 @@ mod tests {
         assert!(matches!(action, QuestionPromptAction::Handled));
         assert!(popup.awaits_typed_answer());
         OverlayPrompt::Question {
-            request_id: QuestionRequestId(1),
+            request_id: UserRequestId(1),
             popup,
         }
     }
@@ -1058,6 +1211,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_open_prompt_closes_when_its_request_resolves() {
+        let root = tempdir::TempDir::new("oven-ui-resolved").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.prompt = Some(answering_prompt());
+
+        ui.apply_event(&AppEvent::agent(AgentEvent::Tool(ToolEvent::Finished {
+            call_id: ToolCallId(1),
+            result: ToolResult::Cancelled,
+        })));
+        ui.apply_event(&AppEvent::agent(AgentEvent::Turn(TurnEvent::Cancelled {
+            duration_ms: 1,
+        })));
+        assert!(ui.prompt.is_some());
+
+        ui.apply_event(&AppEvent::new(AppEventKind::RequestResolved {
+            request_id: UserRequestId(9),
+        }));
+        assert!(ui.prompt.is_some());
+
+        ui.apply_event(&AppEvent::new(AppEventKind::RequestResolved {
+            request_id: UserRequestId(1),
+        }));
+        assert!(ui.prompt.is_none());
+    }
+
+    #[tokio::test]
     async fn ordinary_text_still_starts_a_turn() {
         let root = tempdir::TempDir::new("oven-ui-prompt").unwrap();
         let mut ui = test_ui(&root).await;
@@ -1065,6 +1244,23 @@ mod tests {
 
         ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
 
+        assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
+    }
+
+    #[tokio::test]
+    async fn busy_follows_the_apps_phase_and_flushes_the_queue_when_it_ends() {
+        let root = tempdir::TempDir::new("oven-ui-sync").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.state.busy = true;
+        ui.pending.push(TEST_ANSWER.to_string());
+
+        ui.sync_state();
+
+        assert!(!ui.state.busy, "an idle app is not busy");
+        assert!(
+            ui.pending.is_empty(),
+            "the queue is sent once the app is idle"
+        );
         assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
     }
 

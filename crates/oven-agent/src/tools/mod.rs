@@ -7,6 +7,7 @@ mod file_write;
 mod glob;
 mod grep;
 mod skill_read;
+mod task;
 mod todo_write;
 mod view;
 
@@ -14,15 +15,9 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
 
 use crate::error::AgentError;
-use crate::question::{
-    AnswerResponse, Question, QuestionRequest, QuestionRequestId, QuestionSender,
-};
-
-pub const NO_USER_TO_ANSWER: &str = "no user is available to answer the question";
+use crate::turn::TurnContext;
 
 pub use answer::AnswerTool;
 pub use bash::BashTool;
@@ -33,57 +28,15 @@ pub use file_write::FileWriteTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use skill_read::SkillReadTool;
+pub use task::{TaskOutputTool, TaskTool};
 pub use todo_write::TodoWriteTool;
 pub(crate) use view::labeled;
 pub use view::{ToolCaps, ToolPermission, ToolView, present_tool};
 
-/// What a tool may do besides its own arguments: observe the turn's
-/// cancellation and, for interactive tools, ask the user a question.
-pub struct ToolContext<'a> {
-    cancel: Option<&'a CancellationToken>,
-    asker: Option<&'a QuestionSender>,
-}
-
-impl<'a> ToolContext<'a> {
-    /// Both halves are optional: `new(None, None)` is the shape a tool sees
-    /// when it is invoked outside a frontend-driven turn.
-    pub const fn new(
-        cancel: Option<&'a CancellationToken>,
-        asker: Option<&'a QuestionSender>,
-    ) -> Self {
-        Self { cancel, asker }
-    }
-
-    pub fn cancel(&self) -> Option<&'a CancellationToken> {
-        self.cancel
-    }
-
-    /// Puts `question` to the user and waits for the reply, giving up as
-    /// cancelled when the turn is cancelled or the frontend goes away.
-    pub(crate) async fn ask(&self, question: Question) -> Result<AnswerResponse, AgentError> {
-        let asker = self
-            .asker
-            .ok_or_else(|| AgentError::from(NO_USER_TO_ANSWER))?;
-        let (responder, reply) = oneshot::channel();
-        asker
-            .send(QuestionRequest {
-                request_id: QuestionRequestId::next(),
-                question,
-                responder,
-            })
-            .map_err(|_| AgentError::from(NO_USER_TO_ANSWER))?;
-        let reply = match self.cancel {
-            Some(cancel) => tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Err(AgentError::cancelled()),
-                reply = reply => reply,
-            },
-            None => reply.await,
-        };
-        reply.map_err(|_| AgentError::cancelled())
-    }
-}
-
+/// One capability the model can call. `run` receives the whole
+/// [`TurnContext`] rather than a bag of options, so a tool that starts work
+/// of its own — a subagent, a nested loop — inherits the run it was called
+/// from instead of guessing.
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -95,7 +48,7 @@ pub trait Tool: Send + Sync {
     fn caps(&self) -> ToolCaps {
         ToolCaps::default()
     }
-    async fn run(&self, args: &Value, ctx: &ToolContext<'_>) -> Result<String, AgentError>;
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError>;
 }
 
 pub(crate) fn resolve_within(root: &Path, rel: &str) -> Result<PathBuf, AgentError> {

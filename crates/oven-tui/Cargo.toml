@@ -12,6 +12,7 @@ path = "src/bin/oven-cli.rs"
 [dependencies]
 oven-llm = { workspace = true }
 oven-app = { workspace = true }
+oven-host = { workspace = true }
 arboard = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true }

@@ -5,13 +5,26 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mockall::mock;
-use oven_agent::{Tool, ToolContext};
+use oven_agent::{CancellationToken, Tool, TurnContext};
 use oven_app::AppBuilder;
 use oven_app::config::AppConfig;
 use oven_app::mcp::McpRegistry;
 use oven_app::mcp::client::{McpCaller, McpConnector, McpTool};
 use rmcp::model::ContentBlock as McpContentBlock;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
+
+/// A bare run context: these tests exercise the tool, not a turn.
+fn turn() -> TurnContext {
+    TurnContext::new(
+        oven_agent::TurnId::next(),
+        CancellationToken::new(),
+        oven_agent::Selection::new(
+            oven_agent::AgentMode::Agent,
+            oven_llm::ModelId::new("default"),
+            None,
+        ),
+    )
+}
 
 mock! {
     pub Caller {}
@@ -58,10 +71,7 @@ async fn mcp_tool_calls_through_mock_caller() {
     assert_eq!(tool.description(), "[mcp:test] Echo the given text back");
 
     let out = tool
-        .run(
-            &serde_json::json!({"text": "hi"}),
-            &ToolContext::new(None, None),
-        )
+        .run(&serde_json::json!({"text": "hi"}), &turn())
         .await
         .unwrap();
     assert_eq!(out, "echo: hi");
@@ -83,10 +93,7 @@ async fn mcp_tool_caller_error_is_surfaced() {
         Arc::new(caller),
     );
     let err = tool
-        .run(
-            &serde_json::json!({"text": "hi"}),
-            &ToolContext::new(None, None),
-        )
+        .run(&serde_json::json!({"text": "hi"}), &turn())
         .await
         .unwrap_err();
     assert_eq!(err.message, "mcp:test tool echo: boom");

@@ -56,14 +56,24 @@ channel is empty, so a burst of deltas costs one draw instead of one draw per
 delta. A disconnected channel settles the live transcript response and clears
 `busy`.
 
+The levels come from the app's `watch` instead: on every change `sync_state`
+reads `busy` from `phase.is_active()` and takes `mode`, the subagent strip, the
+status bar's model and window, the input's providers and models, and — only
+between turns — the checklist and the usage readout, since a running turn
+reports those itself. It then sends whatever was queued once the app is idle.
+
 `apply_event` maps each event onto four things:
 
-- `Ui`'s own `state.busy` / `state.mode` / `rewinding` / `quit` /
-  `esc_confirm_until`
-- transcript, status, input, and todos widgets via `on_event`
+- `Ui`'s own `state.agents` / `rewinding` / `quit` / `esc_confirm_until`, the
+  viewer (`focus`), and the strip's copy of the registry
+- transcript, status and todos widgets via `on_event` — and, for an
+  event whose `agent_id` is not the driver's, only that subagent's transcript
 - overlay prompts (`OverlayPrompt`) for tool approval, loop limit, and a
   question from the `answer` tool that is answered either by picking an offered
-  option or by typing into the composer
+  option or by typing into the composer. The prompt closes when
+  `RequestResolved` names the request it was opened for. A local answer closes
+  it immediately; the event covers a reply or a drop that happened elsewhere,
+  including the turn ending while the request was still open
 - `pending`, the messages queued while the backend is busy
 
 ### Queueing
@@ -128,6 +138,8 @@ counter used for animations).
 ├──────────────────────────┤
 │ queue       (0 or 1)     │
 ├──────────────────────────┤
+│ agents      (0..=3)      │
+├──────────────────────────┤
 │ todos       (0..=6)      │
 ├──────────────────────────┤
 │ input        (1..=10)    │
@@ -146,13 +158,13 @@ and reserves the corresponding internal height for response content. Scrolling
 up, or receiving `Completed`, `Cancelled`, `Failed`, or a dropped backend,
 removes only this projection: the prompt row remains in place in the transcript.
 
-`classify_prompt_for_display` mirrors runtime dispatch
-(`oven_app::invokes_command`): normal text starts a User turn, `!` commands
-start a Shell turn, and registered control commands (`/model`, `/setup`,
-`/clear`, …) stay out of the transcript. Queue entries create their row only
+`App::submit` classifies the text into an `oven_app::Input`, and `push_submitted`
+draws that: `Chat` starts a User turn, `Shell` starts a Shell turn, and
+registered control commands (`/model`, `/setup`, `/clear`, …) and `Rewind` stay
+out of the transcript. Queue entries create their row only
 when they are actually sent.
 
-Startup and every `StateChange::HistoryChanged` rebuild the transcript directly
+Startup and every `AppEventKind::HistoryChanged` rebuild the transcript directly
 from `App::history`; no user row is promoted out of history. On a short terminal
 the transcript keeps one row whenever possible, then status; optional bands are
 clamped to the remaining height.
@@ -177,6 +189,7 @@ line kind, border state, and status segment.
 | `file_mention_popup.rs` | `@` file completion |
 | `choice_popup.rs` | the approve/reject and continue/exit modals |
 | `queue.rs` | the queued-message row |
+| `agents.rs` | the subagent strip and the viewer's hint row |
 | `todos.rs` | read-only checklist |
 | `list.rs` | shared list primitive (cycling, `▸` marker, titled header) |
 | `shell.rs` | `!` shell-mode detection and prompt styling |
@@ -333,6 +346,45 @@ own `Separator` computed from the user prompt's timestamp to the answer's, so th
 `Worked for 1.2s` line survives a resume; a message that ended in a tool call
 has none, because the answer it led to is still to come.
 
+### Subagents
+
+Design and rationale: [`subagents.md`](./subagents.md).
+
+The driver's conversation is not the only one on screen. Every `AgentEvent`
+arrives with an `agent_id`; events from the driver (`AppState.agent_id`) feed
+`Ui::transcript`, and every other agent's feed their own `Transcript` in
+`Ui::views`, created on first event and dropped when the registry stops
+listing them.
+
+Three surfaces, in increasing order of commitment:
+
+| Surface | Shows | Entered by |
+| --- | --- | --- |
+| the strip | one row per subagent — `◆ explore#1 · running 12.0s · 3 tools · label` — active ones first, newest finished next, `+N` when it is capped at three rows | always, while any subagent exists |
+| the driver's transcript | the `task` call as an ordinary tool row, its report as the collapsible body | always |
+| the viewer | one subagent's whole transcript, replacing the driver's, with the composer's row turned into a hint | `/agents <n>`, or clicking a strip row |
+
+Opening a view builds it if it does not exist yet, seeded with the label the
+task was spawned under, and fills in from the subagent's events as they arrive —
+so a subagent that is still queued, or that has not spoken yet, still opens
+something. `/agents` applies mid-turn for the same reason: a view command that
+waited for the reply would be useless by the time it ran.
+
+While the viewer is open it owns the keyboard: `↑↓`/`PgUp`/`PgDn` and the
+mouse scroll it, `x` stops that subagent, `Ctrl-C` still quits, and `Esc` goes
+back to the chat. That `Esc` is the one that acts on a single press —
+`EscAction::acts_immediately` — because it throws nothing away (the transcript
+is still there to reopen) and a screen that ignores the first `Esc` reads as one
+you are stuck on. Every other `Esc` still waits for a confirmation. The row that
+replaces the composer says so: `explore#1 · running · esc back to the chat ·
+↑↓ scroll · x stop`. `state.agents` counts the ones still working, which is what keeps
+the frame ticking so their clocks move while the driver is idle — `state.busy`,
+the driver's own turn, stays false so the composer is still free to send.
+
+`Esc` priority is therefore: pop a queued message → leave the viewer → cancel
+the driver's turn → rewind. Cancelling a turn cancels the subagents it spawned;
+one that outlives its turn is stopped with `/agents stop <n>` or `x`.
+
 ### Scrolling and selection
 
 `top` is `None` to follow the tail and `Some(index)` to anchor. Streaming never
@@ -355,6 +407,32 @@ correctly) and copies on release — via `arboard`, falling back to an OSC52 esc
 sequence for terminals without clipboard access. The transcript hit-tests the
 whole conversation area, including user messages; a drag that starts there still
 owns the pointer while it runs, including a release outside the area.
+
+### Quitting
+
+`Ctrl-C` stops what is still running before the process goes away, in the order
+the work was created: the driver's turn is cancelled, then the subagents it
+spawned are stopped (`App::stop_subagents`), and `App::shutdown`
+cancels the supervisor's root token as a backstop for anything that slipped
+through. The exit is immediate — no frame is held for the stopped subagents,
+because they are not persisted and the process is going away either way.
+
+Anything the user queued and never sent is dropped, and said out loud on the
+way out: the count is printed where the session hint goes, so it is readable in
+the scrollback rather than in a frame that is already gone. It covers both
+queues — the messages the composer still holds, and the ones already handed to
+the runtime that are waiting behind the running turn (`App::shutdown` returns
+that second count, since only the runtime knows it).
+
+```text
+dropped 2 queued messages (never sent)
+oven -s 0192f0c1-…
+```
+
+A subagent's clock stops when it does: `NodeInfo::elapsed_ms` counts up while
+it runs and freezes at `finished_at` once it is done, failed or cancelled, so a
+stopped subagent on the strip shows the time it took rather than the time since
+it started.
 
 ## Rendering notes
 

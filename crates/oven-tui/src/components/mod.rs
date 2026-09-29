@@ -1,3 +1,4 @@
+pub(super) mod agents;
 pub(super) mod choice_popup;
 pub(super) mod component;
 pub(super) mod file_mention_popup;

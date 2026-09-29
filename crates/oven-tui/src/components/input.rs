@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use oven_app::AgentMode;
+use oven_app::AppState;
 use oven_app::FileMentions;
 use oven_app::config::ProviderConfig;
-use oven_app::{AppEvent, AppEventKind, StateChange, StateEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::layout::{Constraint, Direction, Layout, Position};
@@ -66,8 +66,11 @@ impl InputView {
         self
     }
 
-    pub fn set_configured(&mut self, configured: Vec<String>) {
-        self.setup.set_configured(configured);
+    /// Follows the providers and models the app reports.
+    pub fn sync(&mut self, state: &AppState) {
+        self.model_picker.update_models(&state.models);
+        self.setup.set_current(&state.provider);
+        self.setup.set_configured(&state.configured_providers);
     }
 
     #[cfg(test)]
@@ -264,25 +267,6 @@ impl InputView {
 }
 
 impl Component for InputView {
-    fn on_event(&mut self, ev: &AppEvent) {
-        let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind else {
-            return;
-        };
-        match change {
-            StateChange::ModelsChanged { models } => {
-                self.model_picker.update_models(models.clone());
-            }
-            StateChange::ProviderChanged {
-                provider,
-                configured_providers,
-            } => {
-                self.setup.set_current(provider.clone());
-                self.setup.set_configured(configured_providers.clone());
-            }
-            _ => {}
-        }
-    }
-
     fn handle_key(&mut self, key: KeyEvent, state: &State) -> KeyResult {
         self.refresh_popups();
 
@@ -547,6 +531,7 @@ fn new_textarea() -> TextArea<'static> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::component::idle_state;
     use super::*;
     use crossterm::event::KeyCode;
 
@@ -569,7 +554,7 @@ mod tests {
 
     fn view() -> InputView {
         let mut view = InputView::new(commands(), ProviderConfig::default());
-        view.model_picker.update_models(models());
+        view.model_picker.update_models(&models());
         view
     }
 
@@ -933,10 +918,10 @@ mod tests {
     #[test]
     fn update_models_refreshes_picker() {
         let mut view = InputView::new(commands(), ProviderConfig::default());
-        let ev = AppEvent::state_changed(oven_app::StateChange::ModelsChanged {
+        view.sync(&AppState {
             models: vec![("kimi-k2".into(), "Moonshot".into())],
+            ..idle_state()
         });
-        view.on_event(&ev);
         type_text(&mut view, "/model");
         view.handle_key(key(KeyCode::Enter), &State::new());
         assert_eq!(view.model_picker.matches(), vec![0]);
@@ -974,14 +959,10 @@ mod tests {
     }
 
     #[test]
-    fn history_changed_does_not_touch_input() {
+    fn syncing_state_does_not_touch_the_draft() {
         let mut view = view();
         type_text(&mut view, "draft");
-        let ev = AppEvent::state_changed(oven_app::StateChange::HistoryChanged {
-            revision: 1,
-            reason: oven_app::HistoryChangeReason::External,
-        });
-        view.on_event(&ev);
+        view.sync(&idle_state());
         assert_eq!(view.textarea.lines()[0], "draft");
     }
 

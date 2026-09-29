@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use oven_agent::{
-    Agent, AgentMode, ApprovalRequestId, LoopLimitRequestId, Question, QuestionRequestId, TodoList,
-    ToolCallId, ToolView, TurnId,
-};
+use oven_agent::{Agent, AgentId, AgentMode, NodeInfo, TodoList, TurnId};
 use oven_llm::{Message, ModelId, Provider, ReasoningEffort, Router, Usage};
 
 use crate::config::ProviderConfig;
@@ -11,6 +8,13 @@ use crate::config::ProviderConfig;
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub phase: AppPhase,
+    /// The conversation driver. Every other agent a view sees is a subagent,
+    /// which is how an event is routed to the transcript it belongs to.
+    pub agent_id: AgentId,
+    /// Subagents in spawn order, mirrored from the registry. Shared, so
+    /// publishing state and telling the frontend it moved cost a refcount
+    /// rather than a copy of every subagent.
+    pub subagents: Arc<Vec<NodeInfo>>,
     pub mode: AgentMode,
     pub model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -36,6 +40,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The conversation with its record timestamps and thinking durations,
+    /// sharing the agent's messages so a transcript re-seed does not copy
+    /// every message.
+    pub fn history_timed_shared(&self) -> Vec<(Arc<Message>, u64, Option<u64>)> {
+        self.history
+            .iter()
+            .cloned()
+            .zip(self.history_timestamps.iter().copied())
+            .zip(self.history_thinking_ms.iter().copied())
+            .map(|((message, timestamp), thinking_ms)| (message, timestamp, thinking_ms))
+            .collect()
+    }
+
     pub(crate) fn from_agent(
         agent: &Agent,
         provider: ProviderConfig,
@@ -44,6 +61,8 @@ impl AppState {
     ) -> Self {
         Self {
             phase: AppPhase::Idle,
+            agent_id: agent.id(),
+            subagents: Arc::new(Vec::new()),
             mode: agent.mode(),
             model: agent.model().to_string(),
             reasoning_effort: agent.reasoning_effort(),
@@ -69,7 +88,7 @@ pub(crate) fn context_tokens(agent: &Agent) -> u32 {
 }
 
 /// Prompt-side tokens (input + cache reads) a usage report accounts for.
-pub(crate) fn context_tokens_of(usage: &Usage) -> u32 {
+pub fn context_tokens_of(usage: &Usage) -> u32 {
     usage.input_tokens.saturating_add(usage.cache_read_tokens)
 }
 
@@ -87,41 +106,23 @@ pub(crate) fn context_window(agent: &Agent) -> Option<u32> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingToolApproval {
-    pub request_id: ApprovalRequestId,
-    pub call_id: ToolCallId,
-    pub name: String,
-    pub view: ToolView,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingQuestion {
-    pub request_id: QuestionRequestId,
-    pub question: Question,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppPhase {
     Idle,
     Running {
         turn_id: TurnId,
     },
-    AwaitingToolApproval {
+    /// The turn is blocked on the user: a tool approval, the loop limit or a
+    /// question. What it is waiting for reaches a frontend as the agent event
+    /// that announced it.
+    Awaiting {
         turn_id: TurnId,
-        request: PendingToolApproval,
-    },
-    AwaitingLoopLimit {
-        turn_id: TurnId,
-        request_id: LoopLimitRequestId,
-        max_iters: usize,
-    },
-    AwaitingAnswer {
-        turn_id: TurnId,
-        request: PendingQuestion,
     },
     Cancelling {
         turn_id: TurnId,
     },
+    /// The history is being summarized: the driver is busy, but there is no
+    /// turn to cancel.
+    Compacting,
     ShuttingDown,
 }
 
@@ -129,11 +130,9 @@ impl AppPhase {
     pub fn turn_id(&self) -> Option<TurnId> {
         match self {
             Self::Running { turn_id }
-            | Self::AwaitingToolApproval { turn_id, .. }
-            | Self::AwaitingLoopLimit { turn_id, .. }
-            | Self::AwaitingAnswer { turn_id, .. }
+            | Self::Awaiting { turn_id }
             | Self::Cancelling { turn_id } => Some(*turn_id),
-            Self::Idle | Self::ShuttingDown => None,
+            Self::Idle | Self::Compacting | Self::ShuttingDown => None,
         }
     }
 
@@ -141,14 +140,14 @@ impl AppPhase {
         matches!(self, Self::Idle)
     }
 
+    /// Whether the driver is occupied, so a frontend shows itself busy.
     pub fn is_active(&self) -> bool {
         matches!(
             self,
             Self::Running { .. }
-                | Self::AwaitingToolApproval { .. }
-                | Self::AwaitingLoopLimit { .. }
-                | Self::AwaitingAnswer { .. }
+                | Self::Awaiting { .. }
                 | Self::Cancelling { .. }
+                | Self::Compacting
         )
     }
 }
@@ -158,14 +157,8 @@ pub struct SessionState {
     pub id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct StateEvent {
-    pub revision: u64,
-    pub change: StateChange,
-}
-
-/// Why the conversation history changed, so a view can rebuild itself
-/// without guessing from a revision number.
+/// Why the conversation history was replaced, so a view can rebuild itself
+/// and tell a rewind from a `/clear`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryChangeReason {
     /// Esc rewind truncated the last turn.
@@ -176,39 +169,4 @@ pub enum HistoryChangeReason {
     Compacted,
     /// History was replaced by something outside a known command.
     External,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StateChange {
-    ModelChanged {
-        model: String,
-        reasoning_effort: Option<ReasoningEffort>,
-    },
-    ModeChanged {
-        mode: AgentMode,
-    },
-    TodosChanged {
-        todos: TodoList,
-    },
-    HistoryChanged {
-        revision: u64,
-        reason: HistoryChangeReason,
-    },
-    SessionChanged {
-        session_id: Option<String>,
-    },
-    UsageChanged {
-        usage: Usage,
-    },
-    ContextChanged {
-        tokens: u32,
-        window: Option<u32>,
-    },
-    ProviderChanged {
-        provider: ProviderConfig,
-        configured_providers: Vec<String>,
-    },
-    ModelsChanged {
-        models: Vec<(String, String)>,
-    },
 }

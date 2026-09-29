@@ -3,14 +3,28 @@
 ## [Unreleased]
 
 ### Added
+- Subagents: `task` delegates a self-contained job to another agent with its own context, as `explore` (read-only tools) or `general` (everything but the tools that speak to the user or would nest delegation); `task_output` reports on one, or on all of them
+- Subagent lifecycles: a registry with a concurrency cap (further spawns queue as `queued`), `role#n` addressing, and cancellation by name, by the turn that spawned them, or by app shutdown
+- `/agents` lists subagents and stops, drops or focuses one; `x` stops the focused one
+- The TUI shows subagents in a strip above the composer (active first, `+N` when capped) and gives each its own transcript, opened with `/agents <n>` or by clicking its row
+- `Esc` closes an open subagent viewer before it cancels a turn or rewinds
+- `max_iters` is configurable (`max_iters`, default 200) and bounds one run rather than one agent; `[subagents]` configures `enabled`, `max_concurrent` and the subagents' own `max_iters`
+- `TurnEvent::StepStarted` / `StepFinished` bound each provider round trip, so loop progress and its stop reason are observable from the event stream
+- `Agent::step` is public and returns a `Step` (text, calls, usage), making the loop one policy over it rather than the only way to drive an agent
+- Tools receive the run's `TurnContext`, which carries cancellation, mode, model and the channel an interactive tool asks its question on
+
+### Changed
+- Tools mount as `Arc<dyn Tool>` and subagents share the driver's instances rather than rebuilding them
+- `/setup` rebuilds the router from config and swaps the snapshot in (`Agent::replace_router`) instead of mutating a live router in place, which used to be able to panic while another agent was mid-request
+- Only the driver's own events move app state: a subagent's usage no longer lands in the context readout, and `App::prompt` no longer returns early on a subagent's turn completion
+- Every agent reports on one event channel the runtime drains while idle, so subagent progress reaches the frontend between turns
+- The turn driver moves to `runtime/turn.rs`: the runtime actor keeps the command loop and persistence, and what happens while a turn runs sits beside it
+- `docs/subagents.md` records the subagent design: the decisions behind it, the constraints it removed, and the seams it leaves for loop and graph engineering
 - `/model` and `/setup` completion lists filter by the characters typed: the query is rendered in the composer (`/model deep`), `Tab` completes the highlighted entry into it, and the provider and protocol stages of the setup wizard now narrow the same way
 - `oven_app::complete` owns the prefix rule shared by the slash popup, the model picker and the setup wizard
 - `answer` tool: the model can ask the user a question mid-turn and blocks until they reply, and the reply becomes the tool result. The question renders as an overlay prompt listing the proposed answers plus an `Other…` row that hands the composer the keystrokes, so any answer can be typed; `Esc` skips the question and `Ctrl-C` cancels the turn
-- Tools receive a `ToolContext` instead of a bare cancellation token, carrying the turn's cancellation plus the channel an interactive tool asks its question on
 - A pending question is mirrored as `ToolEvent::QuestionAsked` and `AppPhase::AwaitingAnswer`, resumed by `ControlCommand::RespondQuestion`
 - Per-model metadata declared as `[[providers.<slug>.models]]` accepts `max_output_tokens` and the `supports_system_prompt` / `supports_tools` / `supports_streaming` / `supports_vision` flags next to `context_window`, with the wire id in an `id` field instead of a quoted table key: omitted limits stay unknown (validation skips them) and omitted capabilities count as supported, so declaring a model never silently disables it
-
-### Changed
 - The model picker no longer prints its filter inside the popup, since the composer line shows it
 - The question prompt grows with the question's wrapped text instead of clipping it to a fixed block
 - The `answer` tool clamps its question, option labels and descriptions to their display limits, and clamps the answer before it enters the conversation
@@ -18,6 +32,9 @@
 - Model metadata moved from the quoted `[providers.<slug>.models."<wire-id>"]` table keys to `[[providers.<slug>.models]]` entries with an `id` field, so ids containing dots (`gpt-4.1`, `glm-5.3`) need no quoting; entries merge by `id` and are rewritten sorted when the config is saved
 
 ### Fixed
+- Tool calls from one response run at the same time instead of one after another, so asking for several `task`s actually runs several subagents in parallel; approvals are still asked one at a time, tools that declare `ToolCaps::exclusive` (file edits and writes, the todo list, the question tool) take a turn each, and tool results still enter the history in the order the model asked for them
+- `/agents` applies while a turn is running, and opening a subagent builds its view on demand, so a subagent can be watched from the moment it is spawned instead of only after the reply lands
+- Leaving a subagent's transcript takes a single `Esc` instead of the usual confirmation pair, the hint row spells the way back out, and the arrow keys scroll it; `Ctrl-C` still quits from inside the viewer
 - Restore the per-turn `Worked for Xs` transcript separator after answers, tool follow-ups, cancellations, failures, compaction, and app errors, including the turn duration when resuming a session from its persisted timestamps
 - A verbose question no longer fails the `answer` call, which used to leave the user with a failed tool row and no prompt at all
 - Composer slash and mention completions stay shut while a question waits for a typed answer, so `Tab` can no longer complete command text into the answer

@@ -1,46 +1,52 @@
 mod agent;
-mod approval;
 mod compact;
 mod error;
 mod event;
 mod history;
 mod identity;
+mod interaction;
 mod matching;
 mod mode;
 mod prompt_template;
-mod question;
 mod retry;
+mod selection;
 mod sink;
 mod skills;
+mod subagent;
 mod todo;
 mod tools;
 mod turn;
 
-pub use agent::{Agent, RouterHandle};
-pub use approval::{
-    ApprovalDecision, ApprovalRequestId, ApprovalSender, LoopLimitDecision, LoopLimitPrompt,
-    LoopLimitRequestId, LoopLimitSender, ToolApproval,
-};
+pub use agent::{Agent, RouterHandle, router_handle};
 pub use compact::{CompactStats, NOTHING_TO_COMPACT};
 pub use error::{AgentError, MAX_ITERS_EXCEEDED};
 pub use event::{
-    AgentEvent, AgentEventEnvelope, StreamEvent, ToolEvent, ToolOutputStream, ToolResult, TurnEvent,
+    AgentEvent, AgentEventEnvelope, CallOutcome, StepStop, StreamEvent, ToolEvent,
+    ToolOutputStream, ToolResult, TurnEvent,
 };
 pub use history::{History, Record, SessionMeta};
 pub use identity::{AgentId, ToolCallId, TurnId};
+pub use interaction::{
+    AnswerResponse, ApprovalDecision, LoopLimitDecision, NO_USER_TO_ANSWER, PendingRequest,
+    Question, QuestionOption, RequestSink, UserRequest, UserRequestId, UserResponse,
+};
 pub use mode::{AgentMode, ToolAccess};
-pub use prompt_template::{InstructionDoc, InstructionScope, load_instructions, system_prompt};
-pub use question::{
-    AnswerResponse, Question, QuestionOption, QuestionRequest, QuestionRequestId, QuestionSender,
+pub use prompt_template::{
+    InstructionDoc, InstructionScope, load_instructions, subagent_preamble, system_prompt,
 };
 pub use retry::RetryingProvider;
-pub use sink::{ChannelEventSink, EventSink, NullSink, VecEventSink};
+pub use selection::{ModelSelection, Selection};
+pub use sink::{EventSink, NullSink, VecEventSink};
 pub use skills::{Skill, SkillRegistry};
-pub use todo::{TodoItem, TodoList, TodoStatus, restore_todos};
+pub use subagent::{
+    NodeHandle, NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest,
+    SubagentSpawner,
+};
+pub use todo::{TodoItem, TodoList, TodoStatus};
 pub use tokio_util::sync::CancellationToken;
 pub use tools::{
     AnswerTool, BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool,
-    GlobTool, GrepTool, SkillReadTool, TodoWriteTool, Tool, ToolCaps, ToolContext, ToolPermission,
-    ToolView, present_tool,
+    GlobTool, GrepTool, SkillReadTool, TaskOutputTool, TaskTool, TodoWriteTool, Tool, ToolCaps,
+    ToolPermission, ToolView, present_tool,
 };
-pub use turn::{TurnContext, TurnOutput};
+pub use turn::{DEFAULT_MAX_ITERS, RunPolicy, Step, StepCall, TurnContext, TurnOutput};

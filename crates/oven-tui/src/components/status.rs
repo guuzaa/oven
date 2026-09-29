@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
 use oven_app::{
-    AgentEvent, AgentMode, AppEvent, AppEventKind, CompactionEvent, StateChange, StateEvent,
-    TurnEvent,
+    AgentEvent, AgentMode, AppEvent, AppEventKind, AppState, CompactionEvent, TurnEvent,
+    context_tokens_of,
 };
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
@@ -72,6 +72,19 @@ impl StatusBar {
         self.context_tokens = tokens;
         self.context_window = window;
         self
+    }
+
+    /// Follows the app's state. The usage readout is only taken between
+    /// turns: while one runs it reports its own usage as it goes, and the
+    /// snapshot lags behind until the turn ends.
+    pub fn sync(&mut self, state: &AppState) {
+        self.model.clone_from(&state.model);
+        self.effort = state.reasoning_effort;
+        self.context_window = state.context_window;
+        if state.phase.is_idle() {
+            self.usage = state.last_turn_usage;
+            self.context_tokens = state.context_tokens;
+        }
     }
 
     pub fn has_reply(&self) -> bool {
@@ -228,30 +241,13 @@ impl Component for StatusBar {
         match &ev.kind {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Turn(TurnEvent::Completed { usage, .. })
-                | AgentEvent::Usage { usage } => self.usage = *usage,
-                _ => {}
-            },
-            AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
-                StateChange::UsageChanged { usage } => {
+                | AgentEvent::Usage { usage } => {
                     self.usage = *usage;
-                    self.clear_reply();
-                }
-                StateChange::HistoryChanged { .. } => {
-                    self.clear_reply();
-                }
-                StateChange::ModelChanged {
-                    model,
-                    reasoning_effort,
-                } => {
-                    self.model.clone_from(model);
-                    self.effort = *reasoning_effort;
-                }
-                StateChange::ContextChanged { tokens, window } => {
-                    self.context_tokens = *tokens;
-                    self.context_window = *window;
+                    self.context_tokens = context_tokens_of(usage);
                 }
                 _ => {}
             },
+            AppEventKind::HistoryChanged { .. } => self.clear_reply(),
             AppEventKind::Compaction(event) => {
                 self.compacting = matches!(event, CompactionEvent::Started);
             }
@@ -362,10 +358,12 @@ fn human(n: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    use oven_app::{AppPhase, TurnId};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
+    use super::super::component::idle_state;
     use super::*;
 
     const MODEL: &str = "deepseek-chat";
@@ -498,10 +496,10 @@ mod tests {
         let mut bar = bar();
         assert_eq!(bar.model_label(), format!("{MODEL} high"));
 
-        bar.on_event(&AppEvent::state_changed(StateChange::ModelChanged {
+        bar.sync(&AppState {
             model: "mini".into(),
-            reasoning_effort: None,
-        }));
+            ..idle_state()
+        });
         assert_eq!(bar.model_label(), "mini");
     }
 
@@ -521,27 +519,65 @@ mod tests {
             cache_read_tokens: 0,
             reasoning_tokens: 0,
         };
-        bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
-            usage: rewound,
-        }));
+        bar.sync(&AppState {
+            last_turn_usage: rewound,
+            ..idle_state()
+        });
         assert_eq!(bar.usage, rewound);
     }
 
     #[test]
-    fn history_and_usage_changes_drop_the_reply() {
+    fn a_running_turn_keeps_reporting_its_own_usage() {
+        let mut bar = bar();
+        bar.usage = usage();
+        bar.sync(&AppState {
+            phase: AppPhase::Running {
+                turn_id: TurnId::next(),
+            },
+            last_turn_usage: Usage::default(),
+            ..idle_state()
+        });
+        assert_eq!(bar.usage, usage());
+    }
+
+    #[test]
+    fn the_context_gauge_follows_the_reported_usage() {
+        let mut bar = bar().with_context(0, Some(100_000));
+        bar.on_event(&agent_event(AgentEvent::Usage { usage: usage() }));
+        assert_eq!(
+            bar.context_label().as_deref(),
+            Some("ctx 1%"),
+            "prompt-side tokens are the input and the cache reads (1989 of 100k)"
+        );
+
+        bar.sync(&AppState {
+            context_window: Some(1_989),
+            context_tokens: 1_989,
+            ..idle_state()
+        });
+        assert_eq!(
+            bar.context_label().as_deref(),
+            Some("ctx 100%"),
+            "the window is the frontend's own, not the usage report's"
+        );
+    }
+
+    #[test]
+    fn a_history_change_drops_the_reply() {
         let mut bar = bar();
         bar.on_event(&AppEvent::notification("Copied!"));
-        bar.on_event(&AppEvent::state_changed(StateChange::HistoryChanged {
-            revision: 1,
+        bar.on_event(&AppEvent::new(AppEventKind::HistoryChanged {
             reason: oven_app::HistoryChangeReason::Rewound,
         }));
         assert!(!bar.has_reply());
+    }
 
+    #[test]
+    fn syncing_state_keeps_the_reply() {
+        let mut bar = bar();
         bar.on_event(&AppEvent::notification("Copied!"));
-        bar.on_event(&AppEvent::state_changed(StateChange::UsageChanged {
-            usage: Usage::default(),
-        }));
-        assert!(!bar.has_reply());
+        bar.sync(&idle_state());
+        assert!(bar.has_reply());
     }
 
     #[test]
