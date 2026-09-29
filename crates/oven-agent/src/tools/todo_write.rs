@@ -38,7 +38,6 @@ impl Tool for TodoWriteTool {
     fn caps(&self) -> ToolCaps {
         ToolCaps {
             plan_only: true,
-            writes_todos: true,
             permission: ToolPermission::Write,
             exclusive: true,
         }

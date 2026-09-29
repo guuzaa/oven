@@ -179,25 +179,34 @@ impl Runtime {
                                 let _ = self.state_tx.send(self.state.clone());
                                 self.events.emit_state(StateChange::ModeChanged { mode });
                             }
-                            Some(cmd) => match model_command_args(&cmd) {
-                                Some(args) => apply_model_during_turn(
-                                    args,
-                                    &ctx,
-                                    &self.router,
-                                    &mut self.config,
-                                    &mut self.state,
-                                    &self.state_tx,
-                                    self.user_config_path.as_deref(),
-                                    &mut self.events,
-                                ),
-                                None if shared_command(&cmd, &self.slash, &self.subagents, &mut self.events) => {}
-                                None => defer_command(
-                                    cmd,
-                                    &self.slash,
-                                    &mut self.events,
-                                    &mut self.pending,
-                                ),
-                            },
+
+                            Some(cmd) => {
+                                let model_args = match &cmd {
+                                    AppCommand::Prompt(text) => {
+                                        self.slash.args_of(Model::NAME, text)
+                                    }
+                                    _ => None,
+                                };
+                                match model_args {
+                                    Some(args) => apply_model_during_turn(
+                                        args,
+                                        &ctx,
+                                        &self.router,
+                                        &mut self.config,
+                                        &mut self.state,
+                                        &self.state_tx,
+                                        self.user_config_path.as_deref(),
+                                        &mut self.events,
+                                    ),
+                                    None if shared_command(&cmd, &self.slash, &self.subagents, &mut self.events) => {}
+                                    None => defer_command(
+                                        cmd,
+                                        &self.slash,
+                                        &mut self.events,
+                                        &mut self.pending,
+                                    ),
+                                }
+                            }
                         }
                     }
                     approval = approval_rx.recv() => {
@@ -487,23 +496,6 @@ fn deferred_notice(cmd: &AppCommand, slash: &SlashRegistry) -> Option<String> {
         )
         | AppCommand::Shutdown => None,
     }
-}
-
-/// If `cmd` is a `/model` command, returns its argument string. `/model`
-/// is the one slash command that can run mid-turn (see
-/// `apply_model_during_turn`): validating it only needs a `Router`
-/// snapshot and applying it only needs `TurnContext`, neither of which
-/// requires the `&mut Agent` a running turn holds exclusively.
-fn model_command_args(cmd: &AppCommand) -> Option<&str> {
-    let AppCommand::Prompt(text) = cmd else {
-        return None;
-    };
-    let body = text.trim_start().strip_prefix('/')?;
-    let (name, args) = match body.split_once(char::is_whitespace) {
-        Some((n, rest)) => (n, rest.trim()),
-        None => (body, ""),
-    };
-    (name == Model::NAME).then_some(args)
 }
 
 #[allow(clippy::too_many_arguments)]

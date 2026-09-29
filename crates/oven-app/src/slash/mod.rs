@@ -126,14 +126,8 @@ impl SlashRegistry {
         cx: &mut CommandContext<'_>,
         input: &str,
     ) -> Result<CommandOutcome, AppError> {
-        let trimmed = input.trim_start();
-        if !trimmed.starts_with('/') {
+        let Some((name, args)) = split_command(input) else {
             return Ok(CommandOutcome::Passthrough);
-        }
-        let body = &trimmed[1..];
-        let (name, args) = match body.split_once(char::is_whitespace) {
-            Some((n, rest)) => (n, rest.trim()),
-            None => (body, ""),
         };
         let Some(command) = self.commands.iter().find(|c| c.name() == name) else {
             return Ok(CommandOutcome::Passthrough);
@@ -157,15 +151,20 @@ impl SlashRegistry {
         }
     }
 
+    /// The arguments `input` passes to the command named `name`, or `None`
+    /// when `input` invokes no command or a different one. Lets the runtime
+    /// apply one specific command (like `/model`) while a turn holds the
+    /// driver, without a second parser for the same syntax.
+    pub fn args_of<'a>(&self, name: &str, input: &'a str) -> Option<&'a str> {
+        let (invoked, args) = split_command(input)?;
+        (invoked == name).then_some(args)
+    }
+
     /// Returns the registered command name `input` invokes, without
     /// executing it. Lets callers classify text as a control command
     /// (e.g. to acknowledge it was queued) without needing `&mut Agent`.
     pub fn recognized_name<'a>(&self, input: &'a str) -> Option<&'a str> {
-        let name = input
-            .trim_start()
-            .strip_prefix('/')?
-            .split_whitespace()
-            .next()?;
+        let (name, _) = split_command(input)?;
         self.commands
             .iter()
             .any(|c| c.name() == name)
@@ -181,6 +180,19 @@ pub fn invokes_command(text: &str) -> bool {
     SlashRegistry::with_builtin()
         .recognized_name(text)
         .is_some()
+}
+
+/// Splits a slash invocation into its command name and trimmed arguments,
+/// or `None` when `input` does not start a command. Every entry point that
+/// classifies input without executing it shares this one parser, so the
+/// registry cannot disagree with itself about what counts as a command.
+fn split_command(input: &str) -> Option<(&str, &str)> {
+    let body = input.trim_start().strip_prefix('/')?;
+    let (name, args) = match body.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim()),
+        None => (body, ""),
+    };
+    Some((name, args))
 }
 
 impl Default for SlashRegistry {

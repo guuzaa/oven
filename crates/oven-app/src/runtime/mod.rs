@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use oven_agent::{
     Agent, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, Record, RouterHandle, RunPolicy,
-    TodoList, restore_todos,
+    TodoList,
 };
 use oven_llm::{
     ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Router,
@@ -858,7 +858,7 @@ fn forward_agent_event(
 }
 
 pub(crate) fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
-    agent.set_todos(restore_todos(prior, agent.history()));
+    agent.set_todos(TodoList::restore(prior, agent.history()));
 }
 
 pub(crate) fn spawn_runtime(

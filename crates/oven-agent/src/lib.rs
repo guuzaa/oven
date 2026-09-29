@@ -45,7 +45,7 @@ pub use subagent::{
     NodeHandle, NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest,
     SubagentSpawner,
 };
-pub use todo::{TodoItem, TodoList, TodoStatus, restore_todos};
+pub use todo::{TodoItem, TodoList, TodoStatus};
 pub use tokio_util::sync::CancellationToken;
 pub use tools::{
     AnswerTool, BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool,

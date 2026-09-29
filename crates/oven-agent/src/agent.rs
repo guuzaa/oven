@@ -20,7 +20,7 @@ use crate::mode::{AgentMode, ToolAccess};
 use crate::prompt_template;
 use crate::sink::EventSink;
 use crate::todo::TodoList;
-use crate::tools::Tool;
+use crate::tools::{TodoWriteTool, Tool};
 use crate::turn::{Step, StepCall, TurnContext, TurnOutput};
 
 /// Cap on a tool's output as it enters the conversation, keeping a single
@@ -452,13 +452,18 @@ impl Agent {
                 };
                 let tool = self.tools.iter().find(|tool| tool.name() == name).cloned();
                 let caps = tool.as_ref().map(|tool| tool.caps());
+                let todos = if name == TodoWriteTool::NAME {
+                    TodoList::parse(input).ok()
+                } else {
+                    None
+                };
                 Some(PlannedCall {
                     id: id.clone(),
                     call_id: ToolCallId::next(),
                     name: name.clone(),
                     input: input.clone(),
                     view: crate::tools::present_tool(name, input),
-                    writes_todos: caps.is_some_and(|caps| caps.writes_todos),
+                    todos,
                     exclusive: caps.is_some_and(|caps| caps.exclusive),
                     tool,
                 })
@@ -494,10 +499,7 @@ impl Agent {
 
     /// A `todo_write` call replaces the checklist with what its arguments say.
     fn commit_todo(&mut self, call: &PlannedCall, sink: &mut impl EventSink) -> bool {
-        if !call.writes_todos {
-            return false;
-        }
-        let Ok(list) = TodoList::parse(&call.input) else {
+        let Some(list) = call.todos.clone() else {
             return false;
         };
         self.todos = list.clone();
@@ -627,8 +629,9 @@ struct PlannedCall {
     name: String,
     input: serde_json::Value,
     view: crate::tools::ToolView,
-    /// Whether a `todo_write` argument replaces the checklist.
-    writes_todos: bool,
+    /// The checklist a `todo_write` call stands for. `None` when the call is
+    /// not one, or its arguments do not describe a valid list.
+    todos: Option<TodoList>,
     /// Whether this call has to run on its own. A tool that rewrites a file
     /// from what it read would otherwise lose one of two edits to the same
     /// file, and a tool that asks the user something would lose the question.

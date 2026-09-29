@@ -4,7 +4,7 @@ use std::fmt::Write;
 use oven_llm::{ContentBlock, Message};
 use serde::{Deserialize, Serialize};
 
-use crate::history::Record;
+use crate::{TodoWriteTool, history::Record};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +36,16 @@ impl TodoList {
     pub const MAX_ITEMS: usize = 40;
     pub const MAX_CONTENT: usize = 200;
     pub const MAX_ID: usize = 64;
+
+    pub fn restore<'a>(records: &[Record], messages: impl Iterator<Item = &'a Message>) -> Self {
+        if let Some(items) = records.iter().rev().find_map(|r| match r {
+            Record::TodoList { items, .. } => Some(items.clone()),
+            _ => None,
+        }) {
+            return TodoList { items };
+        }
+        Self::from_history(messages).unwrap_or_default()
+    }
 
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
@@ -110,16 +120,16 @@ impl TodoList {
 
     pub fn from_history<'a>(messages: impl Iterator<Item = &'a Message>) -> Option<Self> {
         let messages: Vec<_> = messages.collect();
-        for m in messages.into_iter().rev() {
-            for block in m.content.iter().rev() {
-                if let ContentBlock::ToolUse { input, .. } = block
-                    && let Ok(list) = Self::parse(input)
-                {
-                    return Some(list);
+        messages
+            .into_iter()
+            .rev()
+            .flat_map(|m| m.content.iter().rev())
+            .find_map(|block| match block {
+                ContentBlock::ToolUse { name, input, .. } if name == TodoWriteTool::NAME => {
+                    Self::parse(input).ok()
                 }
-            }
-        }
-        None
+                _ => None,
+            })
     }
 
     pub fn render_todo_block(&self) -> String {
@@ -135,19 +145,6 @@ impl TodoList {
         }
         out
     }
-}
-
-pub fn restore_todos<'a>(
-    records: &[Record],
-    messages: impl Iterator<Item = &'a Message>,
-) -> TodoList {
-    if let Some(items) = records.iter().rev().find_map(|r| match r {
-        Record::TodoList { items, .. } => Some(items.clone()),
-        _ => None,
-    }) {
-        return TodoList { items };
-    }
-    TodoList::from_history(messages).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -378,7 +375,7 @@ mod tests {
                 items: vec![],
             },
         ];
-        let restored = restore_todos(&records, std::iter::once(&write));
+        let restored = TodoList::restore(&records, std::iter::once(&write));
         assert!(restored.is_empty());
     }
 
@@ -392,7 +389,7 @@ mod tests {
             timestamp: 1,
             message: write.clone(),
         }];
-        let restored = restore_todos(&records, std::iter::once(&write));
+        let restored = TodoList::restore(&records, std::iter::once(&write));
         assert_eq!(restored.items[0].status, TodoStatus::InProgress);
     }
 }

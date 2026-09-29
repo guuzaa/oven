@@ -236,9 +236,10 @@ impl Step {
     }
 
     pub fn stop(&self) -> StepStop {
-        match self.is_final() {
-            true => StepStop::FinalAnswer,
-            false => StepStop::ToolUse,
+        if self.is_final() {
+            StepStop::FinalAnswer
+        } else {
+            StepStop::ToolUse
         }
     }
 }

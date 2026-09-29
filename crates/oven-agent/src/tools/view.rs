@@ -35,7 +35,6 @@ pub enum ToolPermission {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ToolCaps {
     pub plan_only: bool,
-    pub writes_todos: bool,
     pub permission: ToolPermission,
     /// Runs on its own, never alongside another call of the same step.
     ///
