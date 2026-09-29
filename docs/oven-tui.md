@@ -150,10 +150,10 @@ and reserves the corresponding internal height for response content. Scrolling
 up, or receiving `Completed`, `Cancelled`, `Failed`, or a dropped backend,
 removes only this projection: the prompt row remains in place in the transcript.
 
-`classify_prompt_for_display` mirrors runtime dispatch
-(`oven_app::invokes_command`): normal text starts a User turn, `!` commands
-start a Shell turn, and registered control commands (`/model`, `/setup`,
-`/clear`, …) stay out of the transcript. Queue entries create their row only
+`App::submit` classifies the text into an `oven_app::Input`, and `push_submitted`
+draws that: `Chat` starts a User turn, `Shell` starts a Shell turn, and
+registered control commands (`/model`, `/setup`, `/clear`, …) and `Rewind` stay
+out of the transcript. Queue entries create their row only
 when they are actually sent.
 
 Startup and every `StateChange::HistoryChanged` rebuild the transcript directly
@@ -404,7 +404,7 @@ owns the pointer while it runs, including a release outside the area.
 
 `Ctrl-C` stops what is still running before the process goes away, in the order
 the work was created: the driver's turn is cancelled, then the subagents it
-spawned are stopped (`ControlCommand::StopSubagents`), and `App::shutdown`
+spawned are stopped (`App::stop_subagents`), and `App::shutdown`
 cancels the supervisor's root token as a backstop for anything that slipped
 through. The exit is immediate — no frame is held for the stopped subagents,
 because they are not persisted and the process is going away either way.

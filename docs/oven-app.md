@@ -7,27 +7,36 @@ commands, and publishes facts back as events. It makes no rendering decisions
 and owns no presentation state: `oven-tui` is a client of this crate, so the
 same runtime also serves headless runs.
 
-Everything a frontend can reach goes through two channels:
+A frontend reaches the app through one handle, `App`, in three ways:
 
 ```
-App::send(AppCommand)  ──▶  Runtime::run  ──▶  AppEvent  ──▶  App::subscribe()
-                              │
-                              ├─ Agent (turns, tools, todos, history)
-                              ├─ shell (host process)
-                              ├─ SlashRegistry (/model, /setup, …)
-                              ├─ SessionStore (JSONL on disk)
-                              └─ watch::Sender<AppState>  (snapshot state)
+App::submit(text)  ──▶ inbox ──▶ Runtime::run ──▶ AppEvent ──▶ App::subscribe()
+                                   │
+App::cancel / set_mode /           ├─ Agent (turns, tools, todos, history)
+    respond / stop_subagent(s) ──▶ ├─ shell (host process)
+    (applied by the caller,        ├─ SlashRegistry (/model, /setup, …)
+     through `Shared`)             ├─ SessionStore (JSONL on disk)
+                                   └─ Shared.state: watch::Sender<AppState>
 ```
+
+What has to wait for the conversation driver goes through the inbox, one input
+at a time. What does not — cancelling, switching mode, answering a request,
+stopping subagents, `/model`, `/agents`, shutdown — is applied by the caller
+on `Shared`, so it never queues behind the turn it wants to affect.
 
 ## Entry chain
 
 | File | Role |
 | --- | --- |
 | `src/lib.rs` | re-exports the public surface. |
-| `src/app.rs` | the `App` handle: command sender, event subscriptions, state accessors. |
+| `src/app.rs` | the `App` handle: `submit`, control methods, event subscriptions, state accessors. |
+| `src/command.rs` | `Input`: what the user submitted, classified once at the boundary. |
+| `src/inbox.rs` | the queue of inputs for the driver, counting the prompts nobody took. |
+| `src/shared.rs` | what `App` and the runtime both reach: state, events, the running turn, its pending request, shutdown. |
+| `src/shared/live.rs` | what applies while a turn holds the driver: `/model`, `/agents`, `/exit`. |
 | `src/builder.rs` | service composition: config → tools, MCP servers, skills, agent. |
-| `src/runtime/mod.rs` | the runtime actor — command loop, idle select, dispatch, persistence. |
-| `src/runtime/turn.rs` | what happens while a turn runs — the driver turn, shell, mid-turn `/model`, deferral. |
+| `src/runtime/mod.rs` | the runtime actor — input loop, dispatch, persistence. |
+| `src/runtime/turn.rs` | what happens while a turn runs — the driver turn, shell, slash commands. |
 | `src/subagent.rs` | delegated runs — the registry, the concurrency cap, one task per subagent. |
 
 `App` has three constructors:
@@ -45,33 +54,36 @@ for the canonicalized root through the `cwd_latest.json` index, or starts a fres
 one with a uuid v7 id the caller never supplies. `AppBuilder::with_config`
 bypasses the filesystem entirely, which is how the tests build an app.
 
-`App::shutdown` returns how many queued prompts the runtime dropped without
-ever running them, so a frontend can tell the user what it lost on the way out.
+`App::shutdown` cancels the running turn and returns how many queued prompts
+the runtime dropped without ever running them, so a frontend can tell the user
+what it lost on the way out.
 
 `App::prompt` is the convenience path used by both `App::query` and the tests: it
-subscribes, sends `AppCommand::Prompt`, then collects text deltas until the turn
+subscribes, submits the prompt, then collects text deltas until the turn
 completes, fails, cancels, a shell command finishes, or a non-turn notification
 arrives. Loop-limit prompts are answered with `LoopLimitDecision::Exit` so a
 headless run always terminates.
 
-## Commands and events
+## Inputs and events
 
-`command.rs` keeps prompts and control instructions structurally distinct, so no
-caller ever has to guess whether a piece of text is chat or a command — the
-classification happens once, inside the runtime, where the slash registry lives:
+`App::submit(text)` classifies the text once, with the slash registry the
+runtime shares, into an `Input`, and returns it so a frontend can draw it the
+way the runtime will treat it:
 
 ```rust
-pub enum AppCommand {
-    Prompt(String),
-    Control(ControlCommand),   // Cancel, SetMode, RespondToolApproval, RespondLoopLimit, Rewind
-    Shutdown,
+pub enum Input {
+    Chat(String),
+    Shell(String),                          // `!command`; empty is kept so the runtime can say why nothing ran
+    Slash { name: String, args: String },   // a registered command; unknown `/x` stays `Chat`
+    Rewind,
 }
 ```
 
-Anything that needs the agent's exclusive borrow (switching models, clearing
-history) is therefore expressed as slash text through `Prompt` and resolved once
-the agent is free. `ControlCommand` covers exactly what can be applied while a
-turn holds the borrow.
+While a turn runs, `submit` first tries to apply the input on the spot
+(`Shared::apply_now`): `/model` and any command that never asks for the agent
+(`/agents`, `/exit`). Anything else goes to the inbox, with a
+`queued: will apply once the current reply finishes` notice for slash commands
+and rewinds, and waits for the driver.
 
 `event.rs` fans events out to every subscriber on its own `UnboundedSender`,
 auto-pruning dead ones, with a monotonic `seq`:
@@ -88,34 +100,39 @@ auto-pruning dead ones, with a monotonic `seq`:
 
 ## Runtime loop
 
-`Runtime` owns the agent plus everything the agent does not: the router handle,
-the session store, the config, the event bus and the shared state. `run` pops
-from the deferred queue first, then blocks on the command channel; every command
-is logged by kind. `AppCommand::Prompt` is the only branch that does real work,
-and it classifies the input once:
+`Runtime` owns the agent plus everything the agent does not: the session store
+and the persistence bookkeeping. The state, event bus, config and router it
+shares with `App` live in `Shared`. `run` selects, with `biased` priority, on
+shutdown, the inbox and the subagent wake signal; every input is logged by
+kind. It dispatches on the `Input`:
 
 | Input | Path |
 | --- | --- |
-| `!command` | `run_shell` — a host process, not a turn |
-| `/name args` | `SlashRegistry::parse_and_run`; `Passthrough` falls through to a turn |
-| anything else | `agent.run(input, ctx, sink)` |
+| `Shell` | `run_shell` — a host process, not a turn |
+| `Slash` | `SlashRegistry::run`, then the outcome is applied |
+| `Rewind` | truncate the last turn, persist, publish |
+| `Chat` | `agent.run(input, ctx, sink)` |
 
-A turn is driven by a `tokio::select!` with `biased` priority, so cancellation
-and approvals are never starved by a flood of stream deltas:
+A turn is driven by a `tokio::select!` with `biased` priority, so shutdown is
+never starved by a flood of stream deltas:
 
 | Branch | Purpose |
 | --- | --- |
-| `cmd_rx.recv()` | shutdown, cancel, tool-approval, loop-limit and question replies, mid-turn `/model`; anything else is deferred |
-| `approval_rx.recv()` | agent asked for a tool approval → phase becomes `AwaitingToolApproval` |
-| `loop_limit_rx.recv()` | agent hit the iteration cap → phase becomes `AwaitingLoopLimit` |
-| `question_rx.recv()` | a tool asked the user a question → phase becomes `AwaitingAnswer`, and the runtime publishes `ToolEvent::QuestionAsked` itself |
-| `agent_rx.recv()` | one agent event, forwarded and mirrored into `AppState` |
+| `shutdown.cancelled()` | cancel the turn and take its result |
+| `wake_rx.recv()` | the subagent registry changed → mirror it into `AppState` |
 | `turn` | the turn future itself |
 
-`/model` is the one slash command that runs mid-turn: validating it needs only a
-`Router` snapshot and applying it only a `TurnContext`, so it never contends for
-the `&mut Agent` the turn holds. Other slash commands and rewinds are pushed onto
-`pending` with a `queued: will apply once the current reply finishes` notice.
+Everything else a user does mid-turn reaches the turn through `Shared`:
+
+- `TurnContext` carries the agent's own `Selection` (mode and model), so
+  `App::set_mode` and `/model` change it and the turn picks the change up at
+  its next step.
+- `TurnContext` carries `Shared` as its `RequestSink`. A tool approval, the
+  loop-limit prompt or a question is stored as the turn's one pending request,
+  announced as an agent event, and the phase becomes `Awaiting`. `App::respond`
+  finds it by id and answers it directly; a reply of the wrong kind leaves it
+  open.
+- `App::cancel(turn_id)` cancels only if `turn_id` is still the running turn.
 
 After the turn: session meta is stamped, trailing agent events are drained,
 the turn is persisted, state is synced, and if context usage reached
@@ -132,8 +149,7 @@ instead of buffering the whole history itself:
 pub enum AppPhase {
     Idle,
     Running { turn_id },
-    AwaitingToolApproval { turn_id, request: PendingToolApproval },
-    AwaitingLoopLimit { turn_id, request_id, max_iters },
+    Awaiting { turn_id },
     Cancelling { turn_id },
     ShuttingDown,
 }
@@ -142,8 +158,8 @@ pub enum AppPhase {
 Alongside the snapshot, coarse-grained deltas go out as `StateChange`:
 `ModelChanged`, `ModeChanged`, `TodosChanged`, `HistoryChanged`,
 `SessionChanged`, `UsageChanged`, `ContextChanged`, `ProviderChanged`,
-`ModelsChanged`. The phase carries the approval payload, so the approve/reject
-modal can be rendered without a second query. `HistoryChanged` names its
+`ModelsChanged`. What an `Awaiting` turn waits for is the agent event that
+announced the request, not part of the phase. `HistoryChanged` names its
 `HistoryChangeReason` (`Rewound`, `Cleared`, `Compacted`, `External`), so a view
 tells a rewind from a `/clear` without inferring it from the revision number.
 
@@ -313,7 +329,7 @@ project's `.oven/skills` (later paths override).
 
 An input starting with `!` is executed as a host command in the workspace root
 with a 300 s timeout — no LLM turn is involved. `run_shell` reuses the same
-select loop as a turn, so `ControlCommand::Cancel` stops the process through a
+select loop as a turn, so `App::cancel` stops the process through a
 `CancellationToken`. `shell.rs` then formats the result into a `<local-shell>`
 envelope (command, exit code, stderr section, output) and pushes it into the
 history as a user message, so the model sees what the user just ran. The same
@@ -327,7 +343,7 @@ blocks the UI thread. It never touches the agent.
 ## Tests
 
 Unit tests live in-file (`session.rs`, `slash/*`, `mcp/client_test.rs`); the
-runtime's behaviour — command ordering, deferred commands, mid-turn model
+runtime's behaviour — input ordering, queued commands, mid-turn model
 switches, compaction, rewinds, session switching, approval and loop-limit
 handling — is covered by `runtime/runtime_test.rs` with a mocked provider.
 `tests/` holds the integration paths: config merging, MCP wiring through a mock

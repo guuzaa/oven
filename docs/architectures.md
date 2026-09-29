@@ -22,7 +22,7 @@ Commands never contain events. Events never contain commands. Turn streaming is 
                         ┌──────────────┐
                         │   oven-tui   │
                         └──────┬───────┘
-                               │ AppCommand
+                               │ App::submit · cancel · set_mode · respond
                                ▼
                      ┌──────────────────┐
                      │   App Runtime    │
@@ -43,9 +43,9 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | Crate | Owns |
 | --- | --- |
 | `oven-llm` | `Message`, `Usage`, provider I/O |
-| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `AgentEvent`, `EventSink`, the `UserRequest` channel a turn asks the user on, history/todo domain models, the `SubagentSpawner` protocol and its `NodeInfo`/`NodeStatus` vocabulary, provider retry decoration |
+| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `AgentEvent`, `EventSink`, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, history/todo domain models, the `SubagentSpawner` protocol and its `NodeInfo`/`NodeStatus` vocabulary, provider retry decoration |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
-| `oven-app` | `App`, `AppBuilder`, `AppCommand`, `ControlCommand`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, subagent supervision, tracing subscriber install |
+| `oven-app` | `App`, `AppBuilder`, `Input`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, subagent supervision, tracing subscriber install |
 | `oven-tui` | render events and state; send commands |
 
 `oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
@@ -101,8 +101,9 @@ instance each, so spawning never reconnects an MCP server.
 `App` is the only public app-runtime handle. `AppHandle` is gone. `AppBuilder` loads config, skills, tools, and MCP, then `open()` / `open_session()` spawns the actor. This app runtime is distinct from the `oven-host` infrastructure crate: the former coordinates commands and state, while the latter performs isolated filesystem and process operations.
 
 ```text
-AppBuilder ──open──► App ──AppCommand──► Runtime
+AppBuilder ──open──► App ──submit()──► inbox ──► Runtime
                      │
+                     ├── cancel() · set_mode() · respond() · stop_subagent(s)()  → Shared
                      ├── subscribe()    → AppEvent
                      └── watch_state()  → AppState
 ```
@@ -118,61 +119,53 @@ AppId
 
 IDs start at 1. There is no `Default` sentinel of `0`.
 
-A turn is an app-level user request. The runtime allocates `TurnId` and passes it into `Agent::run` via `TurnContext`; a subagent's spawner does the same for its own turn. `TurnContext` also holds the run's `RunPolicy` (what one run may spend) and live `mode` and `model`, so `SetMode` / `/model` can take effect at the next agent step without waiting for `&mut Agent`.
+A turn is an app-level user request. The runtime allocates `TurnId` and passes it into `Agent::run` via `TurnContext`; a subagent's spawner does the same for its own turn. `TurnContext` also holds the run's `RunPolicy` (what one run may spend) and the agent's own `Selection` (mode and model), so `App::set_mode` / `/model` can take effect at the next agent step without waiting for `&mut Agent`.
 
 `AgentId` is ordered, which is what lets a frontend keep one view per subagent in a `BTreeMap` with a stable order.
 
 ---
 
-# Commands
+# Inputs
 
-TUI / CLI → runtime:
+TUI / CLI → runtime, through `App::submit(text)`, which classifies the text once with the slash registry the runtime shares:
 
 ```rust
-pub enum AppCommand {
-    Prompt(String),
-    Control(ControlCommand),
-    Shutdown,
-}
-
-pub enum ControlCommand {
-    Cancel { turn_id: TurnId },
-    SetMode { mode: AgentMode },
-    Respond { request_id: UserRequestId, response: UserResponse },
+pub enum Input {
+    Chat(String),
+    Shell(String),
+    Slash { name: String, args: String },
     Rewind,
 }
 ```
 
-`Prompt` and `Control` are structurally distinct so callers never sniff strings. Classification of composer text (chat vs slash vs bang-shell) happens once, inside the runtime, where the slash registry lives.
+Classification never happens twice, so callers never sniff strings: `submit` returns the `Input` it sent, and the TUI draws it accordingly. A trimmed body starting with `/` and naming a registered command is `Slash`; an unknown `/x` stays `Chat`.
 
-There is no `SetModel` / `SetProvider` / `ClearSession` command. Those mutations are slash text on `Prompt` (`/model`, `/setup`, `/clear`). The TUI still sends structured `Control` for keyboard cancel, mode toggle, rewind, and approving a tool or a loop-limit prompt.
+There is no `SetModel` / `SetProvider` / `ClearSession` input. Those mutations are slash commands (`/model`, `/setup`, `/clear`). Control that needs no conversation driver is a method on `App`, applied by the caller: `cancel(turn_id)`, `set_mode`, `respond`, `stop_subagent`, `stop_subagents`, `shutdown`.
 
-A `Prompt` whose trimmed body starts with `/` is a slash command. The runtime parses it and either starts an agent turn (`Passthrough`) or applies a state change. Slash commands still arrive as `Prompt("/plan on")`.
-
-A `Prompt` whose trimmed body starts with `!` is a **local shell request**, not a slash command and not an LLM turn. The app runtime strips the bang and invokes `oven-host::run_shell_command` in the workspace root (bash on Unix, falling back to sh; PowerShell on Windows). `oven-host` owns process management and output decoding; the app retains timeout/cancellation choices, shell events, exit-code mapping, and persistence. It commits one user message describing the command and its result.
+A `Shell` input is a **local shell request**, not a slash command and not an LLM turn. The app runtime invokes `oven-host::run_shell_command` in the workspace root (bash on Unix, falling back to sh; PowerShell on Windows). `oven-host` owns process management and output decoding; the app retains timeout/cancellation choices, shell events, exit-code mapping, and persistence. It commits one user message describing the command and its result.
 
 ## Mid-turn dispatch
 
-A running turn holds `&mut Agent` exclusively. Incoming commands split on whether they need that borrow:
+A running turn holds `&mut Agent` exclusively. `App` splits what it is given on whether that borrow is needed:
 
-| Command | While a turn is running |
+| What | While a turn is running |
 | --- | --- |
-| `Control::Cancel { matching turn_id }` | cancel immediately |
-| `Control::SetMode` | apply immediately via `TurnContext` + `AppState` |
-| `Prompt("/model …")` | apply immediately via `RouterHandle` + `TurnContext` |
-| `Prompt("/agents …")`, `Prompt("/exit")` | apply immediately: neither asks for the agent, which is what `CommandContext::agent()` reports |
-| `Control::Respond { request_id, response }` | consumed by the turn's select loop; phase returns to `Running` |
-| `Control::Rewind` | queue; emit `Notification` |
-| other `Prompt` (chat, other slash, bang-shell) | queue; recognized slash names get a `Notification` |
-| `Shutdown` | cancel the turn and exit |
+| `cancel(turn_id)` | cancel immediately, only if `turn_id` is the running turn |
+| `set_mode` | apply immediately via the shared `Selection` + `AppState` |
+| `respond(request_id, response)` | answers the turn's pending request; phase returns to `Running` |
+| `Slash /model …` | apply immediately via `RouterHandle` + `Selection` |
+| `Slash /agents …`, `Slash /exit` | apply immediately: neither asks for the agent, which is what `CommandContext::agent()` reports |
+| `Rewind` | queue; emit `Notification` |
+| other `Input` (chat, other slash, bang-shell) | queue; slash commands get a `Notification` |
+| `shutdown` | cancel the turn and exit |
 
-`TurnContext` carries `mode` and `model` behind a lock so those two can change without `&mut Agent`. The agent re-reads them at each step and at turn end. `TurnContext` also carries the one user-request channel (`TurnContext::with_requests`), so a turn asks the user on it and consumes the reply directly instead of going through `pending`. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::update_router`, so it waits.
+The mode and model live in a `Selection` the agent and its `TurnContext` share, so they can change without `&mut Agent`. The agent re-reads them at each step. `TurnContext` also carries the `RequestSink` (`TurnContext::with_requests`), so a turn asks the user through it and consumes the reply directly. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::replace_router`, so it waits.
 
 ## User requests
 
 A turn asks the user for three things — approve a tool call, keep going past the
 iteration cap, answer a tool's question — and they are the same exchange: one
-request out, exactly one reply back. They share one id type, one channel and one
+request out, exactly one reply back. They share one id type, one sink and one
 response enum:
 
 ```rust
@@ -188,22 +181,29 @@ pub enum UserResponse {
     LoopLimit(LoopLimitDecision),
     Answer(AnswerResponse),
 }
+
+pub trait RequestSink: Debug + Send + Sync {
+    fn submit(&self, turn_id: TurnId, request: PendingRequest) -> bool;
+}
 ```
 
 `TurnContext::approve` / `ask` / `request_loop_continue` each mint a
-`UserRequestId`, send a `PendingRequest` and await the reply on one private
-`wait`, which returns `None` when the turn is cancelled. Without the channel —
-a subagent, a headless run — a tool call is refused, a question is an error and
-the iteration cap stands, so nothing parks on a reply that will never come.
+`UserRequestId`, hand a `PendingRequest` to the sink and await the reply on one
+private `wait`, which returns `None` when the turn is cancelled. Without a
+sink — a subagent, a headless run — a tool call is refused, a question is an
+error and the iteration cap stands, so nothing parks on a reply that will never
+come.
 
-The runtime holds the one `PendingRequest` the turn is parked on and answers it
-by id: a `Control::Respond` whose id does not match, or whose `UserResponse`
-kind does not match the request, is dropped and the request stays open.
+The app's `Shared` is the sink. `submit` stores the one `PendingRequest` the
+turn is parked on, moves the phase to `Awaiting` and publishes the request as
+the event a frontend draws, all before the agent starts waiting. `App::respond`
+answers it by id: a reply whose id does not match, or whose `UserResponse` kind
+does not match the request, is dropped and the request stays open.
 
 A command that never asks for the agent — `/agents`, `/exit` — is applied mid-turn
 instead of queued: `CommandContext::agent()` returns `AgentBusy` for the ones that
-do need it, and the runtime reads that as "wait". Queued commands drain after the
-turn ends, in arrival order. Keyboard mode toggle is `Control::SetMode` and applies live; `/plan` is Prompt slash and therefore waits until the agent is free.
+do need it, and `App::submit` reads that as "wait". Queued inputs drain after the
+turn ends, in arrival order. Keyboard mode toggle is `App::set_mode` and applies live; `/plan` is a slash command and therefore waits until the agent is free.
 
 ---
 
@@ -261,12 +261,12 @@ progress and a stop reason without reading the agent.
 the reasoning phase ends, ahead of the answer text or the tool call that ended
 it, so the transcript never has to guess a duration. `LoopLimitReached`,
 `ApprovalRequested` and `QuestionAsked` park the turn until the matching
-`Control::Respond` arrives. All three are projected by the runtime from the
-one user-request channel: the turn sends a `UserRequest` and waits, and the
-runtime republishes the request as the event a frontend draws before it parks
-the phase on `Awaiting`. `QuestionAsked` is the one that originates inside a
-tool call, where no event sink is reachable — which is why the request channel,
-not the sink, is what a frontend hears about it on.
+`App::respond` arrives. All three are projected by `Shared` from the one
+`RequestSink`: the turn submits a `UserRequest` and waits, and `Shared`
+republishes the request as the event a frontend draws and parks the phase on
+`Awaiting`. `QuestionAsked` is the one that originates inside a tool call,
+where no event sink is reachable — which is why the request sink, not the
+event sink, is what a frontend hears about it on.
 
 `ToolResult` is `Success`, `Failed { error, output }`, `Rejected { reason }`, or
 `Cancelled` — not `ok: bool`.
@@ -329,7 +329,7 @@ forwarding them. The runtime subscribes to nothing; it is only a publisher.
 ## Agent API
 
 ```rust
-agent.run(input, &TurnContext::new(turn_id, cancellation, mode, model, effort), &mut sink)
+agent.run(input, &TurnContext::new(turn_id, cancellation, agent.selection()), &mut sink)
     -> Result<TurnOutput, AgentError>
 
 agent.step(&mut sink, &cx) -> Result<Step, AgentError>
@@ -344,9 +344,9 @@ so a step carrying a huge `file_read` stays cheap. `RunPolicy::max_iters` rides
 `TurnContext` because it bounds one run, not the conversation driver: a
 subagent gets its own.
 
-`mode` and `model` are shared (`Arc<Mutex<_>>`) so the runtime can update them while the turn holds `&mut Agent`. The agent copies both onto itself at the start of every step. `TurnContext` also carries the one user-request channel, which is how what a turn asks the user reaches the runtime and how the reply reaches the running turn without needing `&mut Agent`.
+The agent owns its mode and model as a `Selection`, a cloneable handle over one shared value, so a caller can update them while the turn holds `&mut Agent`. The agent reads it at the start of every step, and the `TurnContext` a run is given shares the agent's own `Selection`, so tools read the same value. `TurnContext` also carries the `RequestSink`, which is how what a turn asks the user reaches the app and how the reply reaches the running turn without needing `&mut Agent`.
 
-The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`. A tool receives the `TurnContext` of the run it belongs to, which is where it finds cancellation and, when a frontend is attached, the channel it asks the user on.
+The Agent calls host capabilities through concrete tools, but `oven-host` never emits Agent events directly. Tool implementations translate host results into `AgentError`, `ToolEvent`, and `ToolResult`. A tool receives the `TurnContext` of the run it belongs to, which is where it finds cancellation and, when a frontend is attached, the sink it asks the user through.
 
 `Agent::with_router(RouterHandle, tools)` joins a router someone else owns, and `Agent::replace_router` swaps the snapshot rather than mutating it in place: a reader that captured the old router finishes its request on it, which is what makes a mid-flight `/setup` safe while a subagent is still running.
 
@@ -434,14 +434,14 @@ stateDiagram-v2
 
     Idle --> Running: Prompt (passthrough or bang-shell)
     Idle --> Awaiting: an approval prompt, the iteration cap, or a question
-    Idle --> Idle: slash / empty bang / Rewind / SetMode
+    Idle --> Idle: slash / empty bang / Rewind / set_mode
     Idle --> ShuttingDown: Shutdown
 
     Running --> Cancelling: Cancel { matching turn_id }
     Running --> Idle: TurnCompleted / TurnFailed
     Running --> ShuttingDown: Shutdown
 
-    Awaiting --> Running: Respond
+    Awaiting --> Running: respond
     Awaiting --> Cancelling: Cancel
     Awaiting --> Idle: TurnFailed / TurnCancelled
     Awaiting --> ShuttingDown: Shutdown
@@ -454,11 +454,11 @@ stateDiagram-v2
 
 Idle slash commands do not enter `Running`. They emit `StateChanged` and/or `Notification` and stay `Idle`.
 
-A bang-shell `Prompt` enters `Running` like an agent turn (so Cancel and queuing work) but emits `AppEventKind::Shell` instead of `AgentEvent`. The agent is not called. On finish the runtime appends a `<local-shell>` user message and persists; it does not emit `HistoryChanged` on the live path.
+A bang-shell `Input::Shell` enters `Running` like an agent turn (so Cancel and queuing work) but emits `AppEventKind::Shell` instead of `AgentEvent`. The agent is not called. On finish the runtime appends a `<local-shell>` user message and persists; it does not emit `HistoryChanged` on the live path.
 
-While `Running`, `SetMode` and `/model` apply immediately and the phase stays `Running`. Other `Prompt`s and `Rewind` wait in `pending`. `Cancel` while idle is a no-op. `Cancel { turn_id }` only applies if it matches the active turn.
+While `Running`, `set_mode` and `/model` apply immediately and the phase stays `Running`. Other inputs and `Rewind` wait in the inbox. `cancel` while idle is a no-op, and `cancel(turn_id)` only applies if it matches the active turn.
 
-A step that needs a tool approval, that hits the iteration cap, or whose tool asked a question parks the phase on `Awaiting`. What the turn is waiting for is not in the phase — it is the agent event that announced the request — so the phase stays one variant while the prompt on screen changes. The matching `Control::Respond` returns it to `Running`, and a reject / exit reply, or a cancel, ends the turn.
+A step that needs a tool approval, that hits the iteration cap, or whose tool asked a question parks the phase on `Awaiting`. What the turn is waiting for is not in the phase — it is the agent event that announced the request — so the phase stays one variant while the prompt on screen changes. The matching `App::respond` returns it to `Running`, and a reject / exit reply, or a cancel, ends the turn.
 
 ---
 
@@ -502,7 +502,7 @@ stateDiagram-v2
     Failed --> [*]
 ```
 
-`ThinkingDone` is not a terminal state: it closes the reasoning window the agent timed, before the answer or the tool call that ended it. Approval, loop-limit and question parks are one state, turn-scoped; the reply arrives as `Control::Respond` and the turn resumes.
+`ThinkingDone` is not a terminal state: it closes the reasoning window the agent timed, before the answer or the tool call that ended it. Approval, loop-limit and question parks are one state, turn-scoped; the reply arrives as `App::respond` and the turn resumes.
 
 Typical successful sequence:
 
@@ -540,7 +540,7 @@ task / task_output ──► Arc<dyn SubagentSpawner> ──► Subagents
 | Addressing | `role#n`, unique for the app run; `1` also means "the first in the listing". |
 | Concurrency | A `Semaphore`; a spawn without a permit waits in `Pending` rather than being refused. |
 | Cancellation | One token per subagent, cancelled by name, by the turn that spawned it, or by app shutdown. |
-| Prompts | A subagent's `TurnContext` carries no user-request channel, so it can never park waiting on a user. It runs in `AgentMode::Agent`; what it may do comes from its role. |
+| Prompts | A subagent's `TurnContext` carries no request sink, so it can never park waiting on a user. It runs in `AgentMode::Agent`; what it may do comes from its role. |
 | Status | The registry is the single source of truth; `AppState.subagents` mirrors it, `/agents` reads it, and `task_output` reads it, so the three cannot disagree. |
 | Results | A foreground `task` returns the report as its tool result; a background one returns a name to poll with `task_output`. |
 | Persistence | None. Subagents live for the app run; only the tool call and its result are in the driver's history, so `/agents` after a resume shows nothing. |
@@ -562,7 +562,7 @@ sequenceDiagram
     participant Runtime
     participant Agent
 
-    TUI->>Runtime: Prompt("fix foo")
+    TUI->>Runtime: submit("fix foo") → Chat
     Runtime->>Runtime: TurnId::next()
     Runtime->>Runtime: phase = Running(id)
     Runtime->>Agent: run(input, ctx, sink)
@@ -581,9 +581,9 @@ sequenceDiagram
     participant Runtime
     participant Agent
 
-    TUI->>Runtime: Control(Cancel { turn_id })
-    Runtime->>Runtime: phase = Cancelling(id)
-    Runtime->>Agent: cancellation.cancel()
+    TUI->>Shared: cancel(turn_id)
+    Shared->>Shared: phase = Cancelling(id)
+    Shared->>Agent: cancellation.cancel()
     Agent-->>TUI: TurnCancelled
     Runtime->>Runtime: phase = Idle
 ```
@@ -591,14 +591,14 @@ sequenceDiagram
 ## Slash (no turn)
 
 ```text
-Prompt("/model gpt-4o")
-  → slash /model
+submit("/model gpt-4o")
+  → Slash /model
   → StateChanged(ModelChanged)
   → Notification("model switched…")
   → phase stays Idle
 ```
 
-The same `Prompt("/model …")` during `Running` does not wait: `RouterHandle` validates, `TurnContext` updates, `StateChanged` + `Notification` fire, and the in-flight turn picks up the new model at its next step.
+The same `submit("/model …")` during `Running` does not wait: `RouterHandle` validates, the shared `Selection` updates, `StateChanged` + `Notification` fire, and the in-flight turn picks up the new model at its next step.
 
 `prompt()` waits for `TurnCompleted`/`Cancelled`/`Failed`, or `Shell` Finished/Failed, or for `Notification`/`Exited` when no turn started.
 
@@ -610,7 +610,7 @@ sequenceDiagram
     participant Runtime
     participant Shell
 
-    TUI->>Runtime: Prompt("!ls")
+    TUI->>Runtime: submit("!ls") → Shell
     Runtime->>Runtime: TurnId::next()
     Runtime->>Runtime: phase = Running(id)
     Runtime-->>TUI: Shell(Started)
@@ -630,7 +630,7 @@ The TUI shows the typed `!` line as a user row and the last 100 output lines as 
 2. Every driver `AgentEventEnvelope.turn_id` matches `phase.turn_id()` while the phase is `Running`, `Awaiting`, or `Cancelling`. Agent envelopes are not emitted for bang-shell, and a subagent's envelope carries its own `agent_id` and `turn_id` instead.
 3. Each agent turn — the driver's or a subagent's — emits exactly one `Started` and exactly one of `Completed | Cancelled | Failed`. Each bang-shell request emits exactly one `Shell::Started` and exactly one of `Finished | Failed`.
 4. `ToolFinished` always follows the `ToolStarted` of the same `ToolCallId`. A call that never ran — a tool hidden in Ask mode, an approval the user declined — reports `ToolFinished` alone, because nothing started.
-5. While `Running`, `Awaiting`, or `Cancelling`, only `Cancel`, `SetMode`, `/model`, `StopSubagent`, `StopSubagents`, `Respond`, and `Shutdown` are applied immediately. Everything else waits in `pending`.
+5. While `Running`, `Awaiting`, or `Cancelling`, only `cancel`, `set_mode`, `/model`, `/agents`, `/exit`, `stop_subagent`, `stop_subagents`, `respond`, and `shutdown` are applied immediately. Everything else waits in the inbox.
 6. Only the driver's own events feed the frontend's checklist, context gauge and usage readout. A subagent's `Usage` is its own and its `TodosChanged` is not the user's; a frontend routes a subagent's envelope to that subagent's view and nothing else.
 7. A subagent's events reach the frontend while the runtime is busy with a turn of its own, or idle between turns: every agent publishes straight onto the shared `EventBus`, so no runtime drain is needed for them to land.
 
@@ -639,20 +639,13 @@ Runtime is a single app actor. It is not the `oven-host` crate:
 ```rust
 struct Runtime {
     agent: Agent,
-    subagents: Arc<Subagents>,
-    wake_rx: Receiver<()>,                    // the registry changed
-    router: RouterHandle,  // independent of `&mut agent`
+    shared: Arc<Shared>,      // state, events, config, router, turn control: also held by `App`
+    wake_rx: Receiver<()>,    // the registry changed
     root: PathBuf,
-    state: AppState,
-    state_tx: watch::Sender<AppState>,
     session: Option<SessionStore>,
-    user_config_path: Option<PathBuf>,
-    config: AppConfig,
-    events: EventBus,       // every agent publishes here
-    slash: SlashRegistry,
+    slash: Arc<SlashRegistry>,
     persisted_messages: usize,  // agent messages already in the session file
     persisted_rev: u64,         // history revision `persisted_messages` belongs to
-    pending: VecDeque<AppCommand>,
 }
 ```
 
@@ -660,13 +653,13 @@ struct Runtime {
 
 ```rust
 impl Runtime {
-    async fn run(mut self, mut rx: Receiver<AppCommand>) { /* dispatch */ }
+    async fn run(mut self, mut inbox: InboxReceiver) { /* dispatch */ }
 }
 ```
 
-`runtime/mod.rs` owns the actor: the command loop, the idle select that also
-serves subagent events, command dispatch, the `pending` queue, and persistence.
-`runtime/turn.rs` owns what happens while a turn runs — `start_turn`,
-`run_shell`, mid-turn `/model`, and the deferral of anything that has to wait
-for `&mut Agent`. `builder.rs` owns construction; `subagent.rs` owns delegated
-runs.
+`runtime/mod.rs` owns the actor: the input loop that also serves subagent
+events, dispatch, and persistence. `runtime/turn.rs` owns what happens while a
+turn runs — `start_turn`, `run_shell` and slash commands. `shared.rs` owns what
+`App` and the actor both reach, including what applies while a turn holds
+`&mut Agent`: cancelling, switching mode, answering a request, `/model`.
+`builder.rs` owns construction; `subagent.rs` owns delegated runs.
