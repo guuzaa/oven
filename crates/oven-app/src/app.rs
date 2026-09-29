@@ -87,10 +87,6 @@ impl App {
         out
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the handle is assembled once from the pieces spawn_runtime already holds"
-    )]
     pub(crate) fn new(
         id: AppId,
         inbox: InboxSender,

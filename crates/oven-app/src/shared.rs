@@ -107,7 +107,10 @@ impl Shared {
     }
 
     pub(crate) fn end_turn(&self) {
-        *self.active_turn() = None;
+        let pending = self.active_turn().take().and_then(|turn| turn.awaiting);
+        if let Some(request) = pending {
+            self.emit_resolved(request.request_id);
+        }
     }
 
     pub(crate) fn cancel(&self, turn_id: TurnId) {
@@ -132,12 +135,20 @@ impl Shared {
         };
         let turn_id = active.turn_id;
         match request.respond(response) {
-            Ok(()) => self.move_phase(
-                AppPhase::Awaiting { turn_id },
-                AppPhase::Running { turn_id },
-            ),
+            Ok(()) => {
+                self.move_phase(
+                    AppPhase::Awaiting { turn_id },
+                    AppPhase::Running { turn_id },
+                );
+                self.emit_resolved(request_id);
+            }
             Err(request) => active.awaiting = Some(request),
         }
+    }
+
+    fn emit_resolved(&self, request_id: UserRequestId) {
+        self.events
+            .emit(AppEventKind::RequestResolved { request_id });
     }
 
     pub(crate) fn set_mode(&self, mode: AgentMode) {
@@ -188,11 +199,17 @@ impl RequestSink for Shared {
         let Some(active) = turn.as_mut().filter(|active| active.turn_id == turn_id) else {
             return false;
         };
-        active.awaiting = Some(request);
+        let replaced = active
+            .awaiting
+            .replace(request)
+            .map(|pending| pending.request_id);
         self.move_phase(
             AppPhase::Running { turn_id },
             AppPhase::Awaiting { turn_id },
         );
+        if let Some(request_id) = replaced {
+            self.emit_resolved(request_id);
+        }
         let agent_id = self.state.borrow().agent_id;
         self.events.emit_agent(agent_id, turn_id, event);
         true
@@ -229,10 +246,13 @@ fn requested_event(request: &PendingRequest) -> AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::PoisonError;
+
+    use crate::event::{AppEvent, AppEventKind};
     use crate::state::SessionState;
     use oven_agent::{Agent, AnswerResponse, ApprovalDecision, LoopLimitDecision};
     use oven_llm::Router;
-    use tokio::sync::oneshot;
+    use tokio::sync::{mpsc, oneshot};
 
     fn shared() -> Shared {
         let agent = Agent::new(Router::new(), Vec::new());
@@ -255,6 +275,27 @@ mod tests {
 
     fn phase(shared: &Shared) -> AppPhase {
         shared.state.borrow().phase.clone()
+    }
+
+    fn subscribe(shared: &Shared) -> mpsc::UnboundedReceiver<AppEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        shared
+            .events
+            .subscribers()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(tx);
+        rx
+    }
+
+    fn resolved_ids(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> Vec<UserRequestId> {
+        let mut ids = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEventKind::RequestResolved { request_id } = event.kind {
+                ids.push(request_id);
+            }
+        }
+        ids
     }
 
     fn loop_limit() -> (PendingRequest, oneshot::Receiver<LoopLimitDecision>) {
@@ -311,10 +352,15 @@ mod tests {
         assert!(shared.submit(turn_id, request));
         assert_eq!(phase(&shared), AppPhase::Awaiting { turn_id });
 
+        let mut events = subscribe(&shared);
         shared.respond(request_id, UserResponse::LoopLimit(LoopLimitDecision::Exit));
 
         assert_eq!(phase(&shared), AppPhase::Running { turn_id });
         assert_eq!(reply.try_recv().unwrap(), LoopLimitDecision::Exit);
+        assert_eq!(resolved_ids(&mut events), vec![request_id]);
+
+        shared.end_turn();
+        assert!(resolved_ids(&mut events).is_empty());
     }
 
     #[test]
@@ -334,6 +380,7 @@ mod tests {
         let request_id = request.request_id;
         shared.submit(turn_id, request);
 
+        let mut events = subscribe(&shared);
         shared.respond(
             request_id,
             UserResponse::Approval(ApprovalDecision::Approved),
@@ -342,6 +389,7 @@ mod tests {
 
         assert_eq!(phase(&shared), AppPhase::Awaiting { turn_id });
         assert!(reply.try_recv().is_err());
+        assert!(resolved_ids(&mut events).is_empty());
 
         shared.respond(
             request_id,
@@ -377,5 +425,38 @@ mod tests {
         );
 
         assert_eq!(phase(&shared), AppPhase::Idle);
+    }
+
+    #[test]
+    fn ending_a_turn_resolves_the_request_it_was_still_holding() {
+        let shared = shared();
+        let turn_id = TurnId::next();
+        shared.begin_turn(turn_id, CancellationToken::new());
+        let (request, _reply) = loop_limit();
+        let request_id = request.request_id;
+        shared.submit(turn_id, request);
+        let mut events = subscribe(&shared);
+
+        shared.end_turn();
+
+        assert_eq!(resolved_ids(&mut events), vec![request_id]);
+    }
+
+    #[test]
+    fn a_later_request_resolves_the_one_it_replaces() {
+        let shared = shared();
+        let turn_id = TurnId::next();
+        shared.begin_turn(turn_id, CancellationToken::new());
+        let (first, _reply) = loop_limit();
+        let first_id = first.request_id;
+        shared.submit(turn_id, first);
+        let mut events = subscribe(&shared);
+        let (second, _reply) = loop_limit();
+        let second_id = second.request_id;
+
+        assert!(shared.submit(turn_id, second));
+
+        assert_eq!(resolved_ids(&mut events), vec![first_id]);
+        assert_ne!(first_id, second_id);
     }
 }

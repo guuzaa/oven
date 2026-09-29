@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, EventSink, TurnId};
+use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, EventSink, TurnId, UserRequestId};
 use tokio::sync::mpsc;
 
 use crate::state::HistoryChangeReason;
@@ -24,6 +24,11 @@ pub struct AppEvent {
 #[derive(Debug, Clone)]
 pub enum AppEventKind {
     Agent(AgentEventEnvelope),
+    /// The user request announced earlier is closed: it was answered, or the
+    /// turn dropped it. A frontend closes the prompt it opened for this id.
+    RequestResolved {
+        request_id: UserRequestId,
+    },
     Subagent(SubagentEvent),
     /// The history was replaced wholesale, so a view rebuilds itself from
     /// the state instead of following per-message events.

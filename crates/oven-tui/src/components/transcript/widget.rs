@@ -1002,7 +1002,8 @@ impl Component for Transcript {
             AppEventKind::HistoryChanged { .. }
             | AppEventKind::Exited
             | AppEventKind::Subagent(_)
-            | AppEventKind::Notification { .. } => {}
+            | AppEventKind::Notification { .. }
+            | AppEventKind::RequestResolved { .. } => {}
             AppEventKind::Error { message } => {
                 self.close_tool_burst();
                 self.flush_streaming();

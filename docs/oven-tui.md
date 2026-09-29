@@ -70,7 +70,10 @@ reports those itself. It then sends whatever was queued once the app is idle.
   event whose `agent_id` is not the driver's, only that subagent's transcript
 - overlay prompts (`OverlayPrompt`) for tool approval, loop limit, and a
   question from the `answer` tool that is answered either by picking an offered
-  option or by typing into the composer
+  option or by typing into the composer. The prompt closes when
+  `RequestResolved` names the request it was opened for. A local answer closes
+  it immediately; the event covers a reply or a drop that happened elsewhere,
+  including the turn ending while the request was still open
 - `pending`, the messages queued while the backend is busy
 
 ### Queueing

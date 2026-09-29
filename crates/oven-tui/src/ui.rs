@@ -79,6 +79,14 @@ impl OverlayPrompt {
         matches!(self, Self::Question { popup, .. } if popup.awaits_typed_answer())
     }
 
+    fn request_id(&self) -> UserRequestId {
+        match self {
+            Self::Approval { request_id, .. }
+            | Self::LoopLimit { request_id, .. }
+            | Self::Question { request_id, .. } => *request_id,
+        }
+    }
+
     /// The keys the open prompt answers.
     fn hint(&self) -> &'static str {
         match self {
@@ -325,11 +333,6 @@ impl Ui {
                         popup: ChoicePopup::loop_limit(*max_iters),
                     });
                 }
-                AgentEvent::Turn(
-                    TurnEvent::Completed { .. }
-                    | TurnEvent::Cancelled { .. }
-                    | TurnEvent::Failed { .. },
-                ) => self.prompt = None,
                 AgentEvent::Tool(ToolEvent::ApprovalRequested {
                     request_id,
                     name,
@@ -353,9 +356,17 @@ impl Ui {
                         ),
                     });
                 }
-                AgentEvent::Tool(ToolEvent::Finished { .. }) => self.prompt = None,
                 _ => {}
             },
+            AppEventKind::RequestResolved { request_id } => {
+                if self
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.request_id() == *request_id)
+                {
+                    self.prompt = None;
+                }
+            }
             AppEventKind::HistoryChanged { .. } => self.reload_history(),
             AppEventKind::Shell(_)
             | AppEventKind::Compaction(_)
@@ -952,6 +963,7 @@ mod tests {
     use crate::components::input::InputView;
     use crate::components::slash_command_popup::SlashCommandPopup;
     use oven_app::config::ProviderConfig;
+    use oven_app::{ToolCallId, ToolResult};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1195,6 +1207,32 @@ mod tests {
             ui.pending.is_empty(),
             "an answer is never a queued prompt, even mid-turn"
         );
+        assert!(ui.prompt.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_open_prompt_closes_when_its_request_resolves() {
+        let root = tempdir::TempDir::new("oven-ui-resolved").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.prompt = Some(answering_prompt());
+
+        ui.apply_event(&AppEvent::agent(AgentEvent::Tool(ToolEvent::Finished {
+            call_id: ToolCallId(1),
+            result: ToolResult::Cancelled,
+        })));
+        ui.apply_event(&AppEvent::agent(AgentEvent::Turn(TurnEvent::Cancelled {
+            duration_ms: 1,
+        })));
+        assert!(ui.prompt.is_some());
+
+        ui.apply_event(&AppEvent::new(AppEventKind::RequestResolved {
+            request_id: UserRequestId(9),
+        }));
+        assert!(ui.prompt.is_some());
+
+        ui.apply_event(&AppEvent::new(AppEventKind::RequestResolved {
+            request_id: UserRequestId(1),
+        }));
         assert!(ui.prompt.is_none());
     }
 

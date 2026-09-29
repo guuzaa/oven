@@ -196,9 +196,12 @@ come.
 
 The app's `Shared` is the sink. `submit` stores the one `PendingRequest` the
 turn is parked on, moves the phase to `Awaiting` and publishes the request as
-the event a frontend draws, all before the agent starts waiting. `App::respond`
-answers it by id: a reply whose id does not match, or whose `UserResponse` kind
-does not match the request, is dropped and the request stays open.
+the event a frontend draws, all before the agent starts waiting. A request
+already parked is resolved first, so the prompt for the id it replaced closes.
+`App::respond` answers it by id: a reply whose id does not match, or whose
+`UserResponse` kind does not match the request, is dropped and the request
+stays open. A reply that matches publishes `RequestResolved`. So does ending
+the turn while it still holds the request.
 
 A command that never asks for the agent — `/agents`, `/exit` — is applied mid-turn
 instead of queued: `CommandContext::agent()` returns `AgentBusy` for the ones that
@@ -266,7 +269,10 @@ it, so the transcript never has to guess a duration. `LoopLimitReached`,
 republishes the request as the event a frontend draws and parks the phase on
 `Awaiting`. `QuestionAsked` is the one that originates inside a tool call,
 where no event sink is reachable — which is why the request sink, not the
-event sink, is what a frontend hears about it on.
+event sink, is what a frontend hears about it on. `RequestResolved` follows
+when that request is answered, when the turn ends still holding it, or when a
+later request replaces it, and a frontend closes the prompt it opened for that
+id.
 
 `ToolResult` is `Success`, `Failed { error, output }`, `Rejected { reason }`, or
 `Cancelled` — not `ok: bool`.
@@ -284,6 +290,7 @@ pub struct AppEvent {
 
 pub enum AppEventKind {
     Agent(AgentEventEnvelope),
+    RequestResolved { request_id: UserRequestId },
     Subagent(SubagentEvent),
     HistoryChanged { reason: HistoryChangeReason },
     Shell(ShellEvent),

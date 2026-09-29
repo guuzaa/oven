@@ -131,7 +131,8 @@ Everything else a user does mid-turn reaches the turn through `Shared`:
   loop-limit prompt or a question is stored as the turn's one pending request,
   announced as an agent event, and the phase becomes `Awaiting`. `App::respond`
   finds it by id and answers it directly; a reply of the wrong kind leaves it
-  open.
+  open. Answering it, dropping it when the turn ends, or replacing it with a
+  later request publishes `RequestResolved` for that id.
 - `App::cancel(turn_id)` cancels only if `turn_id` is still the running turn.
 
 After the turn: session meta is stamped, trailing agent events are drained,
