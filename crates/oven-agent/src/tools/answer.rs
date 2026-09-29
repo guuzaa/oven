@@ -6,7 +6,7 @@ use crate::turn::TurnContext;
 
 use super::{Tool, ToolCaps, ToolView};
 use crate::error::AgentError;
-use crate::question::{AnswerResponse, Question, QuestionOption};
+use crate::interaction::{AnswerResponse, Question, QuestionOption};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";
 const USER_SKIPPED: &str = "the user skipped the question without answering";
@@ -161,9 +161,9 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::question::{NO_USER_TO_ANSWER, QuestionRequest, QuestionSender};
+    use crate::interaction::{NO_USER_TO_ANSWER, PendingRequest, UserRequest, UserRequestSender};
     use serde_json::json;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     const QUESTION: &str = "which database?";
     const ANSWER: &str = "postgres";
@@ -173,12 +173,31 @@ mod tests {
     }
 
     async fn run_with(
-        tx: &QuestionSender,
+        tx: &UserRequestSender,
         args: Value,
         cx: TurnContext,
     ) -> Result<String, AgentError> {
-        let cx = cx.with_question_sender(tx.clone());
+        let cx = cx.with_requests(tx.clone());
         AnswerTool.run(&args, &cx).await
+    }
+
+    /// The parts of a question a test checks and answers with.
+    struct Asked {
+        question: Question,
+        responder: oneshot::Sender<AnswerResponse>,
+    }
+
+    fn asked(request: PendingRequest) -> Asked {
+        match request.request {
+            UserRequest::Question {
+                question,
+                responder,
+            } => Asked {
+                question,
+                responder,
+            },
+            _ => panic!("the answer tool must ask a question"),
+        }
     }
 
     #[test]
@@ -282,11 +301,11 @@ mod tests {
 
     #[tokio::test]
     async fn returns_what_the_user_picked() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         let asker = tokio::spawn(async move {
-            let request = rx.recv().await.unwrap();
-            assert_eq!(request.question.question, QUESTION);
-            request
+            let asked = asked(rx.recv().await.unwrap());
+            assert_eq!(asked.question.question, QUESTION);
+            asked
                 .responder
                 .send(AnswerResponse::Answered {
                     answer: ANSWER.into(),
@@ -306,11 +325,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_skipped_question_is_not_an_error() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         let asker = tokio::spawn(async move {
-            rx.recv()
-                .await
-                .unwrap()
+            asked(rx.recv().await.unwrap())
                 .responder
                 .send(AnswerResponse::Declined)
                 .unwrap();
@@ -328,14 +345,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_verbose_question_still_reaches_the_user() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         let asker = tokio::spawn(async move {
-            let request = rx.recv().await.unwrap();
-            assert_eq!(
-                request.question.question.chars().count(),
-                MAX_QUESTION_CHARS
-            );
-            request
+            let asked = asked(rx.recv().await.unwrap());
+            assert_eq!(asked.question.question.chars().count(), MAX_QUESTION_CHARS);
+            asked
                 .responder
                 .send(AnswerResponse::Answered {
                     answer: ANSWER.into(),
@@ -353,12 +367,10 @@ mod tests {
     #[tokio::test]
     async fn a_pasted_answer_is_capped_before_it_reaches_the_model() {
         const TAIL: &str = "hidden tail";
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         let answer = format!("{}{TAIL}", "x".repeat(MAX_ANSWER_CHARS * 2));
         let asker = tokio::spawn(async move {
-            rx.recv()
-                .await
-                .unwrap()
+            asked(rx.recv().await.unwrap())
                 .responder
                 .send(AnswerResponse::Answered { answer })
                 .unwrap();
@@ -401,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_arguments_never_reach_the_user() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<QuestionRequest>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         assert!(
             run_with(&tx, json!({ "question": "   " }), TurnContext::for_test())
                 .await

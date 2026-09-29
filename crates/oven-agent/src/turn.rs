@@ -4,18 +4,15 @@ use oven_llm::{Message, ModelId, ReasoningEffort, Usage};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::approval::{
-    ApprovalDecision, ApprovalSender, LoopLimitDecision, LoopLimitPrompt, LoopLimitRequestId,
-    LoopLimitSender, ToolApproval,
-};
 use crate::error::AgentError;
 use crate::event::{CallOutcome, StepStop};
 use crate::identity::ToolCallId;
 use crate::identity::TurnId;
-use crate::mode::AgentMode;
-use crate::question::{
-    AnswerResponse, NO_USER_TO_ANSWER, Question, QuestionRequest, QuestionRequestId, QuestionSender,
+use crate::interaction::{
+    AnswerResponse, ApprovalDecision, LoopLimitDecision, NO_USER_TO_ANSWER, PendingRequest,
+    Question, UserRequest, UserRequestId, UserRequestSender,
 };
+use crate::mode::AgentMode;
 use crate::tools::ToolView;
 
 pub const DEFAULT_MAX_ITERS: usize = 200;
@@ -60,9 +57,8 @@ pub struct TurnContext {
     mode: Arc<Mutex<AgentMode>>,
     model: Arc<Mutex<ModelSelection>>,
     policy: RunPolicy,
-    approval_sender: Option<ApprovalSender>,
-    loop_limit_sender: Option<LoopLimitSender>,
-    question_sender: Option<QuestionSender>,
+    /// Absent when nobody can answer: a subagent, or a headless run.
+    requests: Option<UserRequestSender>,
 }
 
 impl TurnContext {
@@ -79,9 +75,7 @@ impl TurnContext {
             mode: Arc::new(Mutex::new(mode)),
             model: Arc::new(Mutex::new((model, reasoning_effort))),
             policy: RunPolicy::default(),
-            approval_sender: None,
-            loop_limit_sender: None,
-            question_sender: None,
+            requests: None,
         }
     }
 
@@ -94,99 +88,87 @@ impl TurnContext {
         self.policy
     }
 
-    pub fn with_approval_sender(mut self, approval_sender: ApprovalSender) -> Self {
-        self.approval_sender = Some(approval_sender);
+    pub fn with_requests(mut self, requests: UserRequestSender) -> Self {
+        self.requests = Some(requests);
         self
     }
 
-    pub fn with_loop_limit_sender(mut self, loop_limit_sender: LoopLimitSender) -> Self {
-        self.loop_limit_sender = Some(loop_limit_sender);
-        self
+    /// Whether anyone can answer what this turn asks of the user.
+    pub fn has_user(&self) -> bool {
+        self.requests.is_some()
     }
 
-    pub fn with_question_sender(mut self, question_sender: QuestionSender) -> Self {
-        self.question_sender = Some(question_sender);
-        self
-    }
-
-    /// The channel interactive tools use to put a question to the user.
-    pub fn question_sender(&self) -> Option<&QuestionSender> {
-        self.question_sender.as_ref()
-    }
-
-    pub fn has_loop_limit_sender(&self) -> bool {
-        self.loop_limit_sender.is_some()
-    }
-
-    pub async fn request_approval(
+    /// Puts a tool call to the user. A turn nobody can answer for refuses the
+    /// call rather than hanging on a reply that will never come.
+    pub async fn approve(
         &self,
-        request_id: crate::approval::ApprovalRequestId,
         call_id: ToolCallId,
         name: String,
         view: ToolView,
     ) -> Option<ApprovalDecision> {
-        let Some(sender) = self.approval_sender.as_ref() else {
+        let Some(requests) = &self.requests else {
             return Some(ApprovalDecision::Rejected);
         };
-        let (responder, response) = oneshot::channel();
-        sender
-            .send(ToolApproval {
-                request_id,
-                call_id,
-                name,
-                view,
-                responder,
+        let (responder, reply) = oneshot::channel();
+        requests
+            .send(PendingRequest {
+                request_id: UserRequestId::next(),
+                request: UserRequest::ApproveTool {
+                    call_id,
+                    name,
+                    view,
+                    responder,
+                },
             })
             .ok()?;
-        tokio::select! {
-            biased;
-            () = self.cancellation.cancelled() => None,
-            decision = response => decision.ok(),
-        }
+        self.wait(reply).await
     }
 
     /// Puts `question` to the user and waits for the reply, giving up as
     /// cancelled when the turn is cancelled or the frontend goes away.
     pub async fn ask(&self, question: Question) -> Result<AnswerResponse, AgentError> {
-        let asker = self
-            .question_sender
-            .as_ref()
-            .ok_or_else(|| AgentError::from(NO_USER_TO_ANSWER))?;
-        let (responder, response) = oneshot::channel();
-        asker
-            .send(QuestionRequest {
-                request_id: QuestionRequestId::next(),
-                question,
-                responder,
+        let Some(requests) = &self.requests else {
+            return Err(AgentError::from(NO_USER_TO_ANSWER));
+        };
+        let (responder, reply) = oneshot::channel();
+        requests
+            .send(PendingRequest {
+                request_id: UserRequestId::next(),
+                request: UserRequest::Question {
+                    question,
+                    responder,
+                },
             })
             .map_err(|_| AgentError::from(NO_USER_TO_ANSWER))?;
-        tokio::select! {
-            biased;
-            () = self.cancellation.cancelled() => Err(AgentError::cancelled()),
-            reply = response => reply.map_err(|_| AgentError::cancelled()),
-        }
+        self.wait(reply).await.ok_or_else(AgentError::cancelled)
     }
 
-    pub async fn request_loop_continue(
-        &self,
-        request_id: LoopLimitRequestId,
-        max_iters: usize,
-    ) -> Option<LoopLimitDecision> {
-        let Some(sender) = self.loop_limit_sender.as_ref() else {
+    /// Asks whether a turn that hit its step budget may keep going. Without
+    /// anyone to ask, the budget stands.
+    pub async fn request_loop_continue(&self, max_iters: usize) -> Option<LoopLimitDecision> {
+        let Some(requests) = &self.requests else {
             return Some(LoopLimitDecision::Exit);
         };
-        let (responder, response) = oneshot::channel();
-        sender
-            .send(LoopLimitPrompt {
-                request_id,
-                max_iters,
-                responder,
+        let (responder, reply) = oneshot::channel();
+        requests
+            .send(PendingRequest {
+                request_id: UserRequestId::next(),
+                request: UserRequest::LoopLimit {
+                    max_iters,
+                    responder,
+                },
             })
             .ok()?;
+        self.wait(reply).await
+    }
+
+    /// Waits for one reply, giving up as `None` when the turn is cancelled or
+    /// the frontend goes away before answering.
+    async fn wait<T>(&self, reply: oneshot::Receiver<T>) -> Option<T> {
         tokio::select! {
             biased;
             () = self.cancellation.cancelled() => None,
-            decision = response => decision.ok(),
+            response = reply => response.ok(),
         }
     }
 

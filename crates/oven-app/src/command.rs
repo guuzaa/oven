@@ -1,7 +1,4 @@
-use oven_agent::{
-    AgentId, AgentMode, AnswerResponse, ApprovalDecision, ApprovalRequestId, LoopLimitDecision,
-    LoopLimitRequestId, QuestionRequestId, TurnId,
-};
+use oven_agent::{AgentId, AgentMode, TurnId, UserRequestId, UserResponse};
 
 /// Commands sent from a frontend to the runtime task.
 ///
@@ -29,17 +26,10 @@ pub enum ControlCommand {
     SetMode {
         mode: AgentMode,
     },
-    RespondToolApproval {
-        request_id: ApprovalRequestId,
-        decision: ApprovalDecision,
-    },
-    RespondLoopLimit {
-        request_id: LoopLimitRequestId,
-        decision: LoopLimitDecision,
-    },
-    RespondQuestion {
-        request_id: QuestionRequestId,
-        response: AnswerResponse,
+    /// What the user answered to the one request a turn is waiting on.
+    Respond {
+        request_id: UserRequestId,
+        response: UserResponse,
     },
     Rewind,
     /// Stop one subagent. Cheap enough to apply mid-turn: it only cancels a

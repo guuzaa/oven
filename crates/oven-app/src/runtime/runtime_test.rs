@@ -1,6 +1,6 @@
 use crate::command::{AppCommand, ControlCommand};
 use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
-use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent};
+use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
 use crate::session::{Session, canonical_root};
 use crate::state::{AppPhase, HistoryChangeReason, StateChange, StateEvent};
 use crate::subagent::{SubagentParts, Subagents};
@@ -28,10 +28,10 @@ fn agent_from(provider: Box<dyn Provider>) -> AppAgents {
     agents_from(Agent::new(router, Vec::new()))
 }
 
-/// Wire a bare agent onto its own event channel and an empty subagent
-/// supervisor: these tests drive the runtime, not delegation.
+/// Wire a bare agent onto the app bus and an empty subagent supervisor:
+/// these tests drive the runtime, not delegation.
 fn agents_from(agent: Agent) -> AppAgents {
-    let (events, event_rx) = mpsc::unbounded_channel();
+    let events = EventBus::new();
     let (wake, wake_rx) = mpsc::unbounded_channel();
     let subagents = Subagents::new(SubagentParts {
         parent: agent.id(),
@@ -47,7 +47,6 @@ fn agents_from(agent: Agent) -> AppAgents {
         main: agent,
         subagents,
         events,
-        event_rx,
         wake_rx,
     }
 }
@@ -268,6 +267,35 @@ fn compaction_of(ev: &AppEvent) -> Option<&CompactionEvent> {
         AppEventKind::Compaction(event) => Some(event),
         _ => None,
     }
+}
+
+fn turn_started(ev: &AppEvent, main: AgentId) -> bool {
+    matches!(
+        &ev.kind,
+        AppEventKind::Agent(env)
+            if env.agent_id == main && matches!(env.event, AgentEvent::Turn(TurnEvent::Started))
+    )
+}
+
+fn push_window(ev: &AppEvent, windows: &mut Vec<u32>) {
+    if let AppEventKind::StateChanged(StateEvent {
+        change: StateChange::ContextWindowChanged {
+            window: Some(window),
+        },
+        ..
+    }) = &ev.kind
+    {
+        windows.push(*window);
+    }
+}
+
+/// The driver's checklist, as the turn writes it.
+fn wrote_todos(ev: &AppEvent) -> bool {
+    matches!(
+        &ev.kind,
+        AppEventKind::Agent(env)
+            if matches!(&env.event, AgentEvent::TodosChanged { todos } if !todos.is_empty())
+    )
 }
 
 fn is_turn_completed(ev: &AppEvent) -> bool {
@@ -662,20 +690,6 @@ async fn usage_reaches_subscribers_before_the_turn_completes() {
         "the first step's usage must be reported mid-turn: {usage_at:?} vs {completed_at:?}"
     );
 
-    let context_at = events.iter().position(|ev| {
-        matches!(
-            &ev.kind,
-            AppEventKind::StateChanged(StateEvent {
-                change: StateChange::ContextChanged { tokens, .. },
-                ..
-            }) if *tokens
-                == FIRST_STEP_USAGE.input_tokens + FIRST_STEP_USAGE.cache_read_tokens
-        )
-    });
-    assert!(
-        context_at < completed_at,
-        "context tokens must follow the reported usage: {context_at:?} vs {completed_at:?}"
-    );
     assert_eq!(handle.last_turn_usage(), LAST_STEP_USAGE);
 
     handle.shutdown().await;
@@ -2190,20 +2204,23 @@ async fn mid_turn_model_switch_publishes_the_new_context_window() {
             "/model {MODEL_WITH_LARGE_WINDOW} low"
         )))
         .unwrap();
+    let mut windows = Vec::new();
     let mut switched = false;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
             Ok(Some(ev)) if is_turn_completed(&ev) => {
                 panic!("turn completed before the mid-turn model switch")
             }
-            Ok(Some(AppEvent {
-                kind: AppEventKind::Notification { text },
-                ..
-            })) if text.contains("model switched") => {
-                switched = true;
-                break;
+            Ok(Some(ev)) => {
+                push_window(&ev, &mut windows);
+                if matches!(
+                    &ev.kind,
+                    AppEventKind::Notification { text } if text.contains("model switched")
+                ) {
+                    switched = true;
+                    break;
+                }
             }
-            Ok(Some(_)) => {}
             Ok(None) => break,
             Err(_) => panic!("timeout waiting for the mid-turn model switch"),
         }
@@ -2212,28 +2229,24 @@ async fn mid_turn_model_switch_publishes_the_new_context_window() {
         switched,
         "expected /model to switch during the in-flight turn"
     );
+    assert_eq!(
+        windows,
+        vec![LARGE_WINDOW],
+        "the switch must publish the new model's window while the turn runs"
+    );
 
     let _ = release_tx.send(());
 
-    let mut windows: Vec<u32> = Vec::new();
     while let Some(ev) = rx.recv().await {
-        if let AppEventKind::StateChanged(StateEvent {
-            change: StateChange::ContextChanged { window, .. },
-            ..
-        }) = &ev.kind
-            && let Some(window) = window
-        {
-            windows.push(*window);
-        }
+        push_window(&ev, &mut windows);
         if is_turn_completed(&ev) {
             break;
         }
     }
-
     assert_eq!(
         windows,
         vec![LARGE_WINDOW],
-        "mid-turn usage must report the switched model's window"
+        "one window, the switched model's, for the rest of the turn"
     );
     handle.shutdown().await;
 }
@@ -2400,14 +2413,14 @@ async fn repro_ask_mode_bash_requests_approval() {
     }
     let request_id = request_id.expect("approval requested");
     assert!(
-        matches!(handle.state().phase, AppPhase::AwaitingToolApproval { .. }),
+        matches!(handle.state().phase, AppPhase::Awaiting { .. }),
         "phase: {:?}",
         handle.state().phase
     );
     handle
-        .send(AppCommand::Control(ControlCommand::RespondToolApproval {
+        .send(AppCommand::Control(ControlCommand::Respond {
             request_id,
-            decision: oven_agent::ApprovalDecision::Approved,
+            response: oven_agent::UserResponse::Approval(oven_agent::ApprovalDecision::Approved),
         }))
         .unwrap();
 
@@ -2468,17 +2481,17 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
     }
     let request_id = request_id.expect("question asked");
     assert!(
-        matches!(handle.state().phase, AppPhase::AwaitingAnswer { .. }),
+        matches!(handle.state().phase, AppPhase::Awaiting { .. }),
         "phase: {:?}",
         handle.state().phase
     );
 
     handle
-        .send(AppCommand::Control(ControlCommand::RespondQuestion {
+        .send(AppCommand::Control(ControlCommand::Respond {
             request_id,
-            response: oven_agent::AnswerResponse::Answered {
+            response: oven_agent::UserResponse::Answer(oven_agent::AnswerResponse::Answered {
                 answer: ANSWER.into(),
-            },
+            }),
         }))
         .unwrap();
 
@@ -2548,14 +2561,14 @@ async fn loop_limit_continue_completes_turn() {
     }
     let request_id = request_id.expect("loop limit requested");
     assert!(
-        matches!(handle.state().phase, AppPhase::AwaitingLoopLimit { .. }),
+        matches!(handle.state().phase, AppPhase::Awaiting { .. }),
         "phase: {:?}",
         handle.state().phase
     );
     handle
-        .send(AppCommand::Control(ControlCommand::RespondLoopLimit {
+        .send(AppCommand::Control(ControlCommand::Respond {
             request_id,
-            decision: oven_agent::LoopLimitDecision::Continue,
+            response: oven_agent::UserResponse::LoopLimit(oven_agent::LoopLimitDecision::Continue),
         }))
         .unwrap();
 
@@ -2717,21 +2730,14 @@ async fn cancel_does_not_roll_back_todos() {
     let mut turn_id = None;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent {
-                kind:
-                    AppEventKind::StateChanged(StateEvent {
-                        change: StateChange::TodosChanged { todos },
-                        ..
-                    }),
-                ..
-            })) if !todos.is_empty() => break,
+            Ok(Some(ev)) if wrote_todos(&ev) => break,
             Ok(Some(ev)) => {
                 if turn_id.is_none() {
                     turn_id = turn_id_of(&ev);
                 }
             }
-            Ok(None) => panic!("channel closed before TodosChanged"),
-            Err(_) => panic!("timeout waiting for TodosChanged"),
+            Ok(None) => panic!("channel closed before the checklist"),
+            Err(_) => panic!("timeout waiting for the checklist"),
         }
     }
     let turn_id = turn_id.unwrap_or_else(|| match handle.state().phase {
@@ -3853,10 +3859,11 @@ async fn shutdown_reports_prompts_that_never_ran() {
     // Both arrive while the first turn is still waiting on its subagent, so
     // neither can start a turn yet.
     let mut queued = false;
+    let mut started = 0;
     while let Some(ev) = rx.recv().await {
+        started += usize::from(turn_started(&ev, main));
         if let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind
             && let StateChange::SubagentsChanged { subagents } = change
-            && !queued
             && subagents.iter().any(|agent| agent.status.is_active())
         {
             queued = true;
@@ -3873,18 +3880,10 @@ async fn shutdown_reports_prompts_that_never_ran() {
     // Let the subagent go: the runtime takes the first of the two messages
     // and starts a turn for it, which stays open. The second waits behind it.
     release.notify_one();
-    let mut started = 0;
     while let Some(ev) = rx.recv().await {
-        if matches!(
-            ev.kind,
-            AppEventKind::Agent(ref env)
-                if env.agent_id == main
-                    && matches!(env.event, AgentEvent::Turn(TurnEvent::Started))
-        ) {
-            started += 1;
-            if started == 2 {
-                break;
-            }
+        started += usize::from(turn_started(&ev, main));
+        if started == 2 {
+            break;
         }
     }
 

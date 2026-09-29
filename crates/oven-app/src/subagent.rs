@@ -12,14 +12,15 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use oven_agent::{
-    Agent, AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, CancellationToken,
-    ChannelEventSink, EventSink, NodeHandle, NodeInfo, NodeOutcome, NodeReport, NodeStatus,
-    RoleSpec, RouterHandle, RunPolicy, SpawnRequest, SubagentSpawner, Tool, ToolEvent, TurnContext,
-    TurnEvent, TurnId,
+    Agent, AgentError, AgentEvent, AgentId, AgentMode, CancellationToken, EventSink, NodeHandle,
+    NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, RouterHandle, RunPolicy, SpawnRequest,
+    SubagentSpawner, Tool, ToolEvent, TurnContext, TurnEvent, TurnId,
 };
 use oven_host::{as_ms, now_ms};
 use oven_llm::Usage;
 use tokio::sync::{Semaphore, mpsc, oneshot};
+
+use crate::event::{BusSink, EventBus};
 use tokio::task::JoinHandle;
 
 /// Finished subagents kept for `/agents` and `task_output` before the oldest
@@ -53,7 +54,7 @@ pub(crate) struct SubagentParts {
     pub(crate) roles: Vec<Role>,
     pub(crate) max_concurrent: usize,
     pub(crate) max_iters: usize,
-    pub(crate) events: mpsc::UnboundedSender<AgentEventEnvelope>,
+    pub(crate) events: EventBus,
     pub(crate) wake: mpsc::UnboundedSender<()>,
 }
 
@@ -69,7 +70,7 @@ pub(crate) struct Subagents {
     router: RouterHandle,
     roles: Vec<Role>,
     max_iters: usize,
-    events: mpsc::UnboundedSender<AgentEventEnvelope>,
+    events: EventBus,
     wake: mpsc::UnboundedSender<()>,
     /// Cancelled when the app shuts down, which stops every subagent.
     root: CancellationToken,
@@ -182,7 +183,6 @@ impl Subagents {
     #[cfg(test)]
     /// A supervisor with no roles, for tests that need one but spawn nothing.
     pub(crate) fn bare(parent: AgentId, router: RouterHandle) -> Arc<Self> {
-        let (events, _) = mpsc::unbounded_channel();
         let (wake, _) = mpsc::unbounded_channel();
         Self::new(SubagentParts {
             parent,
@@ -190,7 +190,7 @@ impl Subagents {
             roles: Vec::new(),
             max_concurrent: 1,
             max_iters: 1,
-            events,
+            events: EventBus::new(),
             wake,
         })
     }
@@ -446,7 +446,7 @@ async fn run_subagent(owner: Arc<Subagents>, mut child: Child, done: oneshot::Se
                 entry.info.status = NodeStatus::Running { turn_id };
             });
             let mut sink = CountingSink::new(
-                ChannelEventSink::new(owner.events.clone(), child.id, turn_id),
+                BusSink::new(owner.events.clone(), child.id, turn_id),
                 Arc::clone(&owner),
                 child.id,
             );
@@ -495,13 +495,13 @@ async fn run_subagent(owner: Arc<Subagents>, mut child: Child, done: oneshot::Se
 /// Counts what a subagent is doing as its events stream past, so the registry
 /// stays the one place that knows.
 struct CountingSink {
-    inner: ChannelEventSink,
+    inner: BusSink,
     owner: Arc<Subagents>,
     id: AgentId,
 }
 
 impl CountingSink {
-    fn new(inner: ChannelEventSink, owner: Arc<Subagents>, id: AgentId) -> Self {
+    fn new(inner: BusSink, owner: Arc<Subagents>, id: AgentId) -> Self {
         Self { inner, owner, id }
     }
 }

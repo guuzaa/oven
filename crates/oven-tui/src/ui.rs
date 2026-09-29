@@ -9,9 +9,8 @@ use crossterm::event::{
 use futures::StreamExt;
 use oven_app::{
     AgentEvent, AgentId, AnswerResponse, App, AppCommand, AppEvent, AppEventKind, ApprovalDecision,
-    ApprovalRequestId, CompactionEvent, ControlCommand, LoopLimitDecision, LoopLimitRequestId,
-    NodeInfo, QuestionRequestId, ShellEvent, StateChange, StateEvent, SubagentEvent, ToolEvent,
-    TurnEvent, invokes_command,
+    CompactionEvent, ControlCommand, LoopLimitDecision, NodeInfo, ShellEvent, StateChange,
+    StateEvent, SubagentEvent, ToolEvent, TurnEvent, UserRequestId, UserResponse, invokes_command,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -46,15 +45,15 @@ const ANSWER_HINT: &str = "enter send · esc back";
 
 enum OverlayPrompt {
     Approval {
-        request_id: ApprovalRequestId,
+        request_id: UserRequestId,
         popup: ChoicePopup,
     },
     LoopLimit {
-        request_id: LoopLimitRequestId,
+        request_id: UserRequestId,
         popup: ChoicePopup,
     },
     Question {
-        request_id: QuestionRequestId,
+        request_id: UserRequestId,
         popup: QuestionPrompt,
     },
 }
@@ -494,9 +493,9 @@ impl Ui {
                     } else {
                         ApprovalDecision::Rejected
                     };
-                    self.control(ControlCommand::RespondToolApproval {
+                    self.control(ControlCommand::Respond {
                         request_id: *request_id,
-                        decision,
+                        response: UserResponse::Approval(decision),
                     });
                     PromptFlow::Closed
                 }
@@ -513,9 +512,9 @@ impl Ui {
                     } else {
                         LoopLimitDecision::Exit
                     };
-                    self.control(ControlCommand::RespondLoopLimit {
+                    self.control(ControlCommand::Respond {
                         request_id: *request_id,
-                        decision,
+                        response: UserResponse::LoopLimit(decision),
                     });
                     PromptFlow::Closed
                 }
@@ -560,10 +559,10 @@ impl Ui {
         }
     }
 
-    fn respond_question(&self, request_id: QuestionRequestId, response: AnswerResponse) {
-        self.control(ControlCommand::RespondQuestion {
+    fn respond_question(&self, request_id: UserRequestId, response: AnswerResponse) {
+        self.control(ControlCommand::Respond {
             request_id,
-            response,
+            response: UserResponse::Answer(response),
         });
     }
 
@@ -1179,7 +1178,7 @@ mod tests {
         );
 
         let question = OverlayPrompt::Question {
-            request_id: QuestionRequestId(1),
+            request_id: UserRequestId(1),
             popup: QuestionPrompt::new("which one?".into(), Vec::new()),
         };
         assert_eq!(
@@ -1255,7 +1254,7 @@ mod tests {
         assert!(matches!(action, QuestionPromptAction::Handled));
         assert!(popup.awaits_typed_answer());
         OverlayPrompt::Question {
-            request_id: QuestionRequestId(1),
+            request_id: UserRequestId(1),
             popup,
         }
     }

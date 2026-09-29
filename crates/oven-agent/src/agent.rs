@@ -11,11 +11,11 @@ use oven_llm::{
 
 use oven_host::{as_ms, now_ms};
 
-use crate::approval::{ApprovalDecision, ApprovalRequestId, LoopLimitDecision, LoopLimitRequestId};
 use crate::error::{AgentError, MAX_ITERS_EXCEEDED};
 use crate::event::{AgentEvent, CallOutcome, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
 use crate::identity::{AgentId, ToolCallId};
+use crate::interaction::{ApprovalDecision, LoopLimitDecision};
 use crate::mode::{AgentMode, ToolAccess};
 use crate::prompt_template;
 use crate::sink::EventSink;
@@ -431,7 +431,7 @@ impl Agent {
         }
 
         let planned = self.plan_calls(&response);
-        let gates = gate_calls(&planned, ctx, sink).await?;
+        let gates = gate_calls(&planned, ctx).await?;
         let records = run_calls(&planned, gates, ctx, sink).await;
         let (calls, wrote_todo) = self.commit_calls(&planned, records, sink);
         self.todo_dirty = !wrote_todo;
@@ -547,7 +547,7 @@ impl Agent {
                         });
                     }
                 }
-                match self.ask_loop_continue(sink, ctx).await? {
+                match self.ask_loop_continue(ctx).await? {
                     LoopLimitDecision::Continue => {}
                     LoopLimitDecision::Exit => {
                         return Err(AgentError::max_iters_exceeded());
@@ -592,22 +592,13 @@ impl Agent {
         result
     }
 
-    async fn ask_loop_continue(
-        &self,
-        sink: &mut impl EventSink,
-        ctx: &TurnContext,
-    ) -> Result<LoopLimitDecision, AgentError> {
+    async fn ask_loop_continue(&self, ctx: &TurnContext) -> Result<LoopLimitDecision, AgentError> {
         let max_iters = ctx.policy().max_iters;
-        if !ctx.has_loop_limit_sender() {
+        if !ctx.has_user() {
             return Err(AgentError::max_iters_exceeded());
         }
         tracing::warn!(max_iters, "{MAX_ITERS_EXCEEDED}");
-        let request_id = LoopLimitRequestId::next();
-        sink.emit(AgentEvent::Turn(TurnEvent::LoopLimitReached {
-            request_id,
-            max_iters,
-        }));
-        match ctx.request_loop_continue(request_id, max_iters).await {
+        match ctx.request_loop_continue(max_iters).await {
             Some(decision) => Ok(decision),
             None => Err(AgentError::cancelled()),
         }
@@ -668,11 +659,7 @@ impl CallRecord {
 /// Decides what each call may do. Approvals are asked one at a time and in
 /// the order the model asked: a frontend answers a single prompt at a time,
 /// so asking for them all at once would strand every answer but one.
-async fn gate_calls(
-    planned: &[PlannedCall],
-    ctx: &TurnContext,
-    sink: &mut impl EventSink,
-) -> Result<Vec<Gate>, AgentError> {
+async fn gate_calls(planned: &[PlannedCall], ctx: &TurnContext) -> Result<Vec<Gate>, AgentError> {
     let mut gates = Vec::with_capacity(planned.len());
     for call in planned {
         // A gate that runs carries the tool it runs, so no later stage has to
@@ -690,20 +677,8 @@ async fn gate_calls(
                 reason: format!("tool '{}' is unavailable in Ask mode", call.name),
             }),
             ToolAccess::RequiresApproval => {
-                let request_id = ApprovalRequestId::next();
-                sink.emit(AgentEvent::Tool(ToolEvent::ApprovalRequested {
-                    request_id,
-                    call_id: call.call_id,
-                    name: call.name.clone(),
-                    view: call.view.clone(),
-                }));
                 match ctx
-                    .request_approval(
-                        request_id,
-                        call.call_id,
-                        call.name.clone(),
-                        call.view.clone(),
-                    )
+                    .approve(call.call_id, call.name.clone(), call.view.clone())
                     .await
                 {
                     Some(ApprovalDecision::Approved) => Gate::Run(tool),
@@ -943,7 +918,6 @@ mod tests {
     use crate::StepStop;
     use crate::TurnId;
     use crate::identity::ToolCallId;
-    use crate::question::AnswerResponse;
     use crate::sink::{NullSink, VecEventSink};
     use crate::tools::{
         AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool,
@@ -959,6 +933,10 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
+
+    use tokio::sync::oneshot;
+
+    use crate::interaction::{AnswerResponse, PendingRequest, Question, UserRequest};
 
     const APPROVED_FILE: &str = "approved.txt";
     const APPROVED_CONTENT: &str = "approved";
@@ -1013,6 +991,35 @@ mod tests {
         sink: &mut impl EventSink,
     ) -> Result<TurnOutput, AgentError> {
         agent.run(input, ctx, sink).await
+    }
+
+    fn tool_approval(request: PendingRequest) -> (String, oneshot::Sender<ApprovalDecision>) {
+        match request.request {
+            UserRequest::ApproveTool {
+                name, responder, ..
+            } => (name, responder),
+            _ => panic!("the turn must ask to approve a tool call"),
+        }
+    }
+
+    fn loop_limit_prompt(request: PendingRequest) -> (usize, oneshot::Sender<LoopLimitDecision>) {
+        match request.request {
+            UserRequest::LoopLimit {
+                max_iters,
+                responder,
+            } => (max_iters, responder),
+            _ => panic!("the turn must ask whether it may keep going"),
+        }
+    }
+
+    fn asked_question(request: PendingRequest) -> (Question, oneshot::Sender<AnswerResponse>) {
+        match request.request {
+            UserRequest::Question {
+                question,
+                responder,
+            } => (question, responder),
+            _ => panic!("the turn must ask a question"),
+        }
     }
 
     fn is_terminal(event: &AgentEvent) -> bool {
@@ -1370,7 +1377,7 @@ mod tests {
             vec![Arc::new(BashTool::new(tmp.path()))],
         );
         agent.set_mode(AgentMode::Ask);
-        let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
         let ctx = TurnContext::new(
             TurnId::next(),
             CancellationToken::new(),
@@ -1378,18 +1385,19 @@ mod tests {
             ModelId::new("default"),
             None,
         )
-        .with_approval_sender(approval_tx);
+        .with_requests(requests);
         let mut sink = NullSink;
         let turn = agent.run("run it", &ctx, &mut sink);
         tokio::pin!(turn);
 
-        let approval = tokio::select! {
-            approval = approval_rx.recv() => approval.unwrap(),
+        let request = tokio::select! {
+            request = asked.recv() => request.unwrap(),
             _ = &mut turn => panic!("turn completed before requesting approval"),
         };
-        assert_eq!(approval.name, "bash");
+        let (name, responder) = tool_approval(request);
+        assert_eq!(name, "bash");
         assert!(!marker.exists());
-        approval.responder.send(ApprovalDecision::Approved).unwrap();
+        responder.send(ApprovalDecision::Approved).unwrap();
 
         assert_eq!(turn.await.unwrap().text(), "done");
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), APPROVED_CONTENT);
@@ -1411,21 +1419,21 @@ mod tests {
             text_response("done"),
         ]);
         let mut agent = Agent::new(router_with(Box::new(mock)), vec![Arc::new(AnswerTool)]);
-        let (question_tx, mut question_rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = turn_ctx().with_question_sender(question_tx);
+        let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = turn_ctx().with_requests(requests);
         let mut sink = NullSink;
         let reply = {
             let turn = agent.run("pick one", &ctx, &mut sink);
             tokio::pin!(turn);
 
             let request = tokio::select! {
-                request = question_rx.recv() => request.unwrap(),
+                request = asked.recv() => request.unwrap(),
                 _ = &mut turn => panic!("turn completed before asking the user"),
             };
-            assert_eq!(request.question.question, QUESTION);
-            assert_eq!(request.question.options.len(), 2);
-            request
-                .responder
+            let (question, responder) = asked_question(request);
+            assert_eq!(question.question, QUESTION);
+            assert_eq!(question.options.len(), 2);
+            responder
                 .send(AnswerResponse::Answered {
                     answer: ANSWER.into(),
                 })
@@ -2133,12 +2141,6 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
         assert_valid_event_sequence(&sink.events);
-        assert!(
-            !sink
-                .events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::Turn(TurnEvent::LoopLimitReached { .. })))
-        );
         assert!(matches!(
             sink.events.last(),
             Some(AgentEvent::Turn(TurnEvent::Failed { error, .. }))
@@ -2155,26 +2157,23 @@ mod tests {
             text_response("done"),
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = turn_ctx_with(2).with_loop_limit_sender(tx);
+        let ctx = turn_ctx_with(2).with_requests(tx);
         let mut sink = VecEventSink::default();
         let text = {
             let turn = agent.run("read it", &ctx, &mut sink);
             tokio::pin!(turn);
 
-            let prompt = tokio::select! {
-                prompt = rx.recv() => prompt.unwrap(),
+            let request = tokio::select! {
+                request = rx.recv() => request.unwrap(),
                 _ = &mut turn => panic!("turn completed before loop limit prompt"),
             };
-            assert_eq!(prompt.max_iters, 2);
-            prompt.responder.send(LoopLimitDecision::Continue).unwrap();
+            let (max_iters, responder) = loop_limit_prompt(request);
+            assert_eq!(max_iters, 2);
+            responder.send(LoopLimitDecision::Continue).unwrap();
             turn.await.unwrap().text()
         };
         assert_eq!(text, "done");
         assert_valid_event_sequence(&sink.events);
-        assert!(sink.events.iter().any(|e| matches!(
-            e,
-            AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters: 2, .. })
-        )));
         assert!(matches!(
             sink.events.last(),
             Some(AgentEvent::Turn(TurnEvent::Completed { .. }))
@@ -2190,26 +2189,22 @@ mod tests {
             text_response("done"),
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = turn_ctx_with(2).with_loop_limit_sender(tx);
+        let ctx = turn_ctx_with(2).with_requests(tx);
         let mut sink = VecEventSink::default();
         let err = {
             let turn = agent.run("read it", &ctx, &mut sink);
             tokio::pin!(turn);
 
-            let prompt = tokio::select! {
-                prompt = rx.recv() => prompt.unwrap(),
+            let request = tokio::select! {
+                request = rx.recv() => request.unwrap(),
                 _ = &mut turn => panic!("turn completed before loop limit prompt"),
             };
-            prompt.responder.send(LoopLimitDecision::Exit).unwrap();
+            let (_, responder) = loop_limit_prompt(request);
+            responder.send(LoopLimitDecision::Exit).unwrap();
             turn.await.unwrap_err()
         };
         assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
         assert_valid_event_sequence(&sink.events);
-        assert!(
-            sink.events
-                .iter()
-                .any(|e| matches!(e, AgentEvent::Turn(TurnEvent::LoopLimitReached { .. })))
-        );
         assert!(matches!(
             sink.events.last(),
             Some(AgentEvent::Turn(TurnEvent::Failed { error, .. }))

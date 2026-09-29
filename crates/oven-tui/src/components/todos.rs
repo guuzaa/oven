@@ -1,4 +1,4 @@
-use oven_app::{AppEvent, AppEventKind, StateChange, StateEvent, TodoList, TodoStatus};
+use oven_app::{AgentEvent, AppEvent, AppEventKind, StateChange, StateEvent, TodoList, TodoStatus};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -31,12 +31,19 @@ impl TodosWidget {
     }
 
     pub fn on_event(&mut self, ev: &AppEvent) {
-        let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind else {
-            return;
+        let todos = match &ev.kind {
+            // The driver's checklist as the turn writes it.
+            AppEventKind::Agent(env) => match &env.event {
+                AgentEvent::TodosChanged { todos } => todos,
+                _ => return,
+            },
+            AppEventKind::StateChanged(StateEvent {
+                change: StateChange::TodosChanged { todos },
+                ..
+            }) => todos,
+            _ => return,
         };
-        if let StateChange::TodosChanged { todos } = change {
-            self.list = todos.clone();
-        }
+        self.list = todos.clone();
     }
 
     pub fn draw(&self, f: &mut Frame<'_>, area: Rect) {

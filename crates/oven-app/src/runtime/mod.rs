@@ -8,8 +8,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use oven_agent::{
-    Agent, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, Record, RouterHandle, RunPolicy,
-    TodoList,
+    Agent, AgentId, AgentMode, Record, RouterHandle, RunPolicy, TodoList, UserResponse,
 };
 use oven_llm::{
     ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort, Router,
@@ -28,24 +27,21 @@ use crate::session::{
 use crate::slash::{CommandOutcome, SlashRegistry};
 use crate::state::{
     AppPhase, AppState, HistoryChangeReason, SessionState, StateChange, context_tokens,
-    context_tokens_of, context_window,
+    context_window,
 };
 use crate::subagent::Subagents;
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
 
-/// One app's agents and the channel they all report on.
+/// One app's agents and the bus they report on.
 ///
-/// The main agent and every subagent it spawns share one event channel, so a
-/// subagent's turn reaches the frontend while the runtime is idle between
-/// turns of its own. `wake` is the separate signal that the subagent registry
-/// changed, which is cheap to send and never carries a payload the runtime
-/// could get stale.
+/// The driver and every subagent publish straight to `events`. `wake` is the
+/// separate signal that the subagent registry changed — cheap to send, and
+/// never carrying a payload the runtime could get stale.
 pub(crate) struct AppAgents {
     pub(crate) main: Agent,
     pub(crate) subagents: Arc<Subagents>,
-    pub(crate) events: mpsc::UnboundedSender<AgentEventEnvelope>,
-    pub(crate) event_rx: mpsc::UnboundedReceiver<AgentEventEnvelope>,
+    pub(crate) events: EventBus,
     pub(crate) wake_rx: mpsc::UnboundedReceiver<()>,
 }
 
@@ -58,9 +54,6 @@ pub(crate) enum Control {
 pub(crate) struct Runtime {
     pub(crate) agent: Agent,
     pub(crate) subagents: Arc<Subagents>,
-    /// Every agent's events, drained whether or not a turn of our own runs.
-    pub(crate) event_rx: mpsc::UnboundedReceiver<AgentEventEnvelope>,
-    pub(crate) events_tx: mpsc::UnboundedSender<AgentEventEnvelope>,
     /// "The subagent registry changed"; the snapshot is read on demand.
     pub(crate) wake_rx: mpsc::UnboundedReceiver<()>,
     /// How many queued prompts went unsent when the app shut down, for the
@@ -98,7 +91,6 @@ impl Runtime {
         session: Option<SessionStore>,
         config: AppConfig,
         user_config_path: Option<PathBuf>,
-        events: EventBus,
         state: AppState,
         state_tx: watch::Sender<AppState>,
         unsent: Arc<AtomicUsize>,
@@ -113,15 +105,13 @@ impl Runtime {
         let AppAgents {
             main: agent,
             subagents,
-            events: events_tx,
-            event_rx,
+            events,
             wake_rx,
         } = agents;
         Self {
             agent,
             subagents,
-            event_rx,
-            events_tx,
+            events,
             wake_rx,
             unsent,
             router,
@@ -131,7 +121,6 @@ impl Runtime {
             session,
             config,
             user_config_path,
-            events,
             slash: SlashRegistry::with_builtin(),
             policy,
             subagent_revision: 0,
@@ -144,9 +133,8 @@ impl Runtime {
     async fn run(mut self, mut rx: mpsc::UnboundedReceiver<AppCommand>) {
         self.bootstrap().await;
         loop {
-            // Idle turns still have to serve subagents: their events must
-            // reach the frontend and their registry changes must be mirrored
-            // even when no turn of ours is running.
+            // Subagent events go straight to the bus. A wake still has to be
+            // mirrored into state while no turn of ours is running.
             let cmd = match self.pending.pop_front() {
                 Some(cmd) => cmd,
                 None => tokio::select! {
@@ -156,10 +144,6 @@ impl Runtime {
                     },
                     Some(()) = self.wake_rx.recv() => {
                         self.sync_subagents();
-                        continue;
-                    }
-                    Some(event) = self.event_rx.recv() => {
-                        self.on_agent_event(event);
                         continue;
                     }
                 },
@@ -195,12 +179,9 @@ impl Runtime {
                 self.stop_subagents();
                 Control::Continue
             }
-            AppCommand::Control(
-                ControlCommand::Cancel { .. }
-                | ControlCommand::RespondToolApproval { .. }
-                | ControlCommand::RespondLoopLimit { .. }
-                | ControlCommand::RespondQuestion { .. },
-            ) => Control::Continue,
+            AppCommand::Control(ControlCommand::Cancel { .. } | ControlCommand::Respond { .. }) => {
+                Control::Continue
+            }
             AppCommand::Control(ControlCommand::Rewind) => {
                 self.rewind();
                 Control::Continue
@@ -263,26 +244,30 @@ impl Runtime {
         self.publish();
     }
 
-    pub(crate) fn emit(&mut self, kind: AppEventKind) {
+    pub(crate) fn emit(&self, kind: AppEventKind) {
         self.events.emit(kind);
     }
 
-    pub(crate) fn emit_state(&mut self, change: StateChange) {
+    pub(crate) fn emit_state(&self, change: StateChange) {
         self.events.emit_state(change);
     }
 
-    pub(crate) fn emit_error(&mut self, message: impl Into<String>) {
+    pub(crate) fn emit_error(&self, message: impl Into<String>) {
         self.events.emit_error(message);
     }
 
-    /// Refresh the context fields from the agent and notify subscribers.
+    /// Refresh the context fields from the agent. Only a window that moved is
+    /// worth telling a frontend about: prompt-side tokens travel with the
+    /// turn's own usage reports, and the model is the one thing the window
+    /// follows.
     fn emit_context_changed(&mut self) {
         self.state.context_tokens = context_tokens(&self.agent);
-        self.state.context_window = context_window(&self.agent);
-        self.emit_state(StateChange::ContextChanged {
-            tokens: self.state.context_tokens,
-            window: self.state.context_window,
-        });
+        publish_context_window(
+            &mut self.state,
+            &self.state_tx,
+            context_window(&self.agent),
+            &self.events,
+        );
     }
 
     fn should_auto_compact(&self) -> bool {
@@ -374,24 +359,13 @@ impl Runtime {
     }
 
     fn stop_subagent(&mut self, id: AgentId) {
-        stop_subagent(&self.subagents, &mut self.events, id);
+        stop_subagent(&self.subagents, &self.events, id);
         self.sync_subagents();
     }
 
     pub(crate) fn stop_subagents(&mut self) {
-        stop_subagents(&self.subagents, &mut self.events);
+        stop_subagents(&self.subagents, &self.events);
         self.sync_subagents();
-    }
-
-    fn on_agent_event(&mut self, event: AgentEventEnvelope) {
-        let main = self.agent.id();
-        forward_agent_event(
-            main,
-            event,
-            &mut self.events,
-            &mut self.state,
-            &self.state_tx,
-        );
     }
 
     pub(crate) fn sync_subagents(&mut self) {
@@ -399,7 +373,7 @@ impl Runtime {
             &self.subagents,
             &mut self.subagent_revision,
             &mut self.state,
-            &mut self.events,
+            &self.events,
             &self.state_tx,
         );
     }
@@ -671,7 +645,7 @@ impl Runtime {
     }
 
     fn save_provider_overlay(&mut self, overlay: &ProviderConfig) -> Option<PathBuf> {
-        save_provider_overlay(self.user_config_path.as_deref(), overlay, &mut self.events)
+        save_provider_overlay(self.user_config_path.as_deref(), overlay, &self.events)
     }
 }
 
@@ -679,6 +653,23 @@ struct ModelSwitchOutcome {
     model: String,
     reasoning_effort: Option<ReasoningEffort>,
     overlay: ProviderConfig,
+}
+
+/// Publishes the active model's context window, but only when it moved: a
+/// frontend already holding the window learns nothing from a repeat, and
+/// prompt-side tokens travel with the turn's usage reports instead.
+fn publish_context_window(
+    state: &mut AppState,
+    state_tx: &watch::Sender<AppState>,
+    window: Option<u32>,
+    events: &EventBus,
+) {
+    if window == state.context_window {
+        return;
+    }
+    state.context_window = window;
+    let _ = state_tx.send(state.clone());
+    events.emit_state(StateChange::ContextWindowChanged { window });
 }
 
 /// Resolves a `/model` switch against `router`/`config` without touching
@@ -729,9 +720,11 @@ fn command_kind(cmd: &AppCommand) -> &'static str {
         AppCommand::Prompt(_) => "prompt",
         AppCommand::Control(ControlCommand::Cancel { .. }) => "cancel",
         AppCommand::Control(ControlCommand::SetMode { .. }) => "set_mode",
-        AppCommand::Control(ControlCommand::RespondToolApproval { .. }) => "tool_approval",
-        AppCommand::Control(ControlCommand::RespondLoopLimit { .. }) => "loop_limit",
-        AppCommand::Control(ControlCommand::RespondQuestion { .. }) => "question",
+        AppCommand::Control(ControlCommand::Respond { response, .. }) => match response {
+            UserResponse::Approval(_) => "tool_approval",
+            UserResponse::LoopLimit(_) => "loop_limit",
+            UserResponse::Answer(_) => "question",
+        },
         AppCommand::Control(ControlCommand::Rewind) => "rewind",
         AppCommand::Control(ControlCommand::StopSubagent { .. }) => "stop_subagent",
         AppCommand::Control(ControlCommand::StopSubagents) => "stop_subagents",
@@ -754,7 +747,7 @@ fn format_model_switched(model: &str, reasoning_effort: Option<ReasoningEffort>)
 fn save_provider_overlay(
     user_config_path: Option<&Path>,
     overlay: &ProviderConfig,
-    events: &mut EventBus,
+    events: &EventBus,
 ) -> Option<PathBuf> {
     let path = user_config_path?;
     match AppConfig::save_provider_at(path, overlay) {
@@ -782,13 +775,13 @@ pub(crate) fn report_unsent(pending: &VecDeque<AppCommand>, unsent: &AtomicUsize
     unsent.store(count, Ordering::Relaxed);
 }
 
-fn stop_subagent(subagents: &Subagents, events: &mut EventBus, id: AgentId) {
+fn stop_subagent(subagents: &Subagents, events: &EventBus, id: AgentId) {
     if !subagents.cancel(id) {
         events.emit_error(format!("no subagent {id:?} to stop"));
     }
 }
 
-fn stop_subagents(subagents: &Subagents, events: &mut EventBus) {
+fn stop_subagents(subagents: &Subagents, events: &EventBus) {
     let stopped = subagents.active();
     subagents.cancel_all();
     events.emit(AppEventKind::Notification {
@@ -804,7 +797,7 @@ fn sync_subagents(
     subagents: &Subagents,
     revision: &mut u64,
     state: &mut AppState,
-    events: &mut EventBus,
+    events: &EventBus,
     state_tx: &watch::Sender<AppState>,
 ) {
     let current = subagents.revision();
@@ -820,43 +813,6 @@ fn sync_subagents(
     });
 }
 
-/// Forwards one agent event to the frontend.
-///
-/// Only the conversation driver's own events may move app state: a subagent's
-/// usage is its own, and its todo list, had it one, is not the user's. Every
-/// event still reaches subscribers, which is how a view can show a subagent's
-/// transcript.
-fn forward_agent_event(
-    main: AgentId,
-    event: AgentEventEnvelope,
-    events: &mut EventBus,
-    state: &mut AppState,
-    state_tx: &watch::Sender<AppState>,
-) {
-    if event.agent_id == main {
-        match &event.event {
-            AgentEvent::TodosChanged { todos } => {
-                state.todos = todos.clone();
-                let _ = state_tx.send(state.clone());
-                events.emit_state(StateChange::TodosChanged {
-                    todos: todos.clone(),
-                });
-            }
-            AgentEvent::Usage { usage } => {
-                state.last_turn_usage = *usage;
-                state.context_tokens = context_tokens_of(usage);
-                let _ = state_tx.send(state.clone());
-                events.emit_state(StateChange::ContextChanged {
-                    tokens: state.context_tokens,
-                    window: state.context_window,
-                });
-            }
-            _ => {}
-        }
-    }
-    events.emit(AppEventKind::Agent(event));
-}
-
 pub(crate) fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
     agent.set_todos(TodoList::restore(prior, agent.history()));
 }
@@ -870,8 +826,7 @@ pub(crate) fn spawn_runtime(
     user_config_path: Option<PathBuf>,
 ) -> App {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let events = EventBus::new();
-    let subscribers = events.subscribers();
+    let subscribers = agents.events.subscribers();
     let slash_commands = SlashRegistry::with_builtin().commands();
     let provider = config
         .active_provider_config()
@@ -899,7 +854,6 @@ pub(crate) fn spawn_runtime(
         session_store,
         config,
         user_config_path,
-        events,
         state,
         state_tx,
         Arc::clone(&unsent),

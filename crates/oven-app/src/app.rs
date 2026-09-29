@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
 
 use oven_agent::AgentError;
-use oven_agent::{AgentEvent, LoopLimitDecision, TodoList, TurnEvent};
+use oven_agent::{AgentEvent, LoopLimitDecision, TodoList, TurnEvent, UserResponse};
 use oven_llm::{Message, Usage};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -219,9 +219,9 @@ impl App {
                         return Err(AppError::Runtime(error.message));
                     }
                     AgentEvent::Turn(TurnEvent::LoopLimitReached { request_id, .. }) => {
-                        let _ = self.send(AppCommand::Control(ControlCommand::RespondLoopLimit {
+                        let _ = self.send(AppCommand::Control(ControlCommand::Respond {
                             request_id,
-                            decision: LoopLimitDecision::Exit,
+                            response: UserResponse::LoopLimit(LoopLimitDecision::Exit),
                         }));
                     }
                     _ => {}

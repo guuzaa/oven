@@ -17,7 +17,7 @@ use crate::AppError;
 use crate::config::AppConfig;
 use crate::config::ProviderConfig;
 use crate::dirs;
-use crate::event::AppId;
+use crate::event::{AppId, EventBus};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
@@ -185,9 +185,9 @@ impl AppBuilder {
     }
 
     /// Compose one app's agents: the conversation driver, the subagents it
-    /// may spawn, and the single event channel they all report on. Building
-    /// them together is what lets a subagent share the driver's router, and
-    /// what lets the runtime drain subagent events while its own turn is idle.
+    /// may spawn, and the bus they report on. Building them together is what
+    /// lets a subagent share the driver's router and publish while the
+    /// runtime is busy with a turn of its own.
     pub(crate) async fn build_agent_with_router(
         &self,
         router: Router,
@@ -205,7 +205,7 @@ impl AppBuilder {
             &self.instructions,
             self.skills.merged_system_prompt(),
         );
-        let (events, event_rx) = mpsc::unbounded_channel();
+        let events = EventBus::new();
         let (wake, wake_rx) = mpsc::unbounded_channel();
         // `wake` goes to the supervisor, which keeps the channel open; the
         // runtime only ever listens on it.
@@ -245,7 +245,6 @@ impl AppBuilder {
             main,
             subagents,
             events,
-            event_rx,
             wake_rx,
         })
     }

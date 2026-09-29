@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::KeyEvent;
 use oven_app::{
     AgentEvent, AgentMode, AppEvent, AppEventKind, CompactionEvent, StateChange, StateEvent,
-    TurnEvent,
+    TurnEvent, context_tokens_of,
 };
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
@@ -228,7 +228,10 @@ impl Component for StatusBar {
         match &ev.kind {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Turn(TurnEvent::Completed { usage, .. })
-                | AgentEvent::Usage { usage } => self.usage = *usage,
+                | AgentEvent::Usage { usage } => {
+                    self.usage = *usage;
+                    self.context_tokens = context_tokens_of(usage);
+                }
                 _ => {}
             },
             AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
@@ -246,10 +249,7 @@ impl Component for StatusBar {
                     self.model.clone_from(model);
                     self.effort = *reasoning_effort;
                 }
-                StateChange::ContextChanged { tokens, window } => {
-                    self.context_tokens = *tokens;
-                    self.context_window = *window;
-                }
+                StateChange::ContextWindowChanged { window } => self.context_window = *window,
                 _ => {}
             },
             AppEventKind::Compaction(event) => {
@@ -525,6 +525,28 @@ mod tests {
             usage: rewound,
         }));
         assert_eq!(bar.usage, rewound);
+    }
+
+    #[test]
+    fn the_context_gauge_follows_the_reported_usage() {
+        let mut bar = bar().with_context(0, Some(100_000));
+        bar.on_event(&agent_event(AgentEvent::Usage { usage: usage() }));
+        assert_eq!(
+            bar.context_label().as_deref(),
+            Some("ctx 1%"),
+            "prompt-side tokens are the input and the cache reads (1989 of 100k)"
+        );
+
+        bar.on_event(&AppEvent::state_changed(
+            StateChange::ContextWindowChanged {
+                window: Some(1_989),
+            },
+        ));
+        assert_eq!(
+            bar.context_label().as_deref(),
+            Some("ctx 100%"),
+            "the window is the frontend's own, not the usage report's"
+        );
     }
 
     #[test]

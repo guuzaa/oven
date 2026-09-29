@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, TurnId};
+use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, EventSink, TurnId};
 use tokio::sync::mpsc;
 
 use crate::state::{StateChange, StateEvent};
@@ -18,7 +18,6 @@ impl AppId {
 
 #[derive(Debug, Clone)]
 pub struct AppEvent {
-    pub seq: u64,
     pub kind: AppEventKind,
 }
 
@@ -73,7 +72,7 @@ pub enum ShellEvent {
 
 impl AppEvent {
     pub fn new(kind: AppEventKind) -> Self {
-        Self { seq: 0, kind }
+        Self { kind }
     }
 
     pub fn notification(text: impl Into<String>) -> Self {
@@ -91,10 +90,7 @@ impl AppEvent {
     }
 
     pub fn state_changed(change: crate::state::StateChange) -> Self {
-        Self::new(AppEventKind::StateChanged(StateEvent {
-            revision: 0,
-            change,
-        }))
+        Self::new(AppEventKind::StateChanged(StateEvent { change }))
     }
 
     pub fn shell(event: ShellEvent) -> Self {
@@ -115,7 +111,6 @@ impl AppEvent {
 
     pub fn agent_with(agent_id: AgentId, turn_id: TurnId, event: AgentEvent) -> Self {
         Self::new(AppEventKind::Agent(AgentEventEnvelope {
-            seq: 0,
             agent_id,
             turn_id,
             event,
@@ -125,18 +120,47 @@ impl AppEvent {
 
 pub(crate) type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<AppEvent>>>>;
 
+/// An agent's report, published straight to the frontend.
+///
+/// The conversation driver and every subagent use one. A subagent's events
+/// reach the frontend while the runtime is busy driving a turn of its own,
+/// or idle between turns, without the runtime forwarding them.
+pub(crate) struct BusSink {
+    bus: EventBus,
+    agent_id: AgentId,
+    turn_id: TurnId,
+}
+
+impl BusSink {
+    pub(crate) fn new(bus: EventBus, agent_id: AgentId, turn_id: TurnId) -> Self {
+        Self {
+            bus,
+            agent_id,
+            turn_id,
+        }
+    }
+}
+
+impl EventSink for BusSink {
+    fn emit(&mut self, event: AgentEvent) {
+        self.bus.emit_agent(self.agent_id, self.turn_id, event);
+    }
+}
+
+/// Every event a frontend can see, fanning out to each subscriber.
+///
+/// Cloneable and shareable on purpose: a turn's own sink emits into the bus
+/// while the runtime keeps handing commands to the same one, and neither has
+/// to borrow it exclusively to do so.
+#[derive(Clone)]
 pub(crate) struct EventBus {
     subscribers: Subscribers,
-    seq: u64,
-    state_rev: u64,
 }
 
 impl EventBus {
     pub(crate) fn new() -> Self {
         Self {
             subscribers: Arc::new(Mutex::new(Vec::new())),
-            seq: 0,
-            state_rev: 0,
         }
     }
 
@@ -144,12 +168,8 @@ impl EventBus {
         self.subscribers.clone()
     }
 
-    pub(crate) fn emit(&mut self, kind: AppEventKind) {
-        self.seq += 1;
-        let event = AppEvent {
-            seq: self.seq,
-            kind,
-        };
+    pub(crate) fn emit(&self, kind: AppEventKind) {
+        let event = AppEvent { kind };
         let mut subscribers = self
             .subscribers
             .lock()
@@ -159,19 +179,15 @@ impl EventBus {
 
     /// Emits an agent event the runtime raises itself, rather than one it
     /// forwards from the agent's own event channel.
-    pub(crate) fn emit_agent(&mut self, agent_id: AgentId, turn_id: TurnId, event: AgentEvent) {
+    pub(crate) fn emit_agent(&self, agent_id: AgentId, turn_id: TurnId, event: AgentEvent) {
         self.emit(AppEvent::agent_with(agent_id, turn_id, event).kind);
     }
 
-    pub(crate) fn emit_state(&mut self, change: StateChange) {
-        self.state_rev += 1;
-        self.emit(AppEventKind::StateChanged(StateEvent {
-            revision: self.state_rev,
-            change,
-        }));
+    pub(crate) fn emit_state(&self, change: StateChange) {
+        self.emit(AppEventKind::StateChanged(StateEvent { change }));
     }
 
-    pub(crate) fn emit_error(&mut self, message: impl Into<String>) {
+    pub(crate) fn emit_error(&self, message: impl Into<String>) {
         let message = message.into();
         tracing::warn!(error = %message, "app error");
         self.emit(AppEventKind::Error { message });

@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use oven_agent::{
-    Agent, AgentId, AgentMode, ApprovalRequestId, LoopLimitRequestId, NodeInfo, Question,
-    QuestionRequestId, TodoList, ToolCallId, ToolView, TurnId,
-};
+use oven_agent::{Agent, AgentId, AgentMode, NodeInfo, TodoList, TurnId};
 use oven_llm::{Message, ModelId, Provider, ReasoningEffort, Router, Usage};
 
 use crate::config::ProviderConfig;
@@ -78,7 +75,7 @@ pub(crate) fn context_tokens(agent: &Agent) -> u32 {
 }
 
 /// Prompt-side tokens (input + cache reads) a usage report accounts for.
-pub(crate) fn context_tokens_of(usage: &Usage) -> u32 {
+pub fn context_tokens_of(usage: &Usage) -> u32 {
     usage.input_tokens.saturating_add(usage.cache_read_tokens)
 }
 
@@ -96,37 +93,16 @@ pub(crate) fn context_window(agent: &Agent) -> Option<u32> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingToolApproval {
-    pub request_id: ApprovalRequestId,
-    pub call_id: ToolCallId,
-    pub name: String,
-    pub view: ToolView,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingQuestion {
-    pub request_id: QuestionRequestId,
-    pub question: Question,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppPhase {
     Idle,
     Running {
         turn_id: TurnId,
     },
-    AwaitingToolApproval {
+    /// The turn is blocked on the user: a tool approval, the loop limit or a
+    /// question. What it is waiting for reaches a frontend as the agent event
+    /// that announced it.
+    Awaiting {
         turn_id: TurnId,
-        request: PendingToolApproval,
-    },
-    AwaitingLoopLimit {
-        turn_id: TurnId,
-        request_id: LoopLimitRequestId,
-        max_iters: usize,
-    },
-    AwaitingAnswer {
-        turn_id: TurnId,
-        request: PendingQuestion,
     },
     Cancelling {
         turn_id: TurnId,
@@ -138,9 +114,7 @@ impl AppPhase {
     pub fn turn_id(&self) -> Option<TurnId> {
         match self {
             Self::Running { turn_id }
-            | Self::AwaitingToolApproval { turn_id, .. }
-            | Self::AwaitingLoopLimit { turn_id, .. }
-            | Self::AwaitingAnswer { turn_id, .. }
+            | Self::Awaiting { turn_id }
             | Self::Cancelling { turn_id } => Some(*turn_id),
             Self::Idle | Self::ShuttingDown => None,
         }
@@ -153,11 +127,7 @@ impl AppPhase {
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            Self::Running { .. }
-                | Self::AwaitingToolApproval { .. }
-                | Self::AwaitingLoopLimit { .. }
-                | Self::AwaitingAnswer { .. }
-                | Self::Cancelling { .. }
+            Self::Running { .. } | Self::Awaiting { .. } | Self::Cancelling { .. }
         )
     }
 }
@@ -169,7 +139,6 @@ pub struct SessionState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateEvent {
-    pub revision: u64,
     pub change: StateChange,
 }
 
@@ -209,8 +178,10 @@ pub enum StateChange {
     UsageChanged {
         usage: Usage,
     },
-    ContextChanged {
-        tokens: u32,
+    /// The active model's context window. Prompt-side tokens are not part of
+    /// it: those belong to the turn's usage reports, which reach a frontend
+    /// as `AgentEvent::Usage`.
+    ContextWindowChanged {
         window: Option<u32>,
     },
     ProviderChanged {

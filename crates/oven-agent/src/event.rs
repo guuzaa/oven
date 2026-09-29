@@ -1,15 +1,13 @@
 use oven_llm::Usage;
 
-use crate::approval::{ApprovalRequestId, LoopLimitRequestId};
 use crate::error::AgentError;
 use crate::identity::{AgentId, ToolCallId, TurnId};
-use crate::question::{Question, QuestionRequestId};
+use crate::interaction::{Question, UserRequestId};
 use crate::todo::TodoList;
 use crate::tools::ToolView;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentEventEnvelope {
-    pub seq: u64,
     pub agent_id: AgentId,
     pub turn_id: TurnId,
     pub event: AgentEvent,
@@ -48,7 +46,7 @@ pub enum TurnEvent {
         duration_ms: u64,
     },
     LoopLimitReached {
-        request_id: LoopLimitRequestId,
+        request_id: UserRequestId,
         max_iters: usize,
     },
 }
@@ -83,7 +81,7 @@ pub enum StreamEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolEvent {
     ApprovalRequested {
-        request_id: ApprovalRequestId,
+        request_id: UserRequestId,
         call_id: ToolCallId,
         name: String,
         view: ToolView,
@@ -93,12 +91,11 @@ pub enum ToolEvent {
         name: String,
         view: ToolView,
     },
-    /// A tool is waiting for the user to answer `question`. A question
-    /// originates inside the tool call that asked it, so this event is
-    /// emitted by the frontend that owns the answer channel rather than by
-    /// the agent loop.
+    /// A tool is waiting for the user to answer `question`. The runtime
+    /// projects this from the request, as it does for an approval and the
+    /// loop limit: the agent loop does not emit user prompts itself.
     QuestionAsked {
-        request_id: QuestionRequestId,
+        request_id: UserRequestId,
         question: Question,
     },
     OutputDelta {
