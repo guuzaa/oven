@@ -1,14 +1,15 @@
-//! Everything a running turn asks of the user, and the one channel that
-//! carries it. A tool approval, the loop-limit prompt and a tool's question
+//! Everything a running turn asks of the user, and the one sink that
+//! receives it. A tool approval, the loop-limit prompt and a tool's question
 //! are the same exchange — a request out, exactly one reply back — so they
-//! share one id type, one channel and one response enum.
+//! share one id type, one sink and one response enum.
 
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::identity::ToolCallId;
+use crate::identity::{ToolCallId, TurnId};
 use crate::tools::ToolView;
 
 pub const NO_USER_TO_ANSWER: &str = "no user is available to answer the question";
@@ -82,7 +83,18 @@ pub struct PendingRequest {
     pub request: UserRequest,
 }
 
-pub type UserRequestSender = mpsc::UnboundedSender<PendingRequest>;
+/// Where a turn puts what it asks of the user.
+pub trait RequestSink: Debug + Send + Sync {
+    /// Takes `request` on behalf of `turn_id`. `false` means nobody took it,
+    /// so no reply will ever come.
+    fn submit(&self, turn_id: TurnId, request: PendingRequest) -> bool;
+}
+
+impl RequestSink for mpsc::UnboundedSender<PendingRequest> {
+    fn submit(&self, _turn_id: TurnId, request: PendingRequest) -> bool {
+        self.send(request).is_ok()
+    }
+}
 
 /// What the user answered with.
 #[derive(Debug, Clone, PartialEq, Eq)]

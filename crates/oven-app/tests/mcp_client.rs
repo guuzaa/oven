@@ -18,9 +18,11 @@ fn turn() -> TurnContext {
     TurnContext::new(
         oven_agent::TurnId::next(),
         CancellationToken::new(),
-        oven_agent::AgentMode::Agent,
-        oven_llm::ModelId::new("default"),
-        None,
+        oven_agent::Selection::new(
+            oven_agent::AgentMode::Agent,
+            oven_llm::ModelId::new("default"),
+            None,
+        ),
     )
 }
 

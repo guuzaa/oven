@@ -8,9 +8,9 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, AgentId, AnswerResponse, App, AppCommand, AppEvent, AppEventKind, ApprovalDecision,
-    CompactionEvent, ControlCommand, LoopLimitDecision, NodeInfo, ShellEvent, StateChange,
-    StateEvent, SubagentEvent, ToolEvent, TurnEvent, UserRequestId, UserResponse, invokes_command,
+    AgentEvent, AgentId, AnswerResponse, App, AppEvent, AppEventKind, ApprovalDecision,
+    CompactionEvent, Input, LoopLimitDecision, NodeInfo, ShellEvent, StateChange, StateEvent,
+    SubagentEvent, ToolEvent, TurnEvent, UserRequestId, UserResponse,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -23,7 +23,6 @@ use crate::components::input::{InputView, Overlay, display_user_input};
 use crate::components::paste_burst::{self, Burst};
 use crate::components::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::components::queue;
-use crate::components::shell;
 use crate::components::status::StatusBar;
 use crate::components::todos::TodosWidget;
 use crate::components::transcript::Transcript;
@@ -136,7 +135,7 @@ pub struct Ui {
 impl Ui {
     pub fn new(app: App) -> Self {
         let events = app.subscribe();
-        let slash_commands = app.slash_commands().to_vec();
+        let slash_commands = app.slash_commands();
         let model = app.model();
         let provider = app.provider_config();
         let root = app
@@ -428,12 +427,10 @@ impl Ui {
         let texts = std::mem::take(&mut self.pending);
         self.state.busy = true;
         let remaining = send_each(texts, |text| {
-            if self.app.send(AppCommand::Prompt(text.to_string())).is_ok() {
-                self.push_submitted(text);
-                true
-            } else {
-                false
-            }
+            self.app
+                .submit(text)
+                .inspect(|input| self.push_submitted(input))
+                .is_ok()
         });
         if !remaining.is_empty() {
             let mut rest = remaining;
@@ -445,11 +442,13 @@ impl Ui {
 
     /// A submitted turn enters the transcript before response events, so its
     /// prompt and response always share one scroll coordinate system.
-    fn push_submitted(&mut self, text: &str) {
-        match classify_prompt_for_display(text) {
-            PromptDisplay::User(text) => self.transcript.start_user_turn(&text),
-            PromptDisplay::Shell(command) => self.transcript.start_shell_turn(&command),
-            PromptDisplay::Quiet => {}
+    fn push_submitted(&mut self, input: &Input) {
+        match input {
+            Input::Chat(text) => self.transcript.start_user_turn(&display_user_input(text)),
+            Input::Shell(command) if !command.is_empty() => {
+                self.transcript.start_shell_turn(command);
+            }
+            Input::Shell(_) | Input::Slash { .. } | Input::Rewind => {}
         }
     }
 
@@ -462,17 +461,13 @@ impl Ui {
             self.send_cancel();
         }
         if !self.agents.is_empty() {
-            self.control(ControlCommand::StopSubagents);
+            self.app.stop_subagents();
         }
-    }
-
-    fn control(&self, command: ControlCommand) {
-        let _ = self.app.send(AppCommand::Control(command));
     }
 
     fn send_cancel(&self) {
         if let Some(turn_id) = self.app.state().phase.turn_id() {
-            self.control(ControlCommand::Cancel { turn_id });
+            self.app.cancel(turn_id);
         }
     }
 
@@ -493,10 +488,8 @@ impl Ui {
                     } else {
                         ApprovalDecision::Rejected
                     };
-                    self.control(ControlCommand::Respond {
-                        request_id: *request_id,
-                        response: UserResponse::Approval(decision),
-                    });
+                    self.app
+                        .respond(*request_id, UserResponse::Approval(decision));
                     PromptFlow::Closed
                 }
                 ChoicePopupAction::Cancel => {
@@ -512,10 +505,8 @@ impl Ui {
                     } else {
                         LoopLimitDecision::Exit
                     };
-                    self.control(ControlCommand::Respond {
-                        request_id: *request_id,
-                        response: UserResponse::LoopLimit(decision),
-                    });
+                    self.app
+                        .respond(*request_id, UserResponse::LoopLimit(decision));
                     PromptFlow::Closed
                 }
                 ChoicePopupAction::Cancel => {
@@ -560,10 +551,7 @@ impl Ui {
     }
 
     fn respond_question(&self, request_id: UserRequestId, response: AnswerResponse) {
-        self.control(ControlCommand::Respond {
-            request_id,
-            response: UserResponse::Answer(response),
-        });
+        self.app.respond(request_id, UserResponse::Answer(response));
     }
 
     /// Routes submitted text to the open question when it is waiting for a
@@ -631,9 +619,7 @@ impl Ui {
                 }
                 _ if is_mode_toggle(key) => {
                     self.state.mode = self.state.mode.toggle();
-                    self.control(ControlCommand::SetMode {
-                        mode: self.state.mode,
-                    });
+                    self.app.set_mode(self.state.mode);
                     KeyResult::Handled
                 }
                 KeyCode::Esc if self.input.overlay() == Overlay::None => self.handle_esc(esc_armed),
@@ -666,18 +652,18 @@ impl Ui {
                 if self.answer_question_with(&text) {
                     return false;
                 }
-                self.push_submitted(&text);
                 self.status.clear_reply();
                 self.input.clear();
                 self.state.busy = true;
-                if self.app.send(AppCommand::Prompt(text)).is_err() {
-                    self.state.busy = false;
+                match self.app.submit(&text) {
+                    Ok(input) => self.push_submitted(&input),
+                    Err(_) => self.state.busy = false,
                 }
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
                 if !self.answer_question_with(&text) {
-                    let _ = self.app.send(AppCommand::Prompt(text));
+                    let _ = self.app.submit(&text);
                 }
                 false
             }
@@ -700,7 +686,7 @@ impl Ui {
             }
             KeyCode::Char('x') if key.modifiers.is_empty() => {
                 if let Some(id) = self.focus {
-                    self.control(ControlCommand::StopSubagent { id });
+                    self.app.stop_subagent(id);
                 }
                 return KeyResult::Handled;
             }
@@ -772,11 +758,7 @@ impl Ui {
                 };
                 self.input.set_text(&text);
                 self.rewinding = true;
-                if self
-                    .app
-                    .send(AppCommand::Control(ControlCommand::Rewind))
-                    .is_err()
-                {
+                if self.app.rewind().is_err() {
                     self.rewinding = false;
                 }
                 KeyResult::Handled
@@ -875,24 +857,6 @@ fn active_agents(agents: &[NodeInfo]) -> usize {
         .iter()
         .filter(|agent| agent.status.is_active())
         .count()
-}
-
-/// Classifies submitted text by the kind of turn it starts. Control commands
-/// do not create transcript rows.
-enum PromptDisplay {
-    User(String),
-    Shell(String),
-    Quiet,
-}
-
-fn classify_prompt_for_display(text: &str) -> PromptDisplay {
-    if let Some(command) = shell::command(text) {
-        return PromptDisplay::Shell(command.to_string());
-    }
-    if invokes_command(text) {
-        return PromptDisplay::Quiet;
-    }
-    PromptDisplay::User(display_user_input(text))
 }
 
 fn is_mode_toggle(key: KeyEvent) -> bool {
@@ -1053,56 +1017,6 @@ mod tests {
         assert!(matches!(
             EscAction::new(None, false, false, false, None),
             EscAction::Ignore
-        ));
-    }
-
-    #[test]
-    fn classify_starts_user_turn_for_ordinary_text() {
-        assert!(matches!(
-            classify_prompt_for_display("why is the build slow?"),
-            PromptDisplay::User(text) if text == "why is the build slow?"
-        ));
-    }
-
-    #[test]
-    fn classify_starts_shell_turn_for_shell_commands() {
-        assert!(matches!(
-            classify_prompt_for_display("! ls -la"),
-            PromptDisplay::Shell(text) if text == "ls -la"
-        ));
-    }
-
-    #[test]
-    fn classify_starts_user_turn_for_unknown_slash_commands() {
-        assert!(matches!(
-            classify_prompt_for_display("/nope"),
-            PromptDisplay::User(text) if text == "/nope"
-        ));
-    }
-
-    #[test]
-    fn classify_keeps_control_commands_out_of_the_transcript() {
-        for text in [
-            "/clear",
-            "/compact",
-            "/exit",
-            "/model",
-            "/model gpt-4o high",
-            "/plan on",
-            "/setup name=deepseek api_key=sk-secret",
-        ] {
-            assert!(
-                matches!(classify_prompt_for_display(text), PromptDisplay::Quiet),
-                "{text} configures the runtime and produces no response"
-            );
-        }
-    }
-
-    #[test]
-    fn classified_setup_command_never_starts_a_turn() {
-        assert!(matches!(
-            classify_prompt_for_display("/setup name=deepseek api_key=sk-secret"),
-            PromptDisplay::Quiet
         ));
     }
 

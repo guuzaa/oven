@@ -121,78 +121,50 @@ impl SlashRegistry {
             .collect()
     }
 
-    pub fn parse_and_run(
-        &self,
-        cx: &mut CommandContext<'_>,
-        input: &str,
-    ) -> Result<CommandOutcome, AppError> {
-        let Some((name, args)) = split_command(input) else {
-            return Ok(CommandOutcome::Passthrough);
+    /// The registered command `input` invokes and its trimmed arguments, or
+    /// `None` when `input` is not a slash invocation or names an unknown
+    /// command. The one parser every entry point shares, so the registry
+    /// cannot disagree with itself about what counts as a command.
+    pub fn invocation<'a>(&self, input: &'a str) -> Option<(&'a str, &'a str)> {
+        let body = input.trim_start().strip_prefix('/')?;
+        let (name, args) = match body.split_once(char::is_whitespace) {
+            Some((name, rest)) => (name, rest.trim()),
+            None => (body, ""),
         };
-        let Some(command) = self.commands.iter().find(|c| c.name() == name) else {
-            return Ok(CommandOutcome::Passthrough);
-        };
-        command.execute(cx, args)
+        self.commands
+            .iter()
+            .any(|c| c.name() == name)
+            .then_some((name, args))
     }
 
-    /// Runs `input` with no driver, which succeeds only for commands that
+    pub fn run(
+        &self,
+        cx: &mut CommandContext<'_>,
+        name: &str,
+        args: &str,
+    ) -> Result<CommandOutcome, AppError> {
+        match self.commands.iter().find(|c| c.name() == name) {
+            Some(command) => command.execute(cx, args),
+            None => Ok(CommandOutcome::Passthrough),
+        }
+    }
+
+    /// Runs a command with no driver, which succeeds only for commands that
     /// never ask for one. `Ok(None)` means the command needs the driver, so
     /// the runtime should defer it until the running turn ends.
-    pub fn parse_and_run_shared(
+    pub fn run_shared(
         &self,
         subagents: &Subagents,
-        input: &str,
+        name: &str,
+        args: &str,
     ) -> Result<Option<CommandOutcome>, AppError> {
         let mut cx = CommandContext::shared(subagents);
-        match self.parse_and_run(&mut cx, input) {
+        match self.run(&mut cx, name, args) {
             Ok(CommandOutcome::Passthrough) | Err(AppError::AgentBusy) => Ok(None),
             Ok(outcome) => Ok(Some(outcome)),
             Err(error) => Err(error),
         }
     }
-
-    /// The arguments `input` passes to the command named `name`, or `None`
-    /// when `input` invokes no command or a different one. Lets the runtime
-    /// apply one specific command (like `/model`) while a turn holds the
-    /// driver, without a second parser for the same syntax.
-    pub fn args_of<'a>(&self, name: &str, input: &'a str) -> Option<&'a str> {
-        let (invoked, args) = split_command(input)?;
-        (invoked == name).then_some(args)
-    }
-
-    /// Returns the registered command name `input` invokes, without
-    /// executing it. Lets callers classify text as a control command
-    /// (e.g. to acknowledge it was queued) without needing `&mut Agent`.
-    pub fn recognized_name<'a>(&self, input: &'a str) -> Option<&'a str> {
-        let (name, _) = split_command(input)?;
-        self.commands
-            .iter()
-            .any(|c| c.name() == name)
-            .then_some(name)
-    }
-}
-
-/// Whether `text` invokes a builtin slash command: a control command that
-/// configures the runtime instead of sending a turn to the agent. Mirrors the
-/// dispatch `Runtime::start_turn` performs, so callers can classify composer
-/// text without executing anything.
-pub fn invokes_command(text: &str) -> bool {
-    SlashRegistry::with_builtin()
-        .recognized_name(text)
-        .is_some()
-}
-
-/// Splits a slash invocation into its command name and trimmed arguments,
-/// or `None` when `input` does not start a command. Every entry point that
-/// classifies input without executing it shares this one parser, so the
-/// registry cannot disagree with itself about what counts as a command.
-fn split_command(input: &str) -> Option<(&str, &str)> {
-    let body = input.trim_start().strip_prefix('/')?;
-    let (name, args) = match body.split_once(char::is_whitespace) {
-        Some((name, rest)) => (name, rest.trim()),
-        None => (body, ""),
-    };
-    Some((name, args))
 }
 
 impl Default for SlashRegistry {
@@ -256,30 +228,23 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_when_not_slash() {
-        let reg = SlashRegistry::with_builtin();
-        let outcome = with_context(|cx| reg.parse_and_run(cx, "hi there")).unwrap();
-        assert!(matches!(outcome, CommandOutcome::Passthrough));
-    }
-
-    #[test]
     fn passthrough_when_unknown_command() {
         let reg = SlashRegistry::with_builtin();
-        let outcome = with_context(|cx| reg.parse_and_run(cx, "/nope")).unwrap();
+        let outcome = with_context(|cx| reg.run(cx, "nope", "")).unwrap();
         assert!(matches!(outcome, CommandOutcome::Passthrough));
     }
 
     #[test]
-    fn recognized_name_matches_registered_command_with_or_without_args() {
+    fn invocation_splits_name_from_trimmed_args() {
         let reg = SlashRegistry::with_builtin();
-        assert_eq!(reg.recognized_name("/model gpt-4o"), Some("model"));
-        assert_eq!(reg.recognized_name("/model"), Some("model"));
-        assert_eq!(reg.recognized_name("/nope"), None);
-        assert_eq!(reg.recognized_name("hello there"), None);
+        assert_eq!(reg.invocation("/model gpt-4o"), Some(("model", "gpt-4o")));
+        assert_eq!(reg.invocation("  /plan   on  "), Some(("plan", "on")));
+        assert_eq!(reg.invocation("/model"), Some(("model", "")));
     }
 
     #[test]
-    fn invokes_command_recognizes_only_registered_commands() {
+    fn invocation_recognizes_only_registered_commands() {
+        let reg = SlashRegistry::with_builtin();
         for text in [
             "/clear",
             "/compact",
@@ -292,10 +257,16 @@ mod tests {
             "/agents",
             "/agents stop all",
         ] {
-            assert!(invokes_command(text), "{text} must be a control command");
+            assert!(
+                reg.invocation(text).is_some(),
+                "{text} must be a control command"
+            );
         }
         for text in ["hello there", "/nope", "! ls", " /nope args"] {
-            assert!(!invokes_command(text), "{text} must reach the agent");
+            assert!(
+                reg.invocation(text).is_none(),
+                "{text} must reach the agent"
+            );
         }
     }
 
@@ -327,9 +298,10 @@ mod tests {
         });
         let subagents = Subagents::bare(agent.id(), agent.router_handle());
         let outcome = reg
-            .parse_and_run(
+            .run(
                 &mut CommandContext::with_agent(&mut agent, &subagents),
-                "/clear",
+                "clear",
+                "",
             )
             .unwrap();
         assert!(matches!(outcome, CommandOutcome::Cleared));
@@ -340,7 +312,7 @@ mod tests {
     #[test]
     fn exit_returns_exit_outcome() {
         let reg = SlashRegistry::with_builtin();
-        let outcome = with_context(|cx| reg.parse_and_run(cx, "/exit")).unwrap();
+        let outcome = with_context(|cx| reg.run(cx, "exit", "")).unwrap();
         assert!(matches!(outcome, CommandOutcome::Exit));
     }
 
@@ -364,7 +336,7 @@ mod tests {
         }
         let mut reg = SlashRegistry::new();
         reg.register(Box::new(Echo));
-        let out = with_context(|cx| reg.parse_and_run(cx, "/echo   hello world")).unwrap();
+        let out = with_context(|cx| reg.run(cx, "echo", "hello world")).unwrap();
         match out {
             CommandOutcome::Reply(s) => assert_eq!(s, "hello world"),
             _ => panic!("expected Reply"),

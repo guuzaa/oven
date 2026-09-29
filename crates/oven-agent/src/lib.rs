@@ -9,6 +9,7 @@ mod matching;
 mod mode;
 mod prompt_template;
 mod retry;
+mod selection;
 mod sink;
 mod skills;
 mod subagent;
@@ -27,13 +28,14 @@ pub use history::{History, Record, SessionMeta};
 pub use identity::{AgentId, ToolCallId, TurnId};
 pub use interaction::{
     AnswerResponse, ApprovalDecision, LoopLimitDecision, NO_USER_TO_ANSWER, PendingRequest,
-    Question, QuestionOption, UserRequest, UserRequestId, UserRequestSender, UserResponse,
+    Question, QuestionOption, RequestSink, UserRequest, UserRequestId, UserResponse,
 };
 pub use mode::{AgentMode, ToolAccess};
 pub use prompt_template::{
     InstructionDoc, InstructionScope, load_instructions, subagent_preamble, system_prompt,
 };
 pub use retry::RetryingProvider;
+pub use selection::{ModelSelection, Selection};
 pub use sink::{EventSink, NullSink, VecEventSink};
 pub use skills::{Skill, SkillRegistry};
 pub use subagent::{

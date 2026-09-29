@@ -1,4 +1,3 @@
-use crate::command::{AppCommand, ControlCommand};
 use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
 use crate::session::{Session, canonical_root};
@@ -13,7 +12,9 @@ use tokio::sync::oneshot;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use oven_agent::{Agent, AgentEvent, AgentEventEnvelope, AgentMode, Record, TurnEvent, TurnId};
+use oven_agent::{
+    Agent, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, Record, TurnEvent, TurnId,
+};
 use oven_llm::{
     ContentBlock, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request,
     Response, Role, Router, StopReason, StreamEvent, Usage,
@@ -445,18 +446,15 @@ async fn handle_exposes_slash_commands() {
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
-    let names: Vec<&str> = handle
-        .slash_commands()
-        .iter()
-        .map(|(n, _)| n.as_str())
-        .collect();
+    let commands = handle.slash_commands();
+    let names: Vec<&str> = commands.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(
         names,
         [
             "clear", "compact", "exit", "model", "setup", "plan", "agents"
         ]
     );
-    assert!(handle.slash_commands().iter().all(|(_, d)| !d.is_empty()));
+    assert!(commands.iter().all(|(_, d)| !d.is_empty()));
 
     handle.shutdown().await;
 }
@@ -572,7 +570,7 @@ async fn slash_exit_emits_exit_event() {
     let handle = spawn_app(&app, Box::new(mock)).await;
 
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt("/exit".into())).unwrap();
+    handle.submit("/exit").unwrap();
 
     let mut saw_exit = false;
     while let Some(ev) = rx.recv().await {
@@ -665,9 +663,7 @@ async fn usage_reaches_subscribers_before_the_turn_completes() {
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![first, last]))).await;
 
     let mut rx = handle.subscribe();
-    handle
-        .send(AppCommand::Prompt("read note.txt".into()))
-        .unwrap();
+    handle.submit("read note.txt").unwrap();
     let mut events = Vec::new();
     while let Some(ev) = rx.recv().await {
         let completed = is_turn_completed(&ev);
@@ -887,9 +883,7 @@ async fn setup_slash_persists_and_registers_provider() {
 
     let mut rx = handle.subscribe();
     handle
-        .send(AppCommand::Prompt(
-            "/setup name=deepseek api_key=sk-test".into(),
-        ))
+        .submit("/setup name=deepseek api_key=sk-test")
         .unwrap();
     let mut out = String::new();
     loop {
@@ -1017,9 +1011,7 @@ async fn setup_uses_target_provider_reasoning_effort() {
 
     let mut rx = handle.subscribe();
     handle
-        .send(AppCommand::Prompt(
-            "/setup name=deepseek api_key=sk-test".into(),
-        ))
+        .submit("/setup name=deepseek api_key=sk-test")
         .unwrap();
     loop {
         match rx.recv().await {
@@ -1041,7 +1033,7 @@ async fn setup_uses_target_provider_reasoning_effort() {
 
 async fn wait_setup(handle: &App, input: &str) -> String {
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt(input.into())).unwrap();
+    handle.submit(input).unwrap();
     loop {
         match rx.recv().await {
             Some(ev) => {
@@ -1276,9 +1268,7 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
         (10, 5)
     );
     let mut sub = handle.subscribe();
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     wait_rewound(&mut sub).await;
     assert_eq!(user_texts(&history(&handle)), vec!["first"]);
     assert_eq!(
@@ -1297,9 +1287,7 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
         ),
         (10, 5)
     );
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     wait_rewound(&mut sub).await;
 
     handle.shutdown().await;
@@ -1365,7 +1353,7 @@ async fn slash_clear_starts_new_session() {
 
     // `/clear` switches the runtime to a fresh uuid v7 session.
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt("/clear".into())).unwrap();
+    handle.submit("/clear").unwrap();
     wait_settled(&mut rx).await;
 
     // Turn 3 continues in the same handle and persists to the new session.
@@ -1474,7 +1462,7 @@ async fn clear_without_new_messages_has_no_id_and_no_file() {
 
     // `/clear` switches to a fresh empty session; nothing written after.
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt("/clear".into())).unwrap();
+    handle.submit("/clear").unwrap();
     wait_settled(&mut rx).await;
     assert!(
         handle.session_id().is_none(),
@@ -1609,11 +1597,9 @@ async fn cancel_during_turn_returns_idle() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
-    handle.send(AppCommand::Prompt("block".into())).unwrap();
+    handle.submit("block").unwrap();
     let turn_id = wait_turn_id(&mut sub).await;
-    handle
-        .send(AppCommand::Control(ControlCommand::Cancel { turn_id }))
-        .unwrap();
+    handle.cancel(turn_id);
 
     let mut saw_cancelled = false;
     let mut saw_error = false;
@@ -1687,10 +1673,10 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
 
-    handle.send(AppCommand::Prompt("first".into())).unwrap();
+    handle.submit("first").unwrap();
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    handle.send(AppCommand::Prompt("second".into())).unwrap();
+    handle.submit("second").unwrap();
 
     drop(tx);
 
@@ -1760,7 +1746,7 @@ async fn clear_updates_recent_index_to_fresh_session() {
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
 
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt("/clear".into())).unwrap();
+    handle.submit("/clear").unwrap();
     wait_settled(&mut rx).await;
     assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
     let fresh = handle.session_id().expect("new session after /clear");
@@ -1817,16 +1803,12 @@ async fn rewind_while_idle_emits_rewound_and_drops_last_exchange() {
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
 
     let mut sub = handle.subscribe();
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     assert_eq!(wait_rewound(&mut sub).await, HistoryChangeReason::Rewound);
     assert_eq!(user_texts(&history(&handle)), vec!["first"]);
 
     assert_eq!(handle.prompt("third").await.unwrap(), "three");
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     assert_eq!(wait_rewound(&mut sub).await, HistoryChangeReason::Rewound);
     assert_eq!(user_texts(&history(&handle)), vec!["first"]);
 
@@ -1841,9 +1823,7 @@ async fn rewind_with_nothing_to_remove_emits_none() {
     let handle = spawn_app(&app, Box::new(mock)).await;
 
     let mut sub = handle.subscribe();
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     wait_rewound(&mut sub).await;
     assert!(history(&handle).is_empty());
     assert_eq!(handle.last_turn_usage(), Usage::default());
@@ -1865,9 +1845,7 @@ async fn rewind_truncates_persisted_session_file() {
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
 
     let mut sub = handle.subscribe();
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     wait_rewound(&mut sub).await;
     assert_eq!(
         handle.session_id().as_deref(),
@@ -1894,9 +1872,7 @@ async fn rewind_all_turns_clears_session_content() {
     assert_eq!(handle.session_id().as_deref(), Some("s1"));
 
     let mut sub = handle.subscribe();
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     wait_rewound(&mut sub).await;
     assert!(
         handle.session_id().is_none(),
@@ -1955,12 +1931,10 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
 
-    handle.send(AppCommand::Prompt("block".into())).unwrap();
+    handle.submit("block").unwrap();
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     drop(tx);
 
     let mut saw_completed = false;
@@ -2055,12 +2029,10 @@ async fn model_slash_switches_immediately_during_turn() {
         None,
     );
     let mut sub = handle.subscribe();
-    handle.send(AppCommand::Prompt("block".into())).unwrap();
+    handle.submit("block").unwrap();
     entered_rx.await.expect("turn entered complete");
 
-    handle
-        .send(AppCommand::Prompt("/model gpt-4o-turbo low".into()))
-        .unwrap();
+    handle.submit("/model gpt-4o-turbo low").unwrap();
 
     let mut saw_switch_notice = false;
     let mut completed_before_switch = false;
@@ -2196,13 +2168,11 @@ async fn mid_turn_model_switch_publishes_the_new_context_window() {
     );
     let mut rx = handle.subscribe();
 
-    handle.send(AppCommand::Prompt("work".into())).unwrap();
+    handle.submit("work").unwrap();
     entered_rx.await.expect("second provider response started");
 
     handle
-        .send(AppCommand::Prompt(format!(
-            "/model {MODEL_WITH_LARGE_WINDOW} low"
-        )))
+        .submit(format!("/model {MODEL_WITH_LARGE_WINDOW} low"))
         .unwrap();
     let mut windows = Vec::new();
     let mut switched = false;
@@ -2310,13 +2280,9 @@ async fn set_mode_applies_during_in_flight_turn() {
         None,
     );
     let mut sub = handle.subscribe();
-    handle.send(AppCommand::Prompt("block".into())).unwrap();
+    handle.submit("block").unwrap();
     entered_rx.await.expect("turn entered complete");
-    handle
-        .send(AppCommand::Control(ControlCommand::SetMode {
-            mode: AgentMode::Plan,
-        }))
-        .unwrap();
+    handle.set_mode(AgentMode::Plan);
 
     let mut saw_mode = false;
     loop {
@@ -2388,12 +2354,8 @@ async fn repro_ask_mode_bash_requests_approval() {
     ]);
     let handle = spawn_app(&app, Box::new(mock)).await;
     let mut rx = handle.subscribe();
-    handle
-        .send(AppCommand::Control(ControlCommand::SetMode {
-            mode: AgentMode::Ask,
-        }))
-        .unwrap();
-    handle.send(AppCommand::Prompt("run it".into())).unwrap();
+    handle.set_mode(AgentMode::Ask);
+    handle.submit("run it").unwrap();
 
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
@@ -2417,12 +2379,10 @@ async fn repro_ask_mode_bash_requests_approval() {
         "phase: {:?}",
         handle.state().phase
     );
-    handle
-        .send(AppCommand::Control(ControlCommand::Respond {
-            request_id,
-            response: oven_agent::UserResponse::Approval(oven_agent::ApprovalDecision::Approved),
-        }))
-        .unwrap();
+    handle.respond(
+        request_id,
+        oven_agent::UserResponse::Approval(oven_agent::ApprovalDecision::Approved),
+    );
 
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind
@@ -2457,9 +2417,7 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
     ]);
     let handle = spawn_app(&app, Box::new(mock)).await;
     let mut rx = handle.subscribe();
-    handle
-        .send(AppCommand::Prompt("set up the database".into()))
-        .unwrap();
+    handle.submit("set up the database").unwrap();
 
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
@@ -2486,14 +2444,12 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
         handle.state().phase
     );
 
-    handle
-        .send(AppCommand::Control(ControlCommand::Respond {
-            request_id,
-            response: oven_agent::UserResponse::Answer(oven_agent::AnswerResponse::Answered {
-                answer: ANSWER.into(),
-            }),
-        }))
-        .unwrap();
+    handle.respond(
+        request_id,
+        oven_agent::UserResponse::Answer(oven_agent::AnswerResponse::Answered {
+            answer: ANSWER.into(),
+        }),
+    );
 
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind
@@ -2542,7 +2498,7 @@ async fn loop_limit_continue_completes_turn() {
     let tmp = tempdir::TempDir::new("app-runtime-loop-limit-continue").unwrap();
     let handle = spawn_loop_limit_app(&tmp).await;
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt("read it".into())).unwrap();
+    handle.submit("read it").unwrap();
 
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
@@ -2565,12 +2521,10 @@ async fn loop_limit_continue_completes_turn() {
         "phase: {:?}",
         handle.state().phase
     );
-    handle
-        .send(AppCommand::Control(ControlCommand::Respond {
-            request_id,
-            response: oven_agent::UserResponse::LoopLimit(oven_agent::LoopLimitDecision::Continue),
-        }))
-        .unwrap();
+    handle.respond(
+        request_id,
+        oven_agent::UserResponse::LoopLimit(oven_agent::LoopLimitDecision::Continue),
+    );
 
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind
@@ -2725,7 +2679,7 @@ async fn cancel_does_not_roll_back_todos() {
         None,
     );
     let mut sub = handle.subscribe();
-    handle.send(AppCommand::Prompt("plan".into())).unwrap();
+    handle.submit("plan").unwrap();
 
     let mut turn_id = None;
     loop {
@@ -2744,9 +2698,7 @@ async fn cancel_does_not_roll_back_todos() {
         AppPhase::Running { turn_id } | AppPhase::Cancelling { turn_id } => turn_id,
         _ => panic!("expected a running turn"),
     });
-    handle
-        .send(AppCommand::Control(ControlCommand::Cancel { turn_id }))
-        .unwrap();
+    handle.cancel(turn_id);
     drop(tx);
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
@@ -2799,9 +2751,7 @@ async fn rewind_restores_previous_todo_list() {
     assert_eq!(handle.todos().items[0].id, "b");
 
     let mut sub = handle.subscribe();
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     let mut saw_todo = false;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
@@ -3066,7 +3016,7 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
-    handle.send(AppCommand::Prompt("block".into())).unwrap();
+    handle.submit("block").unwrap();
 
     let mut events = Vec::new();
     let mut cancelled = false;
@@ -3081,11 +3031,7 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
                         handle.state().phase,
                         AppPhase::Running { turn_id } if turn_id == env.turn_id
                     ));
-                    handle
-                        .send(AppCommand::Control(ControlCommand::Cancel {
-                            turn_id: env.turn_id,
-                        }))
-                        .unwrap();
+                    handle.cancel(env.turn_id);
                     cancelled = true;
                 }
                 let done = is_turn_cancelled(&ev);
@@ -3147,11 +3093,7 @@ async fn ask_mode_bang_shell_runs_without_approval() {
     let tmp = tempdir::TempDir::new("app-runtime-shell-ask").unwrap();
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
-    handle
-        .send(AppCommand::Control(ControlCommand::SetMode {
-            mode: AgentMode::Ask,
-        }))
-        .unwrap();
+    handle.set_mode(AgentMode::Ask);
 
     let out = handle.prompt("!echo hi").await.unwrap();
     assert!(out.contains("hi"), "{out}");
@@ -3180,7 +3122,7 @@ async fn bang_shell_nonzero_exit_is_finished_not_agent_turn() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt("!exit 7".into())).unwrap();
+    handle.submit("!exit 7").unwrap();
     wait_settled(&mut rx).await;
     let parsed = LocalShell::try_parse(&user_texts(&history(&handle))[0]).unwrap();
     assert_eq!(parsed.exit_code, Some(7));
@@ -3198,7 +3140,7 @@ async fn bang_shell_cancel_commits_cancelled_envelope() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt("!sleep 60".into())).unwrap();
+    handle.submit("!sleep 60").unwrap();
 
     let turn_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -3215,9 +3157,7 @@ async fn bang_shell_cancel_commits_cancelled_envelope() {
     .await
     .expect("timeout waiting for shell start");
 
-    handle
-        .send(AppCommand::Control(ControlCommand::Cancel { turn_id }))
-        .unwrap();
+    handle.cancel(turn_id);
     wait_settled(&mut rx).await;
 
     let parsed = LocalShell::try_parse(&user_texts(&history(&handle))[0]).unwrap();
@@ -3257,9 +3197,7 @@ async fn bang_shell_persists_and_rewinds() {
     let handle = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
     assert_eq!(history(&handle).len(), 1);
     let mut sub = handle.subscribe();
-    handle
-        .send(AppCommand::Control(ControlCommand::Rewind))
-        .unwrap();
+    handle.rewind().unwrap();
     wait_rewound(&mut sub).await;
     assert!(history(&handle).is_empty());
     handle.shutdown().await;
@@ -3306,11 +3244,9 @@ async fn bang_shell_queues_behind_agent_turn() {
     )
     .await;
     let mut sub = handle.subscribe();
-    handle.send(AppCommand::Prompt("block".into())).unwrap();
+    handle.submit("block").unwrap();
     let _ = wait_turn_id(&mut sub).await;
-    handle
-        .send(AppCommand::Prompt("!echo queued".into()))
-        .unwrap();
+    handle.submit("!echo queued").unwrap();
     let _ = tx.send(());
     wait_settled(&mut sub).await;
     wait_settled(&mut sub).await;
@@ -3699,9 +3635,7 @@ async fn agents_applies_mid_turn_while_clear_waits() {
         None,
     );
     let mut rx = handle.subscribe();
-    handle
-        .send(AppCommand::Prompt("delegate it".into()))
-        .unwrap();
+    handle.submit("delegate it").unwrap();
 
     let mut asked = false;
     let mut listed = false;
@@ -3729,8 +3663,8 @@ async fn agents_applies_mid_turn_while_clear_waits() {
                         handle.state().phase.is_active(),
                         "the turn is still running"
                     );
-                    handle.send(AppCommand::Prompt("/agents".into())).unwrap();
-                    handle.send(AppCommand::Prompt("/clear".into())).unwrap();
+                    handle.submit("/agents").unwrap();
+                    handle.submit("/clear").unwrap();
                 }
             }
             _ => {}
@@ -3854,7 +3788,7 @@ async fn shutdown_reports_prompts_that_never_ran() {
     );
     let main = handle.agent_id();
     let mut rx = handle.subscribe();
-    handle.send(AppCommand::Prompt("one".into())).unwrap();
+    handle.submit("one").unwrap();
 
     // Both arrive while the first turn is still waiting on its subagent, so
     // neither can start a turn yet.
@@ -3867,8 +3801,8 @@ async fn shutdown_reports_prompts_that_never_ran() {
             && subagents.iter().any(|agent| agent.status.is_active())
         {
             queued = true;
-            handle.send(AppCommand::Prompt("two".into())).unwrap();
-            handle.send(AppCommand::Prompt("three".into())).unwrap();
+            handle.submit("two").unwrap();
+            handle.submit("three").unwrap();
             break;
         }
     }
@@ -3923,9 +3857,7 @@ async fn cancelling_a_turn_cancels_its_subagent() {
         None,
     );
     let mut rx = handle.subscribe();
-    handle
-        .send(AppCommand::Prompt("delegate it".into()))
-        .unwrap();
+    handle.submit("delegate it").unwrap();
 
     let mut cancelled = false;
     while let Some(ev) = rx.recv().await {
@@ -3936,9 +3868,7 @@ async fn cancelling_a_turn_cancels_its_subagent() {
         {
             cancelled = true;
             let turn_id = handle.state().phase.turn_id().expect("turn is running");
-            handle
-                .send(AppCommand::Control(ControlCommand::Cancel { turn_id }))
-                .unwrap();
+            handle.cancel(turn_id);
         }
         if cancelled && matches!(handle.state().phase, AppPhase::Idle) {
             break;

@@ -161,8 +161,9 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interaction::{NO_USER_TO_ANSWER, PendingRequest, UserRequest, UserRequestSender};
+    use crate::interaction::{NO_USER_TO_ANSWER, PendingRequest, UserRequest};
     use serde_json::json;
+    use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
 
     const QUESTION: &str = "which database?";
@@ -173,11 +174,11 @@ mod tests {
     }
 
     async fn run_with(
-        tx: &UserRequestSender,
+        tx: &mpsc::UnboundedSender<PendingRequest>,
         args: Value,
         cx: TurnContext,
     ) -> Result<String, AgentError> {
-        let cx = cx.with_requests(tx.clone());
+        let cx = cx.with_requests(Arc::new(tx.clone()));
         AnswerTool.run(&args, &cx).await
     }
 

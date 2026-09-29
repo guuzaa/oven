@@ -1,6 +1,8 @@
-use std::sync::{Arc, Mutex, PoisonError};
+#[cfg(test)]
+use oven_llm::ModelId;
+use std::sync::Arc;
 
-use oven_llm::{Message, ModelId, ReasoningEffort, Usage};
+use oven_llm::{Message, Usage};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -10,14 +12,13 @@ use crate::identity::ToolCallId;
 use crate::identity::TurnId;
 use crate::interaction::{
     AnswerResponse, ApprovalDecision, LoopLimitDecision, NO_USER_TO_ANSWER, PendingRequest,
-    Question, UserRequest, UserRequestId, UserRequestSender,
+    Question, RequestSink, UserRequest, UserRequestId,
 };
 use crate::mode::AgentMode;
+use crate::selection::{ModelSelection, Selection};
 use crate::tools::ToolView;
 
 pub const DEFAULT_MAX_ITERS: usize = 200;
-
-pub type ModelSelection = (ModelId, Option<ReasoningEffort>);
 
 /// How much one run may spend before it stops on its own.
 ///
@@ -44,36 +45,25 @@ impl RunPolicy {
     }
 }
 
-/// Shared, per-turn state that a running turn re-reads at each step.
-///
-/// `mode` and `model` live behind a lock (rather than as `Agent` fields)
-/// specifically so control commands can update them while a turn holds
-/// `&mut Agent` exclusively: the turn picks up the change at its next step
-/// instead of waiting for the whole turn to finish.
+/// What a running turn shares with whoever started it. `selection` is the
+/// agent's own, so a mode or model change made while the turn holds
+/// `&mut Agent` is picked up at its next step.
 #[derive(Debug, Clone)]
 pub struct TurnContext {
     pub turn_id: TurnId,
     pub cancellation: CancellationToken,
-    mode: Arc<Mutex<AgentMode>>,
-    model: Arc<Mutex<ModelSelection>>,
+    selection: Selection,
     policy: RunPolicy,
     /// Absent when nobody can answer: a subagent, or a headless run.
-    requests: Option<UserRequestSender>,
+    requests: Option<Arc<dyn RequestSink>>,
 }
 
 impl TurnContext {
-    pub fn new(
-        turn_id: TurnId,
-        cancellation: CancellationToken,
-        mode: AgentMode,
-        model: ModelId,
-        reasoning_effort: Option<ReasoningEffort>,
-    ) -> Self {
+    pub fn new(turn_id: TurnId, cancellation: CancellationToken, selection: Selection) -> Self {
         Self {
             turn_id,
             cancellation,
-            mode: Arc::new(Mutex::new(mode)),
-            model: Arc::new(Mutex::new((model, reasoning_effort))),
+            selection,
             policy: RunPolicy::default(),
             requests: None,
         }
@@ -88,7 +78,7 @@ impl TurnContext {
         self.policy
     }
 
-    pub fn with_requests(mut self, requests: UserRequestSender) -> Self {
+    pub fn with_requests(mut self, requests: Arc<dyn RequestSink>) -> Self {
         self.requests = Some(requests);
         self
     }
@@ -96,6 +86,20 @@ impl TurnContext {
     /// Whether anyone can answer what this turn asks of the user.
     pub fn has_user(&self) -> bool {
         self.requests.is_some()
+    }
+
+    /// Puts a request to the user, or `None` when nobody took it.
+    fn put<T>(
+        &self,
+        requests: &Arc<dyn RequestSink>,
+        build: impl FnOnce(oneshot::Sender<T>) -> UserRequest,
+    ) -> Option<oneshot::Receiver<T>> {
+        let (responder, reply) = oneshot::channel();
+        let request = PendingRequest {
+            request_id: UserRequestId::next(),
+            request: build(responder),
+        };
+        requests.submit(self.turn_id, request).then_some(reply)
     }
 
     /// Puts a tool call to the user. A turn nobody can answer for refuses the
@@ -109,18 +113,12 @@ impl TurnContext {
         let Some(requests) = &self.requests else {
             return Some(ApprovalDecision::Rejected);
         };
-        let (responder, reply) = oneshot::channel();
-        requests
-            .send(PendingRequest {
-                request_id: UserRequestId::next(),
-                request: UserRequest::ApproveTool {
-                    call_id,
-                    name,
-                    view,
-                    responder,
-                },
-            })
-            .ok()?;
+        let reply = self.put(requests, |responder| UserRequest::ApproveTool {
+            call_id,
+            name,
+            view,
+            responder,
+        })?;
         self.wait(reply).await
     }
 
@@ -130,16 +128,12 @@ impl TurnContext {
         let Some(requests) = &self.requests else {
             return Err(AgentError::from(NO_USER_TO_ANSWER));
         };
-        let (responder, reply) = oneshot::channel();
-        requests
-            .send(PendingRequest {
-                request_id: UserRequestId::next(),
-                request: UserRequest::Question {
-                    question,
-                    responder,
-                },
+        let reply = self
+            .put(requests, |responder| UserRequest::Question {
+                question,
+                responder,
             })
-            .map_err(|_| AgentError::from(NO_USER_TO_ANSWER))?;
+            .ok_or_else(|| AgentError::from(NO_USER_TO_ANSWER))?;
         self.wait(reply).await.ok_or_else(AgentError::cancelled)
     }
 
@@ -149,16 +143,10 @@ impl TurnContext {
         let Some(requests) = &self.requests else {
             return Some(LoopLimitDecision::Exit);
         };
-        let (responder, reply) = oneshot::channel();
-        requests
-            .send(PendingRequest {
-                request_id: UserRequestId::next(),
-                request: UserRequest::LoopLimit {
-                    max_iters,
-                    responder,
-                },
-            })
-            .ok()?;
+        let reply = self.put(requests, |responder| UserRequest::LoopLimit {
+            max_iters,
+            responder,
+        })?;
         self.wait(reply).await
     }
 
@@ -172,23 +160,12 @@ impl TurnContext {
         }
     }
 
-    pub fn set_mode(&self, mode: AgentMode) {
-        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = mode;
-    }
-
     pub fn mode(&self) -> AgentMode {
-        *self.mode.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    pub fn set_model(&self, model: ModelId, reasoning_effort: Option<ReasoningEffort>) {
-        *self.model.lock().unwrap_or_else(PoisonError::into_inner) = (model, reasoning_effort);
+        self.selection.mode()
     }
 
     pub fn model(&self) -> ModelSelection {
-        self.model
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.selection.model()
     }
 }
 
@@ -238,12 +215,14 @@ pub struct StepCall {
 impl TurnContext {
     /// A bare context for tests that exercise a tool without driving a turn.
     pub(crate) fn for_test() -> Self {
+        Self::for_test_in(AgentMode::Agent)
+    }
+
+    pub(crate) fn for_test_in(mode: AgentMode) -> Self {
         Self::new(
             TurnId::next(),
             CancellationToken::new(),
-            AgentMode::Agent,
-            ModelId::new("default"),
-            None,
+            Selection::new(mode, ModelId::new("default"), None),
         )
     }
 }

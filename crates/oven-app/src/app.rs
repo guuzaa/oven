@@ -1,20 +1,25 @@
 use std::path::{Path, PathBuf};
 use std::string::String;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, PoisonError};
 
 use oven_agent::AgentError;
-use oven_agent::{AgentEvent, LoopLimitDecision, TodoList, TurnEvent, UserResponse};
+use oven_agent::{
+    AgentEvent, AgentId, AgentMode, LoopLimitDecision, TodoList, TurnEvent, TurnId, UserRequestId,
+    UserResponse,
+};
 use oven_llm::{Message, Usage};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::builder::AppBuilder;
-use crate::command::{AppCommand, ControlCommand};
+use crate::command::Input;
 use crate::config::{ConfigError, ProviderConfig};
 use crate::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
+use crate::inbox::InboxSender;
 use crate::session::SessionError;
+use crate::shared::{Shared, queued_notice};
+use crate::slash::SlashRegistry;
 use crate::state::AppState;
 
 #[derive(Debug, Error)]
@@ -52,14 +57,12 @@ impl From<oven_llm::ProviderError> for AppError {
 
 pub struct App {
     id: AppId,
-    cmd_tx: mpsc::UnboundedSender<AppCommand>,
+    inbox: InboxSender,
     subscribers: Subscribers,
     join: JoinHandle<()>,
-    /// Queued prompts the runtime never got to run, filled in as it shuts
-    /// down so a frontend can report them once it has the terminal back.
-    unsent: Arc<AtomicUsize>,
-    slash_commands: Vec<(String, String)>,
+    slash: Arc<SlashRegistry>,
     root: PathBuf,
+    shared: Arc<Shared>,
     state: watch::Receiver<AppState>,
 }
 
@@ -90,23 +93,22 @@ impl App {
     )]
     pub(crate) fn new(
         id: AppId,
-        cmd_tx: mpsc::UnboundedSender<AppCommand>,
+        inbox: InboxSender,
         subscribers: Subscribers,
         join: JoinHandle<()>,
-        slash_commands: Vec<(String, String)>,
+        slash: Arc<SlashRegistry>,
         root: PathBuf,
-        state: watch::Receiver<AppState>,
-        unsent: Arc<AtomicUsize>,
+        shared: Arc<Shared>,
     ) -> Self {
         Self {
             id,
-            cmd_tx,
+            inbox,
             subscribers,
             join,
-            unsent,
-            slash_commands,
+            slash,
             root,
-            state,
+            state: shared.state.subscribe(),
+            shared,
         }
     }
 
@@ -124,8 +126,54 @@ impl App {
         self.state.borrow().subagents.as_ref().clone()
     }
 
-    pub fn send(&self, cmd: AppCommand) -> Result<(), AppError> {
-        self.cmd_tx.send(cmd).map_err(|_| AppError::ChannelClosed)
+    /// Classifies `text` and hands it to the runtime, returning what it was
+    /// taken for so a frontend can draw it the same way.
+    pub fn submit(&self, text: impl AsRef<str>) -> Result<Input, AppError> {
+        let input = Input::parse(text.as_ref(), &self.slash);
+        self.dispatch(input.clone())?;
+        Ok(input)
+    }
+
+    /// Drops the last turn from the conversation once the driver is free.
+    pub fn rewind(&self) -> Result<(), AppError> {
+        self.dispatch(Input::Rewind)
+    }
+
+    /// Applies an input on the spot if it needs no driver while one is busy;
+    /// otherwise queues it for the driver, saying so when the user will
+    /// have to wait.
+    fn dispatch(&self, input: Input) -> Result<(), AppError> {
+        if self.shared.is_busy() {
+            if self.shared.apply_now(&input, &self.slash) {
+                return Ok(());
+            }
+            if let Some(text) = queued_notice(&input) {
+                self.shared.notify(text);
+            }
+        }
+        self.inbox.send(input)
+    }
+
+    /// Cancels `turn_id` if it is still the running turn.
+    pub fn cancel(&self, turn_id: TurnId) {
+        self.shared.cancel(turn_id);
+    }
+
+    pub fn set_mode(&self, mode: AgentMode) {
+        self.shared.set_mode(mode);
+    }
+
+    /// Answers the request the running turn is waiting on.
+    pub fn respond(&self, request_id: UserRequestId, response: UserResponse) {
+        self.shared.respond(request_id, response);
+    }
+
+    pub fn stop_subagent(&self, id: AgentId) {
+        self.shared.stop_subagent(id);
+    }
+
+    pub fn stop_subagents(&self) {
+        self.shared.stop_subagents();
     }
 
     pub fn subscribe(&self) -> mpsc::UnboundedReceiver<AppEvent> {
@@ -137,8 +185,8 @@ impl App {
         rx
     }
 
-    pub fn slash_commands(&self) -> &[(String, String)] {
-        &self.slash_commands
+    pub fn slash_commands(&self) -> Vec<(String, String)> {
+        self.slash.commands()
     }
 
     pub fn state(&self) -> AppState {
@@ -195,7 +243,7 @@ impl App {
     pub async fn prompt(&self, input: impl Into<String>) -> Result<String, AppError> {
         let mut rx = self.subscribe();
         let main = self.state().agent_id;
-        self.send(AppCommand::Prompt(input.into()))?;
+        self.submit(input.into())?;
 
         let mut text = String::new();
         let mut in_turn = false;
@@ -219,10 +267,7 @@ impl App {
                         return Err(AppError::Runtime(error.message));
                     }
                     AgentEvent::Turn(TurnEvent::LoopLimitReached { request_id, .. }) => {
-                        let _ = self.send(AppCommand::Control(ControlCommand::Respond {
-                            request_id,
-                            response: UserResponse::LoopLimit(LoopLimitDecision::Exit),
-                        }));
+                        self.respond(request_id, UserResponse::LoopLimit(LoopLimitDecision::Exit));
                     }
                     _ => {}
                 },
@@ -269,8 +314,8 @@ impl App {
     /// Shuts the runtime down and reports how many queued prompts were
     /// dropped without ever running, so a frontend can say so.
     pub async fn shutdown(self) -> usize {
-        let _ = self.cmd_tx.send(AppCommand::Shutdown);
+        self.shared.shutdown.cancel();
         let _ = self.join.await;
-        self.unsent.load(Ordering::Relaxed)
+        self.inbox.unsent()
     }
 }

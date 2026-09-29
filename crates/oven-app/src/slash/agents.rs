@@ -127,7 +127,7 @@ mod tests {
         let mut agent = Agent::new(Router::new(), Vec::new());
         let subagents = Subagents::bare(agent.id(), agent.router_handle());
         let mut cx = CommandContext::with_agent(&mut agent, &subagents);
-        SlashRegistry::with_builtin().parse_and_run(&mut cx, &format!("/agents {args}"))
+        SlashRegistry::with_builtin().run(&mut cx, "agents", args)
     }
 
     #[test]

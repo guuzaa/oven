@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use oven_agent::{
-    Agent, AgentError, AgentEvent, AgentId, AgentMode, CancellationToken, EventSink, NodeHandle,
-    NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, RouterHandle, RunPolicy, SpawnRequest,
+    Agent, AgentError, AgentEvent, AgentId, CancellationToken, EventSink, NodeHandle, NodeInfo,
+    NodeOutcome, NodeReport, NodeStatus, RoleSpec, RouterHandle, RunPolicy, SpawnRequest,
     SubagentSpawner, Tool, ToolEvent, TurnContext, TurnEvent, TurnId,
 };
 use oven_host::{as_ms, now_ms};
@@ -299,19 +299,13 @@ impl SubagentSpawner for Subagents {
         };
         self.notify();
 
-        let ctx = TurnContext::new(
-            turn_id,
-            cancel,
-            AgentMode::Agent,
-            request.model.clone(),
-            request.reasoning_effort,
-        )
-        .with_policy(RunPolicy::default().with_max_iters(self.max_iters));
         let mut agent = Agent::with_router(self.router.clone(), role.tools.clone())
             .with_id(id)
             .with_system(role.system.clone())
             .with_model(request.model.clone());
         agent.set_reasoning_effort(request.reasoning_effort);
+        let ctx = TurnContext::new(turn_id, cancel, agent.selection())
+            .with_policy(RunPolicy::default().with_max_iters(self.max_iters));
 
         let (done, outcome) = oneshot::channel();
         tokio::spawn(run_subagent(

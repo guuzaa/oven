@@ -531,8 +531,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_mode_refuses_a_writing_role() {
-        let cx = TurnContext::for_test();
-        cx.set_mode(AgentMode::Plan);
+        let cx = TurnContext::for_test_in(AgentMode::Plan);
         let err = tool(MockSpawner::new(completed()))
             .run(
                 &json!({"description": "x", "prompt": "y", "role": "general"}),

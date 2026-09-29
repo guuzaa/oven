@@ -18,6 +18,7 @@ use crate::identity::{AgentId, ToolCallId};
 use crate::interaction::{ApprovalDecision, LoopLimitDecision};
 use crate::mode::{AgentMode, ToolAccess};
 use crate::prompt_template;
+use crate::selection::Selection;
 use crate::sink::EventSink;
 use crate::todo::TodoList;
 use crate::tools::{TodoWriteTool, Tool};
@@ -48,11 +49,9 @@ pub struct Agent {
     router: RouterHandle,
     pub(crate) tools: Vec<Arc<dyn Tool>>,
     pub(crate) history: History,
-    model: ModelId,
+    selection: Selection,
     system: Option<String>,
-    mode: AgentMode,
     todos: TodoList,
-    reasoning_effort: Option<ReasoningEffort>,
     todo_written_this_turn: bool,
     todo_dirty: bool,
 }
@@ -71,11 +70,9 @@ impl Agent {
             router,
             tools,
             history: History::new(),
-            model: ModelId::new("default"),
+            selection: Selection::new(AgentMode::Agent, ModelId::new("default"), None),
             system: None,
-            mode: AgentMode::Agent,
             todos: TodoList::default(),
-            reasoning_effort: None,
             todo_written_this_turn: false,
             todo_dirty: false,
         }
@@ -90,13 +87,13 @@ impl Agent {
         self.id
     }
 
-    pub fn with_model(mut self, model: impl Into<ModelId>) -> Self {
-        self.model = model.into();
+    pub fn with_model(self, model: impl Into<ModelId>) -> Self {
+        self.selection.set_model(model.into());
         self
     }
 
-    pub fn model(&self) -> &ModelId {
-        &self.model
+    pub fn model(&self) -> ModelId {
+        self.selection.model().0
     }
 
     pub fn with_system(mut self, content: impl Into<String>) -> Self {
@@ -105,7 +102,14 @@ impl Agent {
     }
 
     pub fn reasoning_effort(&self) -> Option<ReasoningEffort> {
-        self.reasoning_effort
+        self.selection.model().1
+    }
+
+    /// A handle onto the mode and model the next step runs with, independent
+    /// of `&Agent`/`&mut Agent`. Changing it while a turn runs takes effect
+    /// at the turn's next step.
+    pub fn selection(&self) -> Selection {
+        self.selection.clone()
     }
 
     /// A snapshot of the current router. Cheap to clone and safe to hold
@@ -135,19 +139,19 @@ impl Agent {
     }
 
     pub fn set_model(&mut self, model: impl Into<ModelId>) {
-        self.model = model.into();
+        self.selection.set_model(model.into());
     }
 
     pub fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffort>) {
-        self.reasoning_effort = effort;
+        self.selection.set_reasoning_effort(effort);
     }
 
     pub fn set_mode(&mut self, mode: AgentMode) {
-        self.mode = mode;
+        self.selection.set_mode(mode);
     }
 
     pub fn mode(&self) -> AgentMode {
-        self.mode
+        self.selection.mode()
     }
 
     pub fn set_todos(&mut self, todos: TodoList) {
@@ -174,8 +178,8 @@ impl Agent {
     }
 
     /// Set the reasoning effort for provider calls.
-    pub fn with_reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
-        self.reasoning_effort = Some(effort);
+    pub fn with_reasoning_effort(self, effort: ReasoningEffort) -> Self {
+        self.selection.set_reasoning_effort(Some(effort));
         self
     }
 
@@ -251,8 +255,7 @@ impl Agent {
         removed
     }
 
-    fn llm_tools(&self) -> Vec<oven_llm::Tool> {
-        let mode = self.mode;
+    fn llm_tools(&self, mode: AgentMode) -> Vec<oven_llm::Tool> {
         self.tools
             .iter()
             .filter(|t| !t.caps().plan_only || mode == AgentMode::Plan)
@@ -266,10 +269,11 @@ impl Agent {
     }
 
     pub(crate) fn build_request(&self) -> Request {
-        let tools = self.llm_tools();
+        let mode = self.selection.mode();
+        let (model, reasoning_effort) = self.selection.model();
+        let tools = self.llm_tools(mode);
         let mut system = self.system.clone();
         let todos = &self.todos;
-        let mode = self.mode;
         let mut messages = Vec::with_capacity(self.history.len());
         for m in self.history.messages() {
             if m.role == Role::System {
@@ -287,7 +291,7 @@ impl Agent {
             mode == AgentMode::Plan && self.todo_dirty && !todos.is_empty(),
         );
         Request {
-            model: self.model.clone(),
+            model,
             system,
             messages,
             tools,
@@ -298,16 +302,13 @@ impl Agent {
                 ..Default::default()
             },
             thinking: Some(
-                if self
-                    .reasoning_effort
-                    .is_some_and(|effort| effort != ReasoningEffort::None)
-                {
+                if reasoning_effort.is_some_and(|effort| effort != ReasoningEffort::None) {
                     ThinkingMode::Enabled
                 } else {
                     ThinkingMode::Disabled
                 },
             ),
-            reasoning_effort: self.reasoning_effort,
+            reasoning_effort,
             provider_options: serde_json::Map::default(),
         }
     }
@@ -319,7 +320,7 @@ impl Agent {
         let started = Instant::now();
         let result = self.complete_or_stream(sink).await;
         tracing::debug!(
-            model = %self.model,
+            model = %self.model(),
             duration_ms = as_ms(started.elapsed()),
             "llm request complete"
         );
@@ -368,7 +369,7 @@ impl Agent {
                 Ok((collector.finish()?, span))
             }
             Err(error) => {
-                tracing::warn!(error = %error, model = %self.model, "stream start failed, falling back to complete");
+                tracing::warn!(error = %error, model = %self.model(), "stream start failed, falling back to complete");
                 let started = Instant::now();
                 let response = Provider::complete(&*router, &req).await?;
                 let reasoning = response.thinking();
@@ -406,8 +407,6 @@ impl Agent {
         sink: &mut impl EventSink,
         ctx: &TurnContext,
     ) -> Result<Step, AgentError> {
-        self.mode = ctx.mode();
-        (self.model, self.reasoning_effort) = ctx.model();
         let (response, thinking) = self.complete_response(sink).await?;
 
         self.history
@@ -508,7 +507,7 @@ impl Agent {
         true
     }
 
-    #[tracing::instrument(name = "agent.turn", skip_all, fields(turn_id = ctx.turn_id.0, model = %self.model))]
+    #[tracing::instrument(name = "agent.turn", skip_all, fields(turn_id = ctx.turn_id.0, model = %self.model()))]
     pub async fn run(
         &mut self,
         input: impl Into<String>,
@@ -564,8 +563,6 @@ impl Agent {
                 res = &mut turn => res,
             }
         };
-        self.mode = ctx.mode();
-        (self.model, self.reasoning_effort) = ctx.model();
 
         let duration_ms = self.history.elapsed_ms();
         match &result {
@@ -956,32 +953,27 @@ mod tests {
     /// script rather than on an unbounded loop.
     const TEST_MAX_ITERS: usize = 8;
 
-    fn turn_ctx() -> TurnContext {
-        turn_ctx_with(TEST_MAX_ITERS)
+    fn turn_ctx(agent: &Agent) -> TurnContext {
+        turn_ctx_with(agent, TEST_MAX_ITERS)
     }
 
-    fn turn_ctx_with(max_iters: usize) -> TurnContext {
-        TurnContext::new(
-            TurnId::next(),
-            CancellationToken::new(),
-            AgentMode::Agent,
-            ModelId::new("default"),
-            None,
-        )
-        .with_policy(RunPolicy::default().with_max_iters(max_iters))
+    fn turn_ctx_with(agent: &Agent, max_iters: usize) -> TurnContext {
+        TurnContext::new(TurnId::next(), CancellationToken::new(), agent.selection())
+            .with_policy(RunPolicy::default().with_max_iters(max_iters))
     }
 
     async fn run_text(agent: &mut Agent, input: &str) -> String {
-        let mut sink = NullSink;
-        let ctx = TurnContext::new(
-            TurnId::next(),
-            CancellationToken::new(),
-            agent.mode(),
-            agent.model().clone(),
-            agent.reasoning_effort(),
-        )
-        .with_policy(RunPolicy::default().with_max_iters(TEST_MAX_ITERS));
-        agent.run(input, &ctx, &mut sink).await.unwrap().text()
+        let ctx = turn_ctx(agent);
+        agent.run(input, &ctx, &mut NullSink).await.unwrap().text()
+    }
+
+    async fn run_plain(
+        agent: &mut Agent,
+        input: &str,
+        sink: &mut impl EventSink,
+    ) -> Result<TurnOutput, AgentError> {
+        let ctx = turn_ctx(agent);
+        agent.run(input, &ctx, sink).await
     }
 
     async fn run_with(
@@ -1378,14 +1370,7 @@ mod tests {
         );
         agent.set_mode(AgentMode::Ask);
         let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = TurnContext::new(
-            TurnId::next(),
-            CancellationToken::new(),
-            AgentMode::Ask,
-            ModelId::new("default"),
-            None,
-        )
-        .with_requests(requests);
+        let ctx = turn_ctx(&agent).with_requests(Arc::new(requests));
         let mut sink = NullSink;
         let turn = agent.run("run it", &ctx, &mut sink);
         tokio::pin!(turn);
@@ -1420,7 +1405,7 @@ mod tests {
         ]);
         let mut agent = Agent::new(router_with(Box::new(mock)), vec![Arc::new(AnswerTool)]);
         let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = turn_ctx().with_requests(requests);
+        let ctx = turn_ctx(&agent).with_requests(Arc::new(requests));
         let mut sink = NullSink;
         let reply = {
             let turn = agent.run("pick one", &ctx, &mut sink);
@@ -1464,9 +1449,7 @@ mod tests {
         let mut agent = Agent::new(router_with(Box::new(mock)), tools).with_id(AgentId(7));
 
         let mut sink = VecEventSink::default();
-        let result = run_with(&mut agent, "read it", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        let result = run_plain(&mut agent, "read it", &mut sink).await.unwrap();
         assert_eq!(result.text(), "all good");
 
         let events = sink.events;
@@ -1640,7 +1623,7 @@ mod tests {
             text_response("done"),
         ]);
         let mut agent = Agent::new(router_with(Box::new(mock)), tools);
-        run_with(&mut agent, "go", &turn_ctx(), &mut VecEventSink::default())
+        run_plain(&mut agent, "go", &mut VecEventSink::default())
             .await
             .unwrap();
         assert_eq!(
@@ -1672,7 +1655,7 @@ mod tests {
             text_response("done"),
         ]);
         let mut agent = Agent::new(router_with(Box::new(mock)), tools);
-        run_with(&mut agent, "go", &turn_ctx(), &mut VecEventSink::default())
+        run_plain(&mut agent, "go", &mut VecEventSink::default())
             .await
             .unwrap();
         let log = log.lock().unwrap();
@@ -1707,9 +1690,7 @@ mod tests {
         ]);
         let mut agent = Agent::new(router_with(Box::new(mock)), tools);
         let mut sink = VecEventSink::default();
-        run_with(&mut agent, "go", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        run_plain(&mut agent, "go", &mut sink).await.unwrap();
 
         let started: Vec<ToolCallId> = sink
             .events
@@ -1769,7 +1750,7 @@ mod tests {
             text_response("done"),
         ]);
         let mut agent = Agent::new(router_with(Box::new(mock)), tools);
-        run_with(&mut agent, "go", &turn_ctx(), &mut VecEventSink::default())
+        run_plain(&mut agent, "go", &mut VecEventSink::default())
             .await
             .unwrap();
 
@@ -1803,20 +1784,8 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let mut sink = VecEventSink::default();
-        let err = agent
-            .run(
-                "hi",
-                &TurnContext::new(
-                    TurnId::next(),
-                    cancel,
-                    AgentMode::Agent,
-                    ModelId::new("default"),
-                    None,
-                ),
-                &mut sink,
-            )
-            .await
-            .unwrap_err();
+        let ctx = TurnContext::new(TurnId::next(), cancel, agent.selection());
+        let err = agent.run("hi", &ctx, &mut sink).await.unwrap_err();
         assert!(err.is_cancelled());
         assert_valid_event_sequence(&sink.events);
         assert_eq!(
@@ -1833,9 +1802,7 @@ mod tests {
         let mock = MockProvider::new(vec![text_response("ok")]);
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         let mut sink = VecEventSink::default();
-        let out = run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        let out = run_plain(&mut agent, "hi", &mut sink).await.unwrap();
         assert_eq!(out.text(), "ok");
         assert_valid_event_sequence(&sink.events);
         assert!(matches!(
@@ -1849,9 +1816,7 @@ mod tests {
         let mock = MockProvider::new(vec![text_response("ok")]);
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         let mut sink = VecEventSink::default();
-        run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        run_plain(&mut agent, "hi", &mut sink).await.unwrap();
         let Some(AgentEvent::Turn(TurnEvent::Completed { duration_ms, .. })) = sink.events.last()
         else {
             panic!("expected Completed");
@@ -1886,9 +1851,7 @@ mod tests {
         );
         let mut agent = Agent::new(router_with(Box::new(provider)), Vec::new());
         let mut sink = VecEventSink::default();
-        let out = run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        let out = run_plain(&mut agent, "hi", &mut sink).await.unwrap();
         assert_eq!(out.text(), ANSWER);
         assert_valid_event_sequence(&sink.events);
         let reported = sink.events.iter().find_map(|event| match event {
@@ -1936,9 +1899,7 @@ mod tests {
         };
         let mut agent = Agent::new(router_with(Box::new(provider)), Vec::new());
         let mut sink = VecEventSink::default();
-        let out = run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        let out = run_plain(&mut agent, "hi", &mut sink).await.unwrap();
         assert_eq!(out.text(), ANSWER);
         assert_valid_event_sequence(&sink.events);
         let reported = sink.events.iter().find_map(|event| match event {
@@ -1962,9 +1923,7 @@ mod tests {
         let mock = MockProvider::new(vec![call, text_response("done")]);
         let mut agent = agent_with_todo_write(Box::new(mock));
         let mut sink = VecEventSink::default();
-        run_with(&mut agent, "plan it", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        run_plain(&mut agent, "plan it", &mut sink).await.unwrap();
 
         assert_valid_event_sequence(&sink.events);
         assert!(
@@ -1993,9 +1952,7 @@ mod tests {
         };
         let mut agent = Agent::new(router_with(Box::new(provider)), Vec::new());
         let mut sink = VecEventSink::default();
-        run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        run_plain(&mut agent, "hi", &mut sink).await.unwrap();
         assert_valid_event_sequence(&sink.events);
         assert!(
             !sink
@@ -2011,15 +1968,11 @@ mod tests {
         let mock = MockProvider::new(vec![text_response("one"), text_response("two")]);
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         let mut sink = VecEventSink::default();
-        let out1 = run_with(&mut agent, "first", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        let out1 = run_plain(&mut agent, "first", &mut sink).await.unwrap();
         assert_eq!(out1.usage.input_tokens, 10);
 
         sink.events.clear();
-        let out2 = run_with(&mut agent, "second", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        let out2 = run_plain(&mut agent, "second", &mut sink).await.unwrap();
         assert_eq!(out2.usage.input_tokens, 10);
         assert_eq!(out2.usage.output_tokens, 5);
         assert_eq!(agent.last_turn_usage().input_tokens, 10);
@@ -2043,7 +1996,7 @@ mod tests {
         let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(tmp.path()))];
         let mut agent = Agent::new(router_with(Box::new(mock)), tools);
         let mut sink = VecEventSink::default();
-        run_with(&mut agent, "read note.txt", &turn_ctx(), &mut sink)
+        run_plain(&mut agent, "read note.txt", &mut sink)
             .await
             .unwrap();
         assert_valid_event_sequence(&sink.events);
@@ -2077,20 +2030,8 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
         let mut sink = VecEventSink::default();
-        let err = agent
-            .run(
-                "hi",
-                &TurnContext::new(
-                    TurnId::next(),
-                    cancel,
-                    AgentMode::Agent,
-                    ModelId::new("default"),
-                    None,
-                ),
-                &mut sink,
-            )
-            .await
-            .unwrap_err();
+        let ctx = TurnContext::new(TurnId::next(), cancel, agent.selection());
+        let err = agent.run("hi", &ctx, &mut sink).await.unwrap_err();
         assert!(err.is_cancelled());
         assert_valid_event_sequence(&sink.events);
         assert!(matches!(
@@ -2104,9 +2045,7 @@ mod tests {
         let mock = MockProvider::new(vec![]);
         let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
         let mut sink = VecEventSink::default();
-        let err = run_with(&mut agent, "hi", &turn_ctx(), &mut sink)
-            .await
-            .unwrap_err();
+        let err = run_plain(&mut agent, "hi", &mut sink).await.unwrap_err();
         assert!(!err.is_cancelled());
         assert_valid_event_sequence(&sink.events);
         assert!(matches!(
@@ -2136,7 +2075,8 @@ mod tests {
             text_response("done"),
         ]);
         let mut sink = VecEventSink::default();
-        let err = run_with(&mut agent, "read it", &turn_ctx_with(2), &mut sink)
+        let ctx = turn_ctx_with(&agent, 2);
+        let err = run_with(&mut agent, "read it", &ctx, &mut sink)
             .await
             .unwrap_err();
         assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
@@ -2157,7 +2097,7 @@ mod tests {
             text_response("done"),
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = turn_ctx_with(2).with_requests(tx);
+        let ctx = turn_ctx_with(&agent, 2).with_requests(Arc::new(tx));
         let mut sink = VecEventSink::default();
         let text = {
             let turn = agent.run("read it", &ctx, &mut sink);
@@ -2189,7 +2129,7 @@ mod tests {
             text_response("done"),
         ]);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let ctx = turn_ctx_with(2).with_requests(tx);
+        let ctx = turn_ctx_with(&agent, 2).with_requests(Arc::new(tx));
         let mut sink = VecEventSink::default();
         let err = {
             let turn = agent.run("read it", &ctx, &mut sink);
@@ -2405,9 +2345,7 @@ mod tests {
         ]);
         let mut agent = agent_with_todo_write(Box::new(mock));
         let mut sink = VecEventSink::default();
-        let result = run_with(&mut agent, "plan it", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        let result = run_plain(&mut agent, "plan it", &mut sink).await.unwrap();
         assert_eq!(result.text(), "done");
         assert_eq!(agent.todos().items.len(), 1);
         assert_eq!(agent.todos().items[0].id, "a");
@@ -2449,9 +2387,7 @@ mod tests {
             }],
         });
         let mut sink = VecEventSink::default();
-        run_with(&mut agent, "bad write", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        run_plain(&mut agent, "bad write", &mut sink).await.unwrap();
         assert_eq!(agent.todos().items[0].id, "keep");
         assert!(!agent.todo_written_this_turn());
 
@@ -2600,9 +2536,7 @@ mod tests {
             items: vec![completed_item()],
         });
         let mut sink = VecEventSink::default();
-        run_with(&mut agent, "next", &turn_ctx(), &mut sink)
-            .await
-            .unwrap();
+        run_plain(&mut agent, "next", &mut sink).await.unwrap();
         assert!(agent.todos().is_empty());
         assert!(agent.todo_written_this_turn());
         assert!(sink.events.iter().any(|e| matches!(
@@ -2662,7 +2596,8 @@ mod tests {
         assert_eq!(agent.mode(), AgentMode::Agent);
 
         let mut sink = NullSink;
-        let ctx = turn_ctx();
+        let ctx = turn_ctx(&agent);
+        let selection = agent.selection();
         let run = agent.run("read it", &ctx, &mut sink);
         tokio::pin!(run);
         tokio::select! {
@@ -2670,7 +2605,7 @@ mod tests {
             _ = entered_rx => {}
             _ = &mut run => panic!("turn finished before first complete awaited"),
         }
-        ctx.set_mode(AgentMode::Plan);
+        selection.set_mode(AgentMode::Plan);
         drop(release_tx);
         assert_eq!(run.await.unwrap().text(), "done");
 
