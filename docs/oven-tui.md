@@ -436,9 +436,10 @@ it started.
 
 ## Rendering notes
 
-- `paint_visible` marks cells `AlwaysUpdate` for the transcript region: wide CJK
-  glyphs leave a stale trailing cell on Windows terminals under diff-based
-  painting.
+- `paint_visible` marks cells `AlwaysUpdate` for the transcript region, and the
+  composer does the same for its text area: wide CJK glyphs leave a stale
+  trailing cell under diff-based painting, which shows up as a white block
+  when those characters are deleted.
 - `draw` order in `Ui` is user prompt, transcript, queue, todos, input,
   overlay, status, then the reply toast above the transcript.
 - Ticks are only scheduled while something animates (`wants_tick`), so an idle

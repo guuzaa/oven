@@ -7,6 +7,7 @@ use oven_app::AppState;
 use oven_app::FileMentions;
 use oven_app::config::ProviderConfig;
 use ratatui::Frame;
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
 use ratatui::layout::{Constraint, Direction, Layout, Position};
 use ratatui::style::Style;
@@ -177,13 +178,17 @@ impl InputView {
         );
         if self.setup.is_open() {
             draw_setup_prompt(f, chunks[1], &self.setup);
-            return;
+        } else {
+            self.textarea.set_style(shell::text_style(active));
+            self.textarea.set_cursor_line_style(Style::default());
+            self.textarea
+                .set_placeholder_text(shell::placeholder(active));
+            f.render_widget(&self.textarea, chunks[1]);
         }
-        self.textarea.set_style(shell::text_style(active));
-        self.textarea.set_cursor_line_style(Style::default());
-        self.textarea
-            .set_placeholder_text(shell::placeholder(active));
-        f.render_widget(&self.textarea, chunks[1]);
+        // A deleted wide glyph's trailing column is blank in both buffers, so
+        // the diff skips it and the terminal keeps painting that half — a
+        // white block beside the cursor. Force every composer cell out.
+        force_repaint(f, chunks[1]);
     }
 
     pub(crate) fn open_setup(&mut self) {
@@ -516,6 +521,16 @@ fn normalize_pasted(text: &str) -> Cow<'_, str> {
         return Cow::Borrowed(text);
     }
     Cow::Owned(text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+fn force_repaint(f: &mut Frame<'_>, area: Rect) {
+    let buf = f.buffer_mut();
+    let area = area.intersection(*buf.area());
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)].set_diff_option(CellDiffOption::AlwaysUpdate);
+        }
+    }
 }
 
 fn new_textarea() -> TextArea<'static> {
@@ -1422,6 +1437,29 @@ mod tests {
         let (out, buf) = render(&mut view, 40, 3, &State::new());
         assert_eq!(buf[(0, 0)].style().fg, theme::shell().fg);
         assert!(out.contains('$'), "{out}");
+    }
+
+    #[test]
+    fn deleting_wide_chars_repaints_the_trailing_column() {
+        let mut view = view();
+        type_text(&mut view, "你好");
+        let (_, before) = render(&mut view, 40, 3, &State::new());
+        // Border (1) + prompt (2). "你好" occupies four columns, then the cursor.
+        const TEXT_X: u16 = 1 + PROMPT_COLS;
+        assert_eq!(before[(TEXT_X, 1)].symbol(), "你");
+        assert_eq!(before[(TEXT_X + 2, 1)].symbol(), "好");
+
+        view.handle_key(key(KeyCode::Backspace), &State::new());
+        let (_, after) = render(&mut view, 40, 3, &State::new());
+        assert_eq!(after[(TEXT_X, 1)].symbol(), "你");
+        assert_eq!(after[(TEXT_X + 2, 1)].symbol(), " ");
+        // The column "好" used to cover must be sent even though it is blank
+        // in both frames; otherwise the terminal keeps the right half.
+        assert_eq!(
+            after[(TEXT_X + 3, 1)].diff_option,
+            CellDiffOption::AlwaysUpdate
+        );
+        assert_eq!(after[(TEXT_X + 3, 1)].symbol(), " ");
     }
 
     #[test]
