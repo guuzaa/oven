@@ -4,7 +4,6 @@ use ratatui::style::Style;
 use super::theme;
 
 const PROMPT_IDLE: &str = "› ";
-const PROMPT_BUSY: &str = "⋅ ";
 const PROMPT_SHELL: &str = "$ ";
 const PLACEHOLDER_SHELL: &str = "shell command…";
 const PLACEHOLDER_MESSAGE: &str = "message…";
@@ -17,14 +16,8 @@ pub fn command(text: &str) -> Option<&str> {
     ShellInput::parse(text)?.command()
 }
 
-pub fn prompt(busy: bool, active: bool) -> &'static str {
-    if active && !busy {
-        PROMPT_SHELL
-    } else if busy {
-        PROMPT_BUSY
-    } else {
-        PROMPT_IDLE
-    }
+pub fn prompt(active: bool) -> &'static str {
+    if active { PROMPT_SHELL } else { PROMPT_IDLE }
 }
 
 pub fn prompt_style(active: bool) -> Style {

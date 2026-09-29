@@ -170,7 +170,7 @@ impl InputView {
         let active = shell::is_active(&self.text());
         f.render_widget(
             Paragraph::new(Span::styled(
-                shell::prompt(state.busy, active),
+                shell::prompt(active),
                 shell::prompt_style(active),
             )),
             chunks[0],
@@ -1379,8 +1379,10 @@ mod tests {
             busy: true,
             ..State::new()
         };
-        let (_, buf) = render(&mut view, 40, 3, &busy);
+        let (out, buf) = render(&mut view, 40, 3, &busy);
         assert_eq!(buf[(0, 0)].style().fg, theme::border_active().fg);
+        assert!(out.contains('›'), "{out}");
+        assert!(!out.contains('⋅'), "{out}");
     }
 
     #[test]
