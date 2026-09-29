@@ -999,7 +999,7 @@ impl Component for Transcript {
                     self.push_separator();
                 }
             }
-            AppEventKind::StateChanged(_)
+            AppEventKind::HistoryChanged { .. }
             | AppEventKind::Exited
             | AppEventKind::Subagent(_)
             | AppEventKind::Notification { .. } => {}

@@ -40,6 +40,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// The conversation with its record timestamps and thinking durations,
+    /// sharing the agent's messages so a transcript re-seed does not copy
+    /// every message.
+    pub fn history_timed_shared(&self) -> Vec<(Arc<Message>, u64, Option<u64>)> {
+        self.history
+            .iter()
+            .cloned()
+            .zip(self.history_timestamps.iter().copied())
+            .zip(self.history_thinking_ms.iter().copied())
+            .map(|((message, timestamp), thinking_ms)| (message, timestamp, thinking_ms))
+            .collect()
+    }
+
     pub(crate) fn from_agent(
         agent: &Agent,
         provider: ProviderConfig,
@@ -107,6 +120,9 @@ pub enum AppPhase {
     Cancelling {
         turn_id: TurnId,
     },
+    /// The history is being summarized: the driver is busy, but there is no
+    /// turn to cancel.
+    Compacting,
     ShuttingDown,
 }
 
@@ -116,7 +132,7 @@ impl AppPhase {
             Self::Running { turn_id }
             | Self::Awaiting { turn_id }
             | Self::Cancelling { turn_id } => Some(*turn_id),
-            Self::Idle | Self::ShuttingDown => None,
+            Self::Idle | Self::Compacting | Self::ShuttingDown => None,
         }
     }
 
@@ -124,10 +140,14 @@ impl AppPhase {
         matches!(self, Self::Idle)
     }
 
+    /// Whether the driver is occupied, so a frontend shows itself busy.
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            Self::Running { .. } | Self::Awaiting { .. } | Self::Cancelling { .. }
+            Self::Running { .. }
+                | Self::Awaiting { .. }
+                | Self::Cancelling { .. }
+                | Self::Compacting
         )
     }
 }
@@ -137,13 +157,8 @@ pub struct SessionState {
     pub id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct StateEvent {
-    pub change: StateChange,
-}
-
-/// Why the conversation history changed, so a view can rebuild itself
-/// without guessing from a revision number.
+/// Why the conversation history was replaced, so a view can rebuild itself
+/// and tell a rewind from a `/clear`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryChangeReason {
     /// Esc rewind truncated the last turn.
@@ -154,44 +169,4 @@ pub enum HistoryChangeReason {
     Compacted,
     /// History was replaced by something outside a known command.
     External,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum StateChange {
-    ModelChanged {
-        model: String,
-        reasoning_effort: Option<ReasoningEffort>,
-    },
-    ModeChanged {
-        mode: AgentMode,
-    },
-    TodosChanged {
-        todos: TodoList,
-    },
-    HistoryChanged {
-        revision: u64,
-        reason: HistoryChangeReason,
-    },
-    SessionChanged {
-        session_id: Option<String>,
-    },
-    UsageChanged {
-        usage: Usage,
-    },
-    /// The active model's context window. Prompt-side tokens are not part of
-    /// it: those belong to the turn's usage reports, which reach a frontend
-    /// as `AgentEvent::Usage`.
-    ContextWindowChanged {
-        window: Option<u32>,
-    },
-    ProviderChanged {
-        provider: ProviderConfig,
-        configured_providers: Vec<String>,
-    },
-    ModelsChanged {
-        models: Vec<(String, String)>,
-    },
-    SubagentsChanged {
-        subagents: Arc<Vec<NodeInfo>>,
-    },
 }

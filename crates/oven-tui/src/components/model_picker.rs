@@ -66,8 +66,13 @@ impl ModelPicker {
     }
 
     /// Replace the model list (e.g. after a provider switch).
-    pub(crate) fn update_models(&mut self, models: Vec<(String, String)>) {
-        self.models = models;
+    /// Takes the catalog the app reports. One that has not changed leaves the
+    /// selection where the user put it.
+    pub(crate) fn update_models(&mut self, models: &[(String, String)]) {
+        if self.models == models {
+            return;
+        }
+        self.models = models.to_vec();
         if self.stage == Stage::Models {
             self.selected = 0;
         }

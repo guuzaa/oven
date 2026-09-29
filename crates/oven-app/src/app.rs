@@ -213,19 +213,8 @@ impl App {
         &self.root
     }
 
-    /// The conversation with its record timestamps and thinking durations,
-    /// sharing the agent's messages so a transcript re-seed does not copy
-    /// every message.
     pub fn history_timed_shared(&self) -> Vec<(Arc<Message>, u64, Option<u64>)> {
-        let state = self.state.borrow();
-        state
-            .history
-            .iter()
-            .cloned()
-            .zip(state.history_timestamps.iter().copied())
-            .zip(state.history_thinking_ms.iter().copied())
-            .map(|((message, timestamp), thinking_ms)| (message, timestamp, thinking_ms))
-            .collect()
+        self.state.borrow().history_timed_shared()
     }
 
     pub fn todos(&self) -> TodoList {

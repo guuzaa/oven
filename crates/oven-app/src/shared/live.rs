@@ -12,7 +12,7 @@ use crate::command::Input;
 use crate::config::{AppConfig, ProviderConfig};
 use crate::event::{AppEventKind, EventBus, SubagentEvent};
 use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
-use crate::state::{AppState, StateChange, context_window_of};
+use crate::state::{AppState, context_window_of};
 
 use super::Shared;
 
@@ -113,15 +113,7 @@ impl Shared {
             state.model.clone_from(&outcome.model);
             state.reasoning_effort = outcome.reasoning_effort;
         });
-        self.events.emit_state(StateChange::ModelChanged {
-            model: outcome.model.clone(),
-            reasoning_effort: outcome.reasoning_effort,
-        });
-        publish_context_window(
-            &self.state,
-            context_window_of(&router, &outcome.model),
-            &self.events,
-        );
+        set_context_window(&self.state, context_window_of(&router, &outcome.model));
         let saved = save_provider_overlay(
             self.user_config_path.as_deref(),
             &outcome.overlay,
@@ -152,18 +144,13 @@ struct ModelSwitchOutcome {
 }
 
 /// Publishes the active model's context window, but only when it moved: a
-/// frontend already holding the window learns nothing from a repeat, and
-/// prompt-side tokens travel with the turn's usage reports instead.
-pub(crate) fn publish_context_window(
-    state_tx: &watch::Sender<AppState>,
-    window: Option<u32>,
-    events: &EventBus,
-) {
-    if window == state_tx.borrow().context_window {
-        return;
-    }
-    state_tx.send_modify(|state| state.context_window = window);
-    events.emit_state(StateChange::ContextWindowChanged { window });
+/// frontend already holding the window learns nothing from a repeat.
+pub(crate) fn set_context_window(state_tx: &watch::Sender<AppState>, window: Option<u32>) {
+    state_tx.send_if_modified(|state| {
+        let moved = state.context_window != window;
+        state.context_window = window;
+        moved
+    });
 }
 
 /// Resolves a `/model` switch against `router`/`config` without touching

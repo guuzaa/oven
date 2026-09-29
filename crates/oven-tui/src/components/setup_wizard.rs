@@ -75,12 +75,12 @@ impl SetupWizard {
         self.open
     }
 
-    pub(crate) fn set_current(&mut self, current: ProviderConfig) {
-        self.current = current;
+    pub(crate) fn set_current(&mut self, current: &ProviderConfig) {
+        self.current.clone_from(current);
     }
 
-    pub(crate) fn set_configured(&mut self, configured: Vec<String>) {
-        self.configured = configured;
+    pub(crate) fn set_configured(&mut self, configured: &[String]) {
+        self.configured = configured.to_vec();
     }
 
     pub(crate) fn open(&mut self) {

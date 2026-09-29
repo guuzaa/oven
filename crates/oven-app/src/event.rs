@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, EventSink, TurnId};
 use tokio::sync::mpsc;
 
-use crate::state::{StateChange, StateEvent};
+use crate::state::HistoryChangeReason;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AppId(pub u64);
@@ -25,11 +25,19 @@ pub struct AppEvent {
 pub enum AppEventKind {
     Agent(AgentEventEnvelope),
     Subagent(SubagentEvent),
-    StateChanged(StateEvent),
+    /// The history was replaced wholesale, so a view rebuilds itself from
+    /// the state instead of following per-message events.
+    HistoryChanged {
+        reason: HistoryChangeReason,
+    },
     Shell(ShellEvent),
     Compaction(CompactionEvent),
-    Notification { text: String },
-    Error { message: String },
+    Notification {
+        text: String,
+    },
+    Error {
+        message: String,
+    },
     Exited,
 }
 
@@ -87,10 +95,6 @@ impl AppEvent {
 
     pub fn exited() -> Self {
         Self::new(AppEventKind::Exited)
-    }
-
-    pub fn state_changed(change: crate::state::StateChange) -> Self {
-        Self::new(AppEventKind::StateChanged(StateEvent { change }))
     }
 
     pub fn shell(event: ShellEvent) -> Self {
@@ -181,10 +185,6 @@ impl EventBus {
     /// forwards from the agent's own event channel.
     pub(crate) fn emit_agent(&self, agent_id: AgentId, turn_id: TurnId, event: AgentEvent) {
         self.emit(AppEvent::agent_with(agent_id, turn_id, event).kind);
-    }
-
-    pub(crate) fn emit_state(&self, change: StateChange) {
-        self.emit(AppEventKind::StateChanged(StateEvent { change }));
     }
 
     pub(crate) fn emit_error(&self, message: impl Into<String>) {

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -8,13 +9,13 @@ use crossterm::event::{
 };
 use futures::StreamExt;
 use oven_app::{
-    AgentEvent, AgentId, AnswerResponse, App, AppEvent, AppEventKind, ApprovalDecision,
-    CompactionEvent, Input, LoopLimitDecision, NodeInfo, ShellEvent, StateChange, StateEvent,
-    SubagentEvent, ToolEvent, TurnEvent, UserRequestId, UserResponse,
+    AgentEvent, AgentId, AnswerResponse, App, AppEvent, AppEventKind, AppState, ApprovalDecision,
+    Input, LoopLimitDecision, NodeInfo, SubagentEvent, ToolEvent, TurnEvent, UserRequestId,
+    UserResponse,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::components::agents;
 use crate::components::choice_popup::{ChoicePopup, ChoicePopupAction};
@@ -104,6 +105,9 @@ enum PromptFlow {
 pub struct Ui {
     app: App,
     events: mpsc::UnboundedReceiver<AppEvent>,
+    /// The app's levels — phase, mode, model, subagents — which the UI reads
+    /// as they stand rather than replaying what changed.
+    state_rx: watch::Receiver<AppState>,
     state: State,
     quit: bool,
     /// Esc is ignored until `Rewound` arrives so a second rewind cannot
@@ -135,34 +139,28 @@ pub struct Ui {
 impl Ui {
     pub fn new(app: App) -> Self {
         let events = app.subscribe();
-        let slash_commands = app.slash_commands();
-        let model = app.model();
-        let provider = app.provider_config();
+        let state_rx = app.watch_state();
+        let snapshot = app.state();
         let root = app
             .root()
             .canonicalize()
             .unwrap_or_else(|_| app.root().to_owned());
-        let last_turn_usage = app.last_turn_usage();
-        let (context_tokens, context_window) = {
-            let state = app.state();
-            (state.context_tokens, state.context_window)
-        };
-        let todos = app.todos();
-        let agents = app.subagents();
-        let configured = app.configured_providers();
-        let mut input = InputView::new(slash_commands, provider.clone()).with_root(&root);
-        input.set_configured(configured.clone());
-        if configured.is_empty() && provider.needs_setup() {
+        let mut input =
+            InputView::new(app.slash_commands(), snapshot.provider.clone()).with_root(&root);
+        input.sync(&snapshot);
+        if snapshot.configured_providers.is_empty() && snapshot.provider.needs_setup() {
             input.open_setup();
         }
-        let main_agent = app.agent_id();
         let state = State {
-            agents: active_agents(&agents),
+            busy: snapshot.phase.is_active(),
+            agents: active_agents(&snapshot.subagents),
+            mode: snapshot.mode,
             ..State::new()
         };
         Self {
             app,
             events,
+            state_rx,
             state,
             quit: false,
             rewinding: false,
@@ -171,15 +169,15 @@ impl Ui {
 
             transcript: Transcript::new(),
             views: BTreeMap::new(),
-            main_agent,
-            agents,
+            main_agent: snapshot.agent_id,
+            agents: snapshot.subagents.to_vec(),
             focus: None,
             agents_area: None,
-            status: StatusBar::new(model, &root, last_turn_usage)
-                .with_effort(provider.reasoning_effort)
-                .with_context(context_tokens, context_window),
+            status: StatusBar::new(snapshot.model.clone(), &root, snapshot.last_turn_usage)
+                .with_effort(snapshot.reasoning_effort)
+                .with_context(snapshot.context_tokens, snapshot.context_window),
             input,
-            todos: TodosWidget::new(todos),
+            todos: TodosWidget::new(snapshot.todos.clone()),
             prompt: None,
         }
     }
@@ -187,7 +185,7 @@ impl Ui {
     /// Rebuilds the single scrollable transcript from backend history.
     fn reload_history(&mut self) {
         let mut transcript = Transcript::new();
-        transcript.seed_timed(&self.app.history_timed_shared());
+        transcript.seed_timed(&self.state_rx.borrow().history_timed_shared());
         self.transcript = transcript;
         self.rewinding = false;
     }
@@ -244,6 +242,7 @@ impl Ui {
                         break;
                     }
                 }
+                Ok(()) = self.state_rx.changed() => self.sync_state(),
             }
             terminal.draw(|f| self.draw(f))?;
         }
@@ -317,7 +316,6 @@ impl Ui {
                 return;
             }
             AppEventKind::Agent(env) => match &env.event {
-                AgentEvent::Turn(TurnEvent::Started) => self.state.busy = true,
                 AgentEvent::Turn(TurnEvent::LoopLimitReached {
                     request_id,
                     max_iters,
@@ -331,10 +329,7 @@ impl Ui {
                     TurnEvent::Completed { .. }
                     | TurnEvent::Cancelled { .. }
                     | TurnEvent::Failed { .. },
-                ) => {
-                    self.state.busy = false;
-                    self.prompt = None;
-                }
+                ) => self.prompt = None,
                 AgentEvent::Tool(ToolEvent::ApprovalRequested {
                     request_id,
                     name,
@@ -361,31 +356,30 @@ impl Ui {
                 AgentEvent::Tool(ToolEvent::Finished { .. }) => self.prompt = None,
                 _ => {}
             },
-            AppEventKind::Shell(ev) => match ev {
-                ShellEvent::Started { .. } => self.state.busy = true,
-                ShellEvent::Finished { .. } | ShellEvent::Failed { .. } => {
-                    self.state.busy = false;
-                }
-            },
-            AppEventKind::Compaction(ev) => {
-                self.state.busy = matches!(ev, CompactionEvent::Started);
-            }
-            AppEventKind::StateChanged(StateEvent { change, .. }) => match change {
-                StateChange::ModeChanged { mode } => self.state.mode = *mode,
-                StateChange::HistoryChanged { .. } => self.reload_history(),
-                StateChange::SubagentsChanged { subagents } => self.on_subagents(subagents),
-                _ => {}
-            },
-            AppEventKind::Notification { .. } | AppEventKind::Error { .. } => {
-                if !self.app.state().phase.is_active() {
-                    self.state.busy = false;
-                }
-            }
+            AppEventKind::HistoryChanged { .. } => self.reload_history(),
+            AppEventKind::Shell(_)
+            | AppEventKind::Compaction(_)
+            | AppEventKind::Notification { .. }
+            | AppEventKind::Error { .. } => {}
         }
         self.transcript.on_event(ev);
         self.status.on_event(ev);
-        self.input.on_event(ev);
         self.todos.on_event(ev);
+    }
+
+    /// Follows the levels the app reports. What the driver is doing is read
+    /// from its phase, so the composer is busy exactly while the app is.
+    fn sync_state(&mut self) {
+        let subagents = {
+            let state = self.state_rx.borrow_and_update();
+            self.state.busy = state.phase.is_active();
+            self.state.mode = state.mode;
+            self.status.sync(&state);
+            self.input.sync(&state);
+            self.todos.sync(&state);
+            Arc::clone(&state.subagents)
+        };
+        self.on_subagents(&subagents);
         self.maybe_flush();
     }
 
@@ -425,7 +419,6 @@ impl Ui {
             return;
         }
         let texts = std::mem::take(&mut self.pending);
-        self.state.busy = true;
         let remaining = send_each(texts, |text| {
             self.app
                 .submit(text)
@@ -436,7 +429,6 @@ impl Ui {
             let mut rest = remaining;
             rest.append(&mut self.pending);
             self.pending = rest;
-            self.state.busy = false;
         }
     }
 
@@ -466,7 +458,8 @@ impl Ui {
     }
 
     fn send_cancel(&self) {
-        if let Some(turn_id) = self.app.state().phase.turn_id() {
+        let turn_id = self.state_rx.borrow().phase.turn_id();
+        if let Some(turn_id) = turn_id {
             self.app.cancel(turn_id);
         }
     }
@@ -654,10 +647,8 @@ impl Ui {
                 }
                 self.status.clear_reply();
                 self.input.clear();
-                self.state.busy = true;
-                match self.app.submit(&text) {
-                    Ok(input) => self.push_submitted(&input),
-                    Err(_) => self.state.busy = false,
+                if let Ok(input) = self.app.submit(&text) {
+                    self.push_submitted(&input);
                 }
                 false
             }
@@ -1215,6 +1206,23 @@ mod tests {
 
         ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
 
+        assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
+    }
+
+    #[tokio::test]
+    async fn busy_follows_the_apps_phase_and_flushes_the_queue_when_it_ends() {
+        let root = tempdir::TempDir::new("oven-ui-sync").unwrap();
+        let mut ui = test_ui(&root).await;
+        ui.state.busy = true;
+        ui.pending.push(TEST_ANSWER.to_string());
+
+        ui.sync_state();
+
+        assert!(!ui.state.busy, "an idle app is not busy");
+        assert!(
+            ui.pending.is_empty(),
+            "the queue is sent once the app is idle"
+        );
         assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
     }
 

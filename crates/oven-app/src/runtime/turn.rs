@@ -58,7 +58,6 @@ impl Runtime {
         }
 
         self.sync_state();
-        self.emit_context_changed();
         if result.is_ok() && self.should_auto_compact() {
             self.compact_history().await;
         }

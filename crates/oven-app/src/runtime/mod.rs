@@ -19,11 +19,10 @@ use crate::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,
 };
-use crate::shared::{GOODBYE, Shared, publish_context_window, save_provider_overlay};
+use crate::shared::{GOODBYE, Shared, save_provider_overlay};
 use crate::slash::{CommandOutcome, SlashRegistry};
 use crate::state::{
-    AppPhase, AppState, HistoryChangeReason, SessionState, StateChange, context_tokens,
-    context_window,
+    AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens, context_window,
 };
 use crate::subagent::Subagents;
 
@@ -165,10 +164,7 @@ impl Runtime {
         let router = self.agent.router();
         let config = self.shared.config().clone();
         let (models, _) = refresh_model_choices(router.as_ref(), &model, &config).await;
-        self.shared
-            .state
-            .send_modify(|state| state.models.clone_from(&models));
-        self.emit_state(StateChange::ModelsChanged { models });
+        self.shared.state.send_modify(|state| state.models = models);
     }
 
     fn shutdown(&self, inbox: &InboxReceiver) {
@@ -184,28 +180,12 @@ impl Runtime {
         self.shared.events.emit(kind);
     }
 
-    pub(crate) fn emit_state(&self, change: StateChange) {
-        self.shared.events.emit_state(change);
+    fn emit_history_changed(&self, reason: HistoryChangeReason) {
+        self.emit(AppEventKind::HistoryChanged { reason });
     }
 
     pub(crate) fn emit_error(&self, message: impl Into<String>) {
         self.shared.events.emit_error(message);
-    }
-
-    /// Refresh the context fields from the agent. Only a window that moved is
-    /// worth telling a frontend about: prompt-side tokens travel with the
-    /// turn's own usage reports, and the model is the one thing the window
-    /// follows.
-    fn emit_context_changed(&mut self) {
-        let tokens = context_tokens(&self.agent);
-        self.shared
-            .state
-            .send_modify(|state| state.context_tokens = tokens);
-        publish_context_window(
-            &self.shared.state,
-            context_window(&self.agent),
-            &self.shared.events,
-        );
     }
 
     fn should_auto_compact(&self) -> bool {
@@ -229,6 +209,7 @@ impl Runtime {
             });
             return;
         }
+        self.shared.set_phase(AppPhase::Compacting);
         self.emit(AppEventKind::Compaction(CompactionEvent::Started));
         match self.agent.compact().await {
             Ok(stats) => {
@@ -238,17 +219,7 @@ impl Runtime {
                 }
                 self.persist_compacted();
                 self.sync_state();
-                self.emit_state(StateChange::HistoryChanged {
-                    revision: self.agent.history_revision(),
-                    reason: HistoryChangeReason::Compacted,
-                });
-                self.emit_state(StateChange::UsageChanged {
-                    usage: self.agent.last_turn_usage(),
-                });
-                self.emit_context_changed();
-                self.emit_state(StateChange::SessionChanged {
-                    session_id: self.session_id(),
-                });
+                self.emit_history_changed(HistoryChangeReason::Compacted);
                 self.emit(AppEventKind::Compaction(CompactionEvent::Completed {
                     before_tokens: stats.before_tokens,
                     after_tokens: stats.after_tokens,
@@ -264,6 +235,7 @@ impl Runtime {
                 self.emit_error(format!("compact failed: {}", e.message));
             }
         }
+        self.shared.set_phase(AppPhase::Idle);
     }
 
     /// Write the compacted history (summary message) into the freshly
@@ -360,20 +332,7 @@ impl Runtime {
         self.persisted_messages = 0;
         self.persisted_rev = self.agent.history_revision();
         self.sync_state();
-        self.emit_state(StateChange::HistoryChanged {
-            revision: self.agent.history_revision(),
-            reason: HistoryChangeReason::Cleared,
-        });
-        self.emit_state(StateChange::TodosChanged {
-            todos: self.agent.todos().clone(),
-        });
-        self.emit_state(StateChange::UsageChanged {
-            usage: self.agent.last_turn_usage(),
-        });
-        self.emit_context_changed();
-        self.emit_state(StateChange::SessionChanged {
-            session_id: self.session_id(),
-        });
+        self.emit_history_changed(HistoryChangeReason::Cleared);
         self.emit(AppEventKind::Notification {
             text: "history cleared".into(),
         });
@@ -451,28 +410,14 @@ impl Runtime {
                 .expect("active provider exists after update"),
         );
         let configured_providers = next.configured_providers();
-        let reasoning_effort = self.agent.reasoning_effort();
         self.shared.state.send_modify(|state| {
-            state.provider.clone_from(&provider);
-            state.configured_providers.clone_from(&configured_providers);
-            state.model.clone_from(&model);
-            state.reasoning_effort = reasoning_effort;
+            state.provider = provider;
+            state.configured_providers = configured_providers;
         });
-        self.emit_state(StateChange::ProviderChanged {
-            provider,
-            configured_providers,
-        });
-        self.emit_state(StateChange::ModelChanged {
-            model: model.clone(),
-            reasoning_effort: self.agent.reasoning_effort(),
-        });
-        self.emit_context_changed();
+        self.sync_state();
         let router = self.agent.router();
         let (models, auth_error) = refresh_model_choices(router.as_ref(), &model, &next).await;
-        self.shared
-            .state
-            .send_modify(|state| state.models.clone_from(&models));
-        self.emit_state(StateChange::ModelsChanged { models });
+        self.shared.state.send_modify(|state| state.models = models);
         self.emit(AppEventKind::Notification {
             text: summarize_setup(&overlay, saved.as_deref()),
         });
@@ -513,15 +458,7 @@ impl Runtime {
         }
         self.persisted_rev = self.agent.history_revision();
         self.sync_state();
-        self.emit_state(StateChange::TodosChanged { todos: restored });
-        self.emit_state(StateChange::UsageChanged {
-            usage: self.agent.last_turn_usage(),
-        });
-        self.emit_context_changed();
-        self.emit_state(StateChange::HistoryChanged {
-            revision: self.agent.history_revision(),
-            reason: HistoryChangeReason::Rewound,
-        });
+        self.emit_history_changed(HistoryChangeReason::Rewound);
     }
 
     fn switch_session(&mut self) {

@@ -33,8 +33,5 @@ pub use oven_agent::{
     UserRequestId, UserResponse, present_tool,
 };
 pub use shell::{LocalShell, ShellInput, display_shell_line};
-pub use state::{
-    AppPhase, AppState, HistoryChangeReason, SessionState, StateChange, StateEvent,
-    context_tokens_of,
-};
+pub use state::{AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens_of};
 pub use tools::ToolRegistry;

@@ -1,6 +1,6 @@
 mod live;
 
-pub(crate) use live::{GOODBYE, publish_context_window, queued_notice, save_provider_overlay};
+pub(crate) use live::{GOODBYE, queued_notice, save_provider_overlay};
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use tokio::sync::watch;
 
 use crate::config::AppConfig;
 use crate::event::{AppEventKind, EventBus};
-use crate::state::{AppPhase, AppState, StateChange};
+use crate::state::{AppPhase, AppState};
 use crate::subagent::Subagents;
 
 /// The turn that is running now: how to stop it, and the one request it is
@@ -143,7 +143,6 @@ impl Shared {
     pub(crate) fn set_mode(&self, mode: AgentMode) {
         self.selection.set_mode(mode);
         self.state.send_modify(|state| state.mode = mode);
-        self.events.emit_state(StateChange::ModeChanged { mode });
     }
 
     pub(crate) fn stop_subagent(&self, id: AgentId) {
@@ -178,11 +177,7 @@ impl Shared {
         }
         *revision = current;
         let snapshot = Arc::new(self.subagents.snapshot());
-        self.state
-            .send_modify(|state| state.subagents.clone_from(&snapshot));
-        self.events.emit_state(StateChange::SubagentsChanged {
-            subagents: snapshot,
-        });
+        self.state.send_modify(|state| state.subagents = snapshot);
     }
 }
 

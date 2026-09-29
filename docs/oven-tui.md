@@ -56,12 +56,17 @@ channel is empty, so a burst of deltas costs one draw instead of one draw per
 delta. A disconnected channel settles the live transcript response and clears
 `busy`.
 
+The levels come from the app's `watch` instead: on every change `sync_state`
+reads `busy` from `phase.is_active()` and takes `mode`, the subagent strip, the
+status bar's model and window, the input's providers and models, and — only
+between turns — the checklist and the usage readout, since a running turn
+reports those itself. It then sends whatever was queued once the app is idle.
+
 `apply_event` maps each event onto four things:
 
-- `Ui`'s own `state.busy` / `state.agents` / `state.mode` / `rewinding` /
-  `quit` / `esc_confirm_until`, the viewer (`focus`), and the strip's copy of
-  the registry
-- transcript, status, input, and todos widgets via `on_event` — and, for an
+- `Ui`'s own `state.agents` / `rewinding` / `quit` / `esc_confirm_until`, the
+  viewer (`focus`), and the strip's copy of the registry
+- transcript, status and todos widgets via `on_event` — and, for an
   event whose `agent_id` is not the driver's, only that subagent's transcript
 - overlay prompts (`OverlayPrompt`) for tool approval, loop limit, and a
   question from the `answer` tool that is answered either by picking an offered
@@ -156,7 +161,7 @@ registered control commands (`/model`, `/setup`, `/clear`, …) and `Rewind` sta
 out of the transcript. Queue entries create their row only
 when they are actually sent.
 
-Startup and every `StateChange::HistoryChanged` rebuild the transcript directly
+Startup and every `AppEventKind::HistoryChanged` rebuild the transcript directly
 from `App::history`; no user row is promoted out of history. On a short terminal
 the transcript keeps one row whenever possible, then status; optional bands are
 clamped to the remaining height.

@@ -285,7 +285,7 @@ pub struct AppEvent {
 pub enum AppEventKind {
     Agent(AgentEventEnvelope),
     Subagent(SubagentEvent),
-    StateChanged(StateEvent),
+    HistoryChanged { reason: HistoryChangeReason },
     Shell(ShellEvent),
     Compaction(CompactionEvent),
     Notification { text: String },
@@ -399,26 +399,22 @@ pub enum AppPhase {
 }
 ```
 
-`StateChange` tells the UI *what* moved; `watch` is *what is true now*:
+`watch` is *what is true now*, and it is the only place a level lives: phase, mode, model and effort, todos, `last_turn_usage`, context tokens and window, providers (`configured_providers` holds the canonical slugs saved under `[providers.<slug>]`), models and subagents. No event repeats them. A frontend subscribes to the `watch` and reads them as they stand; the composer is busy exactly while `phase.is_active()`.
 
-```text
-ModelChanged | ModeChanged | TodosChanged | HistoryChanged
-SessionChanged | UsageChanged | ContextWindowChanged | ProviderChanged
-ModelsChanged | SubagentsChanged
-```
+Events say *that something happened*. The one thing a snapshot cannot say is that the history was replaced wholesale, so it goes out as `HistoryChanged { reason }` with a `HistoryChangeReason` (`Rewound`, `Cleared`, `Compacted`, `External`); the view rebuilds from the state.
 
-`UsageChanged` carries `last_turn_usage` — tokens for the most recent agent turn, not a session total. `ContextWindowChanged` carries the active model's context window and only fires when that window moved: prompt-side tokens are not part of it, they travel with the turn's own `AgentEvent::Usage`, which is what the context gauge reads. The turn-end delta is `UsageChanged`. `ProviderChanged` includes `configured_providers` (canonical slugs saved under `[providers.<slug>]`).
+`last_turn_usage` is tokens for the most recent agent turn, not a session total. Prompt-side tokens for the context gauge travel with the turn's own `AgentEvent::Usage`, and the checklist with `AgentEvent::TodosChanged`, because a running turn reports them before the snapshot catches up; the frontend takes the snapshot for both once the phase is `Idle`.
 
 UI rule: consume state as truth, events as “something happened”.
 
 | Old event | Now |
 | --- | --- |
 | `AgentEvent::Done { text, usage }` | `TurnCompleted` + `TextDelta*` |
-| `AgentEvent::HistoryCleared` | `StateChange::HistoryChanged` |
-| `AgentEvent::ModelChanged` | `StateChange::ModelChanged` |
-| `AgentEvent::TodoUpdated` | `AgentEvent::TodosChanged` + `StateChange::TodosChanged` |
+| `AgentEvent::HistoryCleared` | `AppEventKind::HistoryChanged` |
+| `AgentEvent::ModelChanged` | `AppState.model` |
+| `AgentEvent::TodoUpdated` | `AgentEvent::TodosChanged`, then `AppState.todos` |
 | `AppEvent::Idle` | `AppPhase::Idle` |
-| `AppEvent::Rewound { messages, … }` | `HistoryChanged` + `UsageChanged` |
+| `AppEvent::Rewound { messages, … }` | `HistoryChanged` + the new `AppState` |
 | `AppEvent::Notify` | `Notification` |
 | `AppEvent::Exit` | `Exited` |
 
@@ -452,7 +448,7 @@ stateDiagram-v2
     ShuttingDown --> [*]
 ```
 
-Idle slash commands do not enter `Running`. They emit `StateChanged` and/or `Notification` and stay `Idle`.
+Idle slash commands do not enter `Running`. They update the state and/or emit a `Notification` and stay `Idle`.
 
 A bang-shell `Input::Shell` enters `Running` like an agent turn (so Cancel and queuing work) but emits `AppEventKind::Shell` instead of `AgentEvent`. The agent is not called. On finish the runtime appends a `<local-shell>` user message and persists; it does not emit `HistoryChanged` on the live path.
 
@@ -593,12 +589,12 @@ sequenceDiagram
 ```text
 submit("/model gpt-4o")
   → Slash /model
-  → StateChanged(ModelChanged)
+  → AppState.model updated
   → Notification("model switched…")
   → phase stays Idle
 ```
 
-The same `submit("/model …")` during `Running` does not wait: `RouterHandle` validates, the shared `Selection` updates, `StateChanged` + `Notification` fire, and the in-flight turn picks up the new model at its next step.
+The same `submit("/model …")` during `Running` does not wait: `RouterHandle` validates, the shared `Selection` updates, the state changes and a `Notification` fires, and the in-flight turn picks up the new model at its next step.
 
 `prompt()` waits for `TurnCompleted`/`Cancelled`/`Failed`, or `Shell` Finished/Failed, or for `Notification`/`Exited` when no turn started.
 

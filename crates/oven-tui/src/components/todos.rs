@@ -1,4 +1,4 @@
-use oven_app::{AgentEvent, AppEvent, AppEventKind, StateChange, StateEvent, TodoList, TodoStatus};
+use oven_app::{AgentEvent, AppEvent, AppEventKind, AppState, TodoList, TodoStatus};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -30,20 +30,22 @@ impl TodosWidget {
         }
     }
 
+    /// The driver's checklist as the turn writes it.
     pub fn on_event(&mut self, ev: &AppEvent) {
-        let todos = match &ev.kind {
-            // The driver's checklist as the turn writes it.
-            AppEventKind::Agent(env) => match &env.event {
-                AgentEvent::TodosChanged { todos } => todos,
-                _ => return,
-            },
-            AppEventKind::StateChanged(StateEvent {
-                change: StateChange::TodosChanged { todos },
-                ..
-            }) => todos,
-            _ => return,
-        };
-        self.list = todos.clone();
+        if let AppEventKind::Agent(env) = &ev.kind
+            && let AgentEvent::TodosChanged { todos } = &env.event
+        {
+            self.list.clone_from(todos);
+        }
+    }
+
+    /// Between turns the app's checklist is the truth, which is how a rewind
+    /// or `/clear` reaches the widget. While a turn runs it writes its own,
+    /// and the snapshot lags behind until the turn ends.
+    pub fn sync(&mut self, state: &AppState) {
+        if state.phase.is_idle() && self.list != state.todos {
+            self.list.clone_from(&state.todos);
+        }
     }
 
     pub fn draw(&self, f: &mut Frame<'_>, area: Rect) {
@@ -77,8 +79,9 @@ fn item_line(status: TodoStatus, content: &str, width: usize) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::component::idle_state;
     use super::*;
-    use oven_app::TodoItem;
+    use oven_app::{AppPhase, TodoItem, TurnId};
 
     fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {
         TodoItem {
@@ -100,10 +103,17 @@ mod tests {
         ])
     }
 
-    fn todos_changed(items: Vec<TodoItem>) -> AppEvent {
-        AppEvent::state_changed(StateChange::TodosChanged {
+    fn written(items: Vec<TodoItem>) -> AppEvent {
+        AppEvent::agent(AgentEvent::TodosChanged {
             todos: TodoList { items },
         })
+    }
+
+    fn synced(widget: &mut TodosWidget, items: Vec<TodoItem>) {
+        widget.sync(&AppState {
+            todos: TodoList { items },
+            ..idle_state()
+        });
     }
 
     fn render(widget: &TodosWidget) -> String {
@@ -161,14 +171,14 @@ mod tests {
     fn todo_updated_empty_hides_widget() {
         let mut widget = TodosWidget::new(sample());
         assert_eq!(widget.height(), 3);
-        widget.on_event(&todos_changed(Vec::new()));
+        widget.on_event(&written(Vec::new()));
         assert_eq!(widget.height(), 0);
     }
 
     #[test]
     fn todo_updated_replaces_list() {
         let mut widget = TodosWidget::new(sample());
-        widget.on_event(&todos_changed(vec![item(
+        widget.on_event(&written(vec![item(
             "n",
             "next task",
             TodoStatus::InProgress,
@@ -185,8 +195,21 @@ mod tests {
     #[test]
     fn history_cleared_hides_widget() {
         let mut widget = TodosWidget::new(sample());
-        widget.on_event(&todos_changed(Vec::new()));
+        synced(&mut widget, Vec::new());
         assert_eq!(widget.height(), 0);
+    }
+
+    #[test]
+    fn a_running_turn_keeps_its_own_checklist() {
+        let mut widget = TodosWidget::new(TodoList::default());
+        widget.on_event(&written(vec![item("n", "next task", TodoStatus::Pending)]));
+        widget.sync(&AppState {
+            phase: AppPhase::Running {
+                turn_id: TurnId::next(),
+            },
+            ..idle_state()
+        });
+        assert_eq!(widget.height(), 1, "the snapshot lags behind the turn");
     }
 
     #[test]

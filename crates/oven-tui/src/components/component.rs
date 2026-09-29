@@ -52,3 +52,32 @@ pub trait Component {
     fn on_event(&mut self, _ev: &AppEvent) {}
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State);
 }
+
+#[cfg(test)]
+pub(crate) fn idle_state() -> oven_app::AppState {
+    use std::sync::Arc;
+
+    use oven_app::config::ProviderConfig;
+    use oven_app::{AgentId, AppPhase, AppState, SessionState, TodoList};
+    use oven_llm::Usage;
+
+    AppState {
+        phase: AppPhase::Idle,
+        agent_id: AgentId(1),
+        subagents: Arc::default(),
+        mode: AgentMode::default(),
+        model: String::new(),
+        reasoning_effort: None,
+        provider: ProviderConfig::default(),
+        configured_providers: Vec::new(),
+        history: Vec::new(),
+        history_timestamps: Vec::new(),
+        history_thinking_ms: Vec::new(),
+        todos: TodoList::default(),
+        last_turn_usage: Usage::default(),
+        context_tokens: 0,
+        context_window: None,
+        session: SessionState::default(),
+        models: Vec::new(),
+    }
+}

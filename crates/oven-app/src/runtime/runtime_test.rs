@@ -1,7 +1,7 @@
 use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
 use crate::session::{Session, canonical_root};
-use crate::state::{AppPhase, HistoryChangeReason, StateChange, StateEvent};
+use crate::state::{AppPhase, AppState, HistoryChangeReason};
 use crate::subagent::{SubagentParts, Subagents};
 use crate::{App, AppBuilder, NodeStatus};
 use crate::{LocalShell, runtime::*};
@@ -278,18 +278,6 @@ fn turn_started(ev: &AppEvent, main: AgentId) -> bool {
     )
 }
 
-fn push_window(ev: &AppEvent, windows: &mut Vec<u32>) {
-    if let AppEventKind::StateChanged(StateEvent {
-        change: StateChange::ContextWindowChanged {
-            window: Some(window),
-        },
-        ..
-    }) = &ev.kind
-    {
-        windows.push(*window);
-    }
-}
-
 /// The driver's checklist, as the turn writes it.
 fn wrote_todos(ev: &AppEvent) -> bool {
     matches!(
@@ -334,26 +322,13 @@ fn notification(ev: &AppEvent) -> Option<&str> {
 
 fn history_change_reason(ev: &AppEvent) -> Option<HistoryChangeReason> {
     match &ev.kind {
-        AppEventKind::StateChanged(StateEvent {
-            change: StateChange::HistoryChanged { reason, .. },
-            ..
-        }) => Some(*reason),
+        AppEventKind::HistoryChanged { reason } => Some(*reason),
         _ => None,
     }
 }
 
 fn is_history_changed(ev: &AppEvent) -> bool {
     history_change_reason(ev).is_some()
-}
-
-fn is_mode_changed(ev: &AppEvent, want: oven_agent::AgentMode) -> bool {
-    matches!(
-        ev.kind,
-        AppEventKind::StateChanged(StateEvent {
-            change: StateChange::ModeChanged { mode },
-            ..
-        }) if mode == want
-    )
 }
 
 fn turn_id_of(ev: &AppEvent) -> Option<TurnId> {
@@ -365,6 +340,20 @@ fn turn_id_of(ev: &AppEvent) -> Option<TurnId> {
 
 fn settle_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(if cfg!(windows) { 15 } else { 2 })
+}
+
+async fn wait_state(handle: &App, ready: impl FnMut(&AppState) -> bool) {
+    tokio::time::timeout(settle_timeout(), handle.watch_state().wait_for(ready))
+        .await
+        .expect("timed out waiting for the state to settle")
+        .expect("the runtime went away");
+}
+
+async fn wait_for_active_subagent(handle: &App) {
+    wait_state(handle, |state| {
+        state.subagents.iter().any(|agent| agent.status.is_active())
+    })
+    .await;
 }
 
 async fn wait_turn_id(sub: &mut mpsc::UnboundedReceiver<AppEvent>) -> TurnId {
@@ -466,19 +455,12 @@ async fn plan_slash_on_idle_switches() {
     let mock = MockProvider::new(vec![]);
     let handle = spawn_app(&app, Box::new(mock)).await;
 
-    let mut rx = handle.subscribe();
     let status = handle.prompt("/plan").await.unwrap();
     assert!(status.contains("current mode: agent"));
     assert!(status.contains("0 todos"));
 
     let _ = handle.prompt("/plan on").await.unwrap();
-    let mut saw_plan = false;
-    while let Ok(ev) = rx.try_recv() {
-        if is_mode_changed(&ev, AgentMode::Plan) {
-            saw_plan = true;
-        }
-    }
-    assert!(saw_plan, "idle /plan on must emit ModeChanged(Plan)");
+    assert_eq!(handle.state().mode, AgentMode::Plan);
 
     let status = handle.prompt("/plan").await.unwrap();
     assert!(status.contains("current mode: plan"));
@@ -606,32 +588,15 @@ async fn slash_clear_emits_history_cleared_and_resets_usage() {
     let out = handle.prompt("/clear").await.unwrap();
     assert_eq!(out, "history cleared");
 
-    let mut saw_todos_cleared = false;
-    let mut done_usage = None;
     let mut cleared = None;
     while let Ok(ev) = rx.try_recv() {
         if let Some(reason) = history_change_reason(&ev) {
             cleared = Some(reason);
         }
-        match &ev.kind {
-            AppEventKind::StateChanged(StateEvent {
-                change: StateChange::TodosChanged { todos },
-                ..
-            }) if todos.is_empty() => saw_todos_cleared = true,
-            AppEventKind::StateChanged(StateEvent {
-                change: StateChange::TodosChanged { todos },
-                ..
-            }) if todos.is_empty() => saw_todos_cleared = true,
-            AppEventKind::StateChanged(StateEvent {
-                change: StateChange::UsageChanged { usage },
-                ..
-            }) => done_usage = Some(*usage),
-            _ => {}
-        }
     }
     assert_eq!(cleared, Some(HistoryChangeReason::Cleared));
-    assert!(saw_todos_cleared);
-    let usage = done_usage.expect("usage after /clear");
+    assert!(handle.todos().is_empty());
+    let usage = handle.last_turn_usage();
     assert_eq!(usage.input_tokens, 0);
     assert_eq!(usage.output_tokens, 0);
     handle.shutdown().await;
@@ -2174,49 +2139,43 @@ async fn mid_turn_model_switch_publishes_the_new_context_window() {
     handle
         .submit(format!("/model {MODEL_WITH_LARGE_WINDOW} low"))
         .unwrap();
-    let mut windows = Vec::new();
-    let mut switched = false;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
             Ok(Some(ev)) if is_turn_completed(&ev) => {
                 panic!("turn completed before the mid-turn model switch")
             }
-            Ok(Some(ev)) => {
-                push_window(&ev, &mut windows);
+            Ok(Some(ev))
                 if matches!(
                     &ev.kind,
                     AppEventKind::Notification { text } if text.contains("model switched")
-                ) {
-                    switched = true;
-                    break;
-                }
+                ) =>
+            {
+                break;
             }
-            Ok(None) => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("channel closed before the mid-turn model switch"),
             Err(_) => panic!("timeout waiting for the mid-turn model switch"),
         }
     }
-    assert!(
-        switched,
-        "expected /model to switch during the in-flight turn"
-    );
+    let state = handle.state();
+    assert!(state.phase.is_active(), "the turn is still running");
     assert_eq!(
-        windows,
-        vec![LARGE_WINDOW],
+        state.context_window,
+        Some(LARGE_WINDOW),
         "the switch must publish the new model's window while the turn runs"
     );
 
     let _ = release_tx.send(());
 
     while let Some(ev) = rx.recv().await {
-        push_window(&ev, &mut windows);
         if is_turn_completed(&ev) {
             break;
         }
     }
     assert_eq!(
-        windows,
-        vec![LARGE_WINDOW],
-        "one window, the switched model's, for the rest of the turn"
+        handle.state().context_window,
+        Some(LARGE_WINDOW),
+        "the switched model's window holds for the rest of the turn"
     );
     handle.shutdown().await;
 }
@@ -2279,28 +2238,16 @@ async fn set_mode_applies_during_in_flight_turn() {
         AppConfig::default(),
         None,
     );
-    let mut sub = handle.subscribe();
     handle.submit("block").unwrap();
     entered_rx.await.expect("turn entered complete");
     handle.set_mode(AgentMode::Plan);
 
-    let mut saw_mode = false;
-    loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(ev)) if is_mode_changed(&ev, AgentMode::Plan) => {
-                saw_mode = true;
-                break;
-            }
-            Ok(Some(ev)) if is_turn_completed(&ev) => {
-                panic!("TurnCompleted arrived before ModeChanged; SetMode was queued")
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => break,
-            Err(_) => panic!("timeout waiting for ModeChanged"),
-        }
-    }
-    assert!(saw_mode);
-    assert_eq!(handle.state().mode, AgentMode::Plan);
+    let state = handle.state();
+    assert!(
+        state.phase.is_active(),
+        "set_mode did not wait for the turn"
+    );
+    assert_eq!(state.mode, AgentMode::Plan);
     drop(release_tx);
     handle.shutdown().await;
 }
@@ -2752,22 +2699,10 @@ async fn rewind_restores_previous_todo_list() {
 
     let mut sub = handle.subscribe();
     handle.rewind().unwrap();
-    let mut saw_todo = false;
     loop {
         match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
-            Ok(Some(AppEvent {
-                kind:
-                    AppEventKind::StateChanged(StateEvent {
-                        change: StateChange::TodosChanged { todos },
-                        ..
-                    }),
-                ..
-            })) => {
-                assert_eq!(todos.items[0].id, "a");
-                saw_todo = true;
-            }
             Ok(Some(ev)) if is_history_changed(&ev) => {
-                assert!(saw_todo, "TodosChanged must precede HistoryChanged");
+                assert_eq!(handle.todos().items[0].id, "a");
                 break;
             }
             Ok(Some(_)) => {}
@@ -3637,7 +3572,14 @@ async fn agents_applies_mid_turn_while_clear_waits() {
     let mut rx = handle.subscribe();
     handle.submit("delegate it").unwrap();
 
-    let mut asked = false;
+    wait_for_active_subagent(&handle).await;
+    assert!(
+        handle.state().phase.is_active(),
+        "the turn is still running"
+    );
+    handle.submit("/agents").unwrap();
+    handle.submit("/clear").unwrap();
+
     let mut listed = false;
     let mut cleared_queued = false;
     while let Some(ev) = rx.recv().await {
@@ -3650,22 +3592,7 @@ async fn agents_applies_mid_turn_while_clear_waits() {
                 cleared_queued = true;
             }
             AppEventKind::Notification { text } if text.contains("explore#1") => {
-                assert!(asked, "the listing answers the command we sent");
                 listed = true;
-            }
-            AppEventKind::StateChanged(StateEvent { change, .. }) => {
-                if let StateChange::SubagentsChanged { subagents } = change
-                    && !asked
-                    && subagents.iter().any(|agent| agent.status.is_active())
-                {
-                    asked = true;
-                    assert!(
-                        handle.state().phase.is_active(),
-                        "the turn is still running"
-                    );
-                    handle.submit("/agents").unwrap();
-                    handle.submit("/clear").unwrap();
-                }
             }
             _ => {}
         }
@@ -3792,28 +3719,14 @@ async fn shutdown_reports_prompts_that_never_ran() {
 
     // Both arrive while the first turn is still waiting on its subagent, so
     // neither can start a turn yet.
-    let mut queued = false;
-    let mut started = 0;
-    while let Some(ev) = rx.recv().await {
-        started += usize::from(turn_started(&ev, main));
-        if let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind
-            && let StateChange::SubagentsChanged { subagents } = change
-            && subagents.iter().any(|agent| agent.status.is_active())
-        {
-            queued = true;
-            handle.submit("two").unwrap();
-            handle.submit("three").unwrap();
-            break;
-        }
-    }
-    assert!(
-        queued,
-        "the first turn was busy when the two messages arrived"
-    );
+    wait_for_active_subagent(&handle).await;
+    handle.submit("two").unwrap();
+    handle.submit("three").unwrap();
 
     // Let the subagent go: the runtime takes the first of the two messages
     // and starts a turn for it, which stays open. The second waits behind it.
     release.notify_one();
+    let mut started = 0;
     while let Some(ev) = rx.recv().await {
         started += usize::from(turn_started(&ev, main));
         if started == 2 {
@@ -3856,29 +3769,13 @@ async fn cancelling_a_turn_cancels_its_subagent() {
         AppConfig::default(),
         None,
     );
-    let mut rx = handle.subscribe();
     handle.submit("delegate it").unwrap();
 
-    let mut cancelled = false;
-    while let Some(ev) = rx.recv().await {
-        if let AppEventKind::StateChanged(StateEvent { change, .. }) = &ev.kind
-            && let StateChange::SubagentsChanged { subagents } = change
-            && !cancelled
-            && subagents.iter().any(|agent| agent.status.is_active())
-        {
-            cancelled = true;
-            let turn_id = handle.state().phase.turn_id().expect("turn is running");
-            handle.cancel(turn_id);
-        }
-        if cancelled && matches!(handle.state().phase, AppPhase::Idle) {
-            break;
-        }
-    }
+    wait_for_active_subagent(&handle).await;
+    let turn_id = handle.state().phase.turn_id().expect("turn is running");
+    handle.cancel(turn_id);
+    wait_state(&handle, |state| state.phase.is_idle()).await;
 
-    assert!(
-        cancelled,
-        "the subagent started before the turn was cancelled"
-    );
     let subagents = handle.subagents();
     assert!(
         matches!(subagents[0].status, NodeStatus::Cancelled),

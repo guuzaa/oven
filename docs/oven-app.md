@@ -91,7 +91,7 @@ auto-pruning dead ones, with a monotonic `seq`:
 | `AppEventKind` | Emitted when |
 | --- | --- |
 | `Agent(AgentEventEnvelope)` | streamed text, thinking, tool calls and results, turn start/end |
-| `StateChanged(StateEvent)` | a coarse-grained state delta (see [State](#state)) |
+| `HistoryChanged { reason }` | the history was replaced wholesale — rewind, `/clear`, compaction (see [State](#state)) |
 | `Shell(ShellEvent)` | `!cmd` started, finished, failed |
 | `Compaction(CompactionEvent)` | history compaction started, completed (before/after tokens), failed |
 | `Notification { text }` | one-shot backend replies: `/model` confirmations, errors that are not fatal |
@@ -155,13 +155,14 @@ pub enum AppPhase {
 }
 ```
 
-Alongside the snapshot, coarse-grained deltas go out as `StateChange`:
-`ModelChanged`, `ModeChanged`, `TodosChanged`, `HistoryChanged`,
-`SessionChanged`, `UsageChanged`, `ContextChanged`, `ProviderChanged`,
-`ModelsChanged`. What an `Awaiting` turn waits for is the agent event that
-announced the request, not part of the phase. `HistoryChanged` names its
-`HistoryChangeReason` (`Rewound`, `Cleared`, `Compacted`, `External`), so a view
-tells a rewind from a `/clear` without inferring it from the revision number.
+The snapshot is the only carrier of levels — mode, model, context window,
+providers, models, subagents, the phase itself — so a frontend reads them as they
+stand and no event repeats them. What an `Awaiting` turn waits for is the agent
+event that announced the request, not part of the phase, and `Compacting` marks
+the driver busy summarizing with no turn to cancel. The one thing a snapshot
+cannot say is that the history was replaced, so that goes out as
+`HistoryChanged { reason }` (`Rewound`, `Cleared`, `Compacted`, `External`): a
+view rebuilds itself from the state and tells a rewind from a `/clear`.
 
 `context_tokens` is prompt-side tokens (input plus cache reads) of the last
 response and `context_window` comes from the router's model info; both refresh on
@@ -297,7 +298,7 @@ every agent — the driver and each subagent — reports there, so the runtime
 drains it in its outer loop while it is idle, not only inside a turn. The
 supervisor keeps the matching `wake` sender: a ping with no payload that says
 the registry moved, so the runtime can read the snapshot and publish
-`StateChange::SubagentsChanged` only when it actually differs.
+`AppState.subagents` only when it actually differs.
 
 The registry is the single source of truth. `AppState.subagents` mirrors it,
 `/agents` reads it, and `task_output` reads it, so a panel and a tool can never
