@@ -20,7 +20,7 @@ pub fn thinking() -> Style {
 }
 
 pub fn tool() -> Style {
-    Style::default().fg(Color::Magenta)
+    Style::default().fg(Color::DarkGray)
 }
 
 pub fn diff_added() -> Style {
