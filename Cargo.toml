@@ -67,6 +67,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "fmt",
     "std",
 ] }
+windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 
 [profile.release]
 opt-level = 2

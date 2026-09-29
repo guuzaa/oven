@@ -11,5 +11,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "time", "process"] }
 tokio-util = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Globalization"] }
+
 [dev-dependencies]
 tempdir = { workspace = true }

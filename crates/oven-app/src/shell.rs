@@ -272,9 +272,7 @@ mod tests {
 
     #[cfg(windows)]
     fn ansi_code_page() -> u32 {
-        unsafe extern "system" {
-            fn GetACP() -> u32;
-        }
+        use windows_sys::Win32::Globalization::GetACP;
         // SAFETY: GetACP reads the ANSI code page and has no preconditions.
         unsafe { GetACP() }
     }
