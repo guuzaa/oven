@@ -203,7 +203,7 @@ async fn mcp_http_server_mounted_on_agent() {
     use oven_agent::CancellationToken;
     use rmcp::model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
     };
     use rmcp::service::{RequestContext, RoleServer};
     use rmcp::transport::streamable_http_server::{
@@ -215,8 +215,8 @@ async fn mcp_http_server_mounted_on_agent() {
     struct HttpTestServer;
 
     impl ServerHandler for HttpTestServer {
-        fn get_info(&self) -> ServerInfo {
-            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        fn get_info(&self) -> ServerConfig {
+            ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
         }
 
         async fn list_tools(
