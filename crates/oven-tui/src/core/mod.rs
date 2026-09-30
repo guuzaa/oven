@@ -4,5 +4,6 @@
 
 pub mod component;
 pub mod layout;
+pub mod paste;
 pub mod shell;
 pub mod theme;

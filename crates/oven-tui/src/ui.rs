@@ -23,7 +23,7 @@ use crate::widgets::agents;
 use crate::widgets::choice_popup::{ChoicePopup, ChoicePopupAction};
 use crate::core::component::{Action, Component, KeyResult, State};
 use crate::widgets::input::{InputView, Overlay, display_user_input};
-use crate::widgets::paste_burst::{self, Burst};
+use crate::core::paste::{self, Burst};
 use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::widgets::queue;
 use crate::widgets::status::StatusBar;
@@ -272,7 +272,7 @@ impl Ui {
     fn handle_term_event(&mut self, ev: Event) -> io::Result<bool> {
         match ev {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                let (burst, trailing) = paste_burst::coalesce(key)?;
+                let (burst, trailing) = paste::coalesce(key)?;
                 match burst {
                     Burst::Key(key) => {
                         if self.handle_key(key) {
