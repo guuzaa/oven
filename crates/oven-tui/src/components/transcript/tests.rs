@@ -1991,23 +1991,46 @@ fn active_turn_projects_its_prompt_inside_the_transcript() {
     terminal
         .draw(|f| t.draw(f, f.area(), &State::new()))
         .unwrap();
-    assert!(!t.has_sticky_prompt());
-    assert!(!t.has_active_prompt());
+    let buffer = terminal.backend().buffer();
+    let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+    assert!(row(1).contains("question"));
+    assert!(t.has_sticky_prompt());
 }
 
 #[test]
-fn scrolling_up_hides_the_active_prompt_projection() {
+fn scrolling_between_turns_swaps_the_pinned_prompt() {
     let mut t = Transcript::new();
     wide(&mut t);
-    fill(&mut t, 10);
-    t.start_user_turn("question");
-    t.on_event(&text_delta("answer"));
-    t.scroll_up(1);
-    let mut terminal = Terminal::new(TestBackend::new(80, 4)).unwrap();
+    t.start_user_turn("first question");
+    fill(&mut t, 12);
+    t.start_user_turn("second question");
+    fill(&mut t, 12);
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
+    let row = |terminal: &Terminal<TestBackend>, y| {
+        let buffer = terminal.backend().buffer();
+        (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+    };
     terminal
         .draw(|f| t.draw(f, f.area(), &State::new()))
         .unwrap();
-    assert!(!t.has_sticky_prompt());
+    assert!(row(&terminal, 1).contains("second question"));
+    assert!(!row(&terminal, 1).contains("first question"));
+
+    // Stay inside the second turn: its prompt remains the header.
+    t.scroll_up(1);
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    assert!(row(&terminal, 1).contains("second question"));
+
+    // Cross into the first turn: that prompt takes the header.
+    t.scroll_up(30);
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    assert!(row(&terminal, 1).contains("first question"));
+    assert!(!row(&terminal, 1).contains("second question"));
 }
 
 #[test]

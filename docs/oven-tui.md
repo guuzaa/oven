@@ -152,11 +152,10 @@ counter used for animations).
 
 A submitted prompt is appended to `Transcript` before any turn events arrive.
 It is therefore the first row of its turn and shares scrolling, selection, and
-mouse coordinates with thinking, tool, and response rows. While the view follows
-the tail, `Transcript` projects that active row at the top of its own viewport
-and reserves the corresponding internal height for response content. Scrolling
-up, or receiving `Completed`, `Cancelled`, `Failed`, or a dropped backend,
-removes only this projection: the prompt row remains in place in the transcript.
+mouse coordinates with thinking, tool, and response rows. The prompt of whichever
+turn occupies the top of the viewport stays pinned there, including after the
+turn ends. Scrolling into another turn swaps that pin to the other prompt. The
+row itself also remains at its place in the transcript.
 
 `App::submit` classifies the text into an `oven_app::Input`, and `push_submitted`
 draws that: `Chat` starts a User turn, `Shell` starts a Shell turn, and
@@ -389,14 +388,16 @@ one that outlives its turn is stopped with `/agents stop <n>` or `x`.
 
 `top` is `None` to follow the tail and `Some(index)` to anchor. Streaming never
 changes `top`; only PageUp/PageDown, the mouse wheel, and a new turn do. A new
-turn appends its User or Shell row and snaps straight back to the tail. While
-following, that same active row is projected as an internal sticky header; once
-anchored in history it is rendered only at its logical scroll position.
+turn appends its User or Shell row and snaps straight back to the tail. The
+prompt of the turn under the viewport is an internal sticky header: following
+the tail keeps the latest one, and scrolling into an earlier turn swaps in that
+turn's prompt. Ending the turn does not remove it.
 
 The pinned band is the only part of the screen outside that model: it cannot be
 reached by scrolling, and the wheel over it scrolls nothing, because the
-transcript hit-tests its own band. It is only there while a turn runs, so an
-idle screen scrolls as one region again.
+transcript hit-tests its own band. A wheel step moves the body under the header
+and skips the header's own lines, so crossing into the next turn replaces the
+pin in one step.
 
 Expanding or collapsing a row re-anchors `top` afterwards, so the clicked header
 stays on its screen row instead of being scrolled away by the rewrap.

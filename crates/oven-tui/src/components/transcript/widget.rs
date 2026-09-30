@@ -57,7 +57,9 @@ pub struct Transcript {
     /// body, whose success output stays hidden.
     detail_ids: HashMap<String, bool>,
     thinking_row: Option<usize>,
-    active_prompt: Option<usize>,
+    /// Wrapped-line start and height of the prompt pinned at the top of the
+    /// last draw. Scroll math uses it so a wheel step moves the body, not
+    /// the header.
     sticky_prompt: Option<(usize, u16)>,
     render_start: usize,
 }
@@ -82,7 +84,6 @@ impl Transcript {
             burst_row: None,
             detail_ids: HashMap::new(),
             thinking_row: None,
-            active_prompt: None,
             sticky_prompt: None,
             render_start: 0,
         }
@@ -107,7 +108,6 @@ impl Transcript {
 
     fn start_turn(&mut self, kind: LineKind, text: &str) {
         self.push_prompt(kind, text);
-        self.active_prompt = Some(self.rows.len() - 1);
         self.top = None;
     }
 
@@ -115,11 +115,6 @@ impl Transcript {
         self.close_tool_burst();
         let body = trim_message(output);
         self.push_row(LineKind::ShellResult(ok), result_body(&body));
-    }
-
-    #[cfg(test)]
-    pub(super) fn has_active_prompt(&self) -> bool {
-        self.active_prompt.is_some()
     }
 
     #[cfg(test)]
@@ -139,14 +134,12 @@ impl Transcript {
         })
     }
 
-    /// Closes the current response the way a completed turn does, without
-    /// touching the pinned prompt — for paths that end a turn without the
-    /// agent reporting one.
+    /// Closes the current response the way a completed turn does. The prompt
+    /// row stays where it is, so the turn keeps its header after it ends.
     pub(crate) fn finish_response(&mut self) {
         self.close_tool_burst();
         self.stop_live_thinking();
         self.flush_streaming();
-        self.active_prompt = None;
     }
 
     /// Rebuilds the rows from a history without promoting the last user
@@ -299,15 +292,74 @@ impl Transcript {
     }
 
     pub(super) fn scroll_up(&mut self, n: u16) {
-        self.top = Some(self.current_top().saturating_sub(n as usize));
+        let mut origin = self.body_origin();
+        for _ in 0..n {
+            if origin == 0 {
+                break;
+            }
+            origin -= 1;
+            origin = self.skip_prompt_up(origin);
+        }
+        self.top = Some(origin);
     }
 
     pub(super) fn scroll_down(&mut self, n: u16) {
         let total = self.total_lines();
-        let height = self.height().max(1);
+        let height = self.content_height();
         let max_top = total.saturating_sub(height);
-        let top = self.current_top().saturating_add(n as usize).min(max_top);
+        let mut origin = self.body_origin();
+        for _ in 0..n {
+            if origin >= max_top {
+                origin = max_top;
+                break;
+            }
+            origin += 1;
+            origin = self.skip_prompt_down(origin, max_top);
+        }
+        let top = origin.min(max_top);
         self.top = (top.saturating_add(height) < total).then_some(top);
+    }
+
+    /// First body line under the pinned prompt. Following the tail uses the
+    /// origin of the last draw, so a scroll step moves from what is on screen.
+    fn body_origin(&self) -> usize {
+        if let Some(top) = self.top {
+            return top;
+        }
+        if self.sticky_prompt.is_some() {
+            return self.render_start;
+        }
+        self.total_lines().saturating_sub(self.height().max(1))
+    }
+
+    fn content_height(&self) -> usize {
+        let sticky = self
+            .sticky_prompt
+            .map(|(_, height)| usize::from(height))
+            .unwrap_or(0);
+        self.height().saturating_sub(sticky).max(1)
+    }
+
+    /// A prompt is a header, so scrolling up through it lands on the previous
+    /// turn instead of walking the frame line by line.
+    fn skip_prompt_up(&self, mut origin: usize) -> usize {
+        while let Some((start, _)) = self.prompt_bounds_containing(origin) {
+            if start == 0 {
+                return 0;
+            }
+            origin = start - 1;
+        }
+        origin
+    }
+
+    fn skip_prompt_down(&self, mut origin: usize, max_top: usize) -> usize {
+        while let Some((_, end)) = self.prompt_bounds_containing(origin) {
+            if end >= max_top {
+                return max_top;
+            }
+            origin = end;
+        }
+        origin
     }
 
     fn close_tool_burst(&mut self) {
@@ -676,16 +728,114 @@ impl Transcript {
         SelPos { line, col }
     }
 
-    /// Wrapped-line range of the active prompt row: its first non-empty line
-    /// to the start of the next row.
-    fn active_prompt_range(&self) -> Option<(usize, usize)> {
-        let active = self.active_prompt?;
-        let start = *self.row_offsets.get(active)?;
+    /// Which prompt to pin, and the first body line under it.
+    ///
+    /// The prompt is the user or shell row of the turn that contains the
+    /// viewport's focus line. Following the tail focuses the last line, so
+    /// the latest turn stays pinned after it ends. Scrolling into an earlier
+    /// turn pins that turn instead. Body lines start after the pinned prompt
+    /// so the question is not drawn twice.
+    fn layout_viewport(&mut self, area_height: u16) -> (Option<(usize, usize)>, usize) {
+        let total = self.total_lines();
+        if total == 0 {
+            return (None, 0);
+        }
+        let mut prompt = None;
+        for _ in 0..2 {
+            let next = self.prompt_for_focus(self.top, total);
+            let before = self.top;
+            self.clamp_top(total, Self::content_rows(area_height, next));
+            prompt = self.prompt_for_focus(self.top, total);
+            if prompt == next && self.top == before {
+                break;
+            }
+        }
+        let height = Self::content_rows(area_height, prompt);
+        let max_top = total.saturating_sub(height);
+        let mut start = self.top.unwrap_or(max_top);
+        if let Some((_, prompt_end)) = prompt
+            && start < prompt_end
+        {
+            start = prompt_end;
+        }
+        (prompt, start)
+    }
+
+    fn content_rows(area_height: u16, prompt: Option<(usize, usize)>) -> usize {
+        let sticky_h = prompt
+            .map(|(start, end)| (end - start).min(MAX_STICKY_PROMPT_ROWS))
+            .unwrap_or(0)
+            .min(usize::from(area_height));
+        usize::from(area_height).saturating_sub(sticky_h)
+    }
+
+    fn prompt_for_focus(&self, top: Option<usize>, total: usize) -> Option<(usize, usize)> {
+        let focus = top.unwrap_or(total.saturating_sub(1));
+        self.sticky_prompt_range(focus)
+    }
+
+    fn clamp_top(&mut self, total: usize, height: usize) {
+        if height == 0 || total == 0 {
+            return;
+        }
+        let max_top = total.saturating_sub(height);
+        if let Some(top) = self.top {
+            let top = top.min(max_top);
+            self.top = (top.saturating_add(height) < total).then_some(top);
+        }
+    }
+
+    /// Prompt of the turn that contains `line`: the latest user or shell row
+    /// whose wrapped lines start at or before it.
+    fn sticky_prompt_range(&self, line: usize) -> Option<(usize, usize)> {
+        let mut found = None;
+        for (idx, row) in self.rows.iter().enumerate() {
+            if !row.kind.is_prompt() {
+                continue;
+            }
+            let Some(range) = self.row_wrapped_range(idx) else {
+                continue;
+            };
+            if range.0 > line {
+                break;
+            }
+            found = Some(range);
+        }
+        found
+    }
+
+    /// Raw wrapped span of a prompt, including its frame, so scrolling can
+    /// step over the whole header.
+    fn prompt_bounds_containing(&self, line: usize) -> Option<(usize, usize)> {
+        for (idx, row) in self.rows.iter().enumerate() {
+            if !row.kind.is_prompt() {
+                continue;
+            }
+            let start = *self.row_offsets.get(idx)?;
+            let end = self
+                .row_offsets
+                .get(idx + 1)
+                .copied()
+                .unwrap_or(self.wrapped.len());
+            if start <= line && line < end {
+                return Some((start, end));
+            }
+        }
+        None
+    }
+
+    /// Wrapped-line range of one row, from its first non-empty line to the
+    /// start of the next row.
+    fn row_wrapped_range(&self, row: usize) -> Option<(usize, usize)> {
+        let start = *self.row_offsets.get(row)?;
         let end = self
             .row_offsets
-            .get(active + 1)
+            .get(row + 1)
             .copied()
             .unwrap_or(self.wrapped.len());
+        if start >= end {
+            return None;
+        }
         let first_content = self.wrapped[start..end]
             .iter()
             .position(|line| line_display_width(line) > 0)
@@ -983,14 +1133,10 @@ impl Component for Transcript {
                 ShellEvent::Started { .. } => {}
                 ShellEvent::Finished {
                     output, exit_code, ..
-                } => {
-                    self.push_shell_output(output, *exit_code == 0);
-                    self.active_prompt = None;
-                }
+                } => self.push_shell_output(output, *exit_code == 0),
                 ShellEvent::Failed { error, output, .. } => {
                     let body = if output.is_empty() { error } else { output };
                     self.push_shell_output(body, false);
-                    self.active_prompt = None;
                 }
             },
             AppEventKind::Compaction(ev) => {
@@ -1022,12 +1168,10 @@ impl Component for Transcript {
             self.rewrap_stream();
         }
 
+        let (prompt_range, content_start) = self.layout_viewport(area.height);
         self.sticky_prompt = None;
-        let prompt_range = self.active_prompt_range();
         let mut content_area = area;
-        if self.top.is_none()
-            && let Some((prompt_start, prompt_end)) = prompt_range
-        {
+        if let Some((prompt_start, prompt_end)) = prompt_range {
             let prompt_lines = &self.wrapped[prompt_start..prompt_end];
             let height = prompt_lines
                 .len()
@@ -1045,17 +1189,7 @@ impl Component for Transcript {
 
         let height = content_area.height as usize;
         let total = self.total_lines();
-        let max_top = total.saturating_sub(height);
-        if let Some(top) = self.top {
-            let top = top.min(max_top);
-            self.top = (top.saturating_add(height) < total).then_some(top);
-        }
-        let mut start = self.top.unwrap_or(max_top);
-        if let Some((_, prompt_end)) = prompt_range
-            && self.sticky_prompt.is_some()
-        {
-            start = start.max(prompt_end);
-        }
+        let start = content_start;
         self.render_start = start;
         let end = start.saturating_add(height).min(total);
         let mut visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);

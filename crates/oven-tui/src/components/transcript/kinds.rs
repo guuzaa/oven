@@ -44,6 +44,12 @@ impl LineKind {
         self == LineKind::Text
     }
 
+    /// A submitted prompt: the header of a turn. It stays pinned while that
+    /// turn occupies the top of the viewport.
+    pub(super) fn is_prompt(self) -> bool {
+        matches!(self, LineKind::User | LineKind::Shell)
+    }
+
     pub(crate) fn gutter(self) -> &'static str {
         match self {
             LineKind::User => "› ",
