@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use oven_llm::{ModelId, ReasoningEffort};
 
-use crate::mode::AgentMode;
+use crate::core::mode::AgentMode;
 
 pub type ModelSelection = (ModelId, Option<ReasoningEffort>);
 

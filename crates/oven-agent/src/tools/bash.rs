@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::turn::TurnContext;
 
 use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str};
-use crate::error::AgentError;
+use crate::core::error::AgentError;
 use oven_host::{CommandError, run_shell_command};
 
 pub struct BashTool {

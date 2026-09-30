@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::error::AgentError;
+use crate::core::error::AgentError;
 use crate::turn::TurnContext;
 
 pub use crate::core::view::{ToolCaps, ToolPermission, ToolView};

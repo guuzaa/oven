@@ -12,8 +12,8 @@ use oven_llm::{ModelId, ReasoningEffort, Usage};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::AgentError;
-use crate::identity::{AgentId, TurnId};
+use crate::core::error::AgentError;
+use crate::core::identity::{AgentId, TurnId};
 
 /// A role a subagent can play: which tools it may use, and what it is told
 /// to do with them. The name is what the model asks for and what the

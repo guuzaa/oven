@@ -11,14 +11,14 @@ use oven_llm::{
 
 use oven_host::{as_ms, now_ms};
 
-use crate::error::{AgentError, MAX_ITERS_EXCEEDED};
+use crate::core::error::{AgentError, MAX_ITERS_EXCEEDED};
+use crate::core::identity::{AgentId, ToolCallId};
+use crate::core::mode::{AgentMode, ToolAccess};
+use crate::core::selection::Selection;
 use crate::event::{AgentEvent, CallOutcome, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::history::{History, Record};
-use crate::identity::{AgentId, ToolCallId};
 use crate::interaction::{ApprovalDecision, LoopLimitDecision};
-use crate::mode::{AgentMode, ToolAccess};
 use crate::prompt_template;
-use crate::selection::Selection;
 use crate::sink::EventSink;
 use crate::todo::TodoList;
 use crate::tools::{TodoWriteTool, Tool};
@@ -914,7 +914,7 @@ mod tests {
     use crate::RunPolicy;
     use crate::StepStop;
     use crate::TurnId;
-    use crate::identity::ToolCallId;
+    use crate::core::identity::ToolCallId;
     use crate::sink::{NullSink, VecEventSink};
     use crate::tools::{
         AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool,

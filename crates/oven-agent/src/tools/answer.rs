@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use crate::turn::TurnContext;
 
 use super::{Tool, ToolCaps, ToolView};
-use crate::error::AgentError;
+use crate::core::error::AgentError;
 use crate::interaction::{AnswerResponse, Question, QuestionOption};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";

@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use crate::turn::TurnContext;
 
 use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
-use crate::error::AgentError;
-use crate::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
+use crate::core::error::AgentError;
+use crate::core::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
 use oven_host::walk_dir;
 
 pub struct GrepTool {

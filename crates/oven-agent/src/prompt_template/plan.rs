@@ -1,4 +1,4 @@
-use crate::mode::AgentMode;
+use crate::core::mode::AgentMode;
 use crate::todo::TodoList;
 
 pub const PLAN_MODE_PROMPT: &str = include_str!("plan.md");

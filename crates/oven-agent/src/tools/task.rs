@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use oven_llm::Usage;
 use serde_json::{Value, json};
 
-use crate::error::AgentError;
-use crate::mode::AgentMode;
+use crate::core::error::AgentError;
+use crate::core::mode::AgentMode;
 use crate::subagent::{
     NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest, SubagentSpawner,
 };
@@ -361,7 +361,7 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::identity::{AgentId, TurnId};
+    use crate::core::identity::{AgentId, TurnId};
     use crate::subagent::NodeHandle;
     use crate::turn::TurnContext;
     use serde_json::json;

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
 
-use crate::error::AgentError;
+use crate::core::error::AgentError;
 use crate::turn::TurnContext;
 
 pub struct FileWriteTool {

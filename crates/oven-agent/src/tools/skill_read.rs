@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::error::AgentError;
+use crate::core::error::AgentError;
 use crate::tools::Tool;
 
 use crate::turn::TurnContext;

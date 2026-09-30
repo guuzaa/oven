@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::core::identity::{ToolCallId, TurnId};
 use crate::core::view::ToolView;
-use crate::identity::{ToolCallId, TurnId};
 
 pub const NO_USER_TO_ANSWER: &str = "no user is available to answer the question";
 
