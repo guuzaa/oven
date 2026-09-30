@@ -12,8 +12,8 @@ use crate::core::component::{Action, Component, KeyResult};
 use crate::core::esc::{ESC_CONFIRM_WINDOW, EscAction};
 use crate::core::keys::is_mode_toggle;
 use crate::core::paste::{self, Burst};
+use crate::widgets::input::Overlay;
 
-use super::Overlay;
 use super::Ui;
 use super::prompt::PromptFlow;
 

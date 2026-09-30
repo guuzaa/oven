@@ -5,21 +5,17 @@ use std::time::{Duration, Instant};
 use crossterm::event::EventStream;
 use futures::StreamExt;
 use oven_app::{AgentId, AnswerResponse, App, AppEvent, AppState, UserRequestId, UserResponse};
-use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use tokio::sync::{mpsc, watch};
 
-use crate::core::component::{Component, State};
-use crate::widgets::input::{InputView, Overlay};
-use crate::widgets::queue;
+use crate::core::component::State;
+use crate::widgets::input::InputView;
 use crate::widgets::status::StatusBar;
 use crate::widgets::todos::TodosWidget;
 use crate::widgets::transcript::Transcript;
 
-use crate::core::hint::{self, Prompt};
-use crate::core::layout;
 use crate::platform::terminal;
 
 pub struct Ui {
@@ -248,87 +244,11 @@ impl Ui {
             .is_some_and(|until| Instant::now() < until)
     }
 
-    fn draw(&mut self, f: &mut Frame<'_>) {
-        let area = f.area();
-        let overlay_height = match self.prompt.as_ref() {
-            Some(prompt) => prompt.height(area.width),
-            None => self.input.overlay_height(),
-        };
-        let input_h = match self.views.viewer_rows() {
-            Some(rows) => rows,
-            None => self.input.height(area.width),
-        };
-        let regions = layout::split(
-            area,
-            input_h,
-            queue::height(&self.pending),
-            self.views.height(),
-            self.todos.height(),
-            overlay_height,
-        );
-        self.agents_area = regions.agents;
-
-        match self.views.focused() {
-            Some(view) => view.draw(f, regions.transcript, &self.state),
-            None => self.transcript.draw(f, regions.transcript, &self.state),
-        }
-        if let Some(queue) = regions.queue {
-            queue::draw(f, queue, &self.pending);
-        }
-        if let Some(agents) = regions.agents {
-            self.views.draw_strip(f, agents);
-        }
-        if let Some(todos) = regions.todos {
-            self.todos.draw(f, todos);
-        }
-        if self.views.focused_id().is_some() {
-            self.views.draw_hint(f, regions.input);
-            self.status.draw_bar(f, regions.status, &self.state);
-            return;
-        }
-        self.input.draw_composer(
-            f,
-            regions.input,
-            &self.state,
-            composer_hint(
-                &self.input,
-                self.state.busy,
-                self.prompt.as_ref(),
-                self.esc_armed(),
-            ),
-        );
-        if let Some(overlay) = regions.overlay {
-            match self.prompt.as_ref() {
-                Some(prompt) => prompt.draw(f, overlay),
-                None => self.input.draw_overlay(f, overlay),
-            }
-        }
-        self.status.draw_bar(f, regions.status, &self.state);
-        self.status.draw_reply_overlay(f, regions.transcript);
-    }
-
     fn wants_tick(&self) -> bool {
         self.state.working() || self.status.has_reply() || self.esc_armed()
     }
 }
 
-/// The keys that apply right now, drawn on the composer border: whichever box
-/// owns the keyboard states them, and the composer falls back to its own.
-fn composer_hint(
-    input: &InputView,
-    busy: bool,
-    prompt: Option<&OverlayPrompt>,
-    esc_armed: bool,
-) -> Option<&'static str> {
-    let prompt = prompt.map(|prompt| {
-        if prompt.awaits_typed_answer() {
-            Prompt::Answer
-        } else {
-            Prompt::Keys(prompt.hint())
-        }
-    });
-    hint::composer(input.overlay_hint(), prompt, busy, esc_armed)
-}
 fn unsent_notice(count: usize) -> String {
     let noun = match count {
         1 => "message",
@@ -353,6 +273,7 @@ fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<Stri
 #[cfg(test)]
 mod ui_test;
 
+mod draw;
 mod event;
 mod keys;
 mod prompt;

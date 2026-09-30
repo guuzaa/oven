@@ -1,5 +1,7 @@
+use super::draw::composer_hint;
 use super::*;
-use crate::widgets::input::InputView;
+use crate::core::hint;
+use crate::widgets::input::{InputView, Overlay};
 use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::widgets::slash_command_popup::SlashCommandPopup;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
