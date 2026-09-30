@@ -1,14 +1,16 @@
 //! Service composition behind the `App` facade.
 //!
-//! Layers, top to bottom; each may only depend on the ones below it:
+//! Layers, top to bottom; a layer reaches only into the ones below it:
 //!
 //! 1. `api` — the `App` handle a frontend talks to, and its builder
-//! 2. `runtime` — the conversation loop and the state shared with it; it
-//!    also assembles the `App` handle the facade hands out
+//! 2. `runtime` — the conversation loop and the state shared with it
 //! 3. `commands` — slash commands
 //! 4. `capabilities` — tools, subagents, MCP servers
 //! 5. `core` — config, state, events, persistence
 //! 6. `platform` — paths, logging, the local shell envelope
+//!
+//! One edge moves the other way: the runtime also assembles the `App`
+//! handle the facade hands out.
 
 mod api;
 mod capabilities;
