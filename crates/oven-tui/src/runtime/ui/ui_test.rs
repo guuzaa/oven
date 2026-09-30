@@ -1,5 +1,6 @@
 use super::*;
 use crate::widgets::input::InputView;
+use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::widgets::slash_command_popup::SlashCommandPopup;
 use oven_app::config::ProviderConfig;
 use oven_app::{AgentEvent, AppEventKind, ToolCallId, ToolEvent, ToolResult, TurnEvent};

@@ -6,8 +6,8 @@ use crate::widgets::input::display_user_input;
 use crate::widgets::question_prompt::QuestionPrompt;
 use crate::widgets::transcript::Transcript;
 
-use super::OverlayPrompt;
 use super::Ui;
+use super::prompt::OverlayPrompt;
 
 impl Ui {
     /// The backend went away mid-turn: close the response so an unfinished
