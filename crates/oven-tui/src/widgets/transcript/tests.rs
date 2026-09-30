@@ -348,12 +348,13 @@ fn unmatched_failed_tool_end_pushes_reason() {
 fn unmatched_rejected_tool_end_pushes_reason() {
     const REASON: &str = "tool execution was not performed: the user declined permission";
     let mut t = Transcript::new();
-    t.on_event(&agent(AgentEvent::Tool(ToolEvent::Finished {
-        call_id: ToolCallId(1),
-        result: ToolResult::Rejected {
+    t.on_event(&finished(
+        1,
+        ToolResult::Rejected {
             reason: REASON.into(),
         },
-    })));
+        None,
+    ));
     assert_eq!(kinds_of(&t), vec![LineKind::System]);
     assert_eq!(t.rows[0].text, REASON);
 }
@@ -447,9 +448,9 @@ fn tool_start(call_id: u64, name: &str, input: serde_json::Value) -> AppEvent {
 }
 
 fn tool_end(call_id: u64, ok: bool, output: &str) -> AppEvent {
-    agent(AgentEvent::Tool(ToolEvent::Finished {
-        call_id: ToolCallId(call_id),
-        result: if ok {
+    finished(
+        call_id,
+        if ok {
             ToolResult::Success {
                 output: output.into(),
             }
@@ -459,6 +460,15 @@ fn tool_end(call_id: u64, ok: bool, output: &str) -> AppEvent {
                 output: Some(output.into()),
             }
         },
+        None,
+    )
+}
+
+fn finished(call_id: u64, result: ToolResult, detail: Option<&str>) -> AppEvent {
+    agent(AgentEvent::Tool(ToolEvent::Finished {
+        call_id: ToolCallId(call_id),
+        result,
+        detail: detail.map(str::to_string),
     }))
 }
 
@@ -1651,6 +1661,33 @@ fn todo_write_keeps_detail_and_result() {
     let result = t.rows[1].collapsible.as_ref().expect("tool result detail");
     assert_eq!(result.body(), "updated");
     assert!(result.is_expanded());
+}
+
+#[test]
+fn an_answer_row_ends_on_the_answer_the_user_picked() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "answer",
+        serde_json::json!({
+            "question": "which database?",
+            "options": [{ "label": "postgres" }, { "label": "sqlite" }]
+        }),
+    ));
+    t.on_event(&finished(
+        1,
+        ToolResult::Success {
+            output: "the user answered: postgres".into(),
+        },
+        Some("postgres"),
+    ));
+
+    assert_eq!(t.rows[0].text, "Asked 1 question");
+    assert_eq!(
+        diff_items(&t),
+        vec![("Ask which database?".to_string(), "postgres".to_string())],
+        "the row ends on the answer, not on the choices offered"
+    );
 }
 
 #[test]

@@ -6,6 +6,7 @@ use crate::core::turn::TurnContext;
 
 use super::{Tool, ToolCaps, ToolView};
 use crate::core::error::AgentError;
+use crate::core::event::ToolResult;
 use crate::core::interaction::{AnswerResponse, Question, QuestionOption};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";
@@ -79,6 +80,15 @@ impl Tool for AnswerTool {
 
     fn view(&self, input: &Value) -> ToolView {
         Self::view_input(input)
+    }
+
+    /// The answer the user picked, so the row ends on what was chosen rather
+    /// than on what was offered, which the prompt already listed.
+    fn result_detail(&self, result: &ToolResult) -> Option<String> {
+        let ToolResult::Success { output } = result else {
+            return None;
+        };
+        output.strip_prefix(USER_ANSWER_PREFIX).map(str::to_string)
     }
 
     fn caps(&self) -> ToolCaps {
@@ -297,6 +307,48 @@ mod tests {
             !parsed(json!({ "question": "short" }))
                 .question
                 .ends_with(TRUNCATION_MARK)
+        );
+    }
+
+    #[test]
+    fn the_question_is_shown_on_its_own_row() {
+        let view = AnswerTool::view_input(&json!({
+            "question": QUESTION,
+            "options": [{ "label": ANSWER }]
+        }));
+        assert_eq!(view.summary, format!("Ask {QUESTION}"));
+        assert!(view.collapse);
+        assert_eq!(view.detail, None);
+    }
+
+    #[test]
+    fn view_falls_back_without_a_question() {
+        let view = AnswerTool::view_input(&json!({ "options": [{ "label": ANSWER }] }));
+        assert_eq!(view.summary, AnswerTool::NAME);
+    }
+
+    #[test]
+    fn the_answer_becomes_the_calls_detail() {
+        let answered = AnswerTool.result_detail(&ToolResult::Success {
+            output: format!("{USER_ANSWER_PREFIX}{ANSWER}"),
+        });
+        assert_eq!(answered.as_deref(), Some(ANSWER));
+    }
+
+    #[test]
+    fn a_call_that_never_reached_the_user_keeps_no_detail() {
+        assert_eq!(
+            AnswerTool.result_detail(&ToolResult::Success {
+                output: USER_SKIPPED.into(),
+            }),
+            None
+        );
+        assert_eq!(
+            AnswerTool.result_detail(&ToolResult::Failed {
+                error: "answer: empty question".into(),
+                output: None,
+            }),
+            None
         );
     }
 

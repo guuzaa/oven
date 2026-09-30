@@ -350,6 +350,7 @@ async fn run_calls(
                 sink.emit(AgentEvent::Tool(ToolEvent::Finished {
                     call_id: call.call_id,
                     result,
+                    detail: None,
                 }));
             }
             Gate::Run(tool) => {
@@ -386,10 +387,15 @@ async fn run_calls(
             },
         };
         log_tool_finished(&call.name, call.call_id, &result, started);
+        let detail = call
+            .tool
+            .as_ref()
+            .and_then(|tool| tool.result_detail(&result));
         pending[index] = Some(CallRecord::of(&result));
         sink.emit(AgentEvent::Tool(ToolEvent::Finished {
             call_id: call.call_id,
             result,
+            detail,
         }));
     }
     pending

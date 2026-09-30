@@ -14,6 +14,7 @@ enum ToolKind {
     Ran,
     Edited,
     Wrote,
+    Asked,
     Other(String),
 }
 
@@ -25,6 +26,7 @@ impl From<&str> for ToolKind {
             "Ran" => Self::Ran,
             "Edit" => Self::Edited,
             "Write" => Self::Wrote,
+            "Ask" => Self::Asked,
             _ => Self::Other(value.to_string()),
         }
     }
@@ -38,6 +40,7 @@ impl ToolKind {
             Self::Ran => ("Ran", "command"),
             Self::Edited => ("Edited", "file"),
             Self::Wrote => ("Wrote", "file"),
+            Self::Asked => ("Asked", "question"),
             Self::Other(action) if count == SINGLE_CALL => return action.clone(),
             Self::Other(action) => return format!("{action} ×{count}"),
         };
@@ -86,20 +89,32 @@ impl ToolBurst {
         });
     }
 
-    /// Marks a call done: counts the failure and keeps a diff call's error
-    /// beside the diff it failed on, so expanding the item explains it.
-    pub(super) fn finish(&mut self, call_id: &str, failed: bool, error: Option<&str>) -> bool {
+    /// Marks a call done: counts the failure, replaces its body with the one
+    /// the tool ended on — a question tool shows the answer the user picked —
+    /// and keeps a diff call's error beside the diff it failed on, so expanding
+    /// the item explains it.
+    pub(super) fn finish(
+        &mut self,
+        call_id: &str,
+        detail: Option<&str>,
+        failed: bool,
+        error: Option<&str>,
+    ) -> bool {
         let Some(&idx) = self.pending.get(call_id) else {
             return false;
         };
         self.pending.remove(call_id);
         if failed {
             self.failed += 1;
-            if let Some(call) = self.calls.get_mut(idx)
-                && call.diff.is_some()
-            {
-                call.error = error.filter(|text| !text.is_empty()).map(str::to_string);
-            }
+        }
+        let Some(call) = self.calls.get_mut(idx) else {
+            return true;
+        };
+        if let Some(detail) = detail.filter(|text| !text.is_empty()) {
+            call.diff = Some(detail.to_string());
+        }
+        if failed && call.diff.is_some() {
+            call.error = error.filter(|text| !text.is_empty()).map(str::to_string);
         }
         true
     }
@@ -183,7 +198,7 @@ mod tests {
         burst.start("2".into(), "Search\n config in src", None);
         burst.start("3".into(), "Find **/*.rs in src", None);
         burst.start("4".into(), "Read src/main.rs", None);
-        assert!(burst.finish("2", true, None));
+        assert!(burst.finish("2", None, true, None));
 
         assert_eq!(burst.title(), "Searched 3 patterns, Read 1 file, 1 failed");
         assert_eq!(
@@ -204,7 +219,7 @@ mod tests {
     #[test]
     fn finish_ignores_calls_outside_the_burst() {
         let mut burst = ToolBurst::default();
-        assert!(!burst.finish("missing", true, None));
+        assert!(!burst.finish("missing", None, true, None));
         assert_eq!(burst.title(), "");
     }
 
@@ -213,7 +228,7 @@ mod tests {
         let mut burst = ToolBurst::default();
         burst.start("1".into(), "Edit src/main.rs", Some("- old\n+ new"));
         burst.start("2".into(), "Write out.txt", Some("+ hi"));
-        assert!(burst.finish("1", false, None));
+        assert!(burst.finish("1", None, false, None));
         assert_eq!(burst.title(), "Edited 1 file, Wrote 1 file");
         assert_eq!(
             titles(&burst.sections()),
@@ -223,10 +238,32 @@ mod tests {
     }
 
     #[test]
+    fn a_landed_detail_replaces_what_the_call_ran_with() {
+        let mut burst = ToolBurst::default();
+        burst.start("1".into(), "Ask which database?", None);
+        assert!(burst.finish("1", Some("postgres"), false, None));
+
+        let [Section::Item { title, detail, .. }] = &burst.sections()[..] else {
+            panic!("expected one item with a detail");
+        };
+        assert_eq!(title, "Ask which database?");
+        assert_eq!(detail.body(), "postgres");
+    }
+
+    #[test]
+    fn questions_are_counted_in_the_burst_title() {
+        let mut burst = ToolBurst::default();
+        burst.start("1".into(), "Ask which database?", None);
+        assert_eq!(burst.title(), "Asked 1 question");
+        burst.start("2".into(), "Ask sqlite or postgres?", None);
+        assert_eq!(burst.title(), "Asked 2 questions");
+    }
+
+    #[test]
     fn failed_diff_keeps_its_error_inside_the_item() {
         let mut burst = ToolBurst::default();
         burst.start("1".into(), "Edit src/main.rs", Some("- old\n+ new"));
-        assert!(burst.finish("1", true, Some("old_string not found")));
+        assert!(burst.finish("1", None, true, Some("old_string not found")));
 
         assert_eq!(burst.title(), "Edited 1 file, 1 failed");
         let [Section::Item { detail, .. }] = &burst.sections()[..] else {

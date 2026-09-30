@@ -395,12 +395,13 @@ impl Transcript {
         self.upsert_tool_summary();
     }
 
-    fn note_tool_end(&mut self, call_id: &str, ok: bool, output: &str) {
+    fn note_tool_end(&mut self, call_id: &str, ok: bool, output: &str, detail: Option<&str>) {
+        let landed = detail.filter(|text| !text.is_empty());
         if self
             .tool_burst
-            .finish(call_id, !ok, (!ok).then_some(output))
+            .finish(call_id, landed, !ok, (!ok).then_some(output))
         {
-            if !ok {
+            if !ok || landed.is_some() {
                 self.upsert_tool_summary();
             }
             return;
@@ -421,7 +422,7 @@ impl Transcript {
             let error = is_error.then(|| result_text(content));
             if self
                 .tool_burst
-                .finish(tool_use_id, is_error, error.as_deref())
+                .finish(tool_use_id, None, is_error, error.as_deref())
                 && is_error
             {
                 self.upsert_tool_summary();
@@ -1102,7 +1103,11 @@ impl Component for Transcript {
                     self.flush_streaming();
                     self.note_tool_start(&call_id.0.to_string(), view);
                 }
-                AgentEvent::Tool(ToolEvent::Finished { call_id, result }) => {
+                AgentEvent::Tool(ToolEvent::Finished {
+                    call_id,
+                    result,
+                    detail,
+                }) => {
                     let (ok, output) = match result {
                         ToolResult::Success { output } => (true, output.as_str()),
                         ToolResult::Failed { output, error } => {
@@ -1111,7 +1116,7 @@ impl Component for Transcript {
                         ToolResult::Rejected { reason } => (false, reason.as_str()),
                         ToolResult::Cancelled => (false, "cancelled"),
                     };
-                    self.note_tool_end(&call_id.0.to_string(), ok, output);
+                    self.note_tool_end(&call_id.0.to_string(), ok, output, detail.as_deref());
                 }
                 AgentEvent::Tool(ToolEvent::OutputDelta { .. })
                 | AgentEvent::Tool(ToolEvent::QuestionAsked { .. })

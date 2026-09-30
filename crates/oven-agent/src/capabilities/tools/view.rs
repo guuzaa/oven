@@ -138,7 +138,11 @@ mod tests {
             "Agent status: explore#1"
         );
         assert_eq!(
-            present_tool(AnswerTool::NAME, &json!({ "question": "which database?" })).summary,
+            present_tool(
+                AnswerTool::NAME,
+                &json!({ "question": "which database?", "options": [{ "label": "postgres" }] })
+            )
+            .summary,
             "Ask which database?"
         );
         assert_eq!(

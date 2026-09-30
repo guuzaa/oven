@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::core::error::AgentError;
+use crate::core::event::ToolResult;
 use crate::core::turn::TurnContext;
 
 pub use crate::core::view::{ToolCaps, ToolPermission, ToolView};
@@ -45,6 +46,9 @@ pub trait Tool: Send + Sync {
     fn schema(&self) -> Value;
     fn view(&self, _input: &Value) -> ToolView {
         ToolView::named(self.name())
+    }
+    fn result_detail(&self, _result: &ToolResult) -> Option<String> {
+        None
     }
     fn caps(&self) -> ToolCaps {
         ToolCaps::default()

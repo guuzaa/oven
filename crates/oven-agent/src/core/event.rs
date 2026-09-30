@@ -106,6 +106,8 @@ pub enum ToolEvent {
     Finished {
         call_id: ToolCallId,
         result: ToolResult,
+        /// The body to show under the call's row once it has landed
+        detail: Option<String>,
     },
 }
 

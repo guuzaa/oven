@@ -500,7 +500,7 @@ async fn the_answer_tool_blocks_the_turn_until_the_user_replies() {
     let mut agent = Agent::new(router_with(Box::new(mock)), vec![Arc::new(AnswerTool)]);
     let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
     let ctx = turn_ctx(&agent).with_requests(Arc::new(requests));
-    let mut sink = NullSink;
+    let mut sink = VecEventSink::default();
     let reply = {
         let turn = agent.run("pick one", &ctx, &mut sink);
         tokio::pin!(turn);
@@ -526,6 +526,15 @@ async fn the_answer_tool_blocks_the_turn_until_the_user_replies() {
         agent.history().any(|message| content_has(message, ANSWER)),
         "the answer must reach the model"
     );
+    let detail = sink
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Tool(ToolEvent::Finished { detail, .. }) => detail.clone(),
+            _ => None,
+        })
+        .expect("the landing event reports what the call shows");
+    assert_eq!(detail, ANSWER, "the row shows the answer the user picked");
 }
 
 #[tokio::test]

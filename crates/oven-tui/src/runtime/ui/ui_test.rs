@@ -197,6 +197,7 @@ async fn an_open_prompt_closes_when_its_request_resolves() {
     ui.apply_event(&AppEvent::agent(AgentEvent::Tool(ToolEvent::Finished {
         call_id: ToolCallId(1),
         result: ToolResult::Cancelled,
+        detail: None,
     })));
     ui.apply_event(&AppEvent::agent(AgentEvent::Turn(TurnEvent::Cancelled {
         duration_ms: 1,
