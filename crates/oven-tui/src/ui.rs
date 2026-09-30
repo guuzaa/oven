@@ -31,18 +31,14 @@ use crate::widgets::status::StatusBar;
 use crate::widgets::todos::TodosWidget;
 use crate::widgets::transcript::Transcript;
 
+use crate::core::hint::{self, Prompt};
 use crate::core::layout;
 use crate::widgets::terminal;
 
-const IDLE_HINT: &str = "enter send · shift-tab mode · esc undo";
-const VIEWER_HINT: &str = "esc back to the chat · ↑↓ scroll · x stop";
 /// Lines an arrow key scrolls a subagent's transcript by.
 const VIEWER_SCROLL_LINES: u16 = 1;
 /// The viewer replaces the composer with a single hint row.
 const VIEWER_ROWS: u16 = 1;
-const BUSY_HINT: &str = "esc cancel · enter queue";
-const ESC_HINT: &str = "esc again to confirm";
-const ANSWER_HINT: &str = "enter send · esc back";
 
 enum OverlayPrompt {
     Approval {
@@ -854,7 +850,12 @@ impl Ui {
         let Some(agent) = self.agents.iter().find(|agent| agent.id == id) else {
             return;
         };
-        let text = format!("{} · {} · {VIEWER_HINT}", agent.name, agent.status.label());
+        let text = format!(
+            "{} · {} · {}",
+            agent.name,
+            agent.status.label(),
+            hint::VIEWER
+        );
         agents::draw_hint(f, area, &text);
     }
 
@@ -883,23 +884,14 @@ fn composer_hint(
     prompt: Option<&OverlayPrompt>,
     esc_armed: bool,
 ) -> Option<&'static str> {
-    if let Some(prompt) = prompt {
-        return if prompt.awaits_typed_answer() {
-            Some(ANSWER_HINT)
+    let prompt = prompt.map(|prompt| {
+        if prompt.awaits_typed_answer() {
+            Prompt::Answer
         } else {
-            Some(prompt.hint())
-        };
-    }
-    if let Some(hint) = input.overlay_hint() {
-        return Some(hint);
-    }
-    Some(if esc_armed {
-        ESC_HINT
-    } else if busy {
-        BUSY_HINT
-    } else {
-        IDLE_HINT
-    })
+            Prompt::Keys(prompt.hint())
+        }
+    });
+    hint::composer(input.overlay_hint(), prompt, busy, esc_armed)
 }
 fn unsent_notice(count: usize) -> String {
     let noun = match count {
@@ -994,11 +986,11 @@ mod tests {
             InputView::new(Vec::new(), ProviderConfig::default())
         }
 
-        assert_eq!(composer_hint(&input(), true, None, false), Some(BUSY_HINT));
-        assert_eq!(composer_hint(&input(), false, None, false), Some(IDLE_HINT));
+        assert_eq!(composer_hint(&input(), true, None, false), Some(hint::BUSY));
+        assert_eq!(composer_hint(&input(), false, None, false), Some(hint::IDLE));
         assert_eq!(
             composer_hint(&input(), false, None, true),
-            Some(ESC_HINT),
+            Some(hint::ESC_ARMED),
             "the armed Esc overrides the idle hint"
         );
 
@@ -1013,7 +1005,7 @@ mod tests {
         );
         assert_eq!(
             composer_hint(&input(), true, Some(&answering_prompt()), true),
-            Some(ANSWER_HINT)
+            Some(hint::ANSWER)
         );
     }
 

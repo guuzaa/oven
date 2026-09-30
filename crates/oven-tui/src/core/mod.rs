@@ -4,6 +4,7 @@
 
 pub mod component;
 pub mod esc;
+pub mod hint;
 pub mod layout;
 pub mod paste;
 pub mod shell;
