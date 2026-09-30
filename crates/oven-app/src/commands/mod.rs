@@ -1,3 +1,7 @@
+//! Slash commands: parsed by the registry, run against the conversation
+//! driver and the subagent registry, and reported as outcomes the runtime
+//! applies.
+
 mod agents;
 mod clear;
 mod compact;

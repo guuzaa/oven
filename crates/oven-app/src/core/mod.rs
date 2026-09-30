@@ -1,3 +1,6 @@
+//! The app's nouns and their pure rules: configuration, published state,
+//! events, session persistence and provider construction.
+
 pub mod complete;
 pub mod config;
 pub mod error;
