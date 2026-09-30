@@ -336,18 +336,49 @@ fn empty_ok_tool_end_renders_nothing() {
 }
 
 #[test]
-fn unmatched_failed_tool_end_pushes_reason() {
-    const REASON: &str = "tool 'file_write' is unavailable in Ask mode";
+fn seed_unknown_tool_failure_matches_the_live_burst() {
+    const REASON: &str = "unknown tool: write";
     let mut t = Transcript::new();
-    t.on_event(&tool_end(1, false, REASON));
-    assert_eq!(kinds_of(&t), vec![LineKind::System]);
-    assert_eq!(t.rows[0].text, REASON);
+    t.seed(&[
+        Message::assistant(vec![ContentBlock::ToolUse {
+            id: "c1".into(),
+            name: "write".into(),
+            input: serde_json::json!({}),
+            raw_arguments: None,
+        }]),
+        Message::tool_result("c1", REASON, true),
+    ]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(t.rows[0].text, "write, 1 failed");
+    assert_eq!(
+        t.rows[0].collapsible.as_ref().expect("burst detail").body(),
+        format!("write\n{REASON}")
+    );
 }
 
 #[test]
-fn unmatched_rejected_tool_end_pushes_reason() {
+fn refused_tool_lands_on_its_burst_row() {
+    const REASON: &str = "unknown tool: write";
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "write", serde_json::json!({})));
+    t.on_event(&tool_end(1, false, REASON));
+    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(t.rows[0].text, "write, 1 failed");
+    assert_eq!(
+        t.rows[0].collapsible.as_ref().expect("burst detail").body(),
+        format!("write\n{REASON}")
+    );
+}
+
+#[test]
+fn rejected_tool_lands_on_its_burst_row() {
     const REASON: &str = "tool execution was not performed: the user declined permission";
     let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "rm -rf /" }),
+    ));
     t.on_event(&finished(
         1,
         ToolResult::Rejected {
@@ -355,8 +386,12 @@ fn unmatched_rejected_tool_end_pushes_reason() {
         },
         None,
     ));
-    assert_eq!(kinds_of(&t), vec![LineKind::System]);
-    assert_eq!(t.rows[0].text, REASON);
+    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(t.rows[0].text, "Ran 1 command, 1 failed");
+    assert_eq!(
+        t.rows[0].collapsible.as_ref().expect("burst detail").body(),
+        format!("Ran rm -rf /\n{REASON}")
+    );
 }
 
 #[test]
@@ -1084,7 +1119,7 @@ fn live_tools_aggregate_counts_and_failures() {
     assert_eq!(t.rows[0].text, "Ran 2 commands, Read 1 file, 1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
-        "Ran ls\nRan pwd\nRead a"
+        "Ran ls\nRan pwd\nboom\nRead a"
     );
 }
 
@@ -3085,9 +3120,14 @@ fn a_retitled_burst_keeps_its_windowed_body() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(has(EARLIER_3_LINES), "{:?}", t.wrapped);
+    assert!(
+        has("… 4 earlier lines"),
+        "the failure reason is one more line above the window: {:?}",
+        t.wrapped
+    );
     assert!(has("c10"));
     assert!(!has("c01"));
+    assert!(!has("boom"));
 }
 
 #[test]

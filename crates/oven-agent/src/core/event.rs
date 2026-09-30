@@ -147,6 +147,11 @@ impl ToolResult {
         matches!(self, Self::Success { .. })
     }
 
+    /// The tool was invoked. A refusal never ran, so it is not a call.
+    pub fn executed(&self) -> bool {
+        matches!(self, Self::Success { .. } | Self::Failed { .. })
+    }
+
     pub fn outcome(&self) -> CallOutcome {
         match self {
             Self::Success { .. } => CallOutcome::Success,

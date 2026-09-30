@@ -503,9 +503,13 @@ impl CountingSink {
 impl EventSink for CountingSink {
     fn emit(&mut self, event: AgentEvent) {
         match &event {
-            AgentEvent::Tool(ToolEvent::Started { .. }) => self.owner.update(self.id, |entry| {
-                entry.info.tool_calls += 1;
-            }),
+            // Started is also emitted for a refusal, which never ran. The
+            // count is invocations: a success or a failure from the tool.
+            AgentEvent::Tool(ToolEvent::Finished { result, .. }) if result.executed() => {
+                self.owner.update(self.id, |entry| {
+                    entry.info.tool_calls += 1;
+                });
+            }
             AgentEvent::Turn(TurnEvent::StepStarted { index }) => {
                 let index = *index as u32;
                 self.owner.update(self.id, |entry| entry.info.steps = index);
@@ -519,7 +523,7 @@ impl EventSink for CountingSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_agent::Agent;
+    use oven_agent::{Agent, ToolCallId, ToolResult, ToolView};
     use oven_llm::Router;
 
     fn bare() -> Arc<Subagents> {
@@ -546,5 +550,80 @@ mod tests {
             1,
             "dropping every subagent is a change an empty registry still has"
         );
+    }
+
+    #[test]
+    fn tool_calls_count_invocations_not_refusals() {
+        let subagents = bare();
+        let id = AgentId::next();
+        subagents.lock().entries.push(Entry {
+            info: NodeInfo {
+                id,
+                name: "explore#1".into(),
+                role: "explore".into(),
+                label: String::new(),
+                background: false,
+                parent: AgentId::next(),
+                status: NodeStatus::Pending,
+                usage: Usage::default(),
+                tool_calls: 0,
+                steps: 0,
+                started_at: 0,
+                finished_at: None,
+            },
+            cancel: CancellationToken::new(),
+            report: None,
+        });
+        let mut sink = CountingSink::new(
+            BusSink::new(EventBus::new(), id, TurnId::next()),
+            Arc::clone(&subagents),
+            id,
+        );
+        let started = |call_id| {
+            AgentEvent::Tool(ToolEvent::Started {
+                call_id,
+                name: "write".into(),
+                view: ToolView::named("write"),
+            })
+        };
+        let finished = |call_id, result| {
+            AgentEvent::Tool(ToolEvent::Finished {
+                call_id,
+                result,
+                detail: None,
+            })
+        };
+
+        let refused = ToolCallId::next();
+        sink.emit(started(refused));
+        sink.emit(finished(
+            refused,
+            ToolResult::Rejected {
+                reason: "unknown tool: write".into(),
+            },
+        ));
+        sink.emit(finished(
+            ToolCallId::next(),
+            ToolResult::Rejected {
+                reason: "tool 'file_write' is unavailable in Ask mode".into(),
+            },
+        ));
+        sink.emit(finished(ToolCallId::next(), ToolResult::Cancelled));
+        assert_eq!(subagents.snapshot()[0].tool_calls, 0);
+
+        sink.emit(finished(
+            ToolCallId::next(),
+            ToolResult::Success {
+                output: "ok".into(),
+            },
+        ));
+        sink.emit(finished(
+            ToolCallId::next(),
+            ToolResult::Failed {
+                error: "boom".into(),
+                output: Some("boom".into()),
+            },
+        ));
+        assert_eq!(subagents.snapshot()[0].tool_calls, 2);
     }
 }

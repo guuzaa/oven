@@ -853,9 +853,19 @@ async fn an_unmounted_tool_still_gets_a_result() {
         text_response("done"),
     ]);
     let mut agent = Agent::new(router_with(Box::new(mock)), tools);
-    run_plain(&mut agent, "go", &mut VecEventSink::default())
-        .await
-        .unwrap();
+    let mut sink = VecEventSink::default();
+    run_plain(&mut agent, "go", &mut sink).await.unwrap();
+    assert_valid_event_sequence(&sink.events);
+    assert!(
+        sink.events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Tool(ToolEvent::Finished {
+                result: ToolResult::Rejected { reason },
+                ..
+            }) if reason == "unknown tool: invented"
+        )),
+        "an unmounted name is refused, not run"
+    );
 
     let results: Vec<String> = agent
         .history()

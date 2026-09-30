@@ -91,8 +91,8 @@ impl ToolBurst {
 
     /// Marks a call done: counts the failure, replaces its body with the one
     /// the tool ended on — a question tool shows the answer the user picked —
-    /// and keeps a diff call's error beside the diff it failed on, so expanding
-    /// the item explains it.
+    /// and keeps the error, beside a diff or under a plain call, so expanding
+    /// the burst explains it.
     pub(super) fn finish(
         &mut self,
         call_id: &str,
@@ -113,7 +113,7 @@ impl ToolBurst {
         if let Some(detail) = detail.filter(|text| !text.is_empty()) {
             call.diff = Some(detail.to_string());
         }
-        if failed && call.diff.is_some() {
+        if failed {
             call.error = error.filter(|text| !text.is_empty()).map(str::to_string);
         }
         true
@@ -152,7 +152,10 @@ impl ToolBurst {
         self.calls
             .iter()
             .map(|call| match &call.diff {
-                None => Section::Text(call.label.clone()),
+                None => Section::Text(match &call.error {
+                    Some(error) => format!("{}\n{error}", call.label),
+                    None => call.label.clone(),
+                }),
                 Some(diff) => {
                     let mut detail = Collapsible::new(diff.clone());
                     if let Some(error) = &call.error {
@@ -257,6 +260,19 @@ mod tests {
         assert_eq!(burst.title(), "Asked 1 question");
         burst.start("2".into(), "Ask sqlite or postgres?", None);
         assert_eq!(burst.title(), "Asked 2 questions");
+    }
+
+    #[test]
+    fn a_failed_plain_call_keeps_its_error_in_the_body() {
+        let mut burst = ToolBurst::default();
+        burst.start("1".into(), "write", None);
+        assert!(burst.finish("1", None, true, Some("unknown tool: write")));
+
+        assert_eq!(burst.title(), "write, 1 failed");
+        assert_eq!(
+            titles(&burst.sections()),
+            ["text:write\nunknown tool: write"]
+        );
     }
 
     #[test]

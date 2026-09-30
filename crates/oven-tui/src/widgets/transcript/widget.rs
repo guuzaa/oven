@@ -407,9 +407,6 @@ impl Transcript {
             return;
         }
         let Some(row) = self.detail_rows.remove(call_id) else {
-            if !ok {
-                self.push_row(LineKind::System, output);
-            }
             return;
         };
         if !self.has_detail(row) || !ok {

@@ -292,10 +292,8 @@ async fn gate_calls(planned: &[PlannedCall], ctx: &TurnContext) -> Result<Vec<Ga
         // A gate that runs carries the tool it runs, so no later stage has to
         // go looking for one again — and an unmounted tool cannot run.
         let Some(tool) = call.tool.clone() else {
-            let error = format!("unknown tool: {}", call.name);
-            gates.push(Gate::Refused(ToolResult::Failed {
-                error: error.clone(),
-                output: Some(error),
+            gates.push(Gate::Refused(ToolResult::Rejected {
+                reason: format!("unknown tool: {}", call.name),
             }));
             continue;
         };
@@ -343,6 +341,12 @@ async fn run_calls(
     let mut running = FuturesUnordered::new();
     let exclusive = Arc::new(tokio::sync::Mutex::new(()));
     for (index, (call, gate)) in planned.iter().zip(gates).enumerate() {
+        sink.emit(AgentEvent::Tool(ToolEvent::Started {
+            call_id: call.call_id,
+            name: call.name.clone(),
+            view: call.view.clone(),
+        }));
+        log_tool_started(&call.name, call.call_id);
         match gate {
             Gate::Refused(result) => {
                 log_tool_finished(&call.name, call.call_id, &result, Instant::now());
@@ -354,12 +358,6 @@ async fn run_calls(
                 }));
             }
             Gate::Run(tool) => {
-                sink.emit(AgentEvent::Tool(ToolEvent::Started {
-                    call_id: call.call_id,
-                    name: call.name.clone(),
-                    view: call.view.clone(),
-                }));
-                log_tool_started(&call.name, call.call_id);
                 let input = call.input.clone();
                 let cx = ctx.clone();
                 let exclusive = call.exclusive.then(|| Arc::clone(&exclusive));
