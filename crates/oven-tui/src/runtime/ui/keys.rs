@@ -187,13 +187,16 @@ impl Ui {
         KeyResult::Handled
     }
     /// Drops an expired arm so the next Esc starts the confirm pair over.
-    pub(super) fn expire_esc_confirm(&mut self) {
+    /// True when the hint was still on screen and has to be painted away.
+    pub(super) fn expire_esc_confirm(&mut self) -> bool {
         if self
             .esc_confirm_until
             .is_some_and(|until| Instant::now() >= until)
         {
             self.esc_confirm_until = None;
+            return true;
         }
+        false
     }
 
     /// Drops a pending arm, so nothing but a second Esc inside the window

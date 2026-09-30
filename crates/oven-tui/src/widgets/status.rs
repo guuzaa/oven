@@ -92,10 +92,10 @@ impl StatusBar {
     }
 
     pub fn expire_reply(&mut self) -> bool {
-        if self
+        let flash_done = self
             .flash_until
-            .is_some_and(|until| Instant::now() >= until)
-        {
+            .is_some_and(|until| Instant::now() >= until);
+        if flash_done {
             self.flash_until = None;
         }
         match self.reply_until {
@@ -103,7 +103,7 @@ impl StatusBar {
                 self.clear_reply();
                 true
             }
-            _ => false,
+            _ => flash_done,
         }
     }
 
@@ -663,6 +663,17 @@ mod tests {
         bar.reply_until = Some(Instant::now() - Duration::from_millis(1));
         assert!(bar.expire_reply());
         assert!(!bar.has_reply());
+    }
+
+    #[test]
+    fn a_finished_flash_asks_for_another_paint() {
+        let mut bar = bar();
+        bar.on_event(&AppEvent::notification("Copied!"));
+        bar.on_event(&AppEvent::notification("Copied!"));
+        bar.flash_until = Some(Instant::now() - Duration::from_millis(1));
+        assert!(bar.expire_reply());
+        assert!(bar.has_reply());
+        assert!(!bar.is_flashing());
     }
 
     #[test]

@@ -138,12 +138,15 @@ impl Ui {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    if self.state.working() {
+                    // The spinner, caret, and subagent clocks advance with no
+                    // app event behind them. A tool call can sit silent for
+                    // seconds, so the tick itself has to paint those frames.
+                    let animated = self.state.working();
+                    if animated {
                         self.state.frame = self.state.frame.wrapping_add(1);
                     }
-                    self.status.expire_reply();
-                    self.expire_esc_confirm();
-                    if dirty {
+                    let expired = self.status.expire_reply() || self.expire_esc_confirm();
+                    if dirty || animated || expired {
                         dirty = false;
                         self.draw_frame(terminal)?;
                     }
@@ -152,6 +155,7 @@ impl Ui {
                     if self.handle_term_event(ev?)? {
                         break;
                     }
+                    dirty = false;
                     self.draw_frame(terminal)?;
                 }
                 result = self.events.recv() => {
