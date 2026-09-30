@@ -1,13 +1,10 @@
-use std::collections::BTreeMap;
 use std::io::{self, Stdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::EventStream;
 use futures::StreamExt;
-use oven_app::{
-    AgentId, AnswerResponse, App, AppEvent, AppState, NodeInfo, UserRequestId, UserResponse,
-};
+use oven_app::{AgentId, AnswerResponse, App, AppEvent, AppState, UserRequestId, UserResponse};
 use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -15,7 +12,6 @@ use ratatui::layout::Rect;
 use tokio::sync::{mpsc, watch};
 
 use crate::core::component::{Component, State};
-use crate::widgets::agents;
 use crate::widgets::input::{InputView, Overlay};
 use crate::widgets::queue;
 use crate::widgets::status::StatusBar;
@@ -25,9 +21,6 @@ use crate::widgets::transcript::Transcript;
 use crate::core::hint::{self, Prompt};
 use crate::core::layout;
 use crate::platform::terminal;
-
-/// The viewer replaces the composer with a single hint row.
-const VIEWER_ROWS: u16 = 1;
 
 pub struct Ui {
     app: App,
@@ -45,15 +38,12 @@ pub struct Ui {
     esc_confirm_until: Option<Instant>,
 
     transcript: Transcript,
-    /// One transcript per subagent, built from the events it reports. The
-    /// driver's own conversation stays in `transcript`.
-    views: BTreeMap<AgentId, Transcript>,
+    /// Every subagent, its own transcript, and the one on screen. The driver's
+    /// own conversation stays in `transcript`.
+    views: Views,
     /// The driver. Anything else is a subagent, and its events belong to
     /// `views`.
     main_agent: AgentId,
-    agents: Vec<NodeInfo>,
-    /// The subagent whose transcript has taken over the screen.
-    focus: Option<AgentId>,
     /// Where the strip was drawn, so a click can be mapped back to a row.
     agents_area: Option<Rect>,
 
@@ -80,7 +70,7 @@ impl Ui {
         }
         let state = State {
             busy: snapshot.phase.is_active(),
-            agents: active_agents(&snapshot.subagents),
+            agents: Views::new().mirror(&snapshot.subagents),
             mode: snapshot.mode,
             ..State::new()
         };
@@ -95,10 +85,8 @@ impl Ui {
             esc_confirm_until: None,
 
             transcript: Transcript::new(),
-            views: BTreeMap::new(),
+            views: Views::new(),
             main_agent: snapshot.agent_id,
-            agents: snapshot.subagents.to_vec(),
-            focus: None,
             agents_area: None,
             status: StatusBar::new(snapshot.model.clone(), &root, snapshot.last_turn_usage)
                 .with_effort(snapshot.reasoning_effort)
@@ -209,39 +197,8 @@ impl Ui {
             self.todos.sync(&state);
             Arc::clone(&state.subagents)
         };
-        self.on_subagents(&subagents);
+        self.state.agents = self.views.mirror(&subagents);
         self.maybe_flush();
-    }
-
-    /// Opens a subagent's transcript, building it on first view.
-    ///
-    /// A subagent that has not said anything yet — one waiting for a slot, or
-    /// one just spawned — has no transcript of its own, and opening nothing
-    /// is worse than opening a page that says what it was asked to do. The
-    /// task's label is that page: its events fill in under it as they arrive.
-    fn focus_agent(&mut self, id: AgentId) {
-        if !self.views.contains_key(&id) {
-            let mut view = Transcript::new();
-            match self.agents.iter().find(|agent| agent.id == id) {
-                Some(agent) if !agent.label.is_empty() => view.start_user_turn(&agent.label),
-                _ => {}
-            }
-            self.views.insert(id, view);
-        }
-        self.focus = Some(id);
-    }
-
-    /// Mirrors the registry into the strip and drops what it no longer
-    /// holds: a view of a subagent nobody can reach is only memory.
-    fn on_subagents(&mut self, subagents: &[NodeInfo]) {
-        self.agents.clear();
-        self.agents.extend_from_slice(subagents);
-        self.state.agents = active_agents(subagents);
-        self.views
-            .retain(|id, _| self.agents.iter().any(|agent| agent.id == *id));
-        if self.focus.is_some_and(|id| !self.views.contains_key(&id)) {
-            self.focus = None;
-        }
     }
 
     fn maybe_flush(&mut self) {
@@ -270,7 +227,7 @@ impl Ui {
         if self.state.busy {
             self.send_cancel();
         }
-        if !self.agents.is_empty() {
+        if !self.views.is_empty() {
             self.app.stop_subagents();
         }
     }
@@ -293,26 +250,25 @@ impl Ui {
 
     fn draw(&mut self, f: &mut Frame<'_>) {
         let area = f.area();
-        let focused = self.focus.and_then(|id| self.views.get_mut(&id));
         let overlay_height = match self.prompt.as_ref() {
             Some(prompt) => prompt.height(area.width),
             None => self.input.overlay_height(),
         };
-        let input_h = match self.focus {
-            Some(_) => VIEWER_ROWS,
+        let input_h = match self.views.viewer_rows() {
+            Some(rows) => rows,
             None => self.input.height(area.width),
         };
         let regions = layout::split(
             area,
             input_h,
             queue::height(&self.pending),
-            agents::height(&self.agents),
+            self.views.height(),
             self.todos.height(),
             overlay_height,
         );
         self.agents_area = regions.agents;
 
-        match focused {
+        match self.views.focused() {
             Some(view) => view.draw(f, regions.transcript, &self.state),
             None => self.transcript.draw(f, regions.transcript, &self.state),
         }
@@ -320,13 +276,13 @@ impl Ui {
             queue::draw(f, queue, &self.pending);
         }
         if let Some(agents) = regions.agents {
-            agents::draw(f, agents, &self.agents);
+            self.views.draw_strip(f, agents);
         }
         if let Some(todos) = regions.todos {
             self.todos.draw(f, todos);
         }
-        if let Some(id) = self.focus {
-            self.draw_viewer_hint(f, regions.input, id);
+        if self.views.focused_id().is_some() {
+            self.views.draw_hint(f, regions.input);
             self.status.draw_bar(f, regions.status, &self.state);
             return;
         }
@@ -351,31 +307,9 @@ impl Ui {
         self.status.draw_reply_overlay(f, regions.transcript);
     }
 
-    /// While a subagent's transcript owns the screen the composer has no
-    /// work to do, so its row states what the viewer answers to instead.
-    fn draw_viewer_hint(&self, f: &mut Frame<'_>, area: Rect, id: AgentId) {
-        let Some(agent) = self.agents.iter().find(|agent| agent.id == id) else {
-            return;
-        };
-        let text = format!(
-            "{} · {} · {}",
-            agent.name,
-            agent.status.label(),
-            hint::VIEWER
-        );
-        agents::draw_hint(f, area, &text);
-    }
-
     fn wants_tick(&self) -> bool {
         self.state.working() || self.status.has_reply() || self.esc_armed()
     }
-}
-
-fn active_agents(agents: &[NodeInfo]) -> usize {
-    agents
-        .iter()
-        .filter(|agent| agent.status.is_active())
-        .count()
 }
 
 /// The keys that apply right now, drawn on the composer border: whichever box
@@ -422,5 +356,7 @@ mod ui_test;
 mod event;
 mod keys;
 mod prompt;
+mod views;
 
 use self::prompt::OverlayPrompt;
+use self::views::Views;

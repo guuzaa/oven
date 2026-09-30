@@ -4,7 +4,6 @@ use crate::core::component::Component;
 use crate::widgets::choice_popup::ChoicePopup;
 use crate::widgets::input::display_user_input;
 use crate::widgets::question_prompt::QuestionPrompt;
-use crate::widgets::transcript::Transcript;
 
 use super::Ui;
 use super::prompt::OverlayPrompt;
@@ -20,15 +19,12 @@ impl Ui {
     pub(super) fn apply_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Exited => self.quit = true,
-            AppEventKind::Subagent(SubagentEvent::Focus { id }) => self.focus_agent(*id),
+            AppEventKind::Subagent(SubagentEvent::Focus { id }) => self.views.focus(*id),
             // A subagent's turn is not the driver's: its events feed its own
             // transcript and nothing else. Only the notification that it
             // finished reaches the composer and the status bar.
             AppEventKind::Agent(env) if env.agent_id != self.main_agent => {
-                self.views
-                    .entry(env.agent_id)
-                    .or_insert_with(Transcript::new)
-                    .on_event(ev);
+                self.views.transcript(env.agent_id).on_event(ev);
                 return;
             }
             AppEventKind::Agent(env) => match &env.event {

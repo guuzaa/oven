@@ -12,7 +12,6 @@ use crate::core::component::{Action, Component, KeyResult};
 use crate::core::esc::{ESC_CONFIRM_WINDOW, EscAction};
 use crate::core::keys::is_mode_toggle;
 use crate::core::paste::{self, Burst};
-use crate::widgets::agents;
 
 use super::Overlay;
 use super::Ui;
@@ -56,16 +55,16 @@ impl Ui {
 
     fn handle_mouse(&mut self, mouse: MouseEvent, agents_area: Option<Rect>) {
         if let Some(area) = agents_area
-            && let Some(id) = agents::row_at(area, &self.agents, mouse.row)
+            && let Some(id) = self.views.row_at(area, mouse.row)
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
-            self.focus_agent(id);
+            self.views.focus(id);
             return;
         }
         // Whichever transcript is on screen takes the mouse: sending it to the
         // hidden one would scroll what nobody can see, and copy the wrong text
         // to the clipboard.
-        let result = match self.focus.and_then(|id| self.views.get_mut(&id)) {
+        let result = match self.views.focused() {
             Some(view) => view.handle_mouse(mouse, &self.state),
             None => self.transcript.handle_mouse(mouse, &self.state),
         };
@@ -75,7 +74,7 @@ impl Ui {
             }
             // The composer is not drawn while a viewer is open, so there is
             // nothing under the mouse there to hand the event to either.
-            KeyResult::Ignored if self.focus.is_none() => {
+            KeyResult::Ignored if self.views.focused_id().is_none() => {
                 self.input.handle_mouse(mouse, &self.state);
             }
             _ => {}
@@ -92,7 +91,9 @@ impl Ui {
                 self.suppress_completions();
                 result
             }
-            PromptFlow::Free if self.focus.is_some() => self.handle_viewer_key(key, esc_armed),
+            PromptFlow::Free if self.views.focused_id().is_some() => {
+                self.handle_viewer_key(key, esc_armed)
+            }
             PromptFlow::Free => match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     KeyResult::Action(Action::Quit)
@@ -163,20 +164,20 @@ impl Ui {
                 return KeyResult::Action(Action::Quit);
             }
             KeyCode::Char('x') if key.modifiers.is_empty() => {
-                if let Some(id) = self.focus {
+                if let Some(id) = self.views.focused_id() {
                     self.app.stop_subagent(id);
                 }
                 return KeyResult::Handled;
             }
             KeyCode::Up | KeyCode::Down => {
-                if let Some(view) = self.focus.and_then(|id| self.views.get_mut(&id)) {
+                if let Some(view) = self.views.focused() {
                     view.scroll_lines(key.code == KeyCode::Up, VIEWER_SCROLL_LINES);
                 }
                 return KeyResult::Handled;
             }
             _ => {}
         }
-        let result = match self.focus.and_then(|id| self.views.get_mut(&id)) {
+        let result = match self.views.focused() {
             Some(view) => view.handle_key(key, &self.state),
             None => KeyResult::Ignored,
         };
@@ -214,7 +215,7 @@ impl Ui {
         }
         match action {
             EscAction::CloseViewer => {
-                self.focus = None;
+                self.views.close();
                 KeyResult::Handled
             }
             EscAction::PopQueue => {
@@ -242,7 +243,7 @@ impl Ui {
     pub(super) fn esc_action(&self) -> EscAction {
         EscAction::new(
             self.pending.last().map(String::as_str),
-            self.focus.is_some(),
+            self.views.focused_id().is_some(),
             self.state.busy,
             self.rewinding,
             self.transcript.rewind_text().as_deref(),
