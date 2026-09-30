@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::core::error::AgentError;
-use crate::turn::TurnContext;
+use crate::core::turn::TurnContext;
 
 pub use crate::core::view::{ToolCaps, ToolPermission, ToolView};
 pub use answer::AnswerTool;

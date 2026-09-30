@@ -1,4 +1,4 @@
-use crate::event::AgentEvent;
+use crate::core::event::AgentEvent;
 
 pub trait EventSink {
     fn emit(&mut self, event: AgentEvent);

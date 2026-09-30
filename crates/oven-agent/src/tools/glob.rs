@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::turn::TurnContext;
+use crate::core::turn::TurnContext;
 
 use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
 use crate::core::error::AgentError;

@@ -7,16 +7,16 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::AgentError;
+use crate::core::event::{CallOutcome, StepStop};
 use crate::core::identity::ToolCallId;
 use crate::core::identity::TurnId;
-use crate::core::mode::AgentMode;
-use crate::core::selection::{ModelSelection, Selection};
-use crate::core::view::ToolView;
-use crate::event::{CallOutcome, StepStop};
-use crate::interaction::{
+use crate::core::interaction::{
     AnswerResponse, ApprovalDecision, LoopLimitDecision, NO_USER_TO_ANSWER, PendingRequest,
     Question, RequestSink, UserRequest, UserRequestId,
 };
+use crate::core::mode::AgentMode;
+use crate::core::selection::{ModelSelection, Selection};
+use crate::core::view::ToolView;
 
 pub const DEFAULT_MAX_ITERS: usize = 200;
 

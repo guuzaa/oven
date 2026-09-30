@@ -5,7 +5,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::turn::TurnContext;
+use crate::core::turn::TurnContext;
 
 use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str};
 use crate::core::error::AgentError;

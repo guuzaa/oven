@@ -12,17 +12,17 @@ use oven_llm::{
 use oven_host::{as_ms, now_ms};
 
 use crate::core::error::{AgentError, MAX_ITERS_EXCEEDED};
+use crate::core::event::{AgentEvent, CallOutcome, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::core::history::{History, Record};
 use crate::core::identity::{AgentId, ToolCallId};
+use crate::core::interaction::{ApprovalDecision, LoopLimitDecision};
 use crate::core::mode::{AgentMode, ToolAccess};
+use crate::core::prompt_template;
 use crate::core::selection::Selection;
+use crate::core::sink::EventSink;
 use crate::core::todo::TodoList;
-use crate::event::{AgentEvent, CallOutcome, StreamEvent, ToolEvent, ToolResult, TurnEvent};
-use crate::interaction::{ApprovalDecision, LoopLimitDecision};
-use crate::prompt_template;
-use crate::sink::EventSink;
+use crate::core::turn::{Step, StepCall, TurnContext, TurnOutput};
 use crate::tools::{TodoWriteTool, Tool};
-use crate::turn::{Step, StepCall, TurnContext, TurnOutput};
 
 /// Cap on a tool's output as it enters the conversation, keeping a single
 /// huge `file_read`/`bash` result from being carried (and re-encoded on
@@ -915,11 +915,11 @@ mod tests {
     use crate::StepStop;
     use crate::TurnId;
     use crate::core::identity::ToolCallId;
-    use crate::sink::{NullSink, VecEventSink};
+    use crate::core::sink::{NullSink, VecEventSink};
+    use crate::core::turn::TurnContext;
     use crate::tools::{
         AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool,
     };
-    use crate::turn::TurnContext;
     use async_trait::async_trait;
     use futures::stream::{BoxStream, StreamExt, iter};
     use oven_llm::{
@@ -933,7 +933,7 @@ mod tests {
 
     use tokio::sync::oneshot;
 
-    use crate::interaction::{AnswerResponse, PendingRequest, Question, UserRequest};
+    use crate::core::interaction::{AnswerResponse, PendingRequest, Question, UserRequest};
 
     const APPROVED_FILE: &str = "approved.txt";
     const APPROVED_CONTENT: &str = "approved";

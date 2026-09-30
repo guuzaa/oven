@@ -71,7 +71,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use crate::prompt_template::instructions::{InstructionScope, load_instructions};
+    use crate::core::prompt_template::instructions::{InstructionScope, load_instructions};
 
     #[test]
     fn system_prompt_includes_bundled_markdown() {

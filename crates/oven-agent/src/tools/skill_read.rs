@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::core::error::AgentError;
 use crate::tools::Tool;
 
-use crate::turn::TurnContext;
+use crate::core::turn::TurnContext;
 
 /// Reads the full content of a skill's `SKILL.md` by id. The system prompt
 /// only lists skill descriptions; this tool is how the model gets the body.

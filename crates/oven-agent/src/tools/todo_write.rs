@@ -5,7 +5,7 @@ use super::{Tool, ToolCaps, ToolPermission, ToolView};
 
 use crate::core::error::AgentError;
 use crate::core::todo::TodoList;
-use crate::turn::TurnContext;
+use crate::core::turn::TurnContext;
 
 pub struct TodoWriteTool;
 

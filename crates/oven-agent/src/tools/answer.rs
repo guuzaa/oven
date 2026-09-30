@@ -2,11 +2,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::turn::TurnContext;
+use crate::core::turn::TurnContext;
 
 use super::{Tool, ToolCaps, ToolView};
 use crate::core::error::AgentError;
-use crate::interaction::{AnswerResponse, Question, QuestionOption};
+use crate::core::interaction::{AnswerResponse, Question, QuestionOption};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";
 const USER_SKIPPED: &str = "the user skipped the question without answering";
@@ -161,7 +161,7 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interaction::{NO_USER_TO_ANSWER, PendingRequest, UserRequest};
+    use crate::core::interaction::{NO_USER_TO_ANSWER, PendingRequest, UserRequest};
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
