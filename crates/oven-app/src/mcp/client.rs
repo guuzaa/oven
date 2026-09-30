@@ -24,7 +24,8 @@ use rmcp::transport::streamable_http_client::{
 use serde_json::Value;
 use tokio::process::Command;
 
-use super::registry::{McpRegistry, McpServerConfig};
+use super::registry::McpRegistry;
+use crate::core::config::McpServerConfig;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_TOOL_NAME: usize = 64;

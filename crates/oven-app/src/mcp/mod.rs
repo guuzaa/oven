@@ -4,5 +4,6 @@
 pub mod client;
 mod registry;
 
+pub use crate::core::config::McpServerConfig;
 pub use client::{DefaultMcpConnector, McpCaller, McpConnector, McpTool};
-pub use registry::{McpError, McpRegistry, McpServerConfig};
+pub use registry::{McpError, McpRegistry};

@@ -1,9 +1,8 @@
 //! MCP server registration.
 //!
-//! The wire protocol itself lives in [`crate::mcp::client`]; this module only
-//! declares which MCP servers the user wants enabled and keeps them in an
-//! in-memory registry.
-//!
+//! The wire protocol itself lives in [`crate::mcp::client`] and the config
+//! shape in [`crate::core::config::mcp`]; this module keeps the declared
+//! servers in an in-memory registry for the runtime and the tool bridge.
 //! Config shape (in `.oven.toml`):
 //!
 //! ```toml
@@ -23,29 +22,12 @@
 //! [mcps.remote.headers]
 //! Authorization = "Bearer sk-xxx"
 //! ```
-//! ```
+//!
 
 use std::collections::BTreeMap;
-use std::string::String;
 
-use serde::{Deserialize, Serialize};
+use crate::core::config::McpServerConfig;
 use thiserror::Error;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct McpServerConfig {
-    #[serde(default)]
-    pub command: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub env: BTreeMap<String, String>,
-    /// Streamable HTTP endpoint. When set, `command`/`args`/`env` are ignored.
-    #[serde(default)]
-    pub url: Option<String>,
-    /// Extra headers for HTTP servers (e.g. `Authorization`).
-    #[serde(default)]
-    pub headers: BTreeMap<String, String>,
-}
 
 #[derive(Debug, Error)]
 pub enum McpError {

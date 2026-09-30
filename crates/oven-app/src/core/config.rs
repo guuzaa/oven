@@ -8,7 +8,9 @@ use oven_llm::{ModelId, ProviderKind, ProviderName, ReasoningEffort, canonical_v
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::mcp::McpServerConfig;
+pub mod mcp;
+
+pub use mcp::McpServerConfig;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
