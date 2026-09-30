@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
 use crate::App;
+use crate::capabilities::subagent::Subagents;
 use crate::command::Input;
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
@@ -24,7 +25,6 @@ use crate::core::state::{
 use crate::inbox::{self, InboxReceiver};
 use crate::shared::{GOODBYE, Shared, save_provider_overlay};
 use crate::slash::{CommandOutcome, SlashRegistry};
-use crate::subagent::Subagents;
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
 

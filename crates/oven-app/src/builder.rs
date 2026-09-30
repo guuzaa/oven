@@ -13,16 +13,16 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::App;
+use crate::capabilities::mcp::McpRegistry;
+use crate::capabilities::mcp::client::{DefaultMcpConnector, McpConnector};
+use crate::capabilities::subagent::{Role as SubagentRole, SubagentParts, Subagents};
 use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 use crate::core::event::{AppId, EventBus};
 use crate::core::session::{Session, canonical_root, session_span};
-use crate::mcp::McpRegistry;
-use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::platform::dirs;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
-use crate::subagent::{Role as SubagentRole, SubagentParts, Subagents};
 use crate::{SkillRegistry, ToolRegistry};
 
 /// Tools a subagent never mounts: the ones that speak to the user, manage
@@ -85,7 +85,7 @@ impl AppBuilder {
     /// Register a skill module from code. Filesystem skills are discovered
     /// automatically when config is applied; this is for programmatic skills.
     /// Skills contribute system-prompt guidance only; they never mount tools
-    /// (see [`crate::tools::ToolRegistry`]).
+    /// (see [`crate::capabilities::tools::ToolRegistry`]).
     pub fn register_skill(&mut self, skill: Box<dyn Skill>) {
         self.skills.register(skill);
     }

@@ -13,10 +13,10 @@ use oven_agent::{
 };
 use tokio::sync::watch;
 
+use crate::capabilities::subagent::Subagents;
 use crate::core::config::AppConfig;
 use crate::core::event::{AppEventKind, EventBus};
 use crate::core::state::{AppPhase, AppState};
-use crate::subagent::Subagents;
 
 /// The turn that is running now: how to stop it, and the one request it is
 /// waiting on the user for.

@@ -9,9 +9,9 @@ use oven_llm::{
 };
 
 use crate::AppBuilder;
+use crate::capabilities::mcp::{McpRegistry, client::*};
 use crate::core::config::AppConfig;
 use crate::core::event::AppId;
-use crate::mcp::{McpRegistry, client::*};
 use crate::runtime::spawn_runtime;
 
 #[test]

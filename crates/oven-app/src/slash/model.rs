@@ -109,7 +109,7 @@ impl SlashCommand for Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subagent::Subagents;
+    use crate::capabilities::subagent::Subagents;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_agent::Agent;

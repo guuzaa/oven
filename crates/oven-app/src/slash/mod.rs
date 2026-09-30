@@ -8,9 +8,9 @@ mod setup;
 
 use oven_agent::{Agent, AgentId, AgentMode};
 
+use crate::capabilities::subagent::Subagents;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
-use crate::subagent::Subagents;
 
 pub use agents::Agents;
 pub use clear::Clear;
@@ -176,7 +176,7 @@ impl Default for SlashRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subagent::Subagents;
+    use crate::capabilities::subagent::Subagents;
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_llm::{

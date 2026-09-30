@@ -1,6 +1,6 @@
 //! MCP server registration.
 //!
-//! The wire protocol itself lives in [`crate::mcp::client`] and the config
+//! The wire protocol itself lives in [`crate::capabilities::mcp::client`] and the config
 //! shape in [`crate::core::config::mcp`]; this module keeps the declared
 //! servers in an in-memory registry for the runtime and the tool bridge.
 //! Config shape (in `.oven.toml`):
