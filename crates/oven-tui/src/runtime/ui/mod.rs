@@ -18,6 +18,11 @@ use crate::widgets::transcript::Transcript;
 
 use crate::platform::terminal;
 
+/// The screen's pace. A provider streams tens of chunks per second and each of
+/// them used to repaint the whole transcript, which starved the input branch
+/// until the wheel and `Ctrl-C` stalled; frames are coalesced onto this tick.
+const FRAME_INTERVAL: Duration = Duration::from_millis(80);
+
 pub struct Ui {
     app: App,
     events: mpsc::UnboundedReceiver<AppEvent>,
@@ -126,22 +131,28 @@ impl Ui {
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> io::Result<()> {
         let mut term_events = EventStream::new();
-        let mut tick = tokio::time::interval(Duration::from_millis(80));
+        let mut tick = tokio::time::interval(FRAME_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         self.draw_frame(terminal)?;
+        let mut dirty = false;
         loop {
             tokio::select! {
-                _ = tick.tick(), if self.wants_tick() => {
-                    if self.state.busy {
+                _ = tick.tick() => {
+                    if self.state.working() {
                         self.state.frame = self.state.frame.wrapping_add(1);
                     }
                     self.status.expire_reply();
                     self.expire_esc_confirm();
+                    if dirty {
+                        dirty = false;
+                        self.draw_frame(terminal)?;
+                    }
                 }
                 Some(ev) = term_events.next() => {
                     if self.handle_term_event(ev?)? {
                         break;
                     }
+                    self.draw_frame(terminal)?;
                 }
                 result = self.events.recv() => {
                     match result {
@@ -152,10 +163,13 @@ impl Ui {
                     if self.quit {
                         break;
                     }
+                    dirty = true;
                 }
-                Ok(()) = self.state_rx.changed() => self.sync_state(),
+                Ok(()) = self.state_rx.changed() => {
+                    self.sync_state();
+                    dirty = true;
+                }
             }
-            self.draw_frame(terminal)?;
         }
         Ok(())
     }
@@ -242,10 +256,6 @@ impl Ui {
     fn esc_armed(&self) -> bool {
         self.esc_confirm_until
             .is_some_and(|until| Instant::now() < until)
-    }
-
-    fn wants_tick(&self) -> bool {
-        self.state.working() || self.status.has_reply() || self.esc_armed()
     }
 }
 
