@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::core::component::{Component, KeyResult, State};
-use super::theme;
+use crate::core::theme;
 
 const SPIN_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const REPLY_TTL: Duration = Duration::from_secs(3);

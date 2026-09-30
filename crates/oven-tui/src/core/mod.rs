@@ -3,3 +3,4 @@
 //! widget would otherwise make twice.
 
 pub mod component;
+pub mod theme;

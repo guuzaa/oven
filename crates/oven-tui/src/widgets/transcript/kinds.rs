@@ -1,6 +1,6 @@
 use ratatui::style::Style;
 
-use super::super::theme;
+use crate::core::theme;
 use super::collapsible::Collapsible;
 
 pub(super) const LINE_PREFIX_WIDTH: usize = 2;

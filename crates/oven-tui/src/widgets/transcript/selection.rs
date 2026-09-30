@@ -1,7 +1,7 @@
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::super::theme;
+use crate::core::theme;
 use super::kinds::LINE_PREFIX_WIDTH;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]

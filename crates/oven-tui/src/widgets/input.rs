@@ -27,7 +27,7 @@ use super::model_picker::{ModelPicker, ModelPickerAction};
 use super::setup_wizard::{SetupWizard, SetupWizardAction};
 use super::shell;
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
-use super::theme;
+use crate::core::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {

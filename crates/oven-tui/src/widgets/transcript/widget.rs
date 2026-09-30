@@ -15,7 +15,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
 use crate::core::component::{Action, Component, KeyResult, State};
-use super::super::theme;
+use crate::core::theme;
 
 use super::kinds::{Header, LineKind, Row};
 use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};

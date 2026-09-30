@@ -1,7 +1,7 @@
 use oven_app::ShellInput;
 use ratatui::style::Style;
 
-use super::theme;
+use crate::core::theme;
 
 const PROMPT_IDLE: &str = "› ";
 const PROMPT_SHELL: &str = "$ ";

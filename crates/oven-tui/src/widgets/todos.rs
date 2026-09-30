@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::list::truncate_str;
-use super::theme;
+use crate::core::theme;
 
 const MAX_HEIGHT: u16 = 6;
 

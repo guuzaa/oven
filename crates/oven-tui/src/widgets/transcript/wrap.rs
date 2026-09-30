@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::super::theme;
+use crate::core::theme;
 use super::collapsible::{Collapsible, Section};
 use super::kinds::{
     COLLAPSED_MARKER, EXPANDED_MARKER, Header, LINE_INDENT, LineKind, MESSAGE_INDENT,

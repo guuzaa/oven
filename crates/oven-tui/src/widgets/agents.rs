@@ -9,7 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
-use super::theme;
+use crate::core::theme;
 
 const MAX_ROWS: usize = 3;
 const RUNNING: &str = "◆";

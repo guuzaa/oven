@@ -13,6 +13,5 @@ pub(super) mod shell;
 pub(super) mod slash_command_popup;
 pub(super) mod status;
 pub(super) mod terminal;
-pub(super) mod theme;
 pub(super) mod todos;
 pub(super) mod transcript;
