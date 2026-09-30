@@ -1,10 +1,10 @@
 use oven_llm::Usage;
 
+use crate::core::view::ToolView;
 use crate::error::AgentError;
 use crate::identity::{AgentId, ToolCallId, TurnId};
 use crate::interaction::{Question, UserRequestId};
 use crate::todo::TodoList;
-use crate::tools::ToolView;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentEventEnvelope {

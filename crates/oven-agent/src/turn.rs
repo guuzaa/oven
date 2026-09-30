@@ -6,6 +6,7 @@ use oven_llm::{Message, Usage};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::view::ToolView;
 use crate::error::AgentError;
 use crate::event::{CallOutcome, StepStop};
 use crate::identity::ToolCallId;
@@ -16,7 +17,6 @@ use crate::interaction::{
 };
 use crate::mode::AgentMode;
 use crate::selection::{ModelSelection, Selection};
-use crate::tools::ToolView;
 
 pub const DEFAULT_MAX_ITERS: usize = 200;
 

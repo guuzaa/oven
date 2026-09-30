@@ -1,4 +1,4 @@
-use crate::tools::ToolPermission;
+use crate::core::view::ToolPermission;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolAccess {

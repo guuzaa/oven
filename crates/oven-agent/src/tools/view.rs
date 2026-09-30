@@ -1,48 +1,16 @@
+//! How one built-in tool renders a call for a frontend.
+//!
+//! [`present_tool`] is the table a driver consults once per `ToolEvent`; the
+//! nouns it returns live in [`crate::core::view`].
+
 use serde_json::Value;
+
+use crate::core::view::ToolView;
 
 use super::{
     AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,
     TaskOutputTool, TaskTool, TodoWriteTool,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolView {
-    pub summary: String,
-    pub collapse: bool,
-    /// Nested body rendered under the summary, e.g. a file diff.
-    pub detail: Option<String>,
-}
-
-impl ToolView {
-    pub fn named(name: impl Into<String>) -> Self {
-        Self {
-            summary: name.into(),
-            collapse: true,
-            detail: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ToolPermission {
-    #[default]
-    Read,
-    Write,
-    Execute,
-    External,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ToolCaps {
-    pub plan_only: bool,
-    pub permission: ToolPermission,
-    /// Runs on its own, never alongside another call of the same step.
-    ///
-    /// A step's calls run at the same time, so a tool that reads a file,
-    /// changes it and writes it back would lose one of two edits to the same
-    /// file; so would a tool that needs the frontend's attention to itself.
-    pub exclusive: bool,
-}
 
 pub fn present_tool(name: &str, input: &Value) -> ToolView {
     match name {

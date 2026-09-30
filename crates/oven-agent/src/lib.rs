@@ -1,5 +1,6 @@
 mod agent;
 mod compact;
+mod core;
 mod error;
 mod event;
 mod history;

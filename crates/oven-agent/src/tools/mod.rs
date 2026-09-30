@@ -19,6 +19,7 @@ use serde_json::Value;
 use crate::error::AgentError;
 use crate::turn::TurnContext;
 
+pub use crate::core::view::{ToolCaps, ToolPermission, ToolView};
 pub use answer::AnswerTool;
 pub use bash::BashTool;
 pub use catalog::{BUILTIN_TOOLS, BuiltinTool};
@@ -31,7 +32,7 @@ pub use skill_read::SkillReadTool;
 pub use task::{TaskOutputTool, TaskTool};
 pub use todo_write::TodoWriteTool;
 pub(crate) use view::labeled;
-pub use view::{ToolCaps, ToolPermission, ToolView, present_tool};
+pub use view::present_tool;
 
 /// One capability the model can call. `run` receives the whole
 /// [`TurnContext`] rather than a bag of options, so a tool that starts work
