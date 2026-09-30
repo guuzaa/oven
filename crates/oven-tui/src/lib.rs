@@ -1,7 +1,7 @@
 mod cli;
 mod core;
 mod platform;
-mod ui;
+mod runtime;
 mod widgets;
 
 pub use cli::Cli;
