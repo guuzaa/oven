@@ -10,7 +10,6 @@ pub mod log;
 pub mod mcp;
 mod provider;
 mod runtime;
-pub mod session;
 mod shared;
 mod shell;
 mod slash;
@@ -23,6 +22,7 @@ pub use builder::AppBuilder;
 pub use command::Input;
 pub use core::complete;
 pub use core::mention::FileMentions;
+pub use core::session;
 pub use event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
 pub use mcp::McpServerConfig;
 pub use oven_agent::{

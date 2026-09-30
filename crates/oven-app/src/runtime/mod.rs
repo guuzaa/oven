@@ -13,12 +13,12 @@ use tracing::Instrument;
 use crate::App;
 use crate::command::Input;
 use crate::config::{AppConfig, ProviderConfig};
-use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
-use crate::inbox::{self, InboxReceiver};
-use crate::session::{
+use crate::core::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,
 };
+use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
+use crate::inbox::{self, InboxReceiver};
 use crate::shared::{GOODBYE, Shared, save_provider_overlay};
 use crate::slash::{CommandOutcome, SlashRegistry};
 use crate::state::{
