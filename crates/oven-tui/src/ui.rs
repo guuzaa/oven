@@ -19,18 +19,18 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use tokio::sync::{mpsc, watch};
 
-use crate::components::agents;
-use crate::components::choice_popup::{ChoicePopup, ChoicePopupAction};
-use crate::components::component::{Action, Component, KeyResult, State};
-use crate::components::input::{InputView, Overlay, display_user_input};
-use crate::components::paste_burst::{self, Burst};
-use crate::components::question_prompt::{QuestionPrompt, QuestionPromptAction};
-use crate::components::queue;
-use crate::components::status::StatusBar;
-use crate::components::todos::TodosWidget;
-use crate::components::transcript::Transcript;
+use crate::widgets::agents;
+use crate::widgets::choice_popup::{ChoicePopup, ChoicePopupAction};
+use crate::widgets::component::{Action, Component, KeyResult, State};
+use crate::widgets::input::{InputView, Overlay, display_user_input};
+use crate::widgets::paste_burst::{self, Burst};
+use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
+use crate::widgets::queue;
+use crate::widgets::status::StatusBar;
+use crate::widgets::todos::TodosWidget;
+use crate::widgets::transcript::Transcript;
 
-use crate::components::{layout, terminal};
+use crate::widgets::{layout, terminal};
 
 /// Esc only acts when it is pressed twice inside this window, so a stray
 /// press cannot cancel a turn or rewind the transcript.
@@ -970,8 +970,8 @@ fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::input::InputView;
-    use crate::components::slash_command_popup::SlashCommandPopup;
+    use crate::widgets::input::InputView;
+    use crate::widgets::slash_command_popup::SlashCommandPopup;
     use oven_app::config::ProviderConfig;
     use oven_app::{ToolCallId, ToolResult};
     use ratatui::backend::TestBackend;
