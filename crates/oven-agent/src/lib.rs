@@ -1,52 +1,51 @@
-mod agent;
-mod compact;
-mod error;
-mod event;
-mod history;
-mod identity;
-mod interaction;
-mod matching;
-mod mode;
-mod prompt_template;
-mod retry;
-mod selection;
-mod sink;
-mod skills;
-mod subagent;
-mod todo;
-mod tools;
-mod turn;
+//! The agent layer: a driver that runs turns against a provider, the tools a
+//! turn may call, and the vocabulary both share.
+//!
+//! Layers, top to bottom; a layer reaches only into the ones below it:
+//!
+//! 1. `runtime` — the `Agent` driver and the turns it runs
+//! 2. `capabilities` — what an agent can call: the `Tool` protocol, the
+//!    built-in tools, skills, the protocol for handing work to another agent
+//! 3. `core` — the nouns and their pure rules: identity, events, history and
+//!    its records, the turn context, the user-request protocol, tool views
+//!
+//! Providers and messages are `oven-llm`; files, processes and the clock are
+//! `oven-host`. Both sit below all three layers.
 
-pub use agent::{Agent, RouterHandle, router_handle};
-pub use compact::{CompactStats, NOTHING_TO_COMPACT};
-pub use error::{AgentError, MAX_ITERS_EXCEEDED};
-pub use event::{
+mod capabilities;
+mod core;
+mod runtime;
+
+pub use capabilities::skills::{Skill, SkillRegistry};
+pub use capabilities::tools::{
+    AnswerTool, BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool,
+    GlobTool, GrepTool, SkillReadTool, TaskOutputTool, TaskTool, TodoWriteTool, Tool, present_tool,
+};
+pub use core::error::{AgentError, MAX_ITERS_EXCEEDED};
+pub use core::event::{
     AgentEvent, AgentEventEnvelope, CallOutcome, StepStop, StreamEvent, ToolEvent,
     ToolOutputStream, ToolResult, TurnEvent,
 };
-pub use history::{History, Record, SessionMeta};
-pub use identity::{AgentId, ToolCallId, TurnId};
-pub use interaction::{
+pub use core::history::{History, Record, SessionMeta};
+pub use core::identity::{AgentId, ToolCallId, TurnId};
+pub use core::interaction::{
     AnswerResponse, ApprovalDecision, LoopLimitDecision, NO_USER_TO_ANSWER, PendingRequest,
     Question, QuestionOption, RequestSink, UserRequest, UserRequestId, UserResponse,
 };
-pub use mode::{AgentMode, ToolAccess};
-pub use prompt_template::{
+pub use core::mode::{AgentMode, ToolAccess};
+pub use core::prompt_template::{
     InstructionDoc, InstructionScope, load_instructions, subagent_preamble, system_prompt,
 };
-pub use retry::RetryingProvider;
-pub use selection::{ModelSelection, Selection};
-pub use sink::{EventSink, NullSink, VecEventSink};
-pub use skills::{Skill, SkillRegistry};
-pub use subagent::{
+pub use core::retry::RetryingProvider;
+pub use core::selection::{ModelSelection, Selection};
+pub use core::sink::{EventSink, NullSink, VecEventSink};
+pub use core::subagent::{
     NodeHandle, NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest,
     SubagentSpawner,
 };
-pub use todo::{TodoItem, TodoList, TodoStatus};
+pub use core::todo::{TodoItem, TodoList, TodoStatus};
+pub use core::turn::{DEFAULT_MAX_ITERS, RunPolicy, Step, StepCall, TurnContext, TurnOutput};
+pub use core::view::{ToolCaps, ToolPermission, ToolView};
+pub use runtime::agent::{Agent, RouterHandle, router_handle};
+pub use runtime::compact::{CompactStats, NOTHING_TO_COMPACT};
 pub use tokio_util::sync::CancellationToken;
-pub use tools::{
-    AnswerTool, BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool,
-    GlobTool, GrepTool, SkillReadTool, TaskOutputTool, TaskTool, TodoWriteTool, Tool, ToolCaps,
-    ToolPermission, ToolView, present_tool,
-};
-pub use turn::{DEFAULT_MAX_ITERS, RunPolicy, Step, StepCall, TurnContext, TurnOutput};

@@ -45,10 +45,44 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | `oven-llm` | `Message`, `Usage`, provider I/O |
 | `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `AgentEvent`, `EventSink`, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, history/todo domain models, the `SubagentSpawner` protocol and its `NodeInfo`/`NodeStatus` vocabulary, provider retry decoration |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
+| `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
 | `oven-app` | `App`, `AppBuilder`, `Input`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, subagent supervision, tracing subscriber install |
 | `oven-tui` | render events and state; send commands |
 
 `oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
+
+### `oven-agent` layers
+
+`oven-agent` is layered; a layer reaches only into the ones below it.
+
+```text
+runtime        the Agent driver: one provider round trip and the tools it asked for
+capabilities   what an agent can call: the Tool protocol, the built-in tools,
+               skills, the subagent spawner protocol
+core           nouns and their pure rules: identity, events, history and its
+               records, the turn context, the user-request protocol, tool views
+```
+
+| Layer | Path | Owns |
+| --- | --- | --- |
+| `runtime` | `runtime/agent/mod.rs` | the `Agent` handle: tools, history, router, the mode and model the next step runs with |
+| | `runtime/agent/request.rs` | one provider request and its reply: streamed when the provider streams, one shot otherwise |
+| | `runtime/agent/step.rs` | one round trip and the tools it asked for: gating, approvals, calls in flight, result order |
+| | `runtime/agent/notify.rs` | the thinking window, per-call logging, the tool-output cap |
+| | `runtime/compact.rs` | compaction: replace the history with an LLM-written summary |
+| `capabilities` | `capabilities/tools/` | the `Tool` protocol, the built-in tools, `present_tool` |
+| | `capabilities/skills.rs` | skills: named guidance merged into the system prompt |
+| `core` | `core/event.rs` | `AgentEvent`, `ToolResult` |
+| | `core/history/` | the message buffer, and the records it persists as |
+| | `core/turn.rs` | `TurnContext`, `RunPolicy`, `Step`, `TurnOutput` |
+| | `core/interaction.rs` | the user-request protocol: one request out, one reply back |
+| | `core/subagent.rs`, `core/retry.rs` | the subagent vocabulary; `RetryingProvider` |
+
+A noun a lower layer needs lives in the lower layer: `ToolView`, `ToolPermission`
+and `ToolCaps` are core vocabulary that the event, turn and request types carry,
+so they sit in `core` rather than beside the tools that produce them. The
+public surface is pinned by `crates/oven-agent/tests/public_api.rs`, so moving
+a module behind a layer cannot move a path.
 
 TUI internals are documented in [`oven-tui.md`](./oven-tui.md), the app layer in
 [`oven-app.md`](./oven-app.md), and subagents — with the seams they leave for

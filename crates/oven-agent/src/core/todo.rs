@@ -1,0 +1,395 @@
+use std::collections::HashSet;
+use std::fmt::Write;
+
+use oven_llm::{ContentBlock, Message};
+use serde::{Deserialize, Serialize};
+
+use crate::{TodoWriteTool, core::history::Record};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub id: String,
+    pub content: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoList {
+    pub items: Vec<TodoItem>,
+}
+
+#[derive(Deserialize)]
+struct TodoWriteArgs {
+    todos: Vec<TodoItem>,
+}
+
+impl TodoList {
+    pub const MAX_ITEMS: usize = 40;
+    pub const MAX_CONTENT: usize = 200;
+    pub const MAX_ID: usize = 64;
+
+    pub fn restore<'a>(records: &[Record], messages: impl Iterator<Item = &'a Message>) -> Self {
+        if let Some(items) = records.iter().rev().find_map(|r| match r {
+            Record::TodoList { items, .. } => Some(items.clone()),
+            _ => None,
+        }) {
+            return TodoList { items };
+        }
+        Self::from_history(messages).unwrap_or_default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Non-empty and every item is completed or cancelled.
+    pub fn is_finished(&self) -> bool {
+        !self.items.is_empty()
+            && self
+                .items
+                .iter()
+                .all(|item| matches!(item.status, TodoStatus::Completed | TodoStatus::Cancelled))
+    }
+
+    pub fn parse(value: &serde_json::Value) -> Result<Self, String> {
+        let args = TodoWriteArgs::deserialize(value).map_err(|e| format!("todo_write: {e}"))?;
+        Self::validate(args.todos)
+    }
+
+    fn validate(items: Vec<TodoItem>) -> Result<Self, String> {
+        if items.len() > Self::MAX_ITEMS {
+            return Err(format!(
+                "todo_write: too many items (max {})",
+                Self::MAX_ITEMS
+            ));
+        }
+        let mut seen = HashSet::new();
+        let mut in_progress = 0usize;
+        for item in &items {
+            if item.id.is_empty() {
+                return Err("todo_write: empty id".into());
+            }
+            if item.id.chars().count() > Self::MAX_ID {
+                return Err(format!("todo_write: id too long (max {})", Self::MAX_ID));
+            }
+            if !seen.insert(item.id.as_str()) {
+                return Err(format!("todo_write: duplicate id '{}'", item.id));
+            }
+            if item.content.is_empty() {
+                return Err("todo_write: empty content".into());
+            }
+            if item.content.chars().count() > Self::MAX_CONTENT {
+                return Err(format!(
+                    "todo_write: content too long (max {})",
+                    Self::MAX_CONTENT
+                ));
+            }
+            if item.status == TodoStatus::InProgress {
+                in_progress += 1;
+            }
+        }
+        if in_progress > 1 {
+            return Err("todo_write: more than one in_progress item".into());
+        }
+        Ok(Self { items })
+    }
+
+    pub fn summary(&self) -> String {
+        let n = self.items.len();
+        let in_progress = self
+            .items
+            .iter()
+            .filter(|i| i.status == TodoStatus::InProgress)
+            .count();
+        let completed = self
+            .items
+            .iter()
+            .filter(|i| i.status == TodoStatus::Completed)
+            .count();
+        format!("{n} todos ({in_progress} in_progress, {completed} completed)")
+    }
+
+    pub fn from_history<'a>(messages: impl Iterator<Item = &'a Message>) -> Option<Self> {
+        let messages: Vec<_> = messages.collect();
+        messages
+            .into_iter()
+            .rev()
+            .flat_map(|m| m.content.iter().rev())
+            .find_map(|block| match block {
+                ContentBlock::ToolUse { name, input, .. } if name == TodoWriteTool::NAME => {
+                    Self::parse(input).ok()
+                }
+                _ => None,
+            })
+    }
+
+    pub fn render_todo_block(&self) -> String {
+        let mut out = String::from("## Current TODO list\n");
+        for item in &self.items {
+            let status = match item.status {
+                TodoStatus::Pending => "pending",
+                TodoStatus::InProgress => "in_progress",
+                TodoStatus::Completed => "completed",
+                TodoStatus::Cancelled => "cancelled",
+            };
+            let _ = writeln!(out, "- [{status}] `{}` {}", item.id, item.content);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oven_llm::Role;
+    use serde_json::json;
+
+    fn todo_use(id: &str, input: serde_json::Value) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: "todo_write".into(),
+                input,
+                raw_arguments: None,
+            }],
+        }
+    }
+
+    fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {
+        TodoItem {
+            id: id.into(),
+            content: content.into(),
+            status,
+        }
+    }
+
+    #[test]
+    fn parse_success() {
+        let list = TodoList::parse(&json!({
+            "todos": [
+                {"id": "a", "content": "one", "status": "pending"},
+                {"id": "b", "content": "two", "status": "in_progress"},
+                {"id": "c", "content": "three", "status": "completed"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(list.items.len(), 3);
+        assert_eq!(list.items[1].status, TodoStatus::InProgress);
+        assert_eq!(list.summary(), "3 todos (1 in_progress, 1 completed)");
+    }
+
+    #[test]
+    fn parse_missing_todos() {
+        let err = TodoList::parse(&json!({"items": []})).unwrap_err();
+        assert!(err.contains("missing field `todos`"));
+    }
+
+    #[test]
+    fn parse_todos_not_array() {
+        let err = TodoList::parse(&json!({"todos": "nope"})).unwrap_err();
+        assert!(err.contains("invalid type"));
+    }
+
+    #[test]
+    fn parse_duplicate_id() {
+        let err = TodoList::parse(&json!({
+            "todos": [
+                {"id": "x", "content": "one", "status": "pending"},
+                {"id": "x", "content": "two", "status": "completed"}
+            ]
+        }))
+        .unwrap_err();
+        assert_eq!(err, "todo_write: duplicate id 'x'");
+    }
+
+    #[test]
+    fn parse_two_in_progress() {
+        let err = TodoList::parse(&json!({
+            "todos": [
+                {"id": "a", "content": "one", "status": "in_progress"},
+                {"id": "b", "content": "two", "status": "in_progress"}
+            ]
+        }))
+        .unwrap_err();
+        assert!(err.contains("more than one in_progress"));
+    }
+
+    #[test]
+    fn parse_content_too_long() {
+        let err = TodoList::parse(&json!({
+            "todos": [{
+                "id": "a",
+                "content": "x".repeat(TodoList::MAX_CONTENT + 1),
+                "status": "pending"
+            }]
+        }))
+        .unwrap_err();
+        assert!(err.contains("content too long"));
+    }
+
+    #[test]
+    fn parse_limits_use_unicode_scalar_count() {
+        let content: String = "你".repeat(TodoList::MAX_CONTENT);
+        let list = TodoList::parse(&json!({
+            "todos": [{"id": "a", "content": content, "status": "pending"}]
+        }))
+        .unwrap();
+        assert_eq!(list.items[0].content.chars().count(), TodoList::MAX_CONTENT);
+
+        let err = TodoList::parse(&json!({
+            "todos": [{
+                "id": "a",
+                "content": "你".repeat(TodoList::MAX_CONTENT + 1),
+                "status": "pending"
+            }]
+        }))
+        .unwrap_err();
+        assert!(err.contains("content too long"));
+
+        let id: String = "项".repeat(TodoList::MAX_ID);
+        TodoList::parse(&json!({
+            "todos": [{"id": id, "content": "ok", "status": "pending"}]
+        }))
+        .unwrap();
+
+        let err = TodoList::parse(&json!({
+            "todos": [{
+                "id": "项".repeat(TodoList::MAX_ID + 1),
+                "content": "ok",
+                "status": "pending"
+            }]
+        }))
+        .unwrap_err();
+        assert!(err.contains("id too long"));
+    }
+
+    #[test]
+    fn parse_empty_list_allowed() {
+        let list = TodoList::parse(&json!({"todos": []})).unwrap();
+        assert!(list.is_empty());
+        assert_eq!(list.summary(), "0 todos (0 in_progress, 0 completed)");
+    }
+
+    #[test]
+    fn is_finished_requires_items_all_terminal() {
+        assert!(!TodoList::default().is_finished());
+        assert!(
+            !TodoList {
+                items: vec![item("a", "one", TodoStatus::Pending)],
+            }
+            .is_finished()
+        );
+        assert!(
+            !TodoList {
+                items: vec![item("a", "one", TodoStatus::InProgress)],
+            }
+            .is_finished()
+        );
+        assert!(
+            !TodoList {
+                items: vec![
+                    item("a", "one", TodoStatus::Completed),
+                    item("b", "two", TodoStatus::Pending),
+                ],
+            }
+            .is_finished()
+        );
+        assert!(
+            TodoList {
+                items: vec![item("a", "one", TodoStatus::Completed)],
+            }
+            .is_finished()
+        );
+        assert!(
+            TodoList {
+                items: vec![
+                    item("a", "one", TodoStatus::Completed),
+                    item("b", "two", TodoStatus::Cancelled),
+                ],
+            }
+            .is_finished()
+        );
+    }
+
+    #[test]
+    fn from_history_uses_last_parseable_write() {
+        let first = todo_use(
+            "c1",
+            json!({"todos":[{"id":"a","content":"one","status":"pending"}]}),
+        );
+        let bad = todo_use("c2", json!({"todos": "nope"}));
+        let last = todo_use(
+            "c3",
+            json!({"todos":[{"id":"a","content":"one","status":"completed"}]}),
+        );
+        let messages = [
+            Message::user_text("go"),
+            first,
+            bad,
+            last,
+            Message::assistant(vec![ContentBlock::text("done")]),
+        ];
+        let list = TodoList::from_history(messages.iter()).unwrap();
+        assert_eq!(list.items[0].status, TodoStatus::Completed);
+    }
+
+    #[test]
+    fn from_history_none_when_never_written() {
+        let messages = [
+            Message::user_text("hi"),
+            Message::assistant(vec![ContentBlock::text("hello")]),
+        ];
+        assert!(TodoList::from_history(messages.iter()).is_none());
+    }
+
+    #[test]
+    fn from_history_empty_write_is_some() {
+        let messages = [todo_use("c1", json!({"todos": []}))];
+        let list = TodoList::from_history(messages.iter()).unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn restore_todos_prefers_last_todo_list_including_empty() {
+        let write = todo_use(
+            "c1",
+            json!({"todos":[{"id":"a","content":"one","status":"pending"}]}),
+        );
+        let records = vec![
+            Record::Message {
+                timestamp: 1,
+                message: write.clone(),
+            },
+            Record::TodoList {
+                timestamp: 2,
+                items: vec![],
+            },
+        ];
+        let restored = TodoList::restore(&records, std::iter::once(&write));
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn restore_todos_falls_back_to_from_history() {
+        let write = todo_use(
+            "c1",
+            json!({"todos":[{"id":"a","content":"one","status":"in_progress"}]}),
+        );
+        let records = vec![Record::Message {
+            timestamp: 1,
+            message: write.clone(),
+        }];
+        let restored = TodoList::restore(&records, std::iter::once(&write));
+        assert_eq!(restored.items[0].status, TodoStatus::InProgress);
+    }
+}
