@@ -3,6 +3,7 @@
 //! widget would otherwise make twice.
 
 pub mod component;
+pub mod esc;
 pub mod layout;
 pub mod paste;
 pub mod shell;
