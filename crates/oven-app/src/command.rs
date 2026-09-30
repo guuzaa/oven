@@ -1,4 +1,4 @@
-use crate::shell::ShellInput;
+use crate::platform::shell::ShellInput;
 use crate::slash::SlashRegistry;
 
 /// What the user submitted, classified once at the frontend boundary so the

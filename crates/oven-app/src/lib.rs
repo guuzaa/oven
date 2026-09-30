@@ -2,13 +2,11 @@ mod app;
 mod builder;
 mod command;
 mod core;
-pub mod dirs;
 mod inbox;
-pub mod log;
 pub mod mcp;
+mod platform;
 mod runtime;
 mod shared;
-mod shell;
 mod slash;
 mod subagent;
 mod tools;
@@ -30,5 +28,6 @@ pub use oven_agent::{
     TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
     UserRequestId, UserResponse, present_tool,
 };
-pub use shell::{LocalShell, ShellInput, display_shell_line};
+pub use platform::shell::{LocalShell, ShellInput, display_shell_line};
+pub use platform::{dirs, log};
 pub use tools::ToolRegistry;

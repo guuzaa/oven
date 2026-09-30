@@ -600,7 +600,7 @@ impl AppConfig {
 
     /// Default user config location: `~/.oven/config.toml`.
     pub fn default_user_config_path() -> Option<PathBuf> {
-        crate::dirs::user_config_path()
+        crate::platform::dirs::user_config_path()
     }
 
     /// Default project config path: `.oven.toml` in the given workspace root.

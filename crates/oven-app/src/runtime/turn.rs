@@ -4,7 +4,7 @@ use oven_llm::Message;
 
 use crate::core::event::{AppEventKind, BusSink, ShellEvent};
 use crate::core::state::AppPhase;
-use crate::shell;
+use crate::platform::shell;
 use crate::slash::CommandContext;
 
 use super::Runtime;

@@ -3,7 +3,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::dirs;
+use crate::platform::dirs;
 
 const LOG_FILE_NAME: &str = "oven.log";
 const OVEN_LOG_ENV: &str = "OVEN_LOG";
