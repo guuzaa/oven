@@ -1,10 +1,8 @@
 mod app;
 mod builder;
 mod command;
-pub mod config;
 mod core;
 pub mod dirs;
-mod event;
 mod inbox;
 pub mod log;
 pub mod mcp;
@@ -13,17 +11,17 @@ mod runtime;
 mod shared;
 mod shell;
 mod slash;
-mod state;
 mod subagent;
 mod tools;
 
 pub use app::{App, AppError};
 pub use builder::AppBuilder;
 pub use command::Input;
-pub use core::complete;
+pub use core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
 pub use core::mention::FileMentions;
 pub use core::session;
-pub use event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
+pub use core::state::{AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens_of};
+pub use core::{complete, config};
 pub use mcp::McpServerConfig;
 pub use oven_agent::{
     AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AnswerTool,
@@ -33,5 +31,4 @@ pub use oven_agent::{
     UserRequestId, UserResponse, present_tool,
 };
 pub use shell::{LocalShell, ShellInput, display_shell_line};
-pub use state::{AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens_of};
 pub use tools::ToolRegistry;

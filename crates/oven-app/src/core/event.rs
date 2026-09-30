@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, EventSink, TurnId, UserRequestId};
 use tokio::sync::mpsc;
 
-use crate::state::HistoryChangeReason;
+use crate::core::state::HistoryChangeReason;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AppId(pub u64);

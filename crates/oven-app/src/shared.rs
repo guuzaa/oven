@@ -13,9 +13,9 @@ use oven_agent::{
 };
 use tokio::sync::watch;
 
-use crate::config::AppConfig;
-use crate::event::{AppEventKind, EventBus};
-use crate::state::{AppPhase, AppState};
+use crate::core::config::AppConfig;
+use crate::core::event::{AppEventKind, EventBus};
+use crate::core::state::{AppPhase, AppState};
 use crate::subagent::Subagents;
 
 /// The turn that is running now: how to stop it, and the one request it is
@@ -248,8 +248,8 @@ mod tests {
     use super::*;
     use std::sync::PoisonError;
 
-    use crate::event::{AppEvent, AppEventKind};
-    use crate::state::SessionState;
+    use crate::core::event::{AppEvent, AppEventKind};
+    use crate::core::state::SessionState;
     use oven_agent::{Agent, AnswerResponse, ApprovalDecision, LoopLimitDecision};
     use oven_llm::Router;
     use tokio::sync::{mpsc, oneshot};

@@ -1,7 +1,7 @@
-use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
+use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
+use crate::core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
 use crate::core::session::{Session, canonical_root};
-use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
-use crate::state::{AppPhase, AppState, HistoryChangeReason};
+use crate::core::state::{AppPhase, AppState, HistoryChangeReason};
 use crate::subagent::{SubagentParts, Subagents};
 use crate::{App, AppBuilder, NodeStatus};
 use crate::{LocalShell, runtime::*};
@@ -3294,7 +3294,7 @@ async fn subagents_can_be_turned_off() {
         text_response("no subagent for me"),
     ]);
     let app = AppBuilder::new(tmp.path()).with_config(AppConfig {
-        subagents: crate::config::SubagentConfig {
+        subagents: crate::core::config::SubagentConfig {
             enabled: false,
             ..Default::default()
         },

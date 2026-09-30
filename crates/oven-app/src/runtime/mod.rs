@@ -12,18 +12,18 @@ use tracing::Instrument;
 
 use crate::App;
 use crate::command::Input;
-use crate::config::{AppConfig, ProviderConfig};
+use crate::core::config::{AppConfig, ProviderConfig};
+use crate::core::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
 use crate::core::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,
 };
-use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
+use crate::core::state::{
+    AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens, context_window,
+};
 use crate::inbox::{self, InboxReceiver};
 use crate::shared::{GOODBYE, Shared, save_provider_overlay};
 use crate::slash::{CommandOutcome, SlashRegistry};
-use crate::state::{
-    AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens, context_window,
-};
 use crate::subagent::Subagents;
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";

@@ -677,7 +677,7 @@ impl AppConfig {
 
 /// Template written to the user config location on first run. Sourced from
 /// `config.example.toml` so the example and the default template stay in sync.
-const DEFAULT_USER_CONFIG: &str = include_str!("../config.example.toml");
+const DEFAULT_USER_CONFIG: &str = include_str!("../../config.example.toml");
 
 #[cfg(test)]
 mod tests {
@@ -690,7 +690,7 @@ mod tests {
         AppConfig::ensure_user_config_at(&path).unwrap();
         assert!(path.exists());
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
-        let expected: AppConfig = toml::from_str(include_str!("../config.example.toml")).unwrap();
+        let expected: AppConfig = toml::from_str(include_str!("../../config.example.toml")).unwrap();
         assert_eq!(cfg, expected);
 
         std::fs::write(

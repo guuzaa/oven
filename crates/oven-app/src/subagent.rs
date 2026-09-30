@@ -20,7 +20,7 @@ use oven_host::{as_ms, now_ms};
 use oven_llm::Usage;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
-use crate::event::{BusSink, EventBus};
+use crate::core::event::{BusSink, EventBus};
 use tokio::task::JoinHandle;
 
 /// Finished subagents kept for `/agents` and `task_output` before the oldest

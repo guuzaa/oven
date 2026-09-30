@@ -4,7 +4,7 @@ use oven_llm::{
 };
 
 use crate::AppError;
-use crate::config::{AppConfig, ModelParams, ProviderConfig};
+use crate::core::config::{AppConfig, ModelParams, ProviderConfig};
 
 /// `ModelInfo` for a user-declared model. Capabilities default to supported
 /// and unknown limits stay zeroed: validation must not reject a model for
@@ -116,7 +116,7 @@ pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ModelParams;
+    use crate::core::config::ModelParams;
     use oven_llm::{ModelId, RouterError};
 
     #[test]

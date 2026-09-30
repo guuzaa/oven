@@ -3,7 +3,7 @@ use std::sync::Arc;
 use oven_agent::{Agent, AgentId, AgentMode, NodeInfo, TodoList, TurnId};
 use oven_llm::{Message, ModelId, Provider, ReasoningEffort, Router, Usage};
 
-use crate::config::ProviderConfig;
+use crate::core::config::ProviderConfig;
 
 #[derive(Debug, Clone)]
 pub struct AppState {

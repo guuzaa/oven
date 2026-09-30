@@ -14,11 +14,11 @@ use tracing::Instrument;
 
 use crate::App;
 use crate::AppError;
-use crate::config::AppConfig;
-use crate::config::ProviderConfig;
+use crate::core::config::AppConfig;
+use crate::core::config::ProviderConfig;
+use crate::core::event::{AppId, EventBus};
 use crate::core::session::{Session, canonical_root, session_span};
 use crate::dirs;
-use crate::event::{AppId, EventBus};
 use crate::mcp::McpRegistry;
 use crate::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};

@@ -14,13 +14,13 @@ use tokio::task::JoinHandle;
 
 use crate::builder::AppBuilder;
 use crate::command::Input;
-use crate::config::{ConfigError, ProviderConfig};
+use crate::core::config::{ConfigError, ProviderConfig};
+use crate::core::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
 use crate::core::session::SessionError;
-use crate::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
+use crate::core::state::AppState;
 use crate::inbox::InboxSender;
 use crate::shared::{Shared, queued_notice};
 use crate::slash::SlashRegistry;
-use crate::state::AppState;
 
 #[derive(Debug, Error)]
 pub enum AppError {
