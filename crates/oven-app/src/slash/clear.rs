@@ -1,5 +1,5 @@
 use super::{CommandContext, CommandOutcome, SlashCommand};
-use crate::AppError;
+use crate::core::error::AppError;
 
 pub struct Clear;
 

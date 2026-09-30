@@ -3,7 +3,7 @@ use std::fmt::Write;
 use oven_agent::NodeInfo;
 
 use super::{CommandContext, CommandOutcome, SlashCommand};
-use crate::AppError;
+use crate::core::error::AppError;
 
 const NO_SUBAGENTS: &str = "no subagents have run in this session";
 const STOP: &str = "stop";

@@ -8,8 +8,8 @@ mod setup;
 
 use oven_agent::{Agent, AgentId, AgentMode};
 
-use crate::AppError;
 use crate::core::config::ProviderConfig;
+use crate::core::error::AppError;
 use crate::subagent::Subagents;
 
 pub use agents::Agents;

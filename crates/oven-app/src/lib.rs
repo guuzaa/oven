@@ -13,9 +13,10 @@ mod slash;
 mod subagent;
 mod tools;
 
-pub use app::{App, AppError};
+pub use app::App;
 pub use builder::AppBuilder;
 pub use command::Input;
+pub use core::error::AppError;
 pub use core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
 pub use core::mention::FileMentions;
 pub use core::session;

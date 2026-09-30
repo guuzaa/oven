@@ -1,7 +1,7 @@
 use oven_llm::{ModelId, ReasoningEffort, Router, RouterError};
 
 use super::{CommandContext, CommandOutcome, SlashCommand};
-use crate::AppError;
+use crate::core::error::AppError;
 
 const USAGE: &str = "usage: /model <id> [none|low|medium|high]";
 

@@ -2,58 +2,23 @@ use std::path::{Path, PathBuf};
 use std::string::String;
 use std::sync::{Arc, PoisonError};
 
-use oven_agent::AgentError;
 use oven_agent::{
     AgentEvent, AgentId, AgentMode, LoopLimitDecision, TodoList, TurnEvent, TurnId, UserRequestId,
     UserResponse,
 };
 use oven_llm::{Message, Usage};
-use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::builder::AppBuilder;
 use crate::command::Input;
-use crate::core::config::{ConfigError, ProviderConfig};
+use crate::core::config::ProviderConfig;
+use crate::core::error::AppError;
 use crate::core::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
-use crate::core::session::SessionError;
 use crate::core::state::AppState;
 use crate::inbox::InboxSender;
 use crate::shared::{Shared, queued_notice};
 use crate::slash::SlashRegistry;
-
-#[derive(Debug, Error)]
-pub enum AppError {
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-    #[error(transparent)]
-    Session(#[from] SessionError),
-    #[error(transparent)]
-    Agent(#[from] AgentError),
-    #[error("app channel closed")]
-    ChannelClosed,
-    /// A command asked for the conversation driver while a turn holds it.
-    /// The runtime reads this as "defer the command", not as a failure.
-    #[error("the agent is busy with a running turn")]
-    AgentBusy,
-    #[error("{0}")]
-    Runtime(String),
-    #[error("provider: {0}")]
-    Provider(String),
-    #[error("mcp: {0}")]
-    Mcp(String),
-}
-
-impl From<oven_llm::ProviderError> for AppError {
-    fn from(err: oven_llm::ProviderError) -> Self {
-        match &err {
-            oven_llm::ProviderError::InvalidRequest(reason) => {
-                AppError::Provider(format!("invalid request: {reason}"))
-            }
-            _ => AppError::Provider(err.to_string()),
-        }
-    }
-}
 
 pub struct App {
     id: AppId,

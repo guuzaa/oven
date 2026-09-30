@@ -3,8 +3,8 @@ use oven_llm::{
     ModelCapabilities, ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Router,
 };
 
-use crate::AppError;
 use crate::core::config::{AppConfig, ModelParams, ProviderConfig};
+use crate::core::error::AppError;
 
 /// `ModelInfo` for a user-declared model. Capabilities default to supported
 /// and unknown limits stay zeroed: validation must not reject a model for

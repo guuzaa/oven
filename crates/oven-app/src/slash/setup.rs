@@ -1,8 +1,8 @@
 use oven_llm::canonical_vendor;
 
 use super::{CommandContext, CommandOutcome, SlashCommand};
-use crate::AppError;
 use crate::core::config::ProviderConfig;
+use crate::core::error::AppError;
 
 pub struct Setup;
 

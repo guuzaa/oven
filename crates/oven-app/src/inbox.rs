@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::mpsc;
 
-use crate::app::AppError;
 use crate::command::Input;
+use crate::core::error::AppError;
 
 /// The queue of inputs waiting for the conversation driver, which handles
 /// them one at a time. It counts the prompts nobody has taken yet, so a

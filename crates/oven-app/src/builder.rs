@@ -13,9 +13,9 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::App;
-use crate::AppError;
 use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
+use crate::core::error::AppError;
 use crate::core::event::{AppId, EventBus};
 use crate::core::session::{Session, canonical_root, session_span};
 use crate::dirs;
