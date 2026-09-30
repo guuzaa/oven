@@ -47,6 +47,7 @@ esac
 case "$(uname -m)" in
   x86_64 | amd64) ARCH="x86_64" ;;
   aarch64 | arm64) ARCH="aarch64" ;;
+  loongarch64) ARCH="loongarch64" ;;
   *)
     echo "error: unsupported architecture: $(uname -m)" >&2
     exit 1
@@ -60,6 +61,10 @@ case "$OS-$ARCH" in
     ;;
   linux-aarch64)
     TARGETS=("aarch64-unknown-linux-gnu" "aarch64-unknown-linux-musl")
+    ;;
+  linux-loongarch64)
+    # musl only: pinned glibc 2.28 is too old for loongarch64
+    TARGETS=("loongarch64-unknown-linux-musl")
     ;;
   darwin-x86_64)
     TARGETS=("x86_64-apple-darwin")
@@ -164,7 +169,7 @@ TARGET=""
 for candidate in "${TARGETS[@]}"; do
   # The GNU/Linux release is built against glibc 2.28. Do not select it on
   # systems with an older glibc, where the musl release is the compatible one.
-  if [[ "$candidate" == *-linux-gnu && "$OS" == "Linux" ]]; then
+  if [[ "$candidate" == *-linux-gnu && "$OS" == "linux" ]]; then
     glibc_version="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $NF}' || true)"
     if [ -z "$glibc_version" ] || ! awk -v version="$glibc_version" '
       BEGIN {
