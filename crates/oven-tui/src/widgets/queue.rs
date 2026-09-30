@@ -4,7 +4,7 @@ use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 
 use super::list::truncate_str;
-use super::theme;
+use crate::core::theme;
 
 /// Row the queued-message banner occupies, zero when nothing is queued.
 pub fn height(pending: &[String]) -> u16 {

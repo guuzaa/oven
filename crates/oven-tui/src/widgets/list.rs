@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::theme;
+use crate::core::theme;
 
 pub const MAX_LIST_ROWS: usize = 6;
 pub(crate) const SELECTED_MARK: &str = "▸ ";

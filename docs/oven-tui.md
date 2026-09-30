@@ -11,13 +11,47 @@ Nothing in this crate is reachable except the `oven` binary:
 src/bin/oven-cli.rs  →  Cli::parse().run()  →  Ui::new(app).run()
 ```
 
-## Entry chain
+## Layers
 
-| File | Role |
-| --- | --- |
-| `src/bin/oven-cli.rs` | `#[tokio::main]` entry that parses the CLI and runs it. |
-| `src/cli.rs` | clap parsing plus mode selection. |
-| `src/ui.rs` | event loop, cross-component routing, drawing. |
+`oven-tui` is layered; a layer reaches only into the ones below it.
+
+```text
+cli         the oven binary: flags, and which mode they select
+runtime     the Ui actor: the event loop, the projection of app events onto
+            the screen, and the keys that reach the widgets
+widgets     one component per screen region
+core        the vocabulary the widgets share and the pure rules between them
+platform    the OS the screens draw on
+```
+
+| Layer | Path | Owns |
+| --- | --- | --- |
+| `cli` | `cli.rs` | clap parsing and mode selection |
+| `runtime` | `runtime/ui/mod.rs` | the `Ui` handle: the event loop, the queue flush, quitting |
+| | `runtime/ui/event.rs` | app events onto the screen: routing, overlay prompts, a submitted prompt |
+| | `runtime/ui/keys.rs` | terminal input: paste bursts, mouse, the key router, the `Esc` decision |
+| | `runtime/ui/prompt.rs` | the overlay prompts: tool approval, loop limit, a question, and the answer the composer types |
+| | `runtime/ui/views.rs` | one transcript per subagent, the strip, and the viewer |
+| | `runtime/ui/draw.rs` | the frame: layout, the bands, the composer hint |
+| `widgets` | `widgets/transcript/` | the scrolling conversation: rows, wrapping, selection, tool bursts |
+| | `widgets/input.rs` | the composer and its overlays |
+| | `widgets/status.rs`, `todos.rs`, `agents.rs`, `queue.rs` | the bands |
+| | `widgets/*_popup.rs`, `model_picker.rs`, `setup_wizard.rs`, `question_prompt.rs`, `choice_popup.rs` | the modals |
+| | `widgets/list.rs` | the shared list primitive |
+| `core` | `core/component.rs` | the `Component` contract and the shared `State` |
+| | `core/theme.rs` | one style per line kind, border state and status segment |
+| | `core/layout.rs` | the screen geometry |
+| | `core/keys.rs`, `core/paste.rs` | key classification and paste reconstruction |
+| | `core/hint.rs` | the composer hints |
+| | `core/esc.rs` | which action `Esc` offers, and whether it waits for a confirm |
+| | `core/shell.rs` | which prompt the composer shows |
+| `platform` | `platform/terminal.rs` | raw mode, alternate screen, mouse capture, bracketed paste |
+| | `platform/clipboard.rs` | `arboard`, then OSC52 |
+
+A rule the widgets would otherwise apply twice lives in `core`: `core/esc.rs`
+decides what `Esc` does and `core/hint.rs` says which keys apply, so the status
+bar and the composer border cannot disagree. `platform` is where a side effect
+happens; `core` performs none.
 
 `Cli` has three flags: `--cd/-C` (workspace root), `--session/-s` and
 `--continue/-c` (mutually exclusive session selection; an explicit id wins,
@@ -103,7 +137,7 @@ anything.
 
 ### Component contract
 
-`components/component.rs` defines the shared surface:
+`core/component.rs` defines the shared surface:
 
 ```rust
 pub trait Component {
@@ -130,7 +164,7 @@ counter used for animations).
 
 ## Layout
 
-`components/layout.rs` splits the screen into named rows, top-down:
+`core/layout.rs` splits the screen into named rows, top-down:
 
 ```text
 ┌──────────────────────────┐
@@ -168,32 +202,31 @@ from `App::history`; no user row is promoted out of history. On a short terminal
 the transcript keeps one row whenever possible, then status; optional bands are
 clamped to the remaining height.
 
-`components/terminal.rs` owns the raw-mode lifecycle: raw mode, alternate
+`platform/terminal.rs` owns the raw-mode lifecycle: raw mode, alternate
 screen, mouse capture, bracketed paste on `setup()`, and the inverse on
-`restore()`. `components/theme.rs` is a flat list of style functions — one per
+`restore()`. `core/theme.rs` is a flat list of style functions — one per
 line kind, border state, and status segment.
 
 ## Components
 
 | Module | Role |
 | --- | --- |
-| `input.rs` | multi-line composer; dispatches to the four overlays; dynamic height; border colour encodes mode |
-| `question_prompt.rs` | the `answer` tool's question: options plus an `Other…` row that hands the composer the keystrokes |
-| `status.rs` | bottom status row plus the transient reply toast |
-| `transcript/` | scrolling conversation, streaming, selection, tool grouping |
-
-| `setup_wizard.rs` | staged provider configuration |
-| `model_picker.rs` | two-stage model + reasoning-effort picker |
-| `slash_command_popup.rs` | `/` command completion |
-| `file_mention_popup.rs` | `@` file completion |
-| `choice_popup.rs` | the approve/reject and continue/exit modals |
-| `queue.rs` | the queued-message row |
-| `agents.rs` | the subagent strip and the viewer's hint row |
-| `todos.rs` | read-only checklist |
-| `list.rs` | shared list primitive (cycling, `▸` marker, titled header) |
-| `shell.rs` | `!` shell-mode detection and prompt styling |
-| `transcript/collapsible.rs` | expand/collapse state with pinning, nested under `transcript/` |
-| `paste_burst.rs` | Windows paste reconstruction |
+| `widgets/input.rs` | multi-line composer; dispatches to the four overlays; dynamic height; border colour encodes mode |
+| `widgets/question_prompt.rs` | the `answer` tool's question: options plus an `Other…` row that hands the composer the keystrokes |
+| `widgets/status.rs` | bottom status row plus the transient reply toast |
+| `widgets/transcript/` | scrolling conversation, streaming, selection, tool grouping |
+| `widgets/setup_wizard.rs` | staged provider configuration |
+| `widgets/model_picker.rs` | two-stage model + reasoning-effort picker |
+| `widgets/slash_command_popup.rs` | `/` command completion |
+| `widgets/file_mention_popup.rs` | `@` file completion |
+| `widgets/choice_popup.rs` | the approve/reject and continue/exit modals |
+| `widgets/queue.rs` | the queued-message row |
+| `widgets/agents.rs` | the subagent strip and the viewer's hint row |
+| `widgets/todos.rs` | read-only checklist |
+| `widgets/list.rs` | shared list primitive (cycling, `▸` marker, titled header) |
+| `core/shell.rs` | `!` shell-mode detection and prompt styling |
+| `widgets/transcript/collapsible.rs` | expand/collapse state with pinning, nested under `transcript/` |
+| `core/paste.rs` | Windows paste reconstruction |
 
 ### Input
 
@@ -451,7 +484,7 @@ it started.
   window there, and without the park the per-frame repaint leaves the cursor on
   the right edge of the box, so the pinyin is written past the screen edge and
   the terminal scrolls the whole UI sideways.
-- `draw` order in `Ui` is user prompt, transcript, queue, todos, input,
+- `draw` order in `runtime/ui/draw.rs` is user prompt, transcript, queue, todos, input,
   overlay, status, then the reply toast above the transcript.
 - Ticks are only scheduled while something animates (`wants_tick`), so an idle
   TUI does not wake up 12 times a second.

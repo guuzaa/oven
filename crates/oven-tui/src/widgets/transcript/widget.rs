@@ -14,11 +14,12 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
-use super::super::component::{Action, Component, KeyResult, State};
-use super::super::theme;
+use crate::core::component::{Action, Component, KeyResult, State};
+use crate::core::theme;
+use crate::platform::clipboard;
 
 use super::kinds::{Header, LineKind, Row};
-use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_line};
+use super::selection::{SelPos, extract_line_range, highlight_line};
 use super::tools::ToolBurst;
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
@@ -693,7 +694,7 @@ impl Transcript {
     fn end_selection(&mut self) -> bool {
         self.dragging = false;
         match self.selected_text() {
-            Some(text) if !text.is_empty() && copy_to_clipboard(&text) => true,
+            Some(text) if clipboard::copy(&text) => true,
             _ => {
                 self.clear_selection();
                 false

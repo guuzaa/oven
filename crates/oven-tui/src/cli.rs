@@ -5,7 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use oven_app::{App, AppBuilder, dirs, log, session};
 
-use crate::ui::Ui;
+use crate::runtime::ui::Ui;
 
 #[derive(Debug, Parser)]
 #[command(name = "oven", about = "A toy coding agent for joy only.")]

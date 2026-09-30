@@ -1,7 +1,7 @@
 use ratatui::style::Style;
 
-use super::super::theme;
 use super::collapsible::Collapsible;
+use crate::core::theme;
 
 pub(super) const LINE_PREFIX_WIDTH: usize = 2;
 pub(super) const LINE_INDENT: &str = "  ";

@@ -6,8 +6,8 @@ use ratatui::widgets::{Paragraph, Wrap};
 use oven_app::QuestionOption;
 
 use super::list;
-use super::theme;
 use super::transcript::wrap;
+use crate::core::theme;
 
 const TITLE: &str = "the agent is asking";
 const OTHER_LABEL: &str = "Other…";

@@ -21,13 +21,13 @@ const BORDER_COLS: u16 = 2;
 const BORDER_ROWS: u16 = 2;
 const WHEEL_SCROLL_ROWS: u8 = 1;
 
-use super::component::{Action, Component, KeyResult, State};
 use super::file_mention_popup::{FileMentionPopup, FileMentionPopupAction};
 use super::model_picker::{ModelPicker, ModelPickerAction};
 use super::setup_wizard::{SetupWizard, SetupWizardAction};
-use super::shell;
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
-use super::theme;
+use crate::core::component::{Action, Component, KeyResult, State};
+use crate::core::shell;
+use crate::core::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
@@ -570,8 +570,8 @@ fn new_textarea() -> TextArea<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::component::idle_state;
     use super::*;
+    use crate::core::component::idle_state;
     use crossterm::event::KeyCode;
 
     fn commands() -> Vec<(String, String)> {

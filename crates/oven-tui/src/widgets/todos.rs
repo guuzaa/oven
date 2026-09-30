@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::list::truncate_str;
-use super::theme;
+use crate::core::theme;
 
 const MAX_HEIGHT: u16 = 6;
 
@@ -79,8 +79,8 @@ fn item_line(status: TodoStatus, content: &str, width: usize) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::component::idle_state;
     use super::*;
+    use crate::core::component::idle_state;
     use oven_app::{AppPhase, TodoItem, TurnId};
 
     fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {

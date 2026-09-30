@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::list;
-use super::theme;
+use crate::core::theme;
 
 const KEEP: &str = "keep current";
 const EMPTY_HINT: &str = "no choices";

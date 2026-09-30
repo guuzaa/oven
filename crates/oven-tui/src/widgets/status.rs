@@ -15,8 +15,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use super::component::{Component, KeyResult, State};
-use super::theme;
+use crate::core::component::{Component, KeyResult, State};
+use crate::core::theme;
 
 const SPIN_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const REPLY_TTL: Duration = Duration::from_secs(3);
@@ -363,8 +363,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
-    use super::super::component::idle_state;
     use super::*;
+    use crate::core::component::idle_state;
 
     const MODEL: &str = "deepseek-chat";
     const ROOT: &str = "rust/oven";
