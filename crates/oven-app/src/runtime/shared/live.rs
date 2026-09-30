@@ -8,7 +8,7 @@ use std::sync::{Arc, MutexGuard, PoisonError};
 use oven_llm::{ModelId, ReasoningEffort, Router};
 use tokio::sync::watch;
 
-use crate::command::Input;
+use crate::api::input::Input;
 use crate::commands::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::{AppEventKind, EventBus, SubagentEvent};

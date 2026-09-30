@@ -1,17 +1,13 @@
-mod app;
-mod builder;
+mod api;
 mod capabilities;
-mod command;
 mod commands;
 mod core;
 mod platform;
 mod runtime;
 
-pub use app::App;
-pub use builder::AppBuilder;
+pub use api::{App, AppBuilder, Input};
 pub use capabilities::mcp;
 pub use capabilities::tools::ToolRegistry;
-pub use command::Input;
 pub use core::config::McpServerConfig;
 pub use core::error::AppError;
 pub use core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};

@@ -11,8 +11,8 @@ use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
 use crate::App;
+use crate::api::input::Input;
 use crate::capabilities::subagent::Subagents;
-use crate::command::Input;
 use crate::commands::{CommandOutcome, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};

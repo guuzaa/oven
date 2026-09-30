@@ -10,8 +10,8 @@ use oven_llm::{Message, Usage};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::builder::AppBuilder;
-use crate::command::Input;
+use crate::api::builder::AppBuilder;
+use crate::api::input::Input;
 use crate::commands::SlashRegistry;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;

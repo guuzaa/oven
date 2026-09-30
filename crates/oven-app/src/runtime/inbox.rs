@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::sync::mpsc;
 
-use crate::command::Input;
+use crate::api::input::Input;
 use crate::core::error::AppError;
 
 /// The queue of inputs waiting for the conversation driver, which handles
