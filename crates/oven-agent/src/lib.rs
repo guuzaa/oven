@@ -1,9 +1,7 @@
 mod agent;
 mod compact;
 mod core;
-mod retry;
 mod skills;
-mod subagent;
 mod tools;
 
 pub use agent::{Agent, RouterHandle, router_handle};
@@ -23,16 +21,16 @@ pub use core::mode::{AgentMode, ToolAccess};
 pub use core::prompt_template::{
     InstructionDoc, InstructionScope, load_instructions, subagent_preamble, system_prompt,
 };
+pub use core::retry::RetryingProvider;
 pub use core::selection::{ModelSelection, Selection};
 pub use core::sink::{EventSink, NullSink, VecEventSink};
-pub use core::todo::{TodoItem, TodoList, TodoStatus};
-pub use core::turn::{DEFAULT_MAX_ITERS, RunPolicy, Step, StepCall, TurnContext, TurnOutput};
-pub use retry::RetryingProvider;
-pub use skills::{Skill, SkillRegistry};
-pub use subagent::{
+pub use core::subagent::{
     NodeHandle, NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest,
     SubagentSpawner,
 };
+pub use core::todo::{TodoItem, TodoList, TodoStatus};
+pub use core::turn::{DEFAULT_MAX_ITERS, RunPolicy, Step, StepCall, TurnContext, TurnOutput};
+pub use skills::{Skill, SkillRegistry};
 pub use tokio_util::sync::CancellationToken;
 pub use tools::{
     AnswerTool, BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool,

@@ -13,10 +13,10 @@ use serde_json::{Value, json};
 
 use crate::core::error::AgentError;
 use crate::core::mode::AgentMode;
-use crate::core::turn::TurnContext;
-use crate::subagent::{
+use crate::core::subagent::{
     NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest, SubagentSpawner,
 };
+use crate::core::turn::TurnContext;
 use crate::tools::{Tool, ToolCaps, ToolPermission, ToolView, require_str};
 
 const BACKGROUND_HINT: &str = "Read its result later with task_output.";
@@ -362,8 +362,8 @@ fn clamp(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::core::identity::{AgentId, TurnId};
+    use crate::core::subagent::NodeHandle;
     use crate::core::turn::TurnContext;
-    use crate::subagent::NodeHandle;
     use serde_json::json;
     use std::sync::Mutex;
     use tokio::sync::oneshot;
