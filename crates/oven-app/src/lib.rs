@@ -3,7 +3,8 @@
 //! Layers, top to bottom; each may only depend on the ones below it:
 //!
 //! 1. `api` — the `App` handle a frontend talks to, and its builder
-//! 2. `runtime` — the conversation loop and the state shared with it
+//! 2. `runtime` — the conversation loop and the state shared with it; it
+//!    also assembles the `App` handle the facade hands out
 //! 3. `commands` — slash commands
 //! 4. `capabilities` — tools, subagents, MCP servers
 //! 5. `core` — config, state, events, persistence
