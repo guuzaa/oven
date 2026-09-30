@@ -121,14 +121,16 @@ pub(super) fn trim_message(text: &str) -> String {
     clippy::cast_precision_loss,
     reason = "the offset is reduced modulo PERIOD_MS, which is exact in f32"
 )]
-pub(super) fn thinking_phase() -> f32 {
+pub(super) fn shimmer_phase() -> f32 {
     let phase_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() % PERIOD_MS);
     phase_ms as f32 / PERIOD
 }
 
-pub(super) fn apply_thinking_shimmer(line: &Line<'static>, phase: f32) -> Line<'static> {
+/// Waves a line's body through a grey gradient, brightest at the sweep's
+/// peak. The leading gutter span keeps its own style, so the marker stays put.
+pub(super) fn apply_shimmer(line: &Line<'static>, phase: f32) -> Line<'static> {
     match line.spans.as_slice() {
         [head, rest @ ..] => {
             let body: String = rest.iter().map(|s| s.content.as_ref()).collect();

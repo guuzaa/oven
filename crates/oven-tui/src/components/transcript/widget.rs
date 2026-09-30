@@ -22,8 +22,8 @@ use super::selection::{SelPos, copy_to_clipboard, extract_line_range, highlight_
 use super::tools::ToolBurst;
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
-    apply_hover, apply_thinking_shimmer, collect_lines, format_elapsed, format_lines,
-    format_thought, line_display_width, paint_visible, tail_lines, thinking_phase, trim_message,
+    apply_hover, apply_shimmer, collect_lines, format_elapsed, format_lines, format_thought,
+    line_display_width, paint_visible, shimmer_phase, tail_lines, trim_message,
     wrap_collapsible_into, wrap_line_into, wrap_row_into,
 };
 
@@ -53,9 +53,9 @@ pub struct Transcript {
     last_collapsible_click: Option<(Header, Instant)>,
     tool_burst: ToolBurst,
     burst_row: Option<usize>,
-    /// Calls rendered as their own rows; `true` when they carry a detail
-    /// body, whose success output stays hidden.
-    detail_ids: HashMap<String, bool>,
+    /// Rows of calls rendered on their own, keyed by call id: a row stays in
+    /// flight until its result lands.
+    detail_rows: HashMap<String, usize>,
     thinking_row: Option<usize>,
     /// Wrapped-line start and height of the prompt pinned at the top of the
     /// last draw. Scroll math uses it so a wheel step moves the body, not
@@ -82,7 +82,7 @@ impl Transcript {
             last_collapsible_click: None,
             tool_burst: ToolBurst::default(),
             burst_row: None,
-            detail_ids: HashMap::new(),
+            detail_rows: HashMap::new(),
             thinking_row: None,
             sticky_prompt: None,
             render_start: 0,
@@ -249,6 +249,9 @@ impl Transcript {
         // Seeded rows carry their durations already, so none of them is still
         // awaiting the live clock that would keep its body windowed.
         self.thinking_row = None;
+        // A seeded call whose result never landed is settled all the same:
+        // nothing arrives to stop its shimmer.
+        self.detail_rows.clear();
         self.collapse_open();
     }
 
@@ -375,8 +378,6 @@ impl Transcript {
     fn note_tool_start(&mut self, call_id: &str, view: &ToolView) {
         if !view.collapse {
             self.close_tool_burst();
-            self.detail_ids
-                .insert(call_id.to_string(), view.detail.is_some());
             let kind = if view.detail.is_some() {
                 LineKind::Diff
             } else {
@@ -384,6 +385,8 @@ impl Transcript {
             };
             let detail = view.detail.as_deref().map(Collapsible::new);
             self.push_row_with_detail(kind, view.summary.clone(), detail);
+            self.detail_rows
+                .insert(call_id.to_string(), self.rows.len() - 1);
             return;
         }
         self.tool_burst
@@ -401,32 +404,38 @@ impl Transcript {
             }
             return;
         }
-        if let Some(has_detail) = self.detail_ids.remove(call_id) {
-            if !has_detail || !ok {
-                self.push_result_row(ok, output);
+        let Some(row) = self.detail_rows.remove(call_id) else {
+            if !ok {
+                self.push_row(LineKind::System, output);
             }
             return;
-        }
-        if !ok {
-            self.push_row(LineKind::System, output);
+        };
+        if !self.has_detail(row) || !ok {
+            self.push_result_row(ok, output);
         }
     }
 
     fn note_seed_result(&mut self, tool_use_id: &str, is_error: bool, content: &[ContentBlock]) {
-        if let Some(has_detail) = self.detail_ids.remove(tool_use_id) {
-            if !has_detail || is_error {
-                self.push_tool_result(is_error, content);
+        let Some(row) = self.detail_rows.remove(tool_use_id) else {
+            let error = is_error.then(|| result_text(content));
+            if self
+                .tool_burst
+                .finish(tool_use_id, is_error, error.as_deref())
+                && is_error
+            {
+                self.upsert_tool_summary();
             }
             return;
+        };
+        if !self.has_detail(row) || is_error {
+            self.push_tool_result(is_error, content);
         }
-        let error = is_error.then(|| result_text(content));
-        if self
-            .tool_burst
-            .finish(tool_use_id, is_error, error.as_deref())
-            && is_error
-        {
-            self.upsert_tool_summary();
-        }
+    }
+
+    /// Whether a call's own row carries a nested body, whose success output
+    /// stays hidden behind it.
+    fn has_detail(&self, row: usize) -> bool {
+        self.rows[row].collapsible.is_some()
     }
 
     fn upsert_tool_summary(&mut self) {
@@ -938,6 +947,21 @@ impl Transcript {
             .flatten()
     }
 
+    /// First content line of every tool call still in flight: the burst while
+    /// a call has yet to answer, and each call rendered as its own row.
+    fn live_tool_lines(&self) -> Vec<usize> {
+        let running = self
+            .detail_rows
+            .values()
+            .copied()
+            .chain(self.burst_row.filter(|_| self.tool_burst.is_running()));
+        let mut lines: Vec<usize> = running
+            .filter_map(|row| self.row_wrapped_range(row).map(|(start, _)| start))
+            .collect();
+        lines.sort_unstable();
+        lines
+    }
+
     fn is_live_text(&self) -> bool {
         self.stream_kind == LineKind::Text && !self.streaming.is_empty()
     }
@@ -1193,11 +1217,19 @@ impl Component for Transcript {
         self.render_start = start;
         let end = start.saturating_add(height).min(total);
         let mut visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
+        let phase = shimmer_phase();
         if let Some(header) = self.live_thinking_header()
             && header >= start
             && let Some(line) = visible.get_mut(header - start)
         {
-            *line = apply_thinking_shimmer(line, thinking_phase());
+            *line = apply_shimmer(line, phase);
+        }
+        for header in self.live_tool_lines() {
+            if header >= start
+                && let Some(line) = visible.get_mut(header - start)
+            {
+                *line = apply_shimmer(line, phase);
+            }
         }
         if let Some(header) = &self.hovered_collapsible
             && header.line >= start

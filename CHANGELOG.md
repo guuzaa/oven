@@ -12,6 +12,7 @@
 - `TurnEvent::StepStarted` / `StepFinished` bound each provider round trip, so loop progress and its stop reason are observable from the event stream
 - `Agent::step` is public and returns a `Step` (text, calls, usage), making the loop one policy over it rather than the only way to drive an agent
 - Tools receive the run's `TurnContext`, which carries cancellation, mode, model and the channel an interactive tool asks its question on
+- A tool call in flight shimmers its transcript row the way thinking does, until its result lands: the burst row while a grouped call has yet to answer, and each call rendered as its own row
 
 ### Changed
 - **Breaking:** `AppCommand` and `ControlCommand` are gone. `App::submit(text)` classifies the text once into an `Input` (`Chat`, `Shell`, `Slash`, `Rewind`) and returns it, so the runtime and the TUI no longer sniff the same string for the same syntax

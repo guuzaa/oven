@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::ops::Range;
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -10,6 +12,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::text::Line;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -25,8 +28,7 @@ use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::widget::{LOOP_LIMIT_REACHED, Transcript};
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
-    apply_thinking_shimmer, format_elapsed, format_lines, format_thought, line_display_width,
-    tail_lines,
+    apply_shimmer, format_elapsed, format_lines, format_thought, line_display_width, tail_lines,
 };
 
 const ELAPSED_0: &str = "Worked for 0s";
@@ -41,6 +43,8 @@ const ELAPSED_1M_1S: &str = "Worked for 1m 1s";
 const THOUGHT_0: &str = "Thought for 0s";
 const THOUGHT_1_5S: &str = "Thought for 1.5s";
 const THOUGHT_1M_1S: &str = "Thought for 1m 1s";
+const TODO_SUMMARY: &str = "todo_write · 1 todos (0 in_progress, 0 completed)";
+const BURST_SUMMARY: &str = "Ran 1 command";
 
 fn wide(t: &mut Transcript) {
     t.area.width = 80;
@@ -91,11 +95,22 @@ fn thinking_shimmer_preserves_label_and_shifts() {
     let line = format_lines(LineKind::Thinking, THINKING_LABEL)
         .pop()
         .unwrap();
-    let a = apply_thinking_shimmer(&line, 0.0);
-    let b = apply_thinking_shimmer(&line, 0.5);
+    let a = apply_shimmer(&line, 0.0);
+    let b = apply_shimmer(&line, 0.5);
     let body: String = a.spans.iter().skip(1).map(|s| s.content.as_ref()).collect();
     assert_eq!(body, THINKING_LABEL);
     assert_eq!(a.spans.len(), 1 + THINKING_LABEL.chars().count());
+    assert_ne!(a.spans[1].style.fg, b.spans[1].style.fg);
+}
+
+#[test]
+fn tool_shimmer_waves_its_body_and_keeps_the_summary() {
+    let line = format_lines(LineKind::Tool, "Ran ls -la").pop().unwrap();
+    let a = apply_shimmer(&line, 0.0);
+    let b = apply_shimmer(&line, 0.5);
+    let body: String = a.spans.iter().skip(1).map(|s| s.content.as_ref()).collect();
+    assert_eq!(body, "Ran ls -la");
+    assert_eq!(a.spans.len(), 1 + "Ran ls -la".chars().count());
     assert_ne!(a.spans[1].style.fg, b.spans[1].style.fg);
 }
 
@@ -230,14 +245,8 @@ fn regular_text_keeps_default_body_style() {
 #[test]
 fn diff_lines_have_add_remove_backgrounds() {
     let lines = format_lines(LineKind::Diff, "Edit file.txt\n- old\n+ new");
-    assert_eq!(
-        lines[1].spans[1].style.bg,
-        Some(ratatui::style::Color::LightRed)
-    );
-    assert_eq!(
-        lines[2].spans[1].style.bg,
-        Some(ratatui::style::Color::LightGreen)
-    );
+    assert_eq!(lines[1].spans[1].style.bg, Some(Color::LightRed));
+    assert_eq!(lines[2].spans[1].style.bg, Some(Color::LightGreen));
 }
 
 #[test]
@@ -1621,14 +1630,8 @@ fn nested_diff_lines_are_indented_past_their_item_title() {
     assert_eq!(added.spans[0].content.as_ref(), item_indent);
     assert_eq!(removed.spans[1].content.as_ref(), "- old");
     assert_eq!(added.spans[1].content.as_ref(), "+ new");
-    assert_eq!(
-        removed.spans[1].style.bg,
-        Some(ratatui::style::Color::LightRed)
-    );
-    assert_eq!(
-        added.spans[1].style.bg,
-        Some(ratatui::style::Color::LightGreen)
-    );
+    assert_eq!(removed.spans[1].style.bg, Some(Color::LightRed));
+    assert_eq!(added.spans[1].style.bg, Some(Color::LightGreen));
 }
 
 #[test]
@@ -1648,6 +1651,28 @@ fn todo_write_keeps_detail_and_result() {
     let result = t.rows[1].collapsible.as_ref().expect("tool result detail");
     assert_eq!(result.body(), "updated");
     assert!(result.is_expanded());
+}
+
+#[test]
+fn a_running_tool_row_shimmers_and_settles_on_its_result() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "todo_write", todo_input()));
+    let area = Rect::new(0, 0, 60, 6);
+    ready(&mut t, area);
+    assert_shimmer_then_settles(&mut t, area, TODO_SUMMARY);
+}
+
+#[test]
+fn a_running_tool_burst_shimmers_and_settles_on_its_result() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    let area = Rect::new(0, 0, 40, 6);
+    ready(&mut t, area);
+    assert_shimmer_then_settles(&mut t, area, BURST_SUMMARY);
 }
 
 #[test]
@@ -2113,6 +2138,38 @@ fn page_keys_scroll_by_viewport() {
 fn ready(t: &mut Transcript, area: Rect) {
     t.area = area;
     t.rewrap_all();
+}
+
+/// Foreground colors drawn in `cols` of one screen row.
+fn row_shades(t: &mut Transcript, area: Rect, row: u16, cols: Range<usize>) -> Vec<Option<Color>> {
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal.draw(|f| t.draw(f, area, &State::new())).unwrap();
+    let buf = terminal.backend().buffer();
+    cols.map(|x| buf[(x as u16, row)].style().fg).collect()
+}
+
+/// A live row's cells wave through a gradient, then flatten once the call's
+/// result lands.
+fn assert_shimmer_then_settles(t: &mut Transcript, area: Rect, title: &str) {
+    let body = MESSAGE_INDENT.len() + LINE_PREFIX_WIDTH;
+    let cols = body..body + title.chars().count();
+    let running = row_shades(t, area, 0, cols.clone());
+    assert!(
+        running.iter().collect::<HashSet<_>>().len() > 1,
+        "an in-flight call waves across '{title}': {running:?}"
+    );
+    assert!(
+        running.iter().any(|fg| matches!(fg, Some(Color::Rgb(..)))),
+        "the wave paints a gradient: {running:?}"
+    );
+
+    t.on_event(&tool_end(1, true, "ok"));
+    ready(t, area);
+    let settled = row_shades(t, area, 0, cols);
+    assert!(
+        settled.iter().collect::<HashSet<_>>().len() == 1,
+        "the finished row is one flat color: {settled:?}"
+    );
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

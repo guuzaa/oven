@@ -116,6 +116,11 @@ impl ToolBurst {
         parts.join(TITLE_SEPARATOR)
     }
 
+    /// Whether any call of the burst has yet to report a result.
+    pub(super) fn is_running(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
     #[cfg(test)]
     pub(super) fn body(&self) -> String {
         self.calls

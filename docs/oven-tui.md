@@ -333,6 +333,10 @@ Tool calls that declare `view.collapse` are grouped into one `ToolBurst` row
 1 file, 1 failed` — with the individual call summaries as the collapsed body.
 The row is upserted in place as calls finish, so a burst does not spam the log.
 Non-collapsing tools get their own row, plus a `Result` row on failure.
+While a call is in flight its row shimmers the same way: `live_tool_lines`
+reports the wrapped line of the burst row while any of its calls has yet to
+answer, and of each own-row call until its result lands, so `draw` waves those
+lines through the same grey gradient the thinking row uses.
 
 Thinking content is never streamed to the screen. A live thinking row shows
 `Thinking...` with a per-character shimmer, and is retitled to `Thought for 1.2s`
