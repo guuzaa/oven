@@ -2,10 +2,10 @@ use oven_agent::{CancellationToken, TurnContext, TurnId};
 use oven_host::run_shell_command;
 use oven_llm::Message;
 
+use crate::commands::CommandContext;
 use crate::core::event::{AppEventKind, BusSink, ShellEvent};
 use crate::core::state::AppPhase;
 use crate::platform::shell;
-use crate::slash::CommandContext;
 
 use super::Runtime;
 

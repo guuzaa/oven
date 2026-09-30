@@ -2,12 +2,12 @@ mod app;
 mod builder;
 mod capabilities;
 mod command;
+mod commands;
 mod core;
 mod inbox;
 mod platform;
 mod runtime;
 mod shared;
-mod slash;
 
 pub use app::App;
 pub use builder::AppBuilder;

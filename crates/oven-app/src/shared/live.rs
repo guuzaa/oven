@@ -9,10 +9,10 @@ use oven_llm::{ModelId, ReasoningEffort, Router};
 use tokio::sync::watch;
 
 use crate::command::Input;
+use crate::commands::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::{AppEventKind, EventBus, SubagentEvent};
 use crate::core::state::{AppState, context_window_of};
-use crate::slash::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 
 use super::Shared;
 

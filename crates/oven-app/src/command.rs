@@ -1,5 +1,5 @@
+use crate::commands::SlashRegistry;
 use crate::platform::shell::ShellInput;
-use crate::slash::SlashRegistry;
 
 /// What the user submitted, classified once at the frontend boundary so the
 /// runtime and the frontend never sniff the same text for the same syntax.

@@ -98,7 +98,7 @@ fn elapsed(info: &NodeInfo) -> String {
 mod tests {
     use super::*;
     use crate::capabilities::subagent::Subagents;
-    use crate::slash::SlashRegistry;
+    use crate::commands::SlashRegistry;
     use oven_agent::{Agent, AgentId, NodeStatus, TurnId};
     use oven_llm::Router;
 

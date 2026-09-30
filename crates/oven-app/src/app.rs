@@ -12,13 +12,13 @@ use tokio::task::JoinHandle;
 
 use crate::builder::AppBuilder;
 use crate::command::Input;
+use crate::commands::SlashRegistry;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 use crate::core::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
 use crate::core::state::AppState;
 use crate::inbox::InboxSender;
 use crate::shared::{Shared, queued_notice};
-use crate::slash::SlashRegistry;
 
 pub struct App {
     id: AppId,
