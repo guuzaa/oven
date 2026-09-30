@@ -2,6 +2,7 @@ use super::*;
 use crate::widgets::input::InputView;
 use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::widgets::slash_command_popup::SlashCommandPopup;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use oven_app::config::ProviderConfig;
 use oven_app::{AgentEvent, AppEventKind, ToolCallId, ToolEvent, ToolResult, TurnEvent};
 use ratatui::backend::TestBackend;
@@ -97,17 +98,6 @@ fn composer_hint_follows_focus_then_state() {
 
 fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
     KeyEvent::new(code, modifiers)
-}
-
-#[test]
-fn is_mode_toggle_backtab_and_shift_tab() {
-    assert!(is_mode_toggle(key(KeyCode::BackTab, KeyModifiers::NONE)));
-    assert!(is_mode_toggle(key(KeyCode::Tab, KeyModifiers::SHIFT)));
-    assert!(!is_mode_toggle(key(KeyCode::Tab, KeyModifiers::NONE)));
-    assert!(!is_mode_toggle(key(
-        KeyCode::Char('c'),
-        KeyModifiers::CONTROL
-    )));
 }
 
 const TEST_PROVIDER: &str = "mock";
