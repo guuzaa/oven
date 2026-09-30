@@ -372,7 +372,7 @@ impl Transcript {
             if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
                 collapsible.collapse();
             }
-            self.rewrap_all();
+            self.rewrap_row(row);
         }
     }
 
@@ -443,20 +443,20 @@ impl Transcript {
     fn upsert_tool_summary(&mut self) {
         let title = self.tool_burst.title();
         let sections = self.tool_burst.sections();
-        if let Some(row) = self.burst_row.and_then(|idx| self.rows.get_mut(idx)) {
-            row.text = title;
-            if let Some(collapsible) = row.collapsible.as_mut() {
-                collapsible.replace_sections(sections);
-            }
-        } else {
+        let Some(row) = self.burst_row.filter(|idx| self.rows.get(*idx).is_some()) else {
             self.push_row_with_detail(
                 LineKind::Tool,
                 title,
                 Some(Collapsible::from_sections(sections)),
             );
             self.burst_row = Some(self.rows.len() - 1);
+            return;
+        };
+        self.rows[row].text = title;
+        if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
+            collapsible.replace_sections(sections);
         }
-        self.rewrap_all();
+        self.rewrap_row(row);
     }
 
     pub(super) fn push_row(&mut self, kind: LineKind, text: &str) {
@@ -479,7 +479,7 @@ impl Transcript {
         {
             *current_title = title.to_string();
             collapsible.append(text);
-            self.rewrap_all();
+            self.rewrap_row(self.rows.len() - 1);
             return;
         }
         self.push_row_with_detail(
@@ -514,28 +514,42 @@ impl Transcript {
         }
     }
 
+    /// Closes every body a new row opens, and rewraps just those rows: a row
+    /// rewrapped in place shifts the ones after it as a block, so walking the
+    /// rows forwards keeps every span valid for the next one.
     fn collapse_open(&mut self) {
-        let mut changed = false;
-        for row in &mut self.rows {
-            if let Some(collapsible) = row.collapsible.as_mut() {
-                changed |= collapsible.collapse();
+        for idx in 0..self.rows.len() {
+            let closes = self.rows[idx]
+                .collapsible
+                .as_mut()
+                .is_some_and(Collapsible::collapse);
+            if closes {
+                self.rewrap_row(idx);
             }
-        }
-        if changed {
-            self.rewrap_all();
         }
     }
 
+    /// Wraps one row into `out`, asking for `separator`: the blank line that
+    /// keeps rows apart, which every row after the first one leads with.
     fn wrap_row_into(
         out: &mut Vec<Line<'static>>,
         row: &Row,
         width: usize,
         live_rows: Option<usize>,
+        separator: bool,
     ) -> Vec<Header> {
         if let Some(collapsible) = &row.collapsible {
-            wrap_collapsible_into(out, row.kind, &row.text, collapsible, width, live_rows)
+            wrap_collapsible_into(
+                out,
+                row.kind,
+                &row.text,
+                collapsible,
+                width,
+                live_rows,
+                separator,
+            )
         } else {
-            wrap_row_into(out, row.kind, &row.text, width);
+            wrap_row_into(out, row.kind, &row.text, width, separator);
             Vec::new()
         }
     }
@@ -599,13 +613,56 @@ impl Transcript {
 
     fn wrap_row(&mut self, idx: usize) {
         let width = self.width();
-        let live_rows = self.live_body_rows(idx);
         let headers = if width == 0 {
             Vec::new()
         } else {
-            Self::wrap_row_into(&mut self.wrapped, &self.rows[idx], width, live_rows)
+            let separator = !self.wrapped.is_empty();
+            let live_rows = self.live_body_rows(idx);
+            Self::wrap_row_into(
+                &mut self.wrapped,
+                &self.rows[idx],
+                width,
+                live_rows,
+                separator,
+            )
         };
         self.rows[idx].headers = headers;
+    }
+
+    /// Rewraps one row where it stands: the wrapped lines above it stay as they
+    /// are and the rows after it move as a block, so an event that touches a
+    /// single row — a retitled burst, a thinking delta — pays for that row
+    /// instead of the whole conversation.
+    fn rewrap_row(&mut self, idx: usize) {
+        let start = self.row_offsets[idx];
+        let end = self
+            .row_offsets
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(self.wrapped.len());
+        let mut lines = Vec::new();
+        let mut headers = match self.width() {
+            0 => Vec::new(),
+            width => {
+                let separator = start > 0;
+                let live_rows = self.live_body_rows(idx);
+                Self::wrap_row_into(&mut lines, &self.rows[idx], width, live_rows, separator)
+            }
+        };
+        // Wrapped into a buffer of its own, so a marker's line comes back
+        // relative to the row and only means anything once `start` is added.
+        for header in &mut headers {
+            header.line += start;
+        }
+        self.rows[idx].headers = headers;
+        let delta = shift_of(end - start, lines.len());
+        self.wrapped.splice(start..end, lines);
+        if delta != 0 {
+            for offset in &mut self.row_offsets[idx + 1..] {
+                *offset = offset.saturating_add_signed(delta);
+            }
+            self.shift_selection(end, delta);
+        }
     }
 
     /// A body that is still growing — live thinking deltas or an open tool burst
@@ -653,6 +710,14 @@ impl Transcript {
         let head = self.select_head.map(|pos| self.clamp_pos(pos, last));
         self.select_anchor = anchor;
         self.select_head = head;
+    }
+
+    /// Keeps a drag alive across a row's rewrap: lines at or below the row
+    /// moved with it, the ones above it stayed put, so both ends follow.
+    fn shift_selection(&mut self, edge: usize, delta: isize) {
+        self.select_anchor = self.select_anchor.map(|pos| shift_pos(pos, edge, delta));
+        self.select_head = self.select_head.map(|pos| shift_pos(pos, edge, delta));
+        self.reanchor_selection();
     }
 
     fn line_width_at(&self, line: usize) -> usize {
@@ -913,7 +978,7 @@ impl Transcript {
         // The first body line the last layout would draw, so the toggled
         // block keeps the screen row it was clicked on.
         let (_, start) = self.layout_viewport(self.area.height);
-        self.rewrap_all();
+        self.rewrap_row(row);
         self.top = Some(start);
     }
 
@@ -938,7 +1003,7 @@ impl Transcript {
             if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
                 collapsible.collapse();
             }
-            self.rewrap_all();
+            self.rewrap_row(row);
         }
     }
 
@@ -1287,6 +1352,26 @@ fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)>
 /// A result body, or the placeholder the transcript shows for no output.
 fn result_body(body: &str) -> &str {
     if body.is_empty() { NO_OUTPUT } else { body }
+}
+
+/// How far a wrapped line count moved, signed: lengths are bounded by memory,
+/// so the impossible case saturates rather than wrapping around.
+fn shift_of(before: usize, after: usize) -> isize {
+    let before = isize::try_from(before).unwrap_or(isize::MAX);
+    let after = isize::try_from(after).unwrap_or(isize::MAX);
+    after.saturating_sub(before)
+}
+
+/// A selection end that moved with the row it sits in; the ones above the row
+/// kept their lines.
+fn shift_pos(pos: SelPos, edge: usize, delta: isize) -> SelPos {
+    if pos.line < edge {
+        return pos;
+    }
+    SelPos {
+        line: pos.line.saturating_add_signed(delta),
+        col: pos.col,
+    }
 }
 
 fn result_text(content: &[ContentBlock]) -> String {

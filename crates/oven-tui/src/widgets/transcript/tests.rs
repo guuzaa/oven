@@ -2974,3 +2974,165 @@ fn expanding_a_block_in_a_pinned_turn_keeps_its_screen_row() {
         "the tail stays in view"
     );
 }
+
+/// A burst that ended on a failed call.
+const FAILED_BURST: &str = "Ran 1 command, 1 failed";
+
+fn line_texts(lines: &[Line<'_>]) -> Vec<String> {
+    lines.iter().map(line_text).collect()
+}
+
+/// Wrapped line of every marker of every row, in order: what a full rewrap
+/// recomputes and a row rewrapped in place must agree on.
+fn marker_lines(t: &Transcript) -> Vec<Vec<usize>> {
+    t.rows
+        .iter()
+        .map(|row| row.headers.iter().map(|header| header.line).collect())
+        .collect()
+}
+
+#[test]
+fn a_tool_event_leaves_the_rows_above_the_burst_wrapped() {
+    let mut t = Transcript::new();
+    fill(&mut t, 6);
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    ready(&mut t, Rect::new(0, 0, 80, 10));
+    let header = t.rows.last().expect("burst row").headers[0].line;
+    let above = line_texts(&t.wrapped[..header]);
+
+    t.on_event(&tool_end(1, false, "boom"));
+
+    assert_eq!(
+        line_texts(&t.wrapped[..header]),
+        above,
+        "the rows above the burst keep their wrapped lines"
+    );
+    assert_eq!(t.rows.last().expect("burst row").text, FAILED_BURST);
+}
+
+#[test]
+fn a_row_rewrapped_in_place_wraps_like_the_whole_transcript() {
+    let mut t = Transcript::new();
+    fill(&mut t, 4);
+    t.on_event(&thinking("reasoning\n"));
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+
+    let matches_a_full_rewrap = |t: &mut Transcript| {
+        let incremental = (line_texts(&t.wrapped), marker_lines(t));
+        t.rewrap_all();
+        assert_eq!(incremental, (line_texts(&t.wrapped), marker_lines(t)));
+    };
+
+    t.on_event(&tool_end(1, false, "boom"));
+    matches_a_full_rewrap(&mut t);
+
+    t.on_event(&thinking("still reasoning\n"));
+    matches_a_full_rewrap(&mut t);
+
+    t.on_event(&thinking_done(1_500));
+    matches_a_full_rewrap(&mut t);
+
+    t.on_event(&tool_start(
+        2,
+        "file_read",
+        serde_json::json!({ "path": "a" }),
+    ));
+    matches_a_full_rewrap(&mut t);
+
+    t.push_row(LineKind::Text, "the answer");
+    matches_a_full_rewrap(&mut t);
+}
+
+#[test]
+fn a_streaming_body_keeps_its_window_without_a_full_rewrap() {
+    let mut t = Transcript::new();
+    let long = "z".repeat(WRAP_COLUMNS * MAX_LIVE_BODY_ROWS + TAIL_COLUMNS);
+    t.on_event(&thinking(&format!("{long}\n")));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert_eq!(t.wrapped.len(), 1 + MAX_LIVE_BODY_ROWS);
+
+    t.on_event(&thinking("a delta arrives\n"));
+
+    assert_eq!(t.wrapped.len(), 1 + MAX_LIVE_BODY_ROWS, "{:?}", t.wrapped);
+}
+
+/// A burst retitled by a call that failed still shows only its newest calls.
+#[test]
+fn a_retitled_burst_keeps_its_windowed_body() {
+    let mut t = Transcript::new();
+    for i in 1..=(MAX_LIVE_BODY_ROWS + 2) as u64 {
+        t.on_event(&tool_start(
+            i,
+            "bash",
+            serde_json::json!({ "command": format!("c{i:02}") }),
+        ));
+    }
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+
+    t.on_event(&tool_end(1, false, "boom"));
+
+    let has = |needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(has(EARLIER_3_LINES), "{:?}", t.wrapped);
+    assert!(has("c10"));
+    assert!(!has("c01"));
+}
+
+#[test]
+fn a_drag_survives_a_row_that_grows_under_it() {
+    let mut t = Transcript::new();
+    for i in 1..=3 {
+        t.on_event(&tool_start(
+            i,
+            "bash",
+            serde_json::json!({ "command": format!("c{i}") }),
+        ));
+    }
+    t.push_row(LineKind::Text, "the answer");
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+
+    let top = t.current_top();
+    let header = t.rows[0].headers[0].line;
+    let screen_row = u16::try_from(header - top).expect("screen row");
+    double_click(&mut t, 2, screen_row);
+
+    let answer = t
+        .wrapped
+        .iter()
+        .position(|line| line_text(line).contains("the answer"))
+        .expect("the answer is on screen");
+    let answer_row = u16::try_from(answer - top).expect("screen row");
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 4, answer_row),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 11, answer_row),
+        &State::new(),
+    );
+    let selected = t.selected_text().expect("a selection");
+
+    t.on_event(&tool_start(
+        4,
+        "bash",
+        serde_json::json!({ "command": "c4" }),
+    ));
+
+    assert_eq!(
+        t.selected_text().as_deref(),
+        Some(selected.as_str()),
+        "the drag keeps the same text once the burst above it grows"
+    );
+}

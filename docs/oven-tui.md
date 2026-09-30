@@ -322,8 +322,11 @@ struct Row { kind: LineKind, text: String, collapsible: Option<Collapsible>, hea
 `transcript/widget.rs` keeps two wrap buffers: `wrapped` for committed rows and
 `wrapped_stream` for the in-flight delta. Streaming text is appended to
 `wrapped_stream` only, so an in-progress answer never rewraps history and never
-yanks a view the user has scrolled away. `rewrap_all` is only triggered by a
-real content or width change and clears the selection.
+yanks a view the user has scrolled away. A row that changes where it stands —
+a retitled burst, an appended thinking delta, a body a new row closes — is
+rewrapped in place by `rewrap_row`: the wrapped lines above it stay as they
+are, the rows after it move as a block, and a drag on them follows. Only a
+width change rewraps the whole transcript.
 
 Row kinds (`transcript/kinds.rs`) each carry a two-column gutter and a style:
 

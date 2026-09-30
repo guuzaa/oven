@@ -218,8 +218,9 @@ pub(super) fn wrap_row_into(
     kind: LineKind,
     text: &str,
     width: usize,
+    separator: bool,
 ) {
-    if !out.is_empty() {
+    if separator {
         out.push(Line::from(""));
     }
     if let Some(frame) = PromptFrame::of(kind)
@@ -339,8 +340,9 @@ pub(super) fn wrap_collapsible_into(
     collapsible: &Collapsible,
     width: usize,
     live_rows: Option<usize>,
+    separator: bool,
 ) -> Vec<Header> {
-    if !out.is_empty() {
+    if separator {
         out.push(Line::from(""));
     }
     let style = kind.style();
