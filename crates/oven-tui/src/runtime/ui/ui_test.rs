@@ -2,7 +2,7 @@ use super::*;
 use crate::widgets::input::InputView;
 use crate::widgets::slash_command_popup::SlashCommandPopup;
 use oven_app::config::ProviderConfig;
-use oven_app::{ToolCallId, ToolResult};
+use oven_app::{AgentEvent, AppEventKind, ToolCallId, ToolEvent, ToolResult, TurnEvent};
 use ratatui::backend::TestBackend;
 
 #[test]
