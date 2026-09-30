@@ -690,7 +690,8 @@ mod tests {
         AppConfig::ensure_user_config_at(&path).unwrap();
         assert!(path.exists());
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
-        let expected: AppConfig = toml::from_str(include_str!("../../config.example.toml")).unwrap();
+        let expected: AppConfig =
+            toml::from_str(include_str!("../../config.example.toml")).unwrap();
         assert_eq!(cfg, expected);
 
         std::fs::write(

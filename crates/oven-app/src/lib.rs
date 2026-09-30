@@ -6,7 +6,6 @@ pub mod dirs;
 mod inbox;
 pub mod log;
 pub mod mcp;
-mod provider;
 mod runtime;
 mod shared;
 mod shell;

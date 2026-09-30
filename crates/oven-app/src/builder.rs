@@ -148,7 +148,7 @@ impl AppBuilder {
     }
 
     fn build_router(&self) -> Result<Router, AppError> {
-        crate::provider::build_router(&self.config)
+        crate::core::provider::build_router(&self.config)
     }
 
     pub(crate) async fn build_agent(&self) -> Result<AppAgents, AppError> {
@@ -161,7 +161,9 @@ impl AppBuilder {
     pub(crate) async fn build_interactive_agent(&self) -> Result<AppAgents, AppError> {
         let model = self.active_model()?;
         let mut agents = self
-            .build_agent_with_router(crate::provider::build_interactive_router(&self.config)?)
+            .build_agent_with_router(crate::core::provider::build_interactive_router(
+                &self.config,
+            )?)
             .await?;
         agents.main.set_model(model);
         Ok(agents)

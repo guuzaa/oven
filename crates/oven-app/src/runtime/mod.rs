@@ -383,14 +383,14 @@ impl Runtime {
         let active = next
             .active_provider_config()
             .expect("active provider inserted before build");
-        if let Err(e) = crate::provider::build_client(active) {
+        if let Err(e) = crate::core::provider::build_client(active) {
             self.emit_error(e.to_string());
             return;
         }
         // Rebuild the whole router rather than upserting one entry: the swap
         // is a single snapshot replacement, so a subagent holding the old
         // router finishes its request on it instead of racing the mutation.
-        let router = match crate::provider::build_router(&next) {
+        let router = match crate::core::provider::build_router(&next) {
             Ok(router) => router,
             Err(e) => {
                 self.emit_error(e.to_string());
