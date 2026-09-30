@@ -25,7 +25,7 @@ use crate::core::component::{Action, Component, KeyResult, State};
 use super::file_mention_popup::{FileMentionPopup, FileMentionPopupAction};
 use super::model_picker::{ModelPicker, ModelPickerAction};
 use super::setup_wizard::{SetupWizard, SetupWizardAction};
-use super::shell;
+use crate::core::shell;
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
 use crate::core::theme;
 
