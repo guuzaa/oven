@@ -84,6 +84,33 @@ so they sit in `core` rather than beside the tools that produce them. The
 public surface is pinned by `crates/oven-agent/tests/public_api.rs`, so moving
 a module behind a layer cannot move a path.
 
+### `oven-tui` layers
+
+`oven-tui` is layered; a layer reaches only into the ones below it.
+
+```text
+cli         the oven binary: flags, and which mode they select
+runtime     the Ui actor: the event loop, the projection of app events onto
+            the screen, and the keys that reach the widgets
+widgets     one component per screen region
+core        the vocabulary the widgets share and the pure rules between them
+platform    the OS the screens draw on
+```
+
+| Layer | Path | Owns |
+| --- | --- | --- |
+| `cli` | `cli.rs` | clap parsing and mode selection |
+| `runtime` | `runtime/ui/mod.rs` | the `Ui` handle: the event loop, the queue flush, quitting |
+| | `runtime/ui/event.rs` | app events onto the screen |
+| | `runtime/ui/keys.rs` | terminal input, the key router, the `Esc` decision |
+| | `runtime/ui/prompt.rs` | the overlay prompts and the answers they take |
+| | `runtime/ui/views.rs` | one transcript per subagent, the strip, the viewer |
+| | `runtime/ui/draw.rs` | the frame and the composer hint |
+| `widgets` | `widgets/transcript/`, `widgets/input.rs`, the bands and modals | one component per screen region |
+| `core` | `core/component.rs`, `theme.rs`, `layout.rs` | the component contract, the styles, the screen geometry |
+| | `core/esc.rs`, `core/hint.rs`, `core/keys.rs`, `core/paste.rs`, `core/shell.rs` | the rules the widgets would otherwise apply twice |
+| `platform` | `platform/terminal.rs`, `platform/clipboard.rs` | raw-mode lifecycle; `arboard`, then OSC52 |
+
 TUI internals are documented in [`oven-tui.md`](./oven-tui.md), the app layer in
 [`oven-app.md`](./oven-app.md), and subagents — with the seams they leave for
 loop and graph engineering — in [`subagents.md`](./subagents.md).
