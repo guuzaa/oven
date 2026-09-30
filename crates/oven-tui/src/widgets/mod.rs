@@ -9,6 +9,5 @@ pub(super) mod queue;
 pub(super) mod setup_wizard;
 pub(super) mod slash_command_popup;
 pub(super) mod status;
-pub(super) mod terminal;
 pub(super) mod todos;
 pub(super) mod transcript;

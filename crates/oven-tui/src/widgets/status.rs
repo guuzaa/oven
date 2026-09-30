@@ -363,8 +363,8 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
 
-    use crate::core::component::idle_state;
     use super::*;
+    use crate::core::component::idle_state;
 
     const MODEL: &str = "deepseek-chat";
     const ROOT: &str = "rust/oven";

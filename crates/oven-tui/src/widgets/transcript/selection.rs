@@ -1,8 +1,8 @@
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::core::theme;
 use super::kinds::LINE_PREFIX_WIDTH;
+use crate::core::theme;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct SelPos {
@@ -103,33 +103,4 @@ pub(super) fn highlight_line(
         }
     }
     Line::from(spans)
-}
-
-#[cfg(not(test))]
-pub(super) fn copy_to_clipboard(text: &str) -> bool {
-    if text.is_empty() {
-        return false;
-    }
-    arboard::Clipboard::new()
-        .and_then(|mut c| c.set_text(text))
-        .is_ok()
-        || osc52_copy(text)
-}
-
-#[cfg(test)]
-pub(super) fn copy_to_clipboard(_text: &str) -> bool {
-    true
-}
-
-#[cfg(not(test))]
-fn osc52_copy(text: &str) -> bool {
-    use std::io::{self, Write};
-
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD;
-
-    let encoded = STANDARD.encode(text.as_bytes());
-    write!(io::stdout(), "\x1b]52;c;{encoded}\x07")
-        .and_then(|()| io::stdout().flush())
-        .is_ok()
 }

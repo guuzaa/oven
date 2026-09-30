@@ -19,12 +19,12 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use tokio::sync::{mpsc, watch};
 
+use crate::core::component::{Action, Component, KeyResult, State};
+use crate::core::esc::{ESC_CONFIRM_WINDOW, EscAction};
+use crate::core::paste::{self, Burst};
 use crate::widgets::agents;
 use crate::widgets::choice_popup::{ChoicePopup, ChoicePopupAction};
-use crate::core::component::{Action, Component, KeyResult, State};
-use crate::core::esc::{EscAction, ESC_CONFIRM_WINDOW};
 use crate::widgets::input::{InputView, Overlay, display_user_input};
-use crate::core::paste::{self, Burst};
 use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::widgets::queue;
 use crate::widgets::status::StatusBar;
@@ -33,7 +33,7 @@ use crate::widgets::transcript::Transcript;
 
 use crate::core::hint::{self, Prompt};
 use crate::core::layout;
-use crate::widgets::terminal;
+use crate::platform::terminal;
 
 /// Lines an arrow key scrolls a subagent's transcript by.
 const VIEWER_SCROLL_LINES: u16 = 1;
@@ -987,7 +987,10 @@ mod tests {
         }
 
         assert_eq!(composer_hint(&input(), true, None, false), Some(hint::BUSY));
-        assert_eq!(composer_hint(&input(), false, None, false), Some(hint::IDLE));
+        assert_eq!(
+            composer_hint(&input(), false, None, false),
+            Some(hint::IDLE)
+        );
         assert_eq!(
             composer_hint(&input(), false, None, true),
             Some(hint::ESC_ARMED),

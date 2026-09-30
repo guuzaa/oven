@@ -10,11 +10,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::core::theme;
 use super::collapsible::{Collapsible, Section};
 use super::kinds::{
     COLLAPSED_MARKER, EXPANDED_MARKER, Header, LINE_INDENT, LineKind, MESSAGE_INDENT,
 };
+use crate::core::theme;
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 /// Screen rows — counted after wrapping — a body still receiving content may

@@ -54,7 +54,10 @@ mod tests {
             Some(ESC_ARMED),
             "the armed Esc overrides the idle hint"
         );
-        assert_eq!(composer(Some("tab fill"), None, false, true), Some("tab fill"));
+        assert_eq!(
+            composer(Some("tab fill"), None, false, true),
+            Some("tab fill")
+        );
     }
 
     #[test]

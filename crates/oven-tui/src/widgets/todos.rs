@@ -79,8 +79,8 @@ fn item_line(status: TodoStatus, content: &str, width: usize) -> Line<'static> {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::component::idle_state;
     use super::*;
+    use crate::core::component::idle_state;
     use oven_app::{AppPhase, TodoItem, TurnId};
 
     fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {
