@@ -3,7 +3,7 @@
 //! These are the nouns the rest of the crate reasons about — an event carries
 //! a [`ToolView`], a turn's gate reads [`ToolPermission`], a tool declares
 //! [`ToolCaps`] — so they sit below the tools that produce them. The built-in
-//! presentation table lives in [`crate::tools`].
+//! presentation table lives in [`crate::capabilities::tools`].
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolView {

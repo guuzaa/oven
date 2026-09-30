@@ -6,7 +6,7 @@
 //! the system prompt (as `- **<id>**: <description>` lines); the full document
 //! body is never loaded up front. Instead it is read from disk on demand
 //! via [`SkillRegistry::content`], which backs the
-//! [`SkillReadTool`](crate::tools::SkillReadTool).
+//! [`SkillReadTool`](crate::capabilities::tools::SkillReadTool).
 //!
 //! Discovery is directory-driven: [`SkillRegistry::load_from_dirs`] scans
 //! each directory's immediate subdirectories. The app layer decides which

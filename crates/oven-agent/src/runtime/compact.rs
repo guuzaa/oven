@@ -3,8 +3,8 @@
 
 use oven_llm::{Message, Provider, ThinkingMode, ToolChoice};
 
-use crate::agent::Agent;
 use crate::core::error::AgentError;
+use crate::runtime::agent::Agent;
 
 pub const NOTHING_TO_COMPACT: &str = "nothing to compact";
 const EMPTY_SUMMARY: &str = "provider returned an empty summary";

@@ -11,13 +11,13 @@ use async_trait::async_trait;
 use oven_llm::Usage;
 use serde_json::{Value, json};
 
+use crate::capabilities::tools::{Tool, ToolCaps, ToolPermission, ToolView, require_str};
 use crate::core::error::AgentError;
 use crate::core::mode::AgentMode;
 use crate::core::subagent::{
     NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest, SubagentSpawner,
 };
 use crate::core::turn::TurnContext;
-use crate::tools::{Tool, ToolCaps, ToolPermission, ToolView, require_str};
 
 const BACKGROUND_HINT: &str = "Read its result later with task_output.";
 const NO_SUBAGENTS: &str = "no subagents have run in this session";

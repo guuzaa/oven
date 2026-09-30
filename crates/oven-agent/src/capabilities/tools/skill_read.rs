@@ -8,8 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::capabilities::tools::Tool;
 use crate::core::error::AgentError;
-use crate::tools::Tool;
 
 use crate::core::turn::TurnContext;
 
@@ -69,7 +69,7 @@ mod tests {
         TurnContext::for_test()
     }
     use super::*;
-    use crate::skills::SKILL_FILE;
+    use crate::capabilities::skills::SKILL_FILE;
     use serde_json::json;
 
     #[tokio::test]

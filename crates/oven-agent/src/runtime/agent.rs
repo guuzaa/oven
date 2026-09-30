@@ -11,6 +11,7 @@ use oven_llm::{
 
 use oven_host::{as_ms, now_ms};
 
+use crate::capabilities::tools::{TodoWriteTool, Tool};
 use crate::core::error::{AgentError, MAX_ITERS_EXCEEDED};
 use crate::core::event::{AgentEvent, CallOutcome, StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use crate::core::history::{History, Record};
@@ -22,7 +23,6 @@ use crate::core::selection::Selection;
 use crate::core::sink::EventSink;
 use crate::core::todo::TodoList;
 use crate::core::turn::{Step, StepCall, TurnContext, TurnOutput};
-use crate::tools::{TodoWriteTool, Tool};
 
 /// Cap on a tool's output as it enters the conversation, keeping a single
 /// huge `file_read`/`bash` result from being carried (and re-encoded on
@@ -461,7 +461,7 @@ impl Agent {
                     call_id: ToolCallId::next(),
                     name: name.clone(),
                     input: input.clone(),
-                    view: crate::tools::present_tool(name, input),
+                    view: crate::capabilities::tools::present_tool(name, input),
                     todos,
                     exclusive: caps.is_some_and(|caps| caps.exclusive),
                     tool,
@@ -616,7 +616,7 @@ struct PlannedCall {
     call_id: ToolCallId,
     name: String,
     input: serde_json::Value,
-    view: crate::tools::ToolView,
+    view: crate::capabilities::tools::ToolView,
     /// The checklist a `todo_write` call stands for. `None` when the call is
     /// not one, or its arguments do not describe a valid list.
     todos: Option<TodoList>,
@@ -914,12 +914,12 @@ mod tests {
     use crate::RunPolicy;
     use crate::StepStop;
     use crate::TurnId;
+    use crate::capabilities::tools::{
+        AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool,
+    };
     use crate::core::identity::ToolCallId;
     use crate::core::sink::{NullSink, VecEventSink};
     use crate::core::turn::TurnContext;
-    use crate::tools::{
-        AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool,
-    };
     use async_trait::async_trait;
     use futures::stream::{BoxStream, StreamExt, iter};
     use oven_llm::{
@@ -1574,8 +1574,8 @@ mod tests {
             json!({"type": "object"})
         }
 
-        fn caps(&self) -> crate::tools::ToolCaps {
-            crate::tools::ToolCaps {
+        fn caps(&self) -> crate::capabilities::tools::ToolCaps {
+            crate::capabilities::tools::ToolCaps {
                 exclusive: self.exclusive,
                 ..Default::default()
             }
@@ -2268,7 +2268,7 @@ mod tests {
     fn agent_with_todo_write(provider: Box<dyn Provider>) -> Agent {
         Agent::new(
             router_with(provider),
-            vec![Arc::new(crate::tools::TodoWriteTool)],
+            vec![Arc::new(crate::capabilities::tools::TodoWriteTool)],
         )
     }
 
@@ -2277,7 +2277,7 @@ mod tests {
             router_with(provider),
             vec![
                 Arc::new(FileReadTool::new(root)),
-                Arc::new(crate::tools::TodoWriteTool),
+                Arc::new(crate::capabilities::tools::TodoWriteTool),
             ],
         )
     }
