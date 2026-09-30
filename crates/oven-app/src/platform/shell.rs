@@ -80,7 +80,7 @@ impl fmt::Display for LocalShell {
 }
 
 /// Composer / `StartTurn` text that begins with `!`. Persisted history uses
-/// [`parse_local_shell`] on the `<local-shell>` envelope instead.
+/// [`LocalShell::try_parse`] on the `<local-shell>` envelope instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellInput<'a> {
     command: &'a str,
