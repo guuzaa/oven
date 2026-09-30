@@ -53,6 +53,7 @@
 - Composer slash and mention completions stay shut while a question waits for a typed answer, so `Tab` can no longer complete command text into the answer
 - Declaring a model under `[[providers.<slug>.models]]` no longer registers it with every capability off, which made oven reject each turn locally with `provider: invalid request` before the request ever reached the upstream API
 - Provider request-validation failures name the rule that rejected them (`max_tokens 4096 exceeds model's max_output_tokens 8192`, `model does not support tools`, …) instead of only the bare `invalid request`
+- Expanding or collapsing a transcript block no longer yanks the view to that block's line: the anchor is the first body line the layout would draw, which accounts for the pinned prompt, so the clicked header keeps its screen row and the body grows below it
 
 ## [0.0.8] - 2026-09-22
 

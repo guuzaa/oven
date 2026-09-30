@@ -2886,3 +2886,54 @@ fn shell_failed_event_is_error_result() {
     assert_eq!(t.rows[1].kind, LineKind::ShellResult(false));
     assert_eq!(t.rows[1].text, "cancelled");
 }
+
+#[test]
+fn expanding_a_block_in_a_pinned_turn_keeps_its_screen_row() {
+    const BODY: &str = "body one\nbody two\nbody three";
+
+    let mut t = Transcript::new();
+    t.start_user_turn("first question");
+    fill(&mut t, 6);
+    t.push_row(LineKind::Separator, "");
+    t.start_user_turn("second question");
+    t.push_row(LineKind::ToolResult(true), BODY);
+    t.push_row(LineKind::Text, "the answer");
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+    let rows = |terminal: &Terminal<TestBackend>| -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..14)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect()
+    };
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let before = rows(&terminal);
+    assert!(before[1].contains("second question"));
+    let clicked = before
+        .iter()
+        .position(|row| row.contains(RESULT_LABEL))
+        .expect("result header on screen");
+
+    double_click(&mut t, 2, u16::try_from(clicked).expect("screen row"));
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let after = rows(&terminal);
+
+    assert_eq!(after[1], before[1], "the pinned prompt stays on top");
+    assert_eq!(
+        after[clicked].find(RESULT_LABEL),
+        before[clicked].find(RESULT_LABEL),
+        "the clicked header stays on the row it was clicked on"
+    );
+    assert!(
+        after[clicked + 1].contains("body one"),
+        "the body grows below its header"
+    );
+    assert!(
+        after.iter().any(|row| row.contains("the answer")),
+        "the tail stays in view"
+    );
+}

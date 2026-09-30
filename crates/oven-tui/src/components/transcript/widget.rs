@@ -908,10 +908,10 @@ impl Transcript {
             target = nested;
         }
         target.toggle();
-        let start = self.current_top();
+        // The first body line the last layout would draw, so the toggled
+        // block keeps the screen row it was clicked on.
+        let (_, start) = self.layout_viewport(self.area.height);
         self.rewrap_all();
-        // Pin the clicked header to its screen row, so its body grows
-        // downward instead of scrolling the header out of view.
         self.top = Some(start);
     }
 
