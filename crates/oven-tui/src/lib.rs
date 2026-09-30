@@ -1,5 +1,6 @@
 mod cli;
-mod widgets;
+mod core;
 mod ui;
+mod widgets;
 
 pub use cli::Cli;

@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
-use super::super::component::{Action, Component, KeyResult, State};
+use crate::core::component::{Action, Component, KeyResult, State};
 use super::super::theme;
 
 use super::kinds::{Header, LineKind, Row};

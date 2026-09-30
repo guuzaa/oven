@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::widgets::agents;
 use crate::widgets::choice_popup::{ChoicePopup, ChoicePopupAction};
-use crate::widgets::component::{Action, Component, KeyResult, State};
+use crate::core::component::{Action, Component, KeyResult, State};
 use crate::widgets::input::{InputView, Overlay, display_user_input};
 use crate::widgets::paste_burst::{self, Burst};
 use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};

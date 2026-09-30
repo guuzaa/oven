@@ -16,7 +16,7 @@ use ratatui::style::Color;
 use ratatui::text::Line;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::super::component::{Action, Component, KeyResult, State};
+use crate::core::component::{Action, Component, KeyResult, State};
 use super::super::theme;
 
 use super::collapsible::Section;

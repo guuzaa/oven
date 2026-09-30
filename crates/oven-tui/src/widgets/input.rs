@@ -21,7 +21,7 @@ const BORDER_COLS: u16 = 2;
 const BORDER_ROWS: u16 = 2;
 const WHEEL_SCROLL_ROWS: u8 = 1;
 
-use super::component::{Action, Component, KeyResult, State};
+use crate::core::component::{Action, Component, KeyResult, State};
 use super::file_mention_popup::{FileMentionPopup, FileMentionPopupAction};
 use super::model_picker::{ModelPicker, ModelPickerAction};
 use super::setup_wizard::{SetupWizard, SetupWizardAction};
@@ -570,7 +570,7 @@ fn new_textarea() -> TextArea<'static> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::component::idle_state;
+    use crate::core::component::idle_state;
     use super::*;
     use crossterm::event::KeyCode;
 
