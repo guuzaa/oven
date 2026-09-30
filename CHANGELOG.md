@@ -1,59 +1,52 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.9] - 2026-09-30
 
 ### Added
-- Subagents: `task` delegates a self-contained job to another agent with its own context, as `explore` (read-only tools) or `general` (everything but the tools that speak to the user or would nest delegation); `task_output` reports on one, or on all of them
-- Subagent lifecycles: a registry with a concurrency cap (further spawns queue as `queued`), `role#n` addressing, and cancellation by name, by the turn that spawned them, or by app shutdown
-- `/agents` lists subagents and stops, drops or focuses one; `x` stops the focused one
-- The TUI shows subagents in a strip above the composer (active first, `+N` when capped) and gives each its own transcript, opened with `/agents <n>` or by clicking its row
-- `Esc` closes an open subagent viewer before it cancels a turn or rewinds
-- `max_iters` is configurable (`max_iters`, default 200) and bounds one run rather than one agent; `[subagents]` configures `enabled`, `max_concurrent` and the subagents' own `max_iters`
-- `TurnEvent::StepStarted` / `StepFinished` bound each provider round trip, so loop progress and its stop reason are observable from the event stream
-- `Agent::step` is public and returns a `Step` (text, calls, usage), making the loop one policy over it rather than the only way to drive an agent
+- Subagents: the `task` tool delegates a self-contained job to another agent (`explore` — read-only tools — or `general`) with its own context, and `task_output` reports on one, or on all of them
+- Subagent lifecycles: a registry with a concurrency cap (further spawns wait as `queued`), `role#n` addressing, and cancellation by name, by the turn that spawned them, or by app shutdown
+- `/agents` lists subagents and stops, drops or focuses one (`x` stops the focused one); the TUI shows them in a strip above the composer (active first, `+N` when capped) and gives each its own transcript, opened with `/agents <n>` or by clicking its row
+- `answer` tool: the model asks a question mid-turn and blocks until the answer arrives, which then becomes the tool result, with the question, option labels and descriptions clamped to their display limits. The question renders as an overlay prompt listing the proposed answers plus an `Other…` row that hands the composer the keystrokes, so any answer can be typed; `Esc` skips it and `Ctrl-C` cancels the turn
+- A pending request is mirrored as `ToolEvent::QuestionAsked` with `AppPhase::Awaiting` and resumed by `App::respond`, and `AppEventKind::RequestResolved` closes its overlay even when the turn ends still holding it
+- `max_iters` is configurable and bounds one run rather than one agent; `[subagents]` configures `enabled`, `max_concurrent` and the subagents' own `max_iters`
+- `TurnEvent::StepStarted` / `StepFinished` bound each provider round trip, and `Agent::step` is public and returns a `Step` (text, calls, usage), so loop progress is observable and the loop is one policy over a step rather than the only way to drive an agent
 - Tools receive the run's `TurnContext`, which carries cancellation, mode, model and the channel an interactive tool asks its question on
+- Per-model metadata declared as `[[providers.<slug>.models]]` accepts `max_output_tokens` and the `supports_system_prompt` / `supports_tools` / `supports_streaming` / `supports_vision` flags next to `context_window`: omitted limits stay unknown (validation skips them) and omitted capabilities count as supported, so declaring a model never silently disables it
 - A tool call in flight shimmers its transcript row the way thinking does, until its result lands: the burst row while a grouped call has yet to answer, and each call rendered as its own row
 
 ### Changed
 - **Breaking:** `AppCommand` and `ControlCommand` are gone. `App::submit(text)` classifies the text once into an `Input` (`Chat`, `Shell`, `Slash`, `Rewind`) and returns it, so the runtime and the TUI no longer sniff the same string for the same syntax
 - **Breaking:** what needs no conversation driver is a method on `App`, applied by the caller instead of queued behind the turn it affects: `cancel(turn_id)`, `set_mode`, `respond`, `stop_subagent`, `stop_subagents`. `/model`, `/agents` and `/exit` still apply mid-turn, and `shutdown` cancels the running turn directly
-- **Breaking:** `TurnContext::new` takes the agent's `Selection` (its mode and model) instead of copies, and `TurnContext::set_mode` / `set_model` are gone. The agent and the turn share one value, so the agent no longer copies it back when a run ends
-- **Breaking:** a turn asks the user through a `RequestSink` (`TurnContext::with_requests`) instead of a channel the runtime drains. The app's `Shared` stores the pending request, announces it and answers it by id, so the runtime no longer relays it
-- **Breaking:** `StateChange` and `StateEvent` are gone: mode, model, context window, providers, models, subagents, todos and usage are read from `AppState`, which the TUI follows through the `watch` channel. The one event left is `AppEventKind::HistoryChanged { reason }`, for a history replaced wholesale
-- `AppPhase::Compacting` marks the driver busy summarizing, and the TUI is busy exactly while `phase.is_active()`, so a slash command that leaves the phase alone no longer needs a notification to clear it
-- `AppState` lives only in its `watch::Sender` and is changed in place, instead of a copy the runtime cloned and published after each change
-- Queued prompts are counted in the inbox rather than in the runtime's deferral queue, so `App::shutdown` reports every prompt the driver never took
-- Tools mount as `Arc<dyn Tool>` and subagents share the driver's instances rather than rebuilding them
+- **Breaking:** `TurnContext::new` takes the agent's `Selection` (its mode and model) instead of copies, `set_mode` / `set_model` are gone, and a turn asks the user through a `RequestSink` (`TurnContext::with_requests`) that `Shared` stores, announces and answers by id, so nothing is copied back or relayed when a run ends
+- **Breaking:** `StateChange` and `StateEvent` are gone: mode, model, context window, providers, models, subagents, todos and usage are read from `AppState`, which the TUI follows through the `watch` channel. The one event left is `AppEventKind::HistoryChanged { reason }`
+- **Breaking:** model metadata moves from the quoted `[providers.<slug>.models."<wire-id>"]` table keys to `[[providers.<slug>.models]]` entries with an `id` field, so ids containing dots (`gpt-4.1`, `glm-5.3`) need no quoting; entries merge by `id` and are rewritten sorted when the config is saved
+- `AppState` lives only in its `watch::Sender` and is changed in place, queued prompts are counted in the inbox so `App::shutdown` reports every prompt the driver never took, and tools mount as `Arc<dyn Tool>` shared by subagents
+- `AppPhase::Compacting` marks the driver busy summarizing and the TUI is busy exactly while `phase.is_active()`, and `AppPhase::Awaiting` carries a pending request
 - `/setup` rebuilds the router from config and swaps the snapshot in (`Agent::replace_router`) instead of mutating a live router in place, which used to be able to panic while another agent was mid-request
-- Only the driver's own events move app state: a subagent's usage no longer lands in the context readout, and `App::prompt` no longer returns early on a subagent's turn completion
-- Every agent reports on one event channel the runtime drains while idle, so subagent progress reaches the frontend between turns
+- Only the driver's own events move app state, and every agent reports on one event channel the runtime drains while idle, so a subagent's progress and usage no longer land in the main turn's readout and reach the frontend between turns
 - The turn driver moves to `runtime/turn.rs`: the runtime actor keeps the command loop and persistence, and what happens while a turn runs sits beside it
-- `docs/subagents.md` records the subagent design: the decisions behind it, the constraints it removed, and the seams it leaves for loop and graph engineering
-- `/model` and `/setup` completion lists filter by the characters typed: the query is rendered in the composer (`/model deep`), `Tab` completes the highlighted entry into it, and the provider and protocol stages of the setup wizard now narrow the same way
-- `oven_app::complete` owns the prefix rule shared by the slash popup, the model picker and the setup wizard
-- `answer` tool: the model can ask the user a question mid-turn and blocks until they reply, and the reply becomes the tool result. The question renders as an overlay prompt listing the proposed answers plus an `Other…` row that hands the composer the keystrokes, so any answer can be typed; `Esc` skips the question and `Ctrl-C` cancels the turn
-- A pending question is mirrored as `ToolEvent::QuestionAsked` and `AppPhase::Awaiting`, resumed by `App::respond`
-- `AppEventKind::RequestResolved` reports that a pending user request closed, so an overlay prompt closes for that request id when it is answered or dropped, including when the turn ends still holding it
-- Per-model metadata declared as `[[providers.<slug>.models]]` accepts `max_output_tokens` and the `supports_system_prompt` / `supports_tools` / `supports_streaming` / `supports_vision` flags next to `context_window`, with the wire id in an `id` field instead of a quoted table key: omitted limits stay unknown (validation skips them) and omitted capabilities count as supported, so declaring a model never silently disables it
-- The model picker no longer prints its filter inside the popup, since the composer line shows it
-- The question prompt grows with the question's wrapped text instead of clipping it to a fixed block
-- The `answer` tool clamps its question, option labels and descriptions to their display limits, and clamps the answer before it enters the conversation
-- `docs/architectures.md`, `docs/oven-app.md` and `docs/oven-tui.md` cover the question channel, the new phase and the prompt
-- Model metadata moved from the quoted `[providers.<slug>.models."<wire-id>"]` table keys to `[[providers.<slug>.models]]` entries with an `id` field, so ids containing dots (`gpt-4.1`, `glm-5.3`) need no quoting; entries merge by `id` and are rewritten sorted when the config is saved
+- `oven-app`, `oven-agent` and `oven-tui` are layered (`core` / `runtime` / `capabilities` / `api` / `platform` / `widgets`) with each `lib.rs` a map of those layers, and MCP servers are declared in config instead of the MCP layer
+- `/model` and `/setup` completion lists filter by the characters typed: the query is rendered in the composer (`/model deep`), `Tab` completes the highlighted entry into it, and the provider and protocol stages of the wizard narrow the same way; `oven_app::complete` owns the prefix rule shared by the slash popup, the model picker and the wizard
+- Transcript chrome: user prompts and `!` shell commands are framed like the composer, with the submitted prompt as the first row of its turn, and the hint row moved to the composer's bottom-right
+- `docs/subagents.md`, `docs/architectures.md`, `docs/oven-app.md` and `docs/oven-tui.md` cover the subagent design, the question channel, the new phase and the crate layers
+- `Tool::result_detail` lets a tool name the body its row ends on when it lands, so `ToolEvent::Finished` carries it beside the result; a question row shows the answer the user picked instead of repeating the choices the prompt already offered
+- A turn's questions are counted in the burst title the way its searches, reads and commands are: `Asked 1 question`, `Asked 2 questions`
+- An answer opens with its question: what a call landed on is pinned, so a burst reopened after the turn moved on lists each question with the answer it got instead of hiding the answers behind a second click
 
 ### Fixed
-- Deleting wide characters in the composer no longer leaves white blocks: the trailing column of a wide glyph is blank in both frames, so the diff never cleared it
+- The composer no longer garbles itself: a deleted wide glyph leaves no stale half-cell, the prompt stays `>`, the hardware cursor is parked on the caret for IME, and the prompt stays pinned until the viewport leaves its turn
 - Tool calls from one response run at the same time instead of one after another, so asking for several `task`s actually runs several subagents in parallel; approvals are still asked one at a time, tools that declare `ToolCaps::exclusive` (file edits and writes, the todo list, the question tool) take a turn each, and tool results still enter the history in the order the model asked for them
-- `/agents` applies while a turn is running, and opening a subagent builds its view on demand, so a subagent can be watched from the moment it is spawned instead of only after the reply lands
-- A subagent's clock stops when it does, so a cancelled or failed subagent shows the time it took instead of counting up forever
+- `/agents` applies while a turn is running and opening a subagent builds its view on demand, so it can be watched from the moment it is spawned instead of only after the reply lands; its clock stops when it does, so a cancelled or failed subagent shows the time it took instead of counting up forever
 - `Ctrl-C` stops what is still running before quitting — the turn, then the subagents it spawned — and reports the messages that were queued but never sent on the way out
-- Leaving a subagent's transcript takes a single `Esc` instead of the usual confirmation pair, the hint row spells the way back out, and the arrow keys scroll it; `Ctrl-C` still quits from inside the viewer
+- Leaving a subagent's transcript takes a single `Esc` instead of the usual confirmation pair, so `Esc` first closes an open viewer before it cancels a turn or rewinds; the hint row spells the way back out, the arrow keys scroll it, and `Ctrl-C` still quits from inside the viewer
 - Restore the per-turn `Worked for Xs` transcript separator after answers, tool follow-ups, cancellations, failures, compaction, and app errors, including the turn duration when resuming a session from its persisted timestamps
-- A verbose question no longer fails the `answer` call, which used to leave the user with a failed tool row and no prompt at all
+- A verbose question no longer fails the `answer` call, which used to leave the user with a failed tool row and no prompt at all, and the question prompt grows with the question's wrapped text instead of clipping it to a fixed block
 - Composer slash and mention completions stay shut while a question waits for a typed answer, so `Tab` can no longer complete command text into the answer
-- Declaring a model under `[[providers.<slug>.models]]` no longer registers it with every capability off, which made oven reject each turn locally with `provider: invalid request` before the request ever reached the upstream API
+- Declaring a model no longer registers it with every capability off, which made oven reject each turn locally with `provider: invalid request` before the request ever reached the upstream API
 - Provider request-validation failures name the rule that rejected them (`max_tokens 4096 exceeds model's max_output_tokens 8192`, `model does not support tools`, …) instead of only the bare `invalid request`
 - Expanding or collapsing a transcript block no longer yanks the view to that block's line: the anchor is the first body line the layout would draw, which accounts for the pinned prompt, so the clicked header keeps its screen row and the body grows below it
+- Tool rows share the thinking color, matching the in-flight shimmer
+- The install scripts skip the download when no tag is pinned and the requested version is already installed
 
 ## [0.0.8] - 2026-09-22
 
