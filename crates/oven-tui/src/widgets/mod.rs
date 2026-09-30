@@ -2,7 +2,6 @@ pub(super) mod agents;
 pub(super) mod choice_popup;
 pub(super) mod file_mention_popup;
 pub(super) mod input;
-pub(super) mod layout;
 pub(super) mod list;
 pub(super) mod model_picker;
 pub(super) mod paste_burst;

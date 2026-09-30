@@ -30,7 +30,8 @@ use crate::widgets::status::StatusBar;
 use crate::widgets::todos::TodosWidget;
 use crate::widgets::transcript::Transcript;
 
-use crate::widgets::{layout, terminal};
+use crate::core::layout;
+use crate::widgets::terminal;
 
 /// Esc only acts when it is pressed twice inside this window, so a stray
 /// press cannot cancel a turn or rewind the transcript.
