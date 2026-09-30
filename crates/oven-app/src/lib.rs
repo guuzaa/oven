@@ -16,12 +16,13 @@ mod core;
 mod platform;
 mod runtime;
 
-pub use api::{App, AppBuilder, Input};
+pub use api::{App, AppBuilder};
 pub use capabilities::mcp;
 pub use capabilities::tools::ToolRegistry;
 pub use core::config::McpServerConfig;
 pub use core::error::AppError;
 pub use core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
+pub use core::input::Input;
 pub use core::mention::FileMentions;
 pub use core::session;
 pub use core::state::{AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens_of};

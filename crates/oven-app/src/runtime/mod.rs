@@ -11,11 +11,11 @@ use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
 use crate::App;
-use crate::api::input::Input;
 use crate::capabilities::subagent::Subagents;
 use crate::commands::{CommandOutcome, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
+use crate::core::input::Input;
 use crate::core::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,

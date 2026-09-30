@@ -1,47 +1,17 @@
 use crate::commands::SlashRegistry;
+use crate::core::input::Input;
 use crate::platform::shell::ShellInput;
 
-/// What the user submitted, classified once at the frontend boundary so the
-/// runtime and the frontend never sniff the same text for the same syntax.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Input {
-    Chat(String),
-    /// An empty command is kept so the runtime can say why nothing ran.
-    Shell(String),
-    Slash {
-        name: String,
-        args: String,
-    },
-    Rewind,
-}
-
-impl Input {
-    pub(crate) fn parse(text: &str, slash: &SlashRegistry) -> Self {
-        if let Some(shell) = ShellInput::parse(text) {
-            return Self::Shell(shell.command().unwrap_or_default().to_owned());
-        }
-        match slash.invocation(text) {
-            Some((name, args)) => Self::Slash {
-                name: name.to_owned(),
-                args: args.to_owned(),
-            },
-            None => Self::Chat(text.to_owned()),
-        }
+pub(crate) fn classify(text: &str, slash: &SlashRegistry) -> Input {
+    if let Some(shell) = ShellInput::parse(text) {
+        return Input::Shell(shell.command().unwrap_or_default().to_owned());
     }
-
-    /// Whether the user wrote it, as opposed to a control gesture: only
-    /// prompts are reported as dropped when the app shuts down.
-    pub(crate) fn is_prompt(&self) -> bool {
-        !matches!(self, Self::Rewind)
-    }
-
-    pub(crate) fn kind(&self) -> &'static str {
-        match self {
-            Self::Chat(_) => "prompt",
-            Self::Shell(_) => "shell",
-            Self::Slash { .. } => "slash",
-            Self::Rewind => "rewind",
-        }
+    match slash.invocation(text) {
+        Some((name, args)) => Input::Slash {
+            name: name.to_owned(),
+            args: args.to_owned(),
+        },
+        None => Input::Chat(text.to_owned()),
     }
 }
 
@@ -50,7 +20,7 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> Input {
-        Input::parse(text, &SlashRegistry::with_builtin())
+        classify(text, &SlashRegistry::with_builtin())
     }
 
     #[test]
@@ -88,13 +58,5 @@ mod tests {
                 args: String::new(),
             }
         );
-    }
-
-    #[test]
-    fn a_rewind_is_not_a_prompt() {
-        assert!(!Input::Rewind.is_prompt());
-        assert!(parse("hello").is_prompt());
-        assert!(parse("/clear").is_prompt());
-        assert!(parse("!ls").is_prompt());
     }
 }

@@ -11,11 +11,12 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::api::builder::AppBuilder;
-use crate::api::input::Input;
+use crate::api::input;
 use crate::commands::SlashRegistry;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 use crate::core::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
+use crate::core::input::Input;
 use crate::core::state::AppState;
 use crate::runtime::inbox::InboxSender;
 use crate::runtime::shared::{Shared, queued_notice};
@@ -90,7 +91,7 @@ impl App {
     /// Classifies `text` and hands it to the runtime, returning what it was
     /// taken for so a frontend can draw it the same way.
     pub fn submit(&self, text: impl AsRef<str>) -> Result<Input, AppError> {
-        let input = Input::parse(text.as_ref(), &self.slash);
+        let input = input::classify(text.as_ref(), &self.slash);
         self.dispatch(input.clone())?;
         Ok(input)
     }
