@@ -23,8 +23,8 @@ use crate::core::session::{
 use crate::core::state::{
     AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens, context_window,
 };
-use crate::inbox::{self, InboxReceiver};
-use crate::shared::{GOODBYE, Shared, save_provider_overlay};
+use crate::runtime::inbox::InboxReceiver;
+use crate::runtime::shared::{GOODBYE, Shared, save_provider_overlay};
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
 
@@ -651,6 +651,8 @@ fn slug_without_variant(raw: &str) -> String {
     }
 }
 
+pub(crate) mod inbox;
+pub(crate) mod shared;
 mod turn;
 
 #[cfg(test)]

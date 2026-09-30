@@ -17,8 +17,8 @@ use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 use crate::core::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
 use crate::core::state::AppState;
-use crate::inbox::InboxSender;
-use crate::shared::{Shared, queued_notice};
+use crate::runtime::inbox::InboxSender;
+use crate::runtime::shared::{Shared, queued_notice};
 
 pub struct App {
     id: AppId,
