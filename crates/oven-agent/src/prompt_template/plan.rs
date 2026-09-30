@@ -1,5 +1,5 @@
 use crate::core::mode::AgentMode;
-use crate::todo::TodoList;
+use crate::core::todo::TodoList;
 
 pub const PLAN_MODE_PROMPT: &str = include_str!("plan.md");
 pub const ASK_MODE_PROMPT: &str = include_str!("ask.md");
@@ -43,7 +43,7 @@ pub fn compose_todo_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::todo::{TodoItem, TodoStatus};
+    use crate::core::todo::{TodoItem, TodoStatus};
 
     fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {
         TodoItem {

@@ -4,7 +4,7 @@ use std::fmt::Write;
 use oven_llm::{ContentBlock, Message};
 use serde::{Deserialize, Serialize};
 
-use crate::{TodoWriteTool, history::Record};
+use crate::{TodoWriteTool, core::history::Record};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

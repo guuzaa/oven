@@ -4,7 +4,7 @@ use oven_host::now_ms;
 use oven_llm::{Message, Role, Usage};
 use serde::{Deserialize, Serialize};
 
-use crate::todo::TodoItem;
+use crate::core::todo::TodoItem;
 
 type Timestamp = u64;
 
@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn records_never_emit_todo_list() {
-        use crate::todo::{TodoItem, TodoStatus};
+        use crate::core::todo::{TodoItem, TodoStatus};
 
         let records = vec![
             Record::Message {

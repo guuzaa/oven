@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use super::{Tool, ToolCaps, ToolPermission, ToolView};
 
 use crate::core::error::AgentError;
-use crate::todo::TodoList;
+use crate::core::todo::TodoList;
 use crate::turn::TurnContext;
 
 pub struct TodoWriteTool;

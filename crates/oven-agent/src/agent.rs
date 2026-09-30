@@ -12,15 +12,15 @@ use oven_llm::{
 use oven_host::{as_ms, now_ms};
 
 use crate::core::error::{AgentError, MAX_ITERS_EXCEEDED};
+use crate::core::history::{History, Record};
 use crate::core::identity::{AgentId, ToolCallId};
 use crate::core::mode::{AgentMode, ToolAccess};
 use crate::core::selection::Selection;
+use crate::core::todo::TodoList;
 use crate::event::{AgentEvent, CallOutcome, StreamEvent, ToolEvent, ToolResult, TurnEvent};
-use crate::history::{History, Record};
 use crate::interaction::{ApprovalDecision, LoopLimitDecision};
 use crate::prompt_template;
 use crate::sink::EventSink;
-use crate::todo::TodoList;
 use crate::tools::{TodoWriteTool, Tool};
 use crate::turn::{Step, StepCall, TurnContext, TurnOutput};
 
@@ -2379,11 +2379,11 @@ mod tests {
             text_response("done"),
         ]);
         let mut agent = agent_with_todo_write(Box::new(mock));
-        agent.set_todos(crate::todo::TodoList {
-            items: vec![crate::todo::TodoItem {
+        agent.set_todos(crate::core::todo::TodoList {
+            items: vec![crate::core::todo::TodoItem {
                 id: "keep".into(),
                 content: "old".into(),
-                status: crate::todo::TodoStatus::Pending,
+                status: crate::core::todo::TodoStatus::Pending,
             }],
         });
         let mut sink = VecEventSink::default();
@@ -2471,19 +2471,19 @@ mod tests {
         req.tools.iter().map(|t| t.name.as_str()).collect()
     }
 
-    fn pending_item() -> crate::todo::TodoItem {
-        crate::todo::TodoItem {
+    fn pending_item() -> crate::core::todo::TodoItem {
+        crate::core::todo::TodoItem {
             id: "a".into(),
             content: "one".into(),
-            status: crate::todo::TodoStatus::Pending,
+            status: crate::core::todo::TodoStatus::Pending,
         }
     }
 
-    fn completed_item() -> crate::todo::TodoItem {
-        crate::todo::TodoItem {
+    fn completed_item() -> crate::core::todo::TodoItem {
+        crate::core::todo::TodoItem {
             id: "a".into(),
             content: "one".into(),
-            status: crate::todo::TodoStatus::Completed,
+            status: crate::core::todo::TodoStatus::Completed,
         }
     }
 
@@ -2517,7 +2517,7 @@ mod tests {
     async fn default_still_injects_nonempty_list() {
         let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
         let mut agent = agent_with_todo_write(Box::new(mock));
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "hi").await;
@@ -2532,7 +2532,7 @@ mod tests {
     async fn next_turn_clears_finished_todos() {
         let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
         let mut agent = agent_with_todo_write(Box::new(mock));
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![completed_item()],
         });
         let mut sink = VecEventSink::default();
@@ -2551,7 +2551,7 @@ mod tests {
     async fn next_turn_keeps_open_todos() {
         let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
         let mut agent = agent_with_todo_write(Box::new(mock));
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "next").await;
@@ -2574,7 +2574,7 @@ mod tests {
         assert_eq!(agent.todos().items.len(), 1);
         assert_eq!(
             agent.todos().items[0].status,
-            crate::todo::TodoStatus::Completed
+            crate::core::todo::TodoStatus::Completed
         );
     }
 
@@ -2628,7 +2628,7 @@ mod tests {
         ]);
         let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "read it").await;
@@ -2655,7 +2655,7 @@ mod tests {
         ]);
         let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "do it").await;
@@ -2694,7 +2694,7 @@ mod tests {
         ]);
         let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "read it").await;
@@ -2722,7 +2722,7 @@ mod tests {
         ]);
         let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "read it").await;
@@ -2749,12 +2749,12 @@ mod tests {
         ]);
         let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
         agent.set_mode(AgentMode::Plan);
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "read it").await;
         agent.clear_history();
-        agent.set_todos(crate::todo::TodoList {
+        agent.set_todos(crate::core::todo::TodoList {
             items: vec![pending_item()],
         });
         run_text(&mut agent, "fresh").await;
