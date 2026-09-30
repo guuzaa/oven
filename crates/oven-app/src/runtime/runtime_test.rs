@@ -1,8 +1,8 @@
-use crate::config::{AppConfig, ProviderConfig, ProviderSelection};
-use crate::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
-use crate::session::{Session, canonical_root};
-use crate::state::{AppPhase, AppState, HistoryChangeReason};
-use crate::subagent::{SubagentParts, Subagents};
+use crate::capabilities::subagent::{SubagentParts, Subagents};
+use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
+use crate::core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
+use crate::core::session::{Session, canonical_root};
+use crate::core::state::{AppPhase, AppState, HistoryChangeReason};
 use crate::{App, AppBuilder, NodeStatus};
 use crate::{LocalShell, runtime::*};
 use std::borrow::Borrow;
@@ -1665,7 +1665,7 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
 
 #[tokio::test]
 async fn session_persists_root_meta_and_recent_index() {
-    use crate::session::{canonical_root, recent_session_id};
+    use crate::core::session::{canonical_root, recent_session_id};
 
     let tmp = tempdir::TempDir::new("app-runtime-meta").unwrap();
     let app = AppBuilder::new(tmp.path());
@@ -1698,7 +1698,7 @@ async fn session_persists_root_meta_and_recent_index() {
 
 #[tokio::test]
 async fn clear_updates_recent_index_to_fresh_session() {
-    use crate::session::recent_session_id;
+    use crate::core::session::recent_session_id;
 
     let tmp = tempdir::TempDir::new("app-runtime-recent-clear").unwrap();
     let app = AppBuilder::new(tmp.path());
@@ -3294,7 +3294,7 @@ async fn subagents_can_be_turned_off() {
         text_response("no subagent for me"),
     ]);
     let app = AppBuilder::new(tmp.path()).with_config(AppConfig {
-        subagents: crate::config::SubagentConfig {
+        subagents: crate::core::config::SubagentConfig {
             enabled: false,
             ..Default::default()
         },

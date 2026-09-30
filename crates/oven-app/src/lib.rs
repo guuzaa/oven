@@ -1,30 +1,35 @@
-mod app;
-mod builder;
-mod command;
-pub mod complete;
-pub mod config;
-pub mod dirs;
-mod event;
-mod inbox;
-pub mod log;
-pub mod mcp;
-mod mention;
-mod provider;
-mod runtime;
-pub mod session;
-mod shared;
-mod shell;
-mod slash;
-mod state;
-mod subagent;
-mod tools;
+//! Service composition behind the `App` facade.
+//!
+//! Layers, top to bottom; a layer reaches only into the ones below it:
+//!
+//! 1. `api` — the `App` handle a frontend talks to, and its builder
+//! 2. `runtime` — the conversation loop and the state shared with it
+//! 3. `commands` — slash commands
+//! 4. `capabilities` — tools, subagents, MCP servers
+//! 5. `core` — config, state, events, persistence
+//! 6. `platform` — paths, logging, the local shell envelope
+//!
+//! One edge moves the other way: the runtime also assembles the `App`
+//! handle the facade hands out.
 
-pub use app::{App, AppError};
-pub use builder::AppBuilder;
-pub use command::Input;
-pub use event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
-pub use mcp::McpServerConfig;
-pub use mention::FileMentions;
+mod api;
+mod capabilities;
+mod commands;
+mod core;
+mod platform;
+mod runtime;
+
+pub use api::{App, AppBuilder};
+pub use capabilities::mcp;
+pub use capabilities::tools::ToolRegistry;
+pub use core::config::McpServerConfig;
+pub use core::error::AppError;
+pub use core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
+pub use core::input::Input;
+pub use core::mention::FileMentions;
+pub use core::session;
+pub use core::state::{AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens_of};
+pub use core::{complete, config};
 pub use oven_agent::{
     AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AnswerTool,
     ApprovalDecision, CallOutcome, CancellationToken, LoopLimitDecision, NodeInfo, NodeStatus,
@@ -32,6 +37,5 @@ pub use oven_agent::{
     TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
     UserRequestId, UserResponse, present_tool,
 };
-pub use shell::{LocalShell, ShellInput, display_shell_line};
-pub use state::{AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens_of};
-pub use tools::ToolRegistry;
+pub use platform::shell::{LocalShell, ShellInput, display_shell_line};
+pub use platform::{dirs, log};

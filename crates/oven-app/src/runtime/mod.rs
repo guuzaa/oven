@@ -11,20 +11,20 @@ use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
 use crate::App;
-use crate::command::Input;
-use crate::config::{AppConfig, ProviderConfig};
-use crate::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
-use crate::inbox::{self, InboxReceiver};
-use crate::session::{
+use crate::capabilities::subagent::Subagents;
+use crate::commands::{CommandOutcome, SlashRegistry};
+use crate::core::config::{AppConfig, ProviderConfig};
+use crate::core::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
+use crate::core::input::Input;
+use crate::core::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,
 };
-use crate::shared::{GOODBYE, Shared, save_provider_overlay};
-use crate::slash::{CommandOutcome, SlashRegistry};
-use crate::state::{
+use crate::core::state::{
     AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens, context_window,
 };
-use crate::subagent::Subagents;
+use crate::runtime::inbox::InboxReceiver;
+use crate::runtime::shared::{GOODBYE, Shared, save_provider_overlay};
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
 
@@ -383,14 +383,14 @@ impl Runtime {
         let active = next
             .active_provider_config()
             .expect("active provider inserted before build");
-        if let Err(e) = crate::provider::build_client(active) {
+        if let Err(e) = crate::core::provider::build_client(active) {
             self.emit_error(e.to_string());
             return;
         }
         // Rebuild the whole router rather than upserting one entry: the swap
         // is a single snapshot replacement, so a subagent holding the old
         // router finishes its request on it instead of racing the mutation.
-        let router = match crate::provider::build_router(&next) {
+        let router = match crate::core::provider::build_router(&next) {
             Ok(router) => router,
             Err(e) => {
                 self.emit_error(e.to_string());
@@ -651,6 +651,8 @@ fn slug_without_variant(raw: &str) -> String {
     }
 }
 
+pub(crate) mod inbox;
+pub(crate) mod shared;
 mod turn;
 
 #[cfg(test)]
