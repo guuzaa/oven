@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io;
+use std::io::{self, Stdout};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,8 @@ use oven_app::{
     UserResponse,
 };
 use ratatui::Frame;
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use tokio::sync::{mpsc, watch};
 
@@ -220,12 +222,12 @@ impl Ui {
 
     async fn event_loop(
         &mut self,
-        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> io::Result<()> {
         let mut term_events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(80));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        terminal.draw(|f| self.draw(f))?;
+        self.draw_frame(terminal)?;
         loop {
             tokio::select! {
                 _ = tick.tick(), if self.wants_tick() => {
@@ -252,9 +254,17 @@ impl Ui {
                 }
                 Ok(()) = self.state_rx.changed() => self.sync_state(),
             }
-            terminal.draw(|f| self.draw(f))?;
+            self.draw_frame(terminal)?;
         }
         Ok(())
+    }
+
+    /// Draws a frame, then puts the hardware cursor away: the composer parks it
+    /// on the caret so terminals anchor their IME composition window there, and
+    /// the caret itself is the cell the composer draws.
+    fn draw_frame(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> io::Result<()> {
+        terminal.draw(|f| self.draw(f))?;
+        terminal.hide_cursor()
     }
 
     /// Returns `true` when the app should quit.
@@ -964,7 +974,6 @@ mod tests {
     use crate::components::slash_command_popup::SlashCommandPopup;
     use oven_app::config::ProviderConfig;
     use oven_app::{ToolCallId, ToolResult};
-    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     #[test]

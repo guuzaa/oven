@@ -184,6 +184,7 @@ impl InputView {
             self.textarea
                 .set_placeholder_text(shell::placeholder(active));
             f.render_widget(&self.textarea, chunks[1]);
+            park_caret(f, self.textarea.rendered_cursor_position());
         }
         // A deleted wide glyph's trailing column is blank in both buffers, so
         // the diff skips it and the terminal keeps painting that half — a
@@ -454,12 +455,35 @@ pub(crate) fn display_user_input(text: &str) -> String {
 fn draw_setup_prompt(f: &mut Frame<'_>, area: Rect, setup: &SetupWizard) {
     if let Some(value) = setup.prompt_value() {
         f.render_widget(Paragraph::new(Span::raw(value.clone())), area);
+        park_caret(f, Some(text_caret(area, &value)));
         return;
     }
     f.render_widget(
         Paragraph::new(Span::styled(setup.prompt_hint(), theme::dim())),
         area,
     );
+}
+
+/// A terminal draws its IME composition window — pinyin and its candidates — at
+/// the hardware cursor, so the composer parks that cursor on the caret. `Ui`
+/// hides it again after the frame, which keeps the caret the block the composer
+/// draws. Without the park the repaint of every composer cell leaves the cursor
+/// on the right edge of the box, so the composition is written there, runs off
+/// the screen, and the terminal scrolls the whole UI sideways.
+fn park_caret(f: &mut Frame<'_>, caret: Option<Position>) {
+    if let Some(caret) = caret {
+        f.set_cursor_position(caret);
+    }
+}
+
+/// Caret after `text`, pinned to the last column of `area` so it stays on
+/// screen when the text is clipped.
+fn text_caret(area: Rect, text: &str) -> Position {
+    let width = u16::try_from(Line::from(text).width()).unwrap_or(area.width);
+    Position {
+        x: area.x + width.min(area.width.saturating_sub(1)),
+        y: area.y,
+    }
 }
 
 /// If `text` is a `/model` command with at most one argument (`/model` or
@@ -1319,6 +1343,17 @@ mod tests {
         (out, buf)
     }
 
+    /// Draws on one terminal and reports where its hardware cursor sits, which
+    /// is where a terminal puts the IME composition window.
+    fn cursor_position(view: &mut InputView, width: u16, height: u16, state: &State) -> Position {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| view.draw(f, f.area(), state)).unwrap();
+        terminal.backend().cursor_position()
+    }
+
     #[test]
     fn draw_paints_rounded_border_around_prompt() {
         let mut view = view();
@@ -1460,6 +1495,33 @@ mod tests {
             CellDiffOption::AlwaysUpdate
         );
         assert_eq!(after[(TEXT_X + 3, 1)].symbol(), " ");
+    }
+
+    #[test]
+    fn composing_text_anchors_the_terminal_cursor_on_the_caret() {
+        let mut view = view();
+        type_text(&mut view, "你好");
+        // Border (1) + prompt (2); both glyphs cover four columns.
+        const CARET_X: u16 = 1 + PROMPT_COLS + 4;
+        assert_eq!(
+            cursor_position(&mut view, 40, 3, &State::new()),
+            Position::new(CARET_X, 1)
+        );
+
+        view.handle_key(key(KeyCode::Backspace), &State::new());
+        assert_eq!(
+            cursor_position(&mut view, 40, 3, &State::new()),
+            Position::new(CARET_X - 2, 1)
+        );
+    }
+
+    #[test]
+    fn empty_composer_parks_the_terminal_cursor_at_the_text_start() {
+        let mut view = view();
+        assert_eq!(
+            cursor_position(&mut view, 40, 3, &State::new()),
+            Position::new(1 + PROMPT_COLS, 1)
+        );
     }
 
     #[test]

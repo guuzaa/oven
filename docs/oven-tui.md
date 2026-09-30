@@ -445,6 +445,12 @@ it started.
   composer does the same for its text area: wide CJK glyphs leave a stale
   trailing cell under diff-based painting, which shows up as a white block
   when those characters are deleted.
+- The composer parks the hardware cursor on the caret
+  (`TextArea::rendered_cursor_position` + `Frame::set_cursor_position`), and
+  `Ui` hides it again after each frame: terminals place the IME composition
+  window there, and without the park the per-frame repaint leaves the cursor on
+  the right edge of the box, so the pinyin is written past the screen edge and
+  the terminal scrolls the whole UI sideways.
 - `draw` order in `Ui` is user prompt, transcript, queue, todos, input,
   overlay, status, then the reply toast above the transcript.
 - Ticks are only scheduled while something animates (`wants_tick`), so an idle
