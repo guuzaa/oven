@@ -8,56 +8,19 @@ your project, runs shell commands, and helps you get things done.
 
 ## Install
 
-Prebuilt binaries are attached to every release tag. Grab the installer for
-your platform — it downloads the matching archive, puts `oven` in
-`~/.oven/bin` (`%USERPROFILE%\.oven\bin` on Windows), and adds that directory
-to your `PATH`.
-
-Linux / macOS — one-liner (latest release):
+macOS / Linux:
 
 ```bash
 curl -fsSL https://oven.paulden.site/install.sh | bash
 ```
 
-Or pin a specific version:
-
-```bash
-curl -fsSL https://oven.paulden.site/install.sh | bash -s v0.0.1
-```
-
-Or run the installer from a checkout:
-
-```bash
-./scripts/install.sh            # latest release
-./scripts/install.sh v0.0.1     # or a specific tag
-```
-
-Windows (x86_64) — PowerShell one-liner (latest release):
+Windows (PowerShell):
 
 ```powershell
 irm https://oven.paulden.site/install.ps1 | iex
 ```
 
-Pin a specific version:
-
-```powershell
-$env:OVEN_VERSION='v0.0.1'; irm https://oven.paulden.site/install.ps1 | iex
-```
-
-Or run the installer from a checkout:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\install.ps1 v0.0.1
-```
-
-The installer defaults to the latest release; pass a tag argument or set the
-`OVEN_VERSION` environment variable to pin one (the `v` prefix is optional).
-Each download is checked against the digest GitHub publishes for that asset, and
-the install is aborted on a mismatch. Set `OVEN_MIRROR` to an empty string to
-fetch from GitHub directly instead of the default mirror.
-Restart your terminal after installing, then verify with `oven --help`.
-Prebuilt binaries cover Linux x86_64/arm64 (musl), macOS x86_64/arm64, and
-Windows x86_64.
+Restart your terminal, then verify with `oven --help`.
 
 ## Usage
 
@@ -89,15 +52,9 @@ Oven writes a rotating log to `~/.oven/logs/oven.log` (10 MiB per file, one back
 ## How it works
 
 Oven runs inside your project directory and speaks the OpenAI chat
-completions format, so any compatible provider works (OpenAI `gpt-*`,
-DeepSeek `deepseek-*`, Zhipu `glm-*`, Kimi `kimi-*`). The model can read
-and write files and run shell commands; responses stream back in real time.
-
-The model can also delegate: `task` hands a self-contained job to a subagent
-with its own context — `explore` reads and searches, `general` writes and runs
-commands — and only its final answer comes back. Subagents appear in a strip
-above the composer; `/agents` lists them and each one's transcript opens in
-place of the driver's. Design notes: [`docs/subagents.md`](docs/subagents.md).
+completions format, so any compatible provider works. The model can read and
+write files, run shell commands, and delegate jobs to subagents
+([`docs/subagents.md`](docs/subagents.md)).
 
 ## Configuration
 
@@ -151,15 +108,9 @@ reasoning_effort = "low"
 
 ## Interactive mode
 
-Type a prompt and press Enter to send. While running, `Esc` cancels; when
-idle, `Esc` rewinds the last exchange and restores your message. `Ctrl-C`
-quits, `Shift+Tab` toggles plan mode. The TUI shows the current todo list,
-model, and working directory; mouse selection copies automatically. When
-the context window fills up, history is compacted into a summary
-automatically (or on demand via `/compact`). Thinking blocks and tool
-results collapse to one line — double-click to expand or collapse them. Each
-finished turn ends with how long it took (`Worked for 12.3s`). After exiting, the
-session id is printed so you can resume with `--session <id>`.
+Type a prompt and press Enter to send. `Esc` cancels a running turn, or
+rewinds the last exchange when idle. `Shift+Tab` toggles plan or ask mode and
+`Ctrl-C` quits.
 
 ## Slash commands
 
