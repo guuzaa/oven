@@ -1,0 +1,7 @@
+name = "oven-dist"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# The CDN hostname. Replace the pattern with your domain; the zone must already
+# be hosted on Cloudflare for `custom_domain` to work.
+routes = [{ pattern = "oven.paulden.site", custom_domain = true }]

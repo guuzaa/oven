@@ -16,13 +16,13 @@ to your `PATH`.
 Linux / macOS — one-liner (latest release):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.sh | bash
+curl -fsSL https://oven.paulden.site/install.sh | bash
 ```
 
 Or pin a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.sh | bash -s v0.0.1
+curl -fsSL https://oven.paulden.site/install.sh | bash -s v0.0.1
 ```
 
 Or run the installer from a checkout:
@@ -35,13 +35,13 @@ Or run the installer from a checkout:
 Windows (x86_64) — PowerShell one-liner (latest release):
 
 ```powershell
-irm https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.ps1 | iex
+irm https://oven.paulden.site/install.ps1 | iex
 ```
 
 Pin a specific version:
 
 ```powershell
-$env:OVEN_VERSION='v0.0.1'; irm https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.ps1 | iex
+$env:OVEN_VERSION='v0.0.1'; irm https://oven.paulden.site/install.ps1 | iex
 ```
 
 Or run the installer from a checkout:
@@ -52,6 +52,9 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1 v0.0.1
 
 The installer defaults to the latest release; pass a tag argument or set the
 `OVEN_VERSION` environment variable to pin one (the `v` prefix is optional).
+Each download is checked against the digest GitHub publishes for that asset, and
+the install is aborted on a mismatch. Set `OVEN_MIRROR` to an empty string to
+fetch from GitHub directly instead of the default mirror.
 Restart your terminal after installing, then verify with `oven --help`.
 Prebuilt binaries cover Linux x86_64/arm64 (musl), macOS x86_64/arm64, and
 Windows x86_64.
