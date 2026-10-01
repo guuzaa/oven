@@ -75,6 +75,11 @@ digest_for_asset() {
 case "$(uname -s)" in
   Linux) OS="linux" ;;
   Darwin) OS="darwin" ;;
+  MINGW* | MSYS* | CYGWIN*)
+    echo "error: $(uname -s) has no prebuilt binary; run the PowerShell installer instead:" >&2
+    echo "  irm $DEFAULT_MIRROR/install | iex" >&2
+    exit 1
+    ;;
   *)
     echo "error: unsupported OS: $(uname -s)" >&2
     exit 1

@@ -11,14 +11,17 @@ your project, runs shell commands, and helps you get things done.
 macOS / Linux:
 
 ```bash
-curl -fsSL https://oven.paulden.site/install.sh | bash
+curl -fsSL https://oven.paulden.site/install | bash
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://oven.paulden.site/install.ps1 | iex
+irm https://oven.paulden.site/install | iex
 ```
+
+`/install` serves the script matching the caller (`PowerShell/` in the
+`User-Agent` selects `install.ps1`); `/install.sh` and `/install.ps1` still work.
 
 Restart your terminal, then verify with `oven --help`.
 

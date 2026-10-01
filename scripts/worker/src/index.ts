@@ -17,6 +17,9 @@ const MAX_REDIRECTS = 3;
 const RELEASE_ASSET = /^\/dl\/(v[\w.\-]+)\/([\w.\-]+)$/;
 const INSTALLER_SCRIPT = /^\/install\.(sh|ps1)$/;
 const TAGGED_RELEASE = /^\/tags\/(v[\w.\-]+)$/;
+// PowerShell's irm sends "WindowsPowerShell/5.1" or "PowerShell/7.x"; curl and
+// wget send neither, and get the shell installer.
+const POWERSHELL_AGENT = /powershell\//i;
 
 const ALLOWED_HOSTS = new Set([
   "github.com",
@@ -38,6 +41,10 @@ interface Env {
 interface EdgeCache {
   match(request: Request): Promise<Response | undefined>;
   put(request: Request, response: Response): Promise<void>;
+}
+
+interface Ctx {
+  waitUntil(promise: Promise<unknown>): void;
 }
 
 function edgeCache(): EdgeCache {
@@ -114,15 +121,37 @@ function mark(response: Response, cacheStatus: "HIT" | "MISS"): Response {
   return new Response(response.body, { status: response.status, headers });
 }
 
+function varyByAgent(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("vary", "user-agent");
+  return new Response(response.body, { status: response.status, headers });
+}
+
+// Serves /install, which picks the script for the caller, and the explicit
+// /install.sh and /install.ps1. Every variant is cached under its canonical
+// /install.<ext> key, so a dispatched response is never handed to the other
+// platform and a purge of the canonical path drops it.
+function serveInstaller(request: Request, ctx: Ctx, extension: string): Promise<Response> {
+  return serve(
+    request,
+    ctx,
+    `/install.${extension}`,
+    `${RAW_BASE}/scripts/install.${extension}`,
+    undefined,
+    ONE_MINUTE_SECONDS,
+  );
+}
+
 async function serve(
   request: Request,
-  ctx: { waitUntil(promise: Promise<unknown>): void },
+  ctx: Ctx,
+  keyPath: string,
   upstreamUrl: string,
   token: string | undefined,
   ttlSeconds: number,
 ): Promise<Response> {
   const url = new URL(request.url);
-  const key = new Request(new URL(url.pathname, url.origin).href, { method: "GET" });
+  const key = new Request(new URL(keyPath, url.origin).href, { method: "GET" });
   const hit = await edgeCache().match(key);
   if (hit) {
     if (request.method === "HEAD") {
@@ -148,11 +177,7 @@ async function serve(
 }
 
 export default {
-  async fetch(
-    request: Request,
-    env: Env,
-    ctx: { waitUntil(promise: Promise<unknown>): void },
-  ): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: Ctx): Promise<Response> {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("method not allowed\n", { status: 405, headers: NO_STORE });
     }
@@ -164,29 +189,37 @@ export default {
 
     const asset = RELEASE_ASSET.exec(pathname);
     if (asset && asset[2] !== "." && asset[2] !== "..") {
-      return serve(request, ctx, `${DOWNLOAD_BASE}/${asset[1]}/${asset[2]}`, undefined, ONE_YEAR_SECONDS);
+      return serve(
+        request,
+        ctx,
+        pathname,
+        `${DOWNLOAD_BASE}/${asset[1]}/${asset[2]}`,
+        undefined,
+        ONE_YEAR_SECONDS,
+      );
     }
 
     // The installers read the digest GitHub records per asset from the release
     // JSON, so the mirror has to serve it for pinned tags as well.
     const tagged = TAGGED_RELEASE.exec(pathname);
     if (tagged) {
-      return serve(request, ctx, `${API_BASE}/releases/tags/${tagged[1]}`, env.GITHUB_TOKEN, ONE_MINUTE_SECONDS);
+      const upstream = `${API_BASE}/releases/tags/${tagged[1]}`;
+      return serve(request, ctx, pathname, upstream, env.GITHUB_TOKEN, ONE_MINUTE_SECONDS);
+    }
+
+    if (pathname === "/install") {
+      const agent = request.headers.get("user-agent") ?? "";
+      return varyByAgent(await serveInstaller(request, ctx, POWERSHELL_AGENT.test(agent) ? "ps1" : "sh"));
     }
 
     const installer = INSTALLER_SCRIPT.exec(pathname);
     if (installer) {
-      return serve(
-        request,
-        ctx,
-        `${RAW_BASE}/scripts/install.${installer[1]}`,
-        undefined,
-        ONE_MINUTE_SECONDS,
-      );
+      return serveInstaller(request, ctx, installer[1]);
     }
 
     if (pathname === "/latest") {
-      return serve(request, ctx, `${API_BASE}/releases/latest`, env.GITHUB_TOKEN, ONE_MINUTE_SECONDS);
+      const upstream = `${API_BASE}/releases/latest`;
+      return serve(request, ctx, pathname, upstream, env.GITHUB_TOKEN, ONE_MINUTE_SECONDS);
     }
 
     return new Response(`not found: ${pathname}\n`, { status: 404, headers: NO_STORE });

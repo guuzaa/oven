@@ -8,9 +8,16 @@ the only source of truth; nothing is uploaded or kept in sync here.
 | --- | --- | --- |
 | `/dl/<tag>/<asset>` | `github.com/guuzaa/oven/releases/download/<tag>/<asset>` | 1 year (tagged paths are immutable) |
 | `/tags/<tag>` | `api.github.com/repos/guuzaa/oven/releases/tags/<tag>` | 60 s |
-| `/install.sh`, `/install.ps1` | `raw.githubusercontent.com/guuzaa/oven/<branch>/scripts/` | 60 s |
+| `/install`, `/install.sh`, `/install.ps1` | `raw.githubusercontent.com/guuzaa/oven/<branch>/scripts/` | 60 s |
 | `/latest` | `api.github.com/repos/guuzaa/oven/releases/latest` | 60 s |
 | `/_health` | — | no-store |
+
+`/install` is the single entrypoint: it serves `install.ps1` to a `User-Agent`
+carrying `PowerShell/` (which is what `irm` sends) and `install.sh` to anything
+else. Both variants are stored under the canonical `/install.sh` and
+`/install.ps1` keys and the response carries `Vary: User-Agent`, so no cache can
+hand the shell script to a Windows client, and purging the two canonical paths
+also drops `/install`.
 
 GitHub answers an asset URL with a 302 to a signed `release-assets` URL that
 expires in minutes. The worker follows that redirect and stores only the final
@@ -43,9 +50,10 @@ recover.
 5. `DEFAULT_MIRROR` in `scripts/install.sh` and `scripts/install.ps1` already
    points at the zone. Setting `OVEN_MIRROR` (or `$env:OVEN_MIRROR`) to an empty
    string makes an install skip the mirror and go straight to GitHub.
-6. Optional: set the `CDN_URL` repository variable and the `CF_ZONE_ID` /
-   `CF_PURGE_TOKEN` secrets so every release purges `/latest` and the installers
-   instead of waiting out the 60 s TTL.
+
+Releases do not purge anything. `/latest` and the installers can lag up to their
+60 s TTL after a release, so an install in that window gets the previous version
+and a later run gets the new one; the digests always match the tag they resolve.
 
 ## Checking
 
