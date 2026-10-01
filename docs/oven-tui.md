@@ -16,7 +16,8 @@ src/bin/oven-cli.rs  →  Cli::parse().run()  →  Ui::new(app).run()
 `oven-tui` is layered; a layer reaches only into the ones below it.
 
 ```text
-cli         the oven binary: flags, and which mode they select
+cli         the oven binary: flags, subcommands, and which mode they select
+commands    the subcommands that run instead of a session
 runtime     the Ui actor: the event loop, the projection of app events onto
             the screen, and the keys that reach the widgets
 widgets     one component per screen region
@@ -27,6 +28,8 @@ platform    the OS the screens draw on
 | Layer | Path | Owns |
 | --- | --- | --- |
 | `cli` | `cli.rs` | clap parsing and mode selection |
+| `commands` | `commands/prompt.rs` | the line prompts a subcommand asks, and the terminal's no-echo input |
+| | `commands/model/` | `oven model`: `ls`, `add`, `rm` |
 | `runtime` | `runtime/ui/mod.rs` | the `Ui` handle: the event loop, the queue flush, quitting |
 | | `runtime/ui/event.rs` | app events onto the screen: routing, overlay prompts, a submitted prompt |
 | | `runtime/ui/keys.rs` | terminal input: paste bursts, mouse, the key router, the `Esc` decision |
@@ -53,14 +56,16 @@ decides what `Esc` does and `core/hint.rs` says which keys apply, so the status
 bar and the composer border cannot disagree. `platform` is where a side effect
 happens; `core` performs none.
 
-`Cli` has three flags: `--cd/-C` (workspace root), `--session/-s` and
-`--continue/-c` (mutually exclusive session selection; an explicit id wins,
-otherwise the newest session for this root), and `--query/-Q`.
+`Cli` has three flags: `--cd/-C` (workspace root, global so it may follow a
+subcommand), `--session/-s` and `--continue/-c` (mutually exclusive session
+selection; an explicit id wins, otherwise the newest session for this root), and
+`--query/-Q`.
 
-`Cli::run` dispatches to one of three modes:
+`Cli::run` dispatches to one of four modes:
 
 | Condition | Behavior |
 | --- | --- |
+| a subcommand is present | run it and exit; no session, no TUI (`oven model …`) |
 | `--query QUERY` present | headless: `App::query`, print the response, exit. No TUI is started. |
 | `--query` absent and stdin/stdout are both TTYs | interactive: `Ui::run` |
 | `--query` absent and either side is not a TTY | print usage, exit code `2` |
@@ -68,6 +73,30 @@ otherwise the newest session for this root), and `--query/-Q`.
 Warnings from config loading and session resolution go to stderr and never abort
 startup. On interactive exit the resolved session id is printed as
 ` oven -s {id}` so it can be copied back into a shell.
+
+### `oven model`
+
+`oven model ls` (or bare `oven model`) prints every configured model — the one
+each provider would use, then its declarations, then the catalog `oven-llm`
+ships, then `--refresh`'s endpoint answer — marking the model in use with `*`
+and naming where each row came from. `oven model add` walks the same fields the
+config needs, `oven model rm` drops a provider or one declaration. Both write
+only `~/.oven/config.toml`; a project file that also declares the provider is
+reported rather than edited.
+
+The walk is line-oriented, not a modal: `commands/prompt.rs` prints a question,
+reads one line, and takes a number as list index or anything else as the value,
+so a model id can always be typed by hand. It is a `Prompter` trait, so the
+whole flow is testable with scripted answers and a session with no terminal
+answers nothing — every question is also a flag, and a missing required one
+fails naming it (`--base-url is required (stdin is not a terminal)`). The API
+key is read with the terminal in raw mode and echoed as `*`.
+
+`add` deliberately does not switch models: it selects the provider only when
+`--activate` is passed or when nothing usable is selected already. A shipped
+model is left undeclared unless a flag overrides something, because a declared
+entry replaces its catalog entry instead of merging with it — so an override is
+seeded from the whole catalog entry first. `README.md` has the flag list.
 
 ## Event loop
 

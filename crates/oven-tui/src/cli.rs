@@ -5,6 +5,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use oven_app::{App, AppBuilder, dirs, log, session};
 
+use crate::commands::{self, Command};
 use crate::runtime::ui::Ui;
 
 #[derive(Debug, Parser)]
@@ -13,7 +14,7 @@ use crate::runtime::ui::Ui;
         env!("GIT_HASH"), " ", env!("GIT_COMMIT_DATE"), ")"))]
 pub struct Cli {
     /// Tell oven to use the specified directory as its workspace root
-    #[arg(long = "cd", short = 'C', default_value = ".")]
+    #[arg(long = "cd", short = 'C', default_value = ".", global = true)]
     dir: PathBuf,
 
     /// Resume / persist a JSONL session id
@@ -27,6 +28,9 @@ pub struct Cli {
     /// Run a one-shot query and exit
     #[arg(long, short = 'Q', value_name = "QUERY")]
     query: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
 impl Cli {
@@ -94,6 +98,9 @@ impl Cli {
 
     pub async fn run(&self) -> ExitCode {
         log::init();
+        if let Some(command) = &self.command {
+            return commands::run(command, &self.dir).await;
+        }
         match self.query.as_deref() {
             Some(prompt) => {
                 tracing::info!(root = %self.dir.display(), headless = true, "oven starting");

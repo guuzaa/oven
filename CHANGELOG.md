@@ -3,11 +3,20 @@
 ## [Unreleased]
 
 ### Added
+- `oven model` configures providers without starting the TUI: `ls` lists every configured model next to the catalog `oven-llm` ships (and, with `--refresh`, what each endpoint reports), `add` walks a vendor into `~/.oven/config.toml` and `rm` drops a provider or one declaration. Every question of `add` is also a flag, so a script answers nothing and a missing required one fails naming it; the key is read without echo, a one-token request verifies the endpoint before anything is saved, and `--activate` is what switches the model — `add` otherwise leaves the selection alone. The subcommands live in `crates/oven-tui/src/commands/`, where config is still reached only through `oven-app`
+- `commands/prompt.rs`: the line prompts a subcommand asks, behind a `Prompter` trait, so the walk is testable with scripted answers and a session with no terminal answers nothing instead of blocking
+- `AppConfig::load_file` / `save_at` / `empty` / `remove_provider` / `remove_model`, and `provider_toml` for a preview with the API key masked: `save_provider_at` could only merge, so deleting a provider or a model had no path
+- `oven_app::provider_catalog` reads the shipped catalog through a throwaway client with a placeholder key, `provider_models` is the real `GET /models`, and `verify` sends one token
+- `ModelMetadata::from_info` and a public `ModelMetadata::merge_fields`
 - A provider table can carry `context_window`, `max_output_tokens` and the `supports_*` flags directly, as defaults every `[providers.<slug>.models."<wire-id>"]` entry inherits wherever it leaves a field unset. A model that sets a field keeps its own value, an entry that only inherits is dropped when the file is rewritten, and the stored entries stay as written, so saving never bakes an inherited value into a model that only meant to follow the provider
 
 ### Changed
+- A provider with no preset model falls back under its own slug (`myproxy/deepseek-v4-flash`) instead of hardcoding the `deepseek` vendor, and an empty selection is no longer written as `active = ""`
 - **Breaking:** `[provider]` is gone: the active vendor is the root `active = "<slug>"`, and a provider is named by its `[providers.<slug>]` table key instead of a repeated `name`. Model metadata moves back to keyed tables — `[providers.<slug>.models."<wire-id>"]` — keeping the id out of the body, so ids with dots (`gpt-4.1`) just need quoting. Files still in the old shape keep loading and are rewritten on the next save, and a declared model now merges field by field across the user and project files instead of the newer entry replacing the older one outright
 - `ProviderConfig::suggested_base_url` reads `oven_llm::ProviderName::base_url` instead of keeping its own copy of the same five endpoints
+
+### Fixed
+- `oven model add` leaves a shipped model undeclared when there is nothing to override, and seeds an override from the whole catalog entry: a declared entry *replaces* the catalog's, so declaring one with empty metadata used to zero its context window and output limit
 
 ## [0.0.9] - 2026-09-30
 

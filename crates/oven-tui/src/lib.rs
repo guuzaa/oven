@@ -4,17 +4,20 @@
 //!
 //! Layers, top to bottom; a layer reaches only into the ones below it:
 //!
-//! 1. `cli` — the `oven` binary: flags, and which mode they select
-//! 2. `runtime` — the `Ui` actor: the event loop, the projection of app
+//! 1. `cli` — the `oven` binary: flags, subcommands, and which mode they select
+//! 2. `commands` — the subcommands that run instead of a session: they ask the
+//!    questions `oven-app` cannot, and reach config only through it
+//! 3. `runtime` — the `Ui` actor: the event loop, the projection of app
 //!    events onto the screen, and the keys that reach the widgets
-//! 3. `widgets` — one component per screen region
-//! 4. `core` — the vocabulary the widgets share and the pure rules between
+//! 4. `widgets` — one component per screen region
+//! 5. `core` — the vocabulary the widgets share and the pure rules between
 //!    them: the component contract, the themes, the screen geometry, the
 //!    keys, the composer hints, the `Esc` decision
-//! 5. `platform` — the operating system the screens draw on: the terminal's
+//! 6. `platform` — the operating system the screens draw on: the terminal's
 //!    raw-mode lifecycle, and the clipboard
 
 mod cli;
+mod commands;
 mod core;
 mod platform;
 mod runtime;

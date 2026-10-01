@@ -27,7 +27,9 @@ max_iters = 200
 
 # LLM provider settings. `active` names the provider in use; `/setup` writes
 # each vendor under `[providers.<slug>]` so switching does not require
-# re-entering API keys.
+# re-entering API keys. Outside the TUI, `oven model ls` shows what is saved
+# and `oven model add` walks a vendor (endpoint, key, model, limits) into this
+# file; `oven model rm` takes one back out.
 #
 # Canonical vendor slug. Aliases are accepted on read (`grok` → `xai`,
 # `kimi` → `moonshot`, `glm` → `zhipu`) and rewritten as the canonical name.

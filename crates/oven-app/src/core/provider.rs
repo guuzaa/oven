@@ -1,10 +1,20 @@
+use std::time::{Duration, Instant};
+
 use oven_agent::RetryingProvider;
 use oven_llm::{
-    ModelCapabilities, ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Router,
+    ModelCapabilities, ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Request,
+    Router,
 };
 
 use crate::core::config::{AppConfig, ModelMetadata, ProviderConfig};
 use crate::core::error::AppError;
+
+/// Key used to read a static catalog: no request is ever sent with it, so a
+/// listing works before the user has a credential.
+const CATALOG_KEY: &str = "oven-catalog";
+
+/// The one-token request [`verify`] sends.
+const VERIFY_PROMPT: &str = "ping";
 
 /// `ModelInfo` for a user-declared model. Capabilities default to supported
 /// and unknown limits stay zeroed: validation must not reject a model for
@@ -73,8 +83,53 @@ pub(crate) fn build_interactive_router(config: &AppConfig) -> Result<Router, App
 }
 
 pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider>, AppError> {
+    build_client_with(provider, &provider.effective_api_key())
+}
+
+/// Models `oven-llm` ships for this provider's vendor and protocol. Reads the
+/// static catalog through a throwaway client, so it needs neither a working
+/// key nor the network.
+pub fn provider_catalog(provider: &ProviderConfig) -> Vec<ModelInfo> {
+    build_client_with(provider, CATALOG_KEY)
+        .map(|client| client.known_models())
+        .unwrap_or_default()
+}
+
+/// Models the endpoint reports on `GET /models`. Unlike the static catalog
+/// this needs a real credential, so a failure is the caller's to report.
+pub async fn provider_models(
+    provider: &ProviderConfig,
+    timeout: Duration,
+) -> Result<Vec<ModelInfo>, AppError> {
+    let client = build_client(provider)?;
+    tokio::time::timeout(timeout, client.list_models())
+        .await
+        .map_err(|_| AppError::Provider(format!("no model list within {}s", timeout.as_secs())))?
+        .map_err(AppError::from)
+}
+
+/// Prove an endpoint, key and model id work together: one token through a
+/// freshly built client, so `model add` can fail before it saves a config.
+pub async fn verify(provider: &ProviderConfig, timeout: Duration) -> Result<Duration, AppError> {
+    let client = build_client(provider)?;
+    let request = Request::builder()
+        .model(provider.effective_model())
+        .prompt(VERIFY_PROMPT)
+        .max_tokens(1)
+        .build()
+        .map_err(|e| AppError::Provider(e.to_string()))?;
+    let started = Instant::now();
+    tokio::time::timeout(timeout, client.complete(&request))
+        .await
+        .map_err(|_| AppError::Provider(format!("no response within {}s", timeout.as_secs())))??;
+    Ok(started.elapsed())
+}
+
+fn build_client_with(
+    provider: &ProviderConfig,
+    api_key: &str,
+) -> Result<Box<dyn Provider>, AppError> {
     let provider_name = provider.effective_provider_name();
-    let api_key = provider.effective_api_key();
     let base_url = provider.effective_base_url();
     let model = provider.effective_model();
 
@@ -269,5 +324,43 @@ max_output_tokens = 4096
         assert_eq!(info.context_window, 200_000);
         assert_eq!(info.max_output_tokens, 4096);
         assert!(!info.capabilities.supports_vision);
+    }
+
+    #[test]
+    fn provider_catalog_reads_the_static_table_without_a_key() {
+        let provider = ProviderConfig {
+            name: Some("deepseek".into()),
+            ..Default::default()
+        };
+        let ids: Vec<_> = provider_catalog(&provider)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert!(ids.iter().any(|id| id == "deepseek-v4-flash"), "{ids:?}");
+    }
+
+    #[test]
+    fn provider_catalog_is_empty_for_a_custom_vendor() {
+        let provider = ProviderConfig {
+            name: Some("myproxy".into()),
+            base_url: Some("https://example.com/v1".into()),
+            ..Default::default()
+        };
+        assert!(provider_catalog(&provider).is_empty());
+    }
+
+    #[tokio::test]
+    async fn verify_reports_an_unreachable_endpoint() {
+        let provider = ProviderConfig {
+            name: Some("offline".into()),
+            base_url: Some("http://127.0.0.1:9/v1".into()),
+            api_key: Some("k".into()),
+            model: Some("m".into()),
+            ..Default::default()
+        };
+        let error = verify(&provider, Duration::from_secs(5))
+            .await
+            .expect_err("a closed port must not pass verification");
+        assert!(matches!(error, AppError::Provider(_)), "{error:?}");
     }
 }

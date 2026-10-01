@@ -2058,6 +2058,7 @@ dependencies = [
  "serde_json",
  "tempdir",
  "tokio",
+ "toml",
  "tracing",
  "tui-textarea-2",
  "unicode-width",

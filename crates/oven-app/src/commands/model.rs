@@ -1,6 +1,7 @@
 use oven_llm::{ModelId, ReasoningEffort, Router, RouterError};
 
 use super::{CommandContext, CommandOutcome, SlashCommand};
+use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 
 const USAGE: &str = "usage: /model <id> [none|low|medium|high]";
@@ -21,15 +22,11 @@ impl Model {
     pub(crate) const NAME: &'static str = "model";
 
     pub(crate) fn parse_effort(s: &str) -> Result<ReasoningEffort, AppError> {
-        match s.to_ascii_lowercase().as_str() {
-            "none" => Ok(ReasoningEffort::None),
-            "low" => Ok(ReasoningEffort::Low),
-            "medium" => Ok(ReasoningEffort::Medium),
-            "high" => Ok(ReasoningEffort::High),
-            _ => Err(AppError::Runtime(format!(
+        ProviderConfig::parse_effort(s).ok_or_else(|| {
+            AppError::Runtime(format!(
                 "invalid reasoning effort '{s}'; expected none, low, medium, or high"
-            ))),
-        }
+            ))
+        })
     }
 
     pub(crate) fn qualify_against(router: &Router, raw: &str) -> Result<String, AppError> {

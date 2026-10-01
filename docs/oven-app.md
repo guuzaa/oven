@@ -260,6 +260,23 @@ vendors require a `base_url`, and per-model context windows can be declared so
 custom gateways still get ctx% and auto-compaction. `save_provider_at` rewrites
 the file in the canonical format whenever `/model` or `/setup` changes something.
 
+The CLI subcommands edit config instead, so the API is split by intent rather
+than by file: `load_file` reads one file with nothing merged in, `save_at`
+writes a whole config back, and `remove_provider` / `remove_model` are the
+deletions the merge-only `save_provider_at` cannot express — removing the
+active provider reselects the first remaining one, and removing the model in
+use clears the selection so it falls back to a preset. `empty()` is the
+starting point for a file that does not exist yet, because `Default` seeds the
+builtin `deepseek` entry and a new file must not inherit it. `provider_toml`
+renders the block a save would write, with the API key masked, so a frontend
+can preview it.
+
+`provider.rs` also answers what a listing needs without spending a credential:
+`provider_catalog` reads the shipped catalog through a throwaway client built
+with a placeholder key (the table is static and no request is sent), and
+`provider_models` is the real `GET /models`. `verify` sends one token so
+`oven model add` can fail before it saves.
+
 Switching providers at runtime (`set_provider`) fills missing fields from the
 saved entry and the vendor presets, validates that a key is present, and only
 then swaps the client into the live router — a bad key never destroys the

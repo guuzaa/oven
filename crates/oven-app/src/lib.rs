@@ -27,6 +27,7 @@ pub use core::error::AppError;
 pub use core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
 pub use core::input::Input;
 pub use core::mention::FileMentions;
+pub use core::provider::{provider_catalog, provider_models, verify};
 pub use core::session;
 pub use core::state::{AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens_of};
 pub use core::{complete, config};

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use oven_agent::DEFAULT_MAX_ITERS;
-use oven_llm::{ModelId, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
+use oven_llm::{ModelId, ModelInfo, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::SerializeMap as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -18,6 +18,9 @@ pub use mcp::McpServerConfig;
 
 const DEFAULT_SUBAGENT_CONCURRENT: usize = 4;
 const DEFAULT_SUBAGENT_ITERS: usize = 60;
+
+/// Stands in for the API key of a printed config preview.
+const REDACTED_KEY: &str = "<redacted>";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -119,7 +122,22 @@ impl ModelMetadata {
         *self == Self::default()
     }
 
-    fn merge_fields(&mut self, overlay: &Self) {
+    /// Every field of a catalog entry, so declaring a shipped model to change
+    /// one value does not drop the rest: a declared entry replaces the
+    /// catalog's, it does not merge with it.
+    pub fn from_info(info: &ModelInfo) -> Self {
+        Self {
+            context_window: (info.context_window > 0).then_some(info.context_window),
+            max_output_tokens: (info.max_output_tokens > 0).then_some(info.max_output_tokens),
+            supports_system_prompt: Some(info.capabilities.supports_system_prompt),
+            supports_tools: Some(info.capabilities.supports_tools),
+            supports_streaming: Some(info.capabilities.supports_streaming),
+            supports_vision: Some(info.capabilities.supports_vision),
+        }
+    }
+
+    /// Overlay the fields `overlay` sets onto `self`.
+    pub fn merge_fields(&mut self, overlay: &Self) {
         if overlay.context_window.is_some() {
             self.context_window = overlay.context_window;
         }
@@ -268,7 +286,10 @@ impl ProviderConfig {
         {
             return qualify_model(suggested, Some(name));
         }
-        qualify_model(Self::DEFAULT_MODEL, Some("deepseek"))
+        qualify_model(
+            Self::DEFAULT_MODEL,
+            self.name.as_deref().or(Some("deepseek")),
+        )
     }
 
     /// Endpoint preset for a known vendor; `oven-llm` owns the one table.
@@ -317,6 +338,16 @@ impl ProviderConfig {
             "completions" => Some(ProviderKind::Completions),
             "responses" => Some(ProviderKind::Responses),
             "messages" => Some(ProviderKind::Messages),
+            _ => None,
+        }
+    }
+
+    pub fn parse_effort(raw: &str) -> Option<ReasoningEffort> {
+        match raw.to_ascii_lowercase().as_str() {
+            "none" => Some(ReasoningEffort::None),
+            "low" => Some(ReasoningEffort::Low),
+            "medium" => Some(ReasoningEffort::Medium),
+            "high" => Some(ReasoningEffort::High),
             _ => None,
         }
     }
@@ -526,7 +557,9 @@ impl Serialize for ModelsRef<'_> {
 impl Serialize for AppConfig {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(None)?;
-        map.serialize_entry("active", &self.active_provider.name)?;
+        if !self.active_provider.name.is_empty() {
+            map.serialize_entry("active", &self.active_provider.name)?;
+        }
         map.serialize_entry("request_timeout_secs", &self.request_timeout_secs)?;
         map.serialize_entry("max_retries", &self.max_retries)?;
         map.serialize_entry("base_backoff_ms", &self.base_backoff_ms)?;
@@ -757,7 +790,9 @@ impl AppConfig {
         Ok(())
     }
 
-    fn load_file(path: &Path) -> Result<Option<AppConfig>, ConfigError> {
+    /// Read one file on its own: no default merged in, so a caller that means
+    /// to rewrite the file does not write another file's values into it.
+    pub fn load_file(path: &Path) -> Result<Option<AppConfig>, ConfigError> {
         match std::fs::read_to_string(path) {
             Ok(text) => {
                 let cfg: AppConfig =
@@ -846,13 +881,72 @@ impl AppConfig {
         provider.merge_fields(overlay);
         provider.name = Some(name.clone());
         config.active_provider.name = name;
+        Self::save_at(path, &config)
+    }
+
+    /// Write a whole config to `path` in the canonical format, creating the
+    /// parent directory when it does not exist yet.
+    pub fn save_at(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| ConfigError::Write(path.to_path_buf(), e))?;
         }
-        let text = toml::to_string_pretty(&config)
+        let text = toml::to_string_pretty(config)
             .map_err(|e| ConfigError::Serialize(path.to_path_buf(), e))?;
         std::fs::write(path, text).map_err(|e| ConfigError::Write(path.to_path_buf(), e))
+    }
+
+    /// One provider's `[providers.<slug>]` block exactly as it would be
+    /// written, with the API key masked so a preview can be shown and kept.
+    pub fn provider_toml(provider: &ProviderConfig) -> Result<String, ConfigError> {
+        let mut provider = provider.clone();
+        if provider.api_key.is_some() {
+            provider.api_key = Some(REDACTED_KEY.to_string());
+        }
+        let slug = provider.name.clone().unwrap_or_default();
+        let providers = BTreeMap::from([(slug, provider)]);
+        toml::to_string_pretty(&BTreeMap::from([("providers", providers)]))
+            .map_err(|e| ConfigError::Serialize(PathBuf::from("<preview>"), e))
+    }
+
+    /// No saved providers and no selection: the starting point for a config
+    /// file that does not exist yet. [`Default`] instead seeds the builtin
+    /// `deepseek` entry, which must not be baked into a new file.
+    pub fn empty() -> Self {
+        Self {
+            providers: BTreeMap::new(),
+            active_provider: ProviderSelection::default(),
+            ..Self::default()
+        }
+    }
+
+    /// Drop a saved provider. When it was the active one, the first remaining
+    /// provider takes over; with none left the selection is cleared and the
+    /// next interactive start opens `/setup`.
+    pub fn remove_provider(&mut self, name: &str) -> bool {
+        let name = canonical_vendor(name);
+        if self.providers.remove(&name).is_none() {
+            return false;
+        }
+        if self.active_provider.name == name {
+            self.active_provider.name = self.providers.keys().next().cloned().unwrap_or_default();
+        }
+        true
+    }
+
+    /// Drop one declared model. `Some(true)` also means `model` named it and
+    /// the provider now falls back to its preset (`OVEN_MODEL`, then the
+    /// vendor default) rather than to a model that no longer exists; `None`
+    /// means nothing matched, so there was nothing to remove.
+    pub fn remove_model(&mut self, name: &str, id: &str) -> Option<bool> {
+        let wire_id = wire_model(id);
+        let provider = self.providers.get_mut(&canonical_vendor(name))?;
+        let declared = provider.models.remove(&wire_id).is_some();
+        let selected = provider.model.as_deref() == Some(wire_id.as_str());
+        if selected {
+            provider.model = None;
+        }
+        (declared || selected).then_some(selected)
     }
 }
 
@@ -1139,6 +1233,13 @@ supports_vision = true
             ..Default::default()
         };
         assert_eq!(cfg.effective_model(), "deepseek/deepseek-v4-flash");
+
+        // A vendor with no preset falls back under its own name, not deepseek's.
+        let cfg = ProviderConfig {
+            name: Some("my-proxy".into()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_model(), "my-proxy/deepseek-v4-flash");
     }
 
     #[test]
@@ -1417,5 +1518,108 @@ supports_vision = true
         );
         assert_eq!(cfg.providers["deepseek"].api_key.as_deref(), Some("sk-ds"));
         assert_eq!(cfg.configured_providers(), vec!["deepseek", "xai"]);
+    }
+
+    #[test]
+    fn save_at_writes_only_what_the_config_holds() {
+        let tmp = tempdir::TempDir::new("oven-save-at").unwrap();
+        let path = tmp.path().join("nested").join("config.toml");
+        let mut config = AppConfig::empty();
+        config.providers.insert(
+            "myproxy".into(),
+            ProviderConfig {
+                name: Some("myproxy".into()),
+                api_key: Some("sk-secret".into()),
+                model: Some("my-model".into()),
+                ..Default::default()
+            },
+        );
+        config.active_provider.name = "myproxy".into();
+        AppConfig::save_at(&path, &config).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("active = \"myproxy\""), "{text}");
+        assert!(text.contains("[providers.myproxy]"), "{text}");
+        assert_eq!(AppConfig::load_file(&path).unwrap().unwrap(), config);
+    }
+
+    #[test]
+    fn empty_config_writes_no_provider_and_no_selection() {
+        let text = toml::to_string_pretty(&AppConfig::empty()).unwrap();
+        assert!(!text.contains("active"), "{text}");
+        assert!(!text.contains("deepseek"), "{text}");
+        assert!(!text.contains("providers"), "{text}");
+    }
+
+    #[test]
+    fn remove_provider_reselects_the_first_remaining() {
+        let mut config: AppConfig = toml::from_str(
+            "active = \"xai\"\n\n[providers.xai]\napi_key = \"x\"\n[providers.deepseek]\napi_key = \"d\"\n",
+        )
+        .unwrap();
+        assert!(config.remove_provider("xai"));
+        assert_eq!(config.active_provider.name, "deepseek");
+        assert!(!config.providers.contains_key("xai"));
+        assert!(!config.remove_provider("xai"));
+    }
+
+    #[test]
+    fn remove_provider_clears_the_selection_when_it_was_the_last() {
+        let mut config: AppConfig =
+            toml::from_str("active = \"xai\"\n\n[providers.xai]\napi_key = \"x\"\n").unwrap();
+        assert!(config.remove_provider("grok"));
+        assert!(config.providers.is_empty());
+        assert!(config.active_provider.name.is_empty());
+        let text = toml::to_string_pretty(&config).unwrap();
+        assert!(!text.contains("active"), "{text}");
+    }
+
+    #[test]
+    fn remove_model_clears_the_selected_model() {
+        let mut config: AppConfig = toml::from_str(
+            "active = \"p\"\n\n[providers.p]\nmodel = \"gpt-4o\"\n\n[providers.p.models.\"gpt-4o\"]\ncontext_window = 128000\n",
+        )
+        .unwrap();
+        assert!(config.remove_model("p", "gpt-4o").is_some());
+        let provider = &config.providers["p"];
+        assert!(provider.model.is_none());
+        assert!(provider.models.is_empty());
+    }
+
+    #[test]
+    fn remove_model_keeps_an_unrelated_selection() {
+        let mut config: AppConfig = toml::from_str(
+            "active = \"p\"\n\n[providers.p]\nmodel = \"kept\"\n\n[providers.p.models.\"dropped\"]\n\n[providers.p.models.\"kept\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.remove_model("p", "dropped"), Some(false));
+        let provider = &config.providers["p"];
+        assert_eq!(provider.model.as_deref(), Some("kept"));
+        assert!(!provider.models.contains_key("dropped"));
+        assert_eq!(config.remove_model("p", "dropped"), None);
+        assert_eq!(config.remove_model("nope", "kept"), None);
+    }
+
+    #[test]
+    fn remove_model_reports_clearing_the_selection() {
+        let mut config: AppConfig =
+            toml::from_str("active = \"p\"\n\n[providers.p]\nmodel = \"gpt-4o\"\n").unwrap();
+        assert_eq!(config.remove_model("p", "gpt-4o"), Some(true));
+        assert!(config.providers["p"].model.is_none());
+    }
+
+    #[test]
+    fn provider_toml_masks_the_api_key() {
+        let provider = ProviderConfig {
+            name: Some("myproxy".into()),
+            base_url: Some("https://proxy.example/v1".into()),
+            api_key: Some("sk-secret".into()),
+            model: Some("my-model".into()),
+            ..Default::default()
+        };
+        let text = AppConfig::provider_toml(&provider).unwrap();
+        assert!(text.contains("[providers.myproxy]"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
+        assert!(!text.contains("sk-secret"), "{text}");
     }
 }

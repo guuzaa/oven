@@ -44,6 +44,11 @@ oven -c                 # resume the most recent session in this directory
 
 # Work in a different directory
 oven -C /path/to/project
+
+# List, add and remove provider models without starting the TUI
+oven model
+oven model add            # asks for what the flags leave out
+oven model rm xai
 ```
 
 Run `oven --help` for the full CLI.
@@ -64,6 +69,37 @@ write files, run shell commands, and delegate jobs to subagents
 Config lives in `.oven.toml` at the project root, or globally at
 `~/.oven/config.toml` (created as a template on first run). Env vars
 `OVEN_MODEL`, `OVEN_API_KEY`, and `OVEN_BASE_URL` override it.
+
+`oven model` manages that file without starting the TUI:
+
+```bash
+oven model                       # every configured and shipped model
+oven model ls myproxy            # just one provider
+oven model add                   # interactive: provider, endpoint, key, model, limits
+oven model rm myproxy/my-model   # drop one model; `oven model rm myproxy` drops the rest
+```
+
+`oven model add` writes to `~/.oven/config.toml` and, unless `--activate` is
+passed, leaves the current model selected. Every question is also a flag, so a
+script needs no answers at all — a missing required one fails naming it:
+
+```bash
+oven model add myproxy --base-url https://proxy.example/v1 --api-key sk-xxx \
+  --model my-model --context-window 200k --max-output-tokens 8k --no-vision
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--base-url` | endpoint; required for a vendor oven does not ship |
+| `--protocol` | `completions` (default) or `responses`; unknown vendors only |
+| `--api-key` / `--api-key-env` | save a key, or read `OVEN_API_KEY` instead |
+| `--model` | wire id to add |
+| `--context-window`, `--max-output-tokens` | limits, as `200k` or `1m` |
+| `--no-tools`, `--no-vision` | capabilities the model lacks |
+| `--reasoning-effort` | `none`, `low`, `medium` or `high` |
+| `--activate` | also make this provider and model current |
+| `--no-verify` | skip the one-token check that the key and endpoint work |
+| `--yes` | write without showing the preview |
 
 ```toml
 # Provider in use; every vendor is declared under [providers.<slug>].
