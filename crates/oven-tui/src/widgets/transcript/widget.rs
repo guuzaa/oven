@@ -24,15 +24,17 @@ use super::tools::ToolBurst;
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
     apply_hover, apply_shimmer, collect_lines, format_elapsed, format_lines, format_thought,
-    line_display_width, paint_visible, shimmer_phase, tail_lines, trim_message,
-    wrap_collapsible_into, wrap_line_into, wrap_row_into,
+    line_display_width, paint_visible, shimmer_phase, sticky_prompt_lines, tail_lines,
+    trim_message, wrap_collapsible_into, wrap_line_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
 const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
-const MAX_STICKY_PROMPT_ROWS: usize = 8;
+/// Rows the prompt pinned at the top of the transcript area may occupy, frame
+/// included, so a long prompt cannot take the whole viewport.
+pub(super) const MAX_STICKY_PROMPT_ROWS: usize = 8;
 const NO_OUTPUT: &str = "(no output)";
 pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
 
@@ -1272,7 +1274,8 @@ impl Component for Transcript {
             if height > 0 {
                 let height = u16::try_from(height).unwrap_or(area.height);
                 let prompt_area = Rect::new(area.x, area.y, area.width, height);
-                paint_visible(f, prompt_area, prompt_lines[..usize::from(height)].to_vec());
+                let lines = sticky_prompt_lines(prompt_lines, usize::from(height));
+                paint_visible(f, prompt_area, lines);
                 content_area.y = content_area.y.saturating_add(height);
                 content_area.height = content_area.height.saturating_sub(height);
                 self.sticky_prompt = Some((prompt_start, height));

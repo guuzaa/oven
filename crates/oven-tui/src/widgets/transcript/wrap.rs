@@ -317,6 +317,16 @@ fn wrap_prompt_frame_into(
     ));
 }
 
+/// The pinned prompt block inside `height` rows, still closed: its last row is
+/// the frame's bottom rule, so a truncation drops middle body lines instead of
+/// the border.
+pub(super) fn sticky_prompt_lines(lines: &[Line<'static>], height: usize) -> Vec<Line<'static>> {
+    let last = lines.len() - 1;
+    let mut visible = lines[..height.saturating_sub(1).min(last)].to_vec();
+    visible.push(lines[last].clone());
+    visible
+}
+
 pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {
     let hover = theme::hover();
     let mut spans: Vec<Span<'static>> = line

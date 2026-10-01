@@ -25,7 +25,7 @@ use super::kinds::{
 };
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 
-use super::widget::{LOOP_LIMIT_REACHED, Transcript};
+use super::widget::{LOOP_LIMIT_REACHED, MAX_STICKY_PROMPT_ROWS, Transcript};
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
     apply_shimmer, format_elapsed, format_lines, format_thought, line_display_width, tail_lines,
@@ -3174,5 +3174,42 @@ fn a_drag_survives_a_row_that_grows_under_it() {
         t.selected_text().as_deref(),
         Some(selected.as_str()),
         "the drag keeps the same text once the burst above it grows"
+    );
+}
+
+#[test]
+fn a_long_sticky_prompt_still_closes_its_frame() {
+    const WIDTH: u16 = 40;
+    const HEIGHT: u16 = 12;
+    let mut t = Transcript::new();
+    let prompt = (1..=12)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    t.push_prompt(LineKind::User, &prompt);
+    t.push_row(LineKind::Text, "response");
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = |y| {
+        (0..WIDTH)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
+    let bottom = u16::try_from(MAX_STICKY_PROMPT_ROWS - 1).unwrap();
+    assert!(row(0).starts_with('╭'), "{:?}", row(0));
+    assert!(row(1).contains("line 1"), "{:?}", row(1));
+    assert!(
+        row(bottom).starts_with('╰') && row(bottom).ends_with('╯'),
+        "a prompt taller than the cap keeps its bottom border: {:?}",
+        row(bottom)
+    );
+    assert!(
+        row(bottom - 1).starts_with('│'),
+        "the rows the cap drops are body lines: {:?}",
+        row(bottom - 1)
     );
 }
