@@ -60,6 +60,7 @@ impl Ui {
                         ),
                     });
                 }
+                AgentEvent::Turn(TurnEvent::UserAppended { text }) => self.drop_appended(text),
                 _ => {}
             },
             AppEventKind::RequestResolved { request_id } => {

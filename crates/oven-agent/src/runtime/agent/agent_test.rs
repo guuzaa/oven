@@ -7,7 +7,7 @@ use crate::capabilities::tools::{
 };
 use crate::core::identity::ToolCallId;
 use crate::core::sink::{NullSink, VecEventSink};
-use crate::core::turn::TurnContext;
+use crate::core::turn::{PendingPrompts, TurnContext};
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt, iter};
 use oven_llm::{
@@ -1597,6 +1597,83 @@ fn completed_item() -> crate::core::todo::TodoItem {
         content: "one".into(),
         status: crate::core::todo::TodoStatus::Completed,
     }
+}
+
+#[derive(Debug)]
+struct ParkedPrompts {
+    texts: Mutex<Vec<String>>,
+}
+
+impl PendingPrompts for ParkedPrompts {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut self.texts.lock().unwrap())
+    }
+}
+
+#[tokio::test]
+async fn queued_prompts_are_appended_after_tool_results() {
+    const FIRST: &str = "also check the tests";
+    const SECOND: &str = "and the docs";
+    let (mock, seen) = CaptureRequests::new(vec![
+        tool_response("c1", "file_read", json!({"path": "note.txt"})),
+        text_response("done"),
+    ]);
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mut agent = Agent::new(
+        router_with(Box::new(mock)),
+        vec![Arc::new(FileReadTool::new(tmp.path()))],
+    );
+    let ctx = turn_ctx(&agent).with_pending(Arc::new(ParkedPrompts {
+        texts: Mutex::new(vec![FIRST.into(), SECOND.into()]),
+    }));
+    let mut sink = VecEventSink::default();
+    run_with(&mut agent, "read it", &ctx, &mut sink)
+        .await
+        .unwrap();
+
+    let reqs = seen.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 2, "the follow-up rides the tool-result upload");
+    let uploaded = &reqs[1].messages;
+    let tool_at = uploaded
+        .iter()
+        .rposition(|message| message.role == Role::Tool)
+        .expect("tool result");
+    assert_eq!(uploaded[tool_at + 1].role, Role::User);
+    assert!(content_has(&uploaded[tool_at + 1], FIRST));
+    assert_eq!(uploaded[tool_at + 2].role, Role::User);
+    assert!(content_has(&uploaded[tool_at + 2], SECOND));
+    let appended: Vec<&str> = sink
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Turn(TurnEvent::UserAppended { text }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(appended, [FIRST, SECOND]);
+}
+
+#[tokio::test]
+async fn queued_prompt_stays_parked_when_the_turn_calls_no_tools() {
+    let prompts = Arc::new(ParkedPrompts {
+        texts: Mutex::new(vec!["later".into()]),
+    });
+    let mock = MockProvider::new(vec![text_response("done")]);
+    let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+    let ctx = turn_ctx(&agent).with_pending(Arc::clone(&prompts) as Arc<dyn PendingPrompts>);
+    run_with(&mut agent, "hi", &ctx, &mut VecEventSink::default())
+        .await
+        .unwrap();
+
+    assert_eq!(prompts.texts.lock().unwrap().as_slice(), ["later"]);
+    assert_eq!(
+        agent
+            .history()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

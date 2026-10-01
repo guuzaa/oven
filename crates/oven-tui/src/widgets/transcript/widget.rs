@@ -1189,6 +1189,10 @@ impl Component for Transcript {
                 | AgentEvent::Turn(TurnEvent::StepFinished { .. })
                 | AgentEvent::Usage { .. }
                 | AgentEvent::TodosChanged { .. } => {}
+                AgentEvent::Turn(TurnEvent::UserAppended { text }) => {
+                    self.flush_streaming();
+                    self.push_prompt(LineKind::User, text);
+                }
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
                     self.stop_live_thinking();
                     self.flush_streaming();

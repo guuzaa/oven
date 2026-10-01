@@ -63,8 +63,18 @@ impl Agent {
         let gates = gate_calls(&planned, ctx).await?;
         let records = run_calls(&planned, gates, ctx, sink).await;
         let (calls, wrote_todo) = self.commit_calls(&planned, records, sink);
+        self.append_queued_prompts(ctx, sink);
         self.todo_dirty = !wrote_todo;
         Ok(Step { text, calls, usage })
+    }
+
+    /// Chats typed while tools were running ride along with the results the
+    /// next provider request uploads.
+    fn append_queued_prompts(&mut self, ctx: &TurnContext, sink: &mut impl EventSink) {
+        for text in ctx.take_pending() {
+            self.history.push(Message::user_text(text.clone()));
+            sink.emit(AgentEvent::Turn(TurnEvent::UserAppended { text }));
+        }
     }
 
     /// Resolves the response's calls against the mounted tools before any of

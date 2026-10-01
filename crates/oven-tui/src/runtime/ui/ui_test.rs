@@ -6,7 +6,7 @@ use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::widgets::slash_command_popup::SlashCommandPopup;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use oven_app::config::ProviderConfig;
-use oven_app::{AgentEvent, AppEventKind, ToolCallId, ToolEvent, ToolResult, TurnEvent};
+use oven_app::{AgentEvent, AppEventKind, ToolCallId, ToolEvent, ToolResult, TurnEvent, TurnId};
 use ratatui::backend::TestBackend;
 
 #[test]
@@ -231,7 +231,10 @@ async fn busy_follows_the_apps_phase_and_flushes_the_queue_when_it_ends() {
     let root = tempdir::TempDir::new("oven-ui-sync").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.push(TEST_ANSWER.to_string());
+    ui.pending.push(Queued {
+        text: TEST_ANSWER.to_string(),
+        steered: false,
+    });
 
     ui.sync_state();
 
@@ -240,6 +243,50 @@ async fn busy_follows_the_apps_phase_and_flushes_the_queue_when_it_ends() {
         ui.pending.is_empty(),
         "the queue is sent once the app is idle"
     );
+    assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
+}
+
+#[tokio::test]
+async fn a_prompt_already_appended_is_not_sent_again_when_idle() {
+    let root = tempdir::TempDir::new("oven-ui-steer-flush").unwrap();
+    let mut ui = test_ui(&root).await;
+    ui.state.busy = true;
+    ui.pending.push(Queued {
+        text: TEST_ANSWER.to_string(),
+        steered: true,
+    });
+
+    ui.sync_state();
+
+    assert!(
+        ui.pending.is_empty(),
+        "a prompt the turn already took is dropped"
+    );
+    assert!(
+        ui.transcript.rewind_text().is_none(),
+        "flush must not start a second turn for it"
+    );
+}
+
+#[tokio::test]
+async fn an_appended_prompt_leaves_the_queue_and_joins_the_transcript() {
+    let root = tempdir::TempDir::new("oven-ui-steer-event").unwrap();
+    let mut ui = test_ui(&root).await;
+    ui.state.busy = true;
+    ui.pending.push(Queued {
+        text: TEST_ANSWER.to_string(),
+        steered: true,
+    });
+
+    ui.apply_event(&AppEvent::agent_with(
+        ui.main_agent,
+        TurnId(1),
+        AgentEvent::Turn(TurnEvent::UserAppended {
+            text: TEST_ANSWER.to_string(),
+        }),
+    ));
+
+    assert!(ui.pending.is_empty(), "the queue row goes away");
     assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
 }
 
@@ -317,7 +364,10 @@ async fn queued_text_waits_for_the_esc_confirm() {
     let root = tempdir::TempDir::new("oven-ui-esc-queue").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.push(TEST_ANSWER.to_string());
+    ui.pending.push(Queued {
+        text: TEST_ANSWER.to_string(),
+        steered: false,
+    });
 
     ui.handle_key(esc());
 

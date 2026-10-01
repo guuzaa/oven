@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use oven_agent::{
-    Agent, AgentEvent, AgentId, AgentMode, CancellationToken, PendingRequest, RequestSink,
-    RouterHandle, Selection, ToolEvent, TurnEvent, TurnId, UserRequest, UserRequestId,
+    Agent, AgentEvent, AgentId, AgentMode, CancellationToken, PendingPrompts, PendingRequest,
+    RequestSink, RouterHandle, Selection, ToolEvent, TurnEvent, TurnId, UserRequest, UserRequestId,
     UserResponse,
 };
 use tokio::sync::watch;
@@ -44,6 +44,9 @@ pub(crate) struct Shared {
     user_config_path: Option<PathBuf>,
     subagent_revision: Mutex<u64>,
     turn: Mutex<Option<ActiveTurn>>,
+    /// Chats typed while a turn runs. The turn takes them when it uploads
+    /// tool results; anything still here when the turn ends is sent later.
+    prompts: Mutex<Vec<String>>,
 }
 
 impl fmt::Debug for Shared {
@@ -72,7 +75,27 @@ impl Shared {
             user_config_path,
             subagent_revision: Mutex::new(0),
             turn: Mutex::new(None),
+            prompts: Mutex::new(Vec::new()),
         }
+    }
+
+    fn prompts(&self) -> MutexGuard<'_, Vec<String>> {
+        self.prompts.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn push_prompt(&self, text: String) {
+        self.prompts().push(text);
+    }
+
+    /// Drops one parked chat equal to `text`, preferring the latest.
+    /// `false` when the running turn already took it.
+    pub(crate) fn claim_prompt(&self, text: &str) -> bool {
+        let mut prompts = self.prompts();
+        let Some(index) = prompts.iter().rposition(|queued| queued == text) else {
+            return false;
+        };
+        prompts.remove(index);
+        true
     }
 
     pub(crate) fn user_config_path(&self) -> Option<&Path> {
@@ -189,6 +212,12 @@ impl Shared {
         *revision = current;
         let snapshot = Arc::new(self.subagents.snapshot());
         self.state.send_modify(|state| state.subagents = snapshot);
+    }
+}
+
+impl PendingPrompts for Shared {
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.prompts())
     }
 }
 

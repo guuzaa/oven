@@ -101,6 +101,26 @@ impl App {
         self.dispatch(Input::Rewind)
     }
 
+    /// Parks a chat typed while a turn is running, so the next tool-result
+    /// upload can carry it. `false` when the driver is idle, or when `text`
+    /// is a slash command or a shell line — those still wait for the driver.
+    pub fn steer(&self, text: &str) -> bool {
+        if !self.shared.is_busy() {
+            return false;
+        }
+        let Input::Chat(text) = input::classify(text, &self.slash) else {
+            return false;
+        };
+        self.shared.push_prompt(text);
+        true
+    }
+
+    /// Drops a chat [`steer`](Self::steer) parked. `false` when the running
+    /// turn already appended it.
+    pub fn claim_steer(&self, text: &str) -> bool {
+        self.shared.claim_prompt(text)
+    }
+
     /// Applies an input on the spot if it needs no driver while one is busy;
     /// otherwise queues it for the driver, saying so when the user will
     /// have to wait.

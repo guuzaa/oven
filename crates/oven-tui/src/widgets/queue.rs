@@ -7,19 +7,17 @@ use super::list::truncate_str;
 use crate::core::theme;
 
 /// Row the queued-message banner occupies, zero when nothing is queued.
-pub fn height(pending: &[String]) -> u16 {
-    u16::from(!pending.is_empty())
+pub fn height(count: usize) -> u16 {
+    u16::from(count > 0)
 }
 
 /// Renders a single compact row of messages queued while the app is busy.
-pub fn draw(f: &mut Frame<'_>, area: Rect, pending: &[String]) {
-    if pending.is_empty() {
-        return;
-    }
+/// `extra` is how many messages follow `first`.
+pub fn draw(f: &mut Frame<'_>, area: Rect, first: &str, extra: usize) {
     let inner_width = area.width as usize;
-    let first = pending[0].lines().next().unwrap_or("");
-    let extra = if pending.len() > 1 {
-        format!("  +{}", pending.len() - 1)
+    let first = first.lines().next().unwrap_or("");
+    let extra = if extra > 0 {
+        format!("  +{extra}")
     } else {
         String::new()
     };
@@ -33,18 +31,14 @@ pub fn draw(f: &mut Frame<'_>, area: Rect, pending: &[String]) {
 mod tests {
     use super::*;
 
-    fn q(texts: &[&str]) -> Vec<String> {
-        texts.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
     fn height_is_zero_when_empty() {
-        assert_eq!(height(&[]), 0);
+        assert_eq!(height(0), 0);
     }
 
     #[test]
     fn height_is_one_when_queued() {
-        assert_eq!(height(&q(&["a"])), 1);
-        assert_eq!(height(&q(&["a", "b", "c", "d"])), 1);
+        assert_eq!(height(1), 1);
+        assert_eq!(height(4), 1);
     }
 }

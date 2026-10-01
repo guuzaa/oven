@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use oven_agent::{CancellationToken, TurnContext, TurnId};
 use oven_host::run_shell_command;
 use oven_llm::Message;
@@ -25,7 +27,8 @@ impl Runtime {
         let mut sink = BusSink::new(self.shared.events.clone(), self.agent.id(), turn_id);
         let ctx = TurnContext::new(turn_id, cancel.clone(), self.agent.selection())
             .with_policy(self.policy)
-            .with_requests(self.shared.clone());
+            .with_requests(self.shared.clone() as Arc<dyn oven_agent::RequestSink>)
+            .with_pending(self.shared.clone() as Arc<dyn oven_agent::PendingPrompts>);
 
         let result = {
             let turn = self.agent.run(input, &ctx, &mut sink);

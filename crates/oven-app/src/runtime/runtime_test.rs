@@ -1664,6 +1664,124 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
 }
 
 #[tokio::test]
+async fn a_steered_chat_is_appended_when_tool_results_are_uploaded() {
+    const FOLLOW_UP: &str = "also check the tests";
+
+    struct Capture {
+        seen: Arc<Mutex<Vec<Request>>>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+        responses: Mutex<std::collections::VecDeque<Response>>,
+    }
+
+    #[async_trait]
+    impl Provider for Capture {
+        async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+            self.seen.lock().unwrap().push(req.clone());
+            let rx = self.release.lock().unwrap().take();
+            if let Some(rx) = rx {
+                let _ = rx.await;
+            }
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| ProviderError::Api {
+                    status: 500,
+                    body: "no more mock responses".into(),
+                })
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "no stream".into(),
+            })
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("steer-capture".into())
+        }
+    }
+
+    let tmp = tempdir::TempDir::new("app-runtime-steer").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = Capture {
+        seen: Arc::clone(&seen),
+        release: Mutex::new(Some(release_rx)),
+        responses: Mutex::new(
+            vec![
+                tool_response("c1", "file_read", serde_json::json!({"path": "note.txt"})),
+                text_response("done"),
+            ]
+            .into(),
+        ),
+    };
+
+    let app = AppBuilder::new(tmp.path());
+    let handle = spawn_app(&app, Box::new(provider)).await;
+    let mut sub = handle.subscribe();
+    handle.submit("read note.txt").unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if !seen.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first request never started");
+
+    assert!(handle.steer(FOLLOW_UP), "a chat parks while the turn runs");
+    assert!(
+        !handle.steer("/clear"),
+        "a slash command is not a user message"
+    );
+    drop(release_tx);
+
+    let mut completed = 0usize;
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv()).await {
+            Ok(Some(ev)) if is_turn_completed(&ev) => {
+                completed += 1;
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(_) => panic!("timeout waiting for the turn"),
+        }
+    }
+    assert_eq!(completed, 1, "the follow-up stays inside the running turn");
+
+    let reqs = seen.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 2);
+    let uploaded = &reqs[1].messages;
+    let tool_at = uploaded
+        .iter()
+        .rposition(|message| message.role == Role::Tool)
+        .expect("tool result");
+    assert!(
+        matches!(&uploaded[tool_at + 1].content[0], ContentBlock::Text { text } if text == FOLLOW_UP),
+        "the queued chat follows the tool result"
+    );
+    assert_eq!(
+        user_texts(&history(&handle)),
+        vec!["read note.txt", FOLLOW_UP]
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn session_persists_root_meta_and_recent_index() {
     use crate::core::session::{canonical_root, recent_session_id};
 

@@ -1,5 +1,6 @@
 #[cfg(test)]
 use oven_llm::ModelId;
+use std::fmt::Debug;
 use std::sync::Arc;
 
 use oven_llm::{Message, Usage};
@@ -19,6 +20,12 @@ use crate::core::selection::{ModelSelection, Selection};
 use crate::core::view::ToolView;
 
 pub const DEFAULT_MAX_ITERS: usize = 200;
+
+/// Chats typed while a turn is running. The driver takes them once, after
+/// tool results are written, and appends each one behind those results.
+pub trait PendingPrompts: Debug + Send + Sync {
+    fn take(&self) -> Vec<String>;
+}
 
 /// How much one run may spend before it stops on its own.
 ///
@@ -56,6 +63,8 @@ pub struct TurnContext {
     policy: RunPolicy,
     /// Absent when nobody can answer: a subagent, or a headless run.
     requests: Option<Arc<dyn RequestSink>>,
+    /// Absent for a subagent, and for a run nobody is typing into.
+    prompts: Option<Arc<dyn PendingPrompts>>,
 }
 
 impl TurnContext {
@@ -66,6 +75,7 @@ impl TurnContext {
             selection,
             policy: RunPolicy::default(),
             requests: None,
+            prompts: None,
         }
     }
 
@@ -81,6 +91,20 @@ impl TurnContext {
     pub fn with_requests(mut self, requests: Arc<dyn RequestSink>) -> Self {
         self.requests = Some(requests);
         self
+    }
+
+    pub fn with_pending(mut self, prompts: Arc<dyn PendingPrompts>) -> Self {
+        self.prompts = Some(prompts);
+        self
+    }
+
+    /// Chats parked while this turn runs. Empty when nobody is typing, or
+    /// nothing has been parked since the last take.
+    pub fn take_pending(&self) -> Vec<String> {
+        self.prompts
+            .as_ref()
+            .map(|prompts| prompts.take())
+            .unwrap_or_default()
     }
 
     /// Whether anyone can answer what this turn asks of the user.

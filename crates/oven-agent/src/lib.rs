@@ -44,7 +44,9 @@ pub use core::subagent::{
     SubagentSpawner,
 };
 pub use core::todo::{TodoItem, TodoList, TodoStatus};
-pub use core::turn::{DEFAULT_MAX_ITERS, RunPolicy, Step, StepCall, TurnContext, TurnOutput};
+pub use core::turn::{
+    DEFAULT_MAX_ITERS, PendingPrompts, RunPolicy, Step, StepCall, TurnContext, TurnOutput,
+};
 pub use core::view::{ToolCaps, ToolPermission, ToolView};
 pub use runtime::agent::{Agent, RouterHandle, router_handle};
 pub use runtime::compact::{CompactStats, NOTHING_TO_COMPACT};

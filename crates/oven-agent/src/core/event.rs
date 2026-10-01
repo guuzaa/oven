@@ -34,6 +34,11 @@ pub enum TurnEvent {
         index: usize,
         stop: StepStop,
     },
+    /// A chat typed while the turn was running, appended after the tool
+    /// results that are about to be sent.
+    UserAppended {
+        text: String,
+    },
     Completed {
         usage: Usage,
         duration_ms: u64,

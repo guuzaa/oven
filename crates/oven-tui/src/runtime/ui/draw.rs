@@ -23,7 +23,7 @@ impl Ui {
         let regions = layout::split(
             area,
             input_h,
-            queue::height(&self.pending),
+            queue::height(self.pending.len()),
             self.views.height(),
             self.todos.height(),
             overlay_height,
@@ -35,7 +35,7 @@ impl Ui {
             None => self.transcript.draw(f, regions.transcript, &self.state),
         }
         if let Some(queue) = regions.queue {
-            queue::draw(f, queue, &self.pending);
+            queue::draw(f, queue, &self.pending[0].text, self.pending.len() - 1);
         }
         if let Some(agents) = regions.agents {
             self.views.draw_strip(f, agents);

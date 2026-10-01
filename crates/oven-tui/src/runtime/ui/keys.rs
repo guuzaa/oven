@@ -14,8 +14,8 @@ use crate::core::keys::is_mode_toggle;
 use crate::core::paste::{self, Burst};
 use crate::widgets::input::Overlay;
 
-use super::Ui;
 use super::prompt::PromptFlow;
+use super::{Queued, Ui};
 
 /// Lines an arrow key scrolls a subagent's transcript by.
 const VIEWER_SCROLL_LINES: u16 = 1;
@@ -125,7 +125,8 @@ impl Ui {
             }
             KeyResult::Action(Action::Queue(text)) => {
                 if !self.answer_question_with(&text) {
-                    self.pending.push(text);
+                    let steered = self.app.steer(&text);
+                    self.pending.push(Queued { text, steered });
                 }
                 false
             }
@@ -222,8 +223,10 @@ impl Ui {
                 KeyResult::Handled
             }
             EscAction::PopQueue => {
-                if let Some(text) = self.pending.pop() {
-                    self.input.set_text(&text);
+                if let Some(queued) = self.pending.pop()
+                    && (!queued.steered || self.app.claim_steer(&queued.text))
+                {
+                    self.input.set_text(&queued.text);
                 }
                 KeyResult::Handled
             }
@@ -245,7 +248,7 @@ impl Ui {
 
     pub(super) fn esc_action(&self) -> EscAction {
         EscAction::new(
-            self.pending.last().map(String::as_str),
+            self.pending.last().map(|queued| queued.text.as_str()),
             self.views.focused_id().is_some(),
             self.state.busy,
             self.rewinding,

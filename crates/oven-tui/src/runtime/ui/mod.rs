@@ -34,7 +34,7 @@ pub struct Ui {
     /// Esc is ignored until `Rewound` arrives so a second rewind cannot
     /// desync the transcript from the backend.
     rewinding: bool,
-    pending: Vec<String>,
+    pending: Vec<Queued>,
     /// Deadline for the Esc press that confirms a previous one.
     esc_confirm_until: Option<Instant>,
 
@@ -219,10 +219,13 @@ impl Ui {
         if self.state.busy || self.pending.is_empty() {
             return;
         }
-        let texts = std::mem::take(&mut self.pending);
-        let remaining = send_each(texts, |text| {
+        let queued = std::mem::take(&mut self.pending);
+        let remaining = send_each(queued, |queued| {
+            if queued.steered && !self.app.claim_steer(&queued.text) {
+                return true;
+            }
             self.app
-                .submit(text)
+                .submit(&queued.text)
                 .inspect(|input| self.push_submitted(input))
                 .is_ok()
         });
@@ -230,6 +233,16 @@ impl Ui {
             let mut rest = remaining;
             rest.append(&mut self.pending);
             self.pending = rest;
+        }
+    }
+
+    fn drop_appended(&mut self, text: &str) {
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|queued| queued.steered && queued.text == text)
+        {
+            self.pending.remove(index);
         }
     }
 
@@ -263,6 +276,14 @@ impl Ui {
     }
 }
 
+struct Queued {
+    text: String,
+    /// Parked with the running turn, which appends it after the next tool
+    /// results. A slash command or shell line stays local until the driver
+    /// is free.
+    steered: bool,
+}
+
 fn unsent_notice(count: usize) -> String {
     let noun = match count {
         1 => "message",
@@ -271,8 +292,8 @@ fn unsent_notice(count: usize) -> String {
     format!("dropped {count} queued {noun} (never sent)")
 }
 
-fn send_each(texts: Vec<String>, mut send: impl FnMut(&str) -> bool) -> Vec<String> {
-    let mut iter = texts.into_iter();
+fn send_each<T>(items: Vec<T>, mut send: impl FnMut(&T) -> bool) -> Vec<T> {
+    let mut iter = items.into_iter();
     let mut remaining = Vec::new();
     while let Some(text) = iter.next() {
         if !send(&text) {
