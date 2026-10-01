@@ -9,6 +9,9 @@
 # You can also pin the version with OVEN_VERSION:
 #   $env:OVEN_VERSION='v0.1.0'; powershell -ExecutionPolicy Bypass -File install.ps1
 #
+# Downloads are verified against the digest GitHub records for the asset in the
+# release JSON, so a stale or corrupted mirror copy is refused.
+#
 # One-liner (latest release):
 #   irm https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.ps1 | iex
 
@@ -17,11 +20,26 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# PowerShell 5.1 renders a progress bar per transfer, which makes a multi-megabyte
+# download crawl.
+$ProgressPreference = 'SilentlyContinue'
 
 $repo = 'guuzaa/oven'
 $binName = 'oven'
 $installDir = Join-Path $env:USERPROFILE '.oven'
 $binDir = Join-Path $installDir 'bin'
+
+# Base URL of the distribution mirror, tried before github.com and shaped as
+# $mirror/latest, $mirror/tags/<tag> and $mirror/dl/<tag>/oven-<tag>-<target>.zip.
+# Point $env:OVEN_MIRROR somewhere else, or set it to an empty string to skip the
+# mirror.
+$defaultMirror = 'https://oven.paulden.site'
+# An explicitly empty value disables the mirror; only an unset variable falls
+# back to the default.
+$mirror = if ($env:OVEN_MIRROR -ne $null) { $env:OVEN_MIRROR } else { $defaultMirror }
+while ($mirror.EndsWith('/')) {
+    $mirror = $mirror.Substring(0, $mirror.Length - 1)
+}
 
 # GitHub requires TLS 1.2; PowerShell 5.1 does not negotiate it by default.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -35,18 +53,38 @@ if ($procArch -eq 'AMD64' -or $procArchWow -eq 'AMD64') {
     throw "error: no prebuilt binary for $procArch"
 }
 
-# --- Resolve the release tag ----------------------------------------------
+# --- Resolve the release ----------------------------------------------------
+# The release JSON is the source of the tag and of the digest recorded for every
+# asset, so it is fetched once and read throughout.
 $pinnedTag = $Tag
 if (-not $pinnedTag) { $pinnedTag = $env:OVEN_VERSION }
-$resolvedTag = $pinnedTag
-if (-not $resolvedTag) {
-    Write-Host 'Resolving the latest release tag...'
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
-    $resolvedTag = $release.tag_name
+
+# Tags are v-prefixed; accept either form.
+$releasePath = if ($pinnedTag) {
+    if ($pinnedTag -like 'v*') { "tags/$pinnedTag" } else { "tags/v$pinnedTag" }
+} else {
+    'latest'
 }
-if (-not $resolvedTag) {
-    throw 'error: could not determine the release tag; pass it explicitly, e.g. install.ps1 v0.1.0'
+
+$bases = @()
+if ($mirror) { $bases += $mirror }
+$bases += "https://api.github.com/repos/$repo/releases"
+
+$release = $null
+foreach ($base in $bases) {
+    try {
+        Write-Host "Resolving $base/$releasePath ..."
+        $release = Invoke-RestMethod -Uri "$base/$releasePath"
+        break
+    } catch {
+        Write-Host "release lookup failed: $_"
+    }
 }
+if (-not $release) {
+    throw 'error: could not determine the release; pass it explicitly, e.g. install.ps1 v0.1.0'
+}
+
+$resolvedTag = $release.tag_name
 
 # Release tags are v-prefixed; the installed binary reports a bare version.
 $version = $resolvedTag -replace '^v', ''
@@ -99,21 +137,71 @@ $Tag = $resolvedTag
 if ($Tag -notlike 'v*') { $Tag = "v$Tag" }
 
 $asset = "oven-$Tag-$target.zip"
-$url = "https://github.com/$repo/releases/download/$Tag/$asset"
+$downloadBases = @()
+if ($mirror) { $downloadBases += "$mirror/dl/$Tag" }
+$downloadBases += "https://github.com/$repo/releases/download/$Tag"
+
+# GitHub records a sha256 for every uploaded asset, so an install is only as
+# trustworthy as its digest. Refusing without one keeps a stale or tampered
+# archive from reaching the disk.
+function Test-AssetDigest {
+    param([Parameter(Mandatory)][string]$File)
+    $digest = ($release.assets | Where-Object { $_.name -eq $asset } | Select-Object -First 1).digest
+    if (-not $digest) {
+        throw "error: $Tag publishes no digest for $asset; refusing to install it"
+    }
+
+    $expected = ($digest -replace '^sha256:', '').ToLowerInvariant()
+    $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        throw "error: $asset does not match the digest published with $Tag`n  expected: $expected`n  actual:   $actual`n  The mirror may still serve an earlier build of this tag."
+    }
+    Write-Host "Verified $asset"
+}
 
 # --- Download and extract -------------------------------------------------
 $tmp = Join-Path $env:TEMP ("oven-install-" + [guid]::NewGuid().ToString('N'))
 try {
     New-Item -ItemType Directory -Path $tmp | Out-Null
 
-    Write-Host "Downloading $url ..."
-    Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile (Join-Path $tmp $asset)
+    $archive = $null
+    foreach ($base in $downloadBases) {
+        $url = "$base/$asset"
+        try {
+            Write-Host "Downloading $url ..."
+            $downloaded = Join-Path $tmp $asset
+            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $downloaded
+            $stream = [System.IO.File]::OpenRead($downloaded)
+            try {
+                $magic = New-Object byte[] 2
+                $read = $stream.Read($magic, 0, 2)
+            } finally {
+                $stream.Dispose()
+            }
+            if ($read -ne 2 -or $magic[0] -ne 0x50 -or $magic[1] -ne 0x4B) {
+                throw "response is not a zip archive"
+            }
+            $archive = $downloaded
+            break
+        } catch {
+            Write-Host "download failed: $_"
+        }
+    }
+    if (-not $archive) {
+        throw "error: failed to download $asset from any mirror"
+    }
+
+    Test-AssetDigest -File $archive
 
     Write-Host 'Extracting...'
-    Expand-Archive -Path (Join-Path $tmp $asset) -DestinationPath $tmp -Force
+    Expand-Archive -Path $archive -DestinationPath $tmp -Force
 
     New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-    Copy-Item -Path (Join-Path $tmp "oven-$target\$binName.exe") -Destination (Join-Path $binDir "$binName.exe") -Force
+    # Stage inside the temporary directory and move, so an interrupted install
+    # cannot leave a truncated executable behind.
+    $staged = Join-Path $tmp "$binName.exe"
+    Copy-Item -Path (Join-Path $tmp "oven-$target\$binName.exe") -Destination $staged -Force
+    Move-Item -Path $staged -Destination (Join-Path $binDir "$binName.exe") -Force
 
     # --- Add to user PATH --------------------------------------------------
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

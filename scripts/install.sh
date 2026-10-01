@@ -11,6 +11,9 @@
 # You can also pin the version with OVEN_VERSION:
 #   OVEN_VERSION=v0.1.0 ./install.sh
 #
+# Downloads are verified against the digest GitHub records for the asset in the
+# release JSON, so a stale or corrupted mirror copy is refused.
+#
 # One-liner (latest release):
 #   curl -fsSL https://raw.githubusercontent.com/guuzaa/oven/master/scripts/install.sh | bash
 
@@ -20,6 +23,11 @@ REPO="guuzaa/oven"
 BIN_NAME="oven"
 INSTALL_DIR="$HOME/.oven"
 BIN_DIR="$INSTALL_DIR/bin"
+
+# Base URL of the distribution mirror, tried before github.com and shaped as
+# $MIRROR/latest, $MIRROR/tags/<tag> and $MIRROR/dl/<tag>/oven-<tag>-<target>.tar.gz.
+# Point OVEN_MIRROR somewhere else, or set it to an empty string to skip the mirror.
+DEFAULT_MIRROR="https://oven.paulden.site"
 
 # Reads from /dev/tty so the one-liner (`curl ... | bash`) still works.
 prompt_yes_no() {
@@ -32,6 +40,35 @@ prompt_yes_no() {
     y | Y | yes | Yes | YES) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+tag_from_release_json() {
+  grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" \
+    | head -1 \
+    | cut -d '"' -f 4 || true
+}
+
+# Prints the digest GitHub recorded for asset $2 in the release JSON $1. Fields
+# are split one per line first: the digest of an asset follows its own name and
+# nothing else in between.
+digest_for_asset() {
+  tr '{,}' '\n\n\n' < "$1" | awk -v asset="$2" '
+    /"name"/ {
+      name = $0
+      sub(/.*"name"[[:space:]]*:[[:space:]]*"/, "", name)
+      sub(/".*/, "", name)
+      wanted = name == asset
+    }
+    wanted && /"digest"/ {
+      digest = $0
+      sub(/.*"digest"[[:space:]]*:[[:space:]]*"/, "", digest)
+      sub(/".*/, "", digest)
+      sub(/^sha256:/, "", digest)
+      if (digest != "" && digest !~ /[^0-9a-f]/) {
+        print digest
+        exit
+      }
+    }'
 }
 
 # --- Detect OS and architecture -------------------------------------------
@@ -113,20 +150,78 @@ download() {
   return 1
 }
 
-# --- Resolve the release tag ----------------------------------------------
-PINNED_TAG="${1:-${OVEN_VERSION:-}}"
-TAG="$PINNED_TAG"
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+# Prints the SHA256 of $1. Fails on systems carrying neither coreutils nor perl.
+actual_checksum() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "error: sha256sum or shasum is required to verify the download" >&2
+    return 1
+  fi
+}
 
-if [ -z "$TAG" ]; then
-  echo "Resolving the latest release tag..."
-  RELEASE_JSON="$TMP_DIR/latest.json"
-  download "https://api.github.com/repos/$REPO/releases/latest" "$RELEASE_JSON"
-  TAG="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$RELEASE_JSON" \
-    | head -1 \
-    | cut -d '"' -f 4 || true)"
+# GitHub records a sha256 for every uploaded asset, so an install is only as
+# trustworthy as its digest. Refusing without one keeps a stale or tampered
+# archive from reaching the disk.
+verify_download() {
+  local asset="$1" file="$2"
+  local expected actual
+
+  expected="$(digest_for_asset "$RELEASE_JSON" "$asset")"
+  if [ -z "$expected" ]; then
+    echo "error: $TAG publishes no digest for $asset; refusing to install it" >&2
+    exit 1
+  fi
+
+  actual="$(actual_checksum "$file")" || exit 1
+  if [ "$actual" != "$expected" ]; then
+    echo "error: $asset does not match the digest published with $TAG" >&2
+    echo "  expected: $expected" >&2
+    echo "  actual:   $actual" >&2
+    echo "  The mirror may still serve an earlier build of this tag." >&2
+    return 1
+  fi
+  echo "Verified $asset"
+}
+
+# --- Resolve the release tag ------------------------------------------------
+PINNED_TAG="${1:-${OVEN_VERSION:-}}"
+# `${OVEN_MIRROR-DEFAULT}` rather than `${OVEN_MIRROR:-DEFAULT}`: an explicitly
+# empty value keeps the mirror disabled instead of falling back to the default.
+MIRROR="${OVEN_MIRROR-$DEFAULT_MIRROR}"
+while [ "${MIRROR%/}" != "$MIRROR" ]; do
+  MIRROR="${MIRROR%/}"
+done
+
+# The release JSON is the source of the tag and of the digest recorded for every
+# asset, so it is fetched once and read throughout.
+JSON_BASES=()
+if [ -n "$MIRROR" ]; then
+  JSON_BASES+=("$MIRROR")
 fi
+JSON_BASES+=("https://api.github.com/repos/$REPO/releases")
+
+# Tags are v-prefixed; accept either form.
+case "$PINNED_TAG" in
+  "") RELEASE_PATH="latest" ;;
+  v*) RELEASE_PATH="tags/$PINNED_TAG" ;;
+  *) RELEASE_PATH="tags/v$PINNED_TAG" ;;
+esac
+
+TMP_DIR="$(mktemp -d)"
+TMP_BIN=""
+trap 'rm -rf "$TMP_DIR" "$TMP_BIN"' EXIT
+
+RELEASE_JSON="$TMP_DIR/release.json"
+for base in "${JSON_BASES[@]}"; do
+  if download "$base/$RELEASE_PATH" "$RELEASE_JSON"; then
+    break
+  fi
+done
+
+TAG="$(tag_from_release_json "$RELEASE_JSON")"
 if [ -z "$TAG" ]; then
   echo "error: could not determine the release tag; pass it explicitly, e.g. ./install.sh v0.1.0" >&2
   exit 1
@@ -158,13 +253,13 @@ if [ -z "$PINNED_TAG" ]; then
   fi
 fi
 
-# Tags are v-prefixed; accept either form.
-case "$TAG" in
-  v*) ;;
-  *) TAG="v$TAG" ;;
-esac
-
 # --- Download and extract -------------------------------------------------
+DOWNLOAD_BASES=()
+if [ -n "$MIRROR" ]; then
+  DOWNLOAD_BASES+=("$MIRROR/dl/$TAG")
+fi
+DOWNLOAD_BASES+=("https://github.com/$REPO/releases/download/$TAG")
+
 TARGET=""
 for candidate in "${TARGETS[@]}"; do
   # The GNU/Linux release is built against glibc 2.28. Do not select it on
@@ -181,12 +276,16 @@ for candidate in "${TARGETS[@]}"; do
   fi
 
   ASSET="oven-$TAG-$candidate.tar.gz"
-  URL="https://github.com/$REPO/releases/download/$TAG/$ASSET"
-  echo "Trying $URL ..."
-  if download "$URL" "$TMP_DIR/$ASSET"; then
-    TARGET="$candidate"
-    break
-  fi
+  for base in "${DOWNLOAD_BASES[@]}"; do
+    URL="$base/$ASSET"
+    echo "Trying $URL ..."
+    if download "$URL" "$TMP_DIR/$ASSET" \
+      && verify_download "$ASSET" "$TMP_DIR/$ASSET" \
+      && tar -tzf "$TMP_DIR/$ASSET" >/dev/null 2>&1; then
+      TARGET="$candidate"
+      break 2
+    fi
+  done
 done
 
 if [ -z "$TARGET" ]; then
@@ -196,7 +295,11 @@ fi
 
 tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
 mkdir -p "$BIN_DIR"
-install -m 755 "$TMP_DIR/oven-$TARGET/$BIN_NAME" "$BIN_DIR/$BIN_NAME"
+# Stage next to the binary and rename, so an interrupted install cannot leave a
+# truncated executable behind.
+TMP_BIN="$BIN_DIR/.$BIN_NAME.$$"
+install -m 755 "$TMP_DIR/oven-$TARGET/$BIN_NAME" "$TMP_BIN"
+mv -f "$TMP_BIN" "$BIN_DIR/$BIN_NAME"
 
 # --- Add to PATH ----------------------------------------------------------
 case "${SHELL:-}" in
