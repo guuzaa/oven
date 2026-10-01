@@ -66,6 +66,9 @@ Config lives in `.oven.toml` at the project root, or globally at
 `OVEN_MODEL`, `OVEN_API_KEY`, and `OVEN_BASE_URL` override it.
 
 ```toml
+# Provider in use; every vendor is declared under [providers.<slug>].
+active = "deepseek"
+
 tools = ["file_read", "file_write", "bash"]
 
 # Fraction of the model's context window that triggers automatic history
@@ -81,9 +84,6 @@ enabled = true
 max_concurrent = 4
 max_iters = 60
 
-[provider]
-name = "deepseek"
-
 [providers.deepseek]
 model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
@@ -93,6 +93,18 @@ reasoning_effort = "high"
 [providers.xai]
 api_key = "xai-xxx"
 reasoning_effort = "low"
+
+# Only for a model oven does not ship: the wire id is the table key, and the
+# limits are what turn on ctx% display and auto-compaction. Any of those keys
+# can instead sit in the provider table itself, as a default for every model
+# below it that leaves the field unset.
+# [providers.myproxy]
+# base_url = "https://example.com/v1"
+# api_key = "sk-xxx"
+# model = "my-model"
+# context_window = 200000
+# [providers.myproxy.models."my-model"]
+# max_output_tokens = 8192
 ```
 
 - `tools` — capabilities the agent can invoke (`file_read`, `file_write`,
@@ -100,6 +112,17 @@ reasoning_effort = "low"
 - `max_iters` — provider round trips one turn may take before the loop asks
   whether to continue; `[subagents]` tunes delegation (`enabled`,
   `max_concurrent`, and the subagents' own `max_iters`).
+- `active` — the canonical vendor slug in use; aliases are accepted on read
+  (`grok` → `xai`, `kimi` → `moonshot`, `glm` → `zhipu`). A known vendor needs
+  only `api_key`: its endpoint, wire protocol and model catalog come from
+  `oven-llm`. A custom vendor also needs `base_url`, and may set `protocol`
+  (`completions` or `responses`) to override the default.
+- a provider table may also carry `context_window`, `max_output_tokens`,
+  `supports_system_prompt`, `supports_tools`, `supports_streaming` or
+  `supports_vision` directly: they are the defaults every entry under
+  `[providers.<slug>.models]` inherits wherever it leaves a field unset, so a
+  vendor whose models share one window declares it once. A model that sets a
+  field keeps its own value, and the stored entries stay as written.
 - `[mcps]` — MCP servers: stdio (`command`/`args`/`env`) or remote
   streamable HTTP (`url`/`headers`); their tools are mounted as
   `<server>_<tool>`.

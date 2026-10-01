@@ -109,8 +109,7 @@ async fn mcp_connect_failure_propagates() {
 
     let cfg: AppConfig = toml::from_str(
         r#"
-[provider]
-name = "openai"
+active = "openai"
 
 [providers.openai]
 model = "gpt-4o-mini"
@@ -138,8 +137,7 @@ command = "ignored"
 async fn mcp_http_invalid_header_rejected() {
     let cfg: AppConfig = toml::from_str(
         r#"
-[provider]
-name = "openai"
+active = "openai"
 
 [providers.openai]
 model = "gpt-4o-mini"

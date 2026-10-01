@@ -875,7 +875,7 @@ async fn setup_slash_persists_and_registers_provider() {
     assert!(out.contains(cfg_path.to_str().unwrap()));
 
     let saved = std::fs::read_to_string(&cfg_path).unwrap();
-    assert!(saved.contains("name = \"deepseek\""));
+    assert!(saved.contains("active = \"deepseek\""));
     assert!(!saved.contains("kind"));
     assert!(saved.contains("model = \"deepseek-v4-flash\""));
     assert!(saved.contains("base_url = \"https://api.deepseek.com\""));
@@ -936,7 +936,8 @@ async fn model_slash_persists_model_and_effort() {
     assert!(out.contains(cfg_path.to_str().unwrap()));
 
     let saved = std::fs::read_to_string(&cfg_path).unwrap();
-    assert!(saved.contains("name = \"mock\""));
+    assert!(saved.contains("active = \"mock\""));
+    assert!(saved.contains("[providers.mock]"));
     assert!(saved.contains("model = \"gpt-4o-turbo\""));
     assert!(saved.contains("reasoning_effort = \"high\""));
     handle.shutdown().await;

@@ -3,15 +3,19 @@ use oven_llm::{
     ModelCapabilities, ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Router,
 };
 
-use crate::core::config::{AppConfig, ModelParams, ProviderConfig};
+use crate::core::config::{AppConfig, ModelMetadata, ProviderConfig};
 use crate::core::error::AppError;
 
 /// `ModelInfo` for a user-declared model. Capabilities default to supported
 /// and unknown limits stay zeroed: validation must not reject a model for
 /// metadata the user chose not (or was unable) to spell out.
-fn declared_model_info(params: &ModelParams, provider_name: &ProviderName) -> ModelInfo {
+fn declared_model_info(
+    id: &str,
+    params: &ModelMetadata,
+    provider_name: &ProviderName,
+) -> ModelInfo {
     ModelInfo {
-        id: params.id.clone(),
+        id: id.to_owned(),
         provider: provider_name.clone(),
         context_window: params.context_window.unwrap_or_default(),
         max_output_tokens: params.max_output_tokens.unwrap_or_default(),
@@ -103,8 +107,8 @@ pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider
         Some(kind) => ProviderBuilder::new(kind),
         None => ProviderBuilder::provider(),
     };
-    for params in &provider.models {
-        builder = builder.add_model(declared_model_info(params, &provider_name));
+    for (id, params) in provider.effective_models() {
+        builder = builder.add_model(declared_model_info(id, &params, &provider_name));
     }
     builder = builder.provider_name(provider_name).api_key(api_key);
     if let Some(u) = &base_url {
@@ -116,8 +120,18 @@ pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::ModelParams;
+    use std::collections::BTreeMap;
+
     use oven_llm::{ModelId, RouterError};
+
+    fn declared<const N: usize>(
+        entries: [(&str, ModelMetadata); N],
+    ) -> BTreeMap<String, ModelMetadata> {
+        entries
+            .into_iter()
+            .map(|(id, metadata)| (id.to_owned(), metadata))
+            .collect()
+    }
 
     #[test]
     fn interactive_router_is_empty_without_key() {
@@ -139,11 +153,13 @@ mod tests {
             base_url: Some("https://example.com/v1".into()),
             api_key: Some("k".into()),
             model: Some("my-model".into()),
-            models: vec![ModelParams {
-                id: "my-model".into(),
-                context_window: Some(200_000),
-                ..Default::default()
-            }],
+            models: declared([(
+                "my-model",
+                ModelMetadata {
+                    context_window: Some(200_000),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
         let client = build_client(&provider).unwrap();
@@ -158,11 +174,13 @@ mod tests {
         let provider = ProviderConfig {
             name: Some("deepseek".into()),
             api_key: Some("k".into()),
-            models: vec![ModelParams {
-                id: "deepseek-v4-flash".into(),
-                context_window: Some(42_000),
-                ..Default::default()
-            }],
+            models: declared([(
+                "deepseek-v4-flash",
+                ModelMetadata {
+                    context_window: Some(42_000),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
         let client = build_client(&provider).unwrap();
@@ -179,11 +197,13 @@ mod tests {
             base_url: Some("https://api.stepfun.com/v1".into()),
             api_key: Some("k".into()),
             model: Some("step-5-preview".into()),
-            models: vec![ModelParams {
-                id: "step-5-preview".into(),
-                context_window: Some(1_000_000),
-                ..Default::default()
-            }],
+            models: declared([(
+                "step-5-preview",
+                ModelMetadata {
+                    context_window: Some(1_000_000),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
         let client = build_client(&provider).unwrap();
@@ -204,12 +224,14 @@ mod tests {
             base_url: Some("https://example.com/v1".into()),
             api_key: Some("k".into()),
             model: Some("my-model".into()),
-            models: vec![ModelParams {
-                id: "my-model".into(),
-                max_output_tokens: Some(8192),
-                supports_vision: Some(false),
-                ..Default::default()
-            }],
+            models: declared([(
+                "my-model",
+                ModelMetadata {
+                    max_output_tokens: Some(8192),
+                    supports_vision: Some(false),
+                    ..Default::default()
+                },
+            )]),
             ..Default::default()
         };
         let client = build_client(&provider).unwrap();
@@ -219,5 +241,33 @@ mod tests {
         assert_eq!(info.max_output_tokens, 8192);
         assert!(!info.capabilities.supports_vision);
         assert!(info.capabilities.supports_tools);
+    }
+
+    #[test]
+    fn provider_metadata_reaches_the_built_client() {
+        let config: AppConfig = toml::from_str(
+            r#"
+active = "myproxy"
+
+[providers.myproxy]
+base_url = "https://example.com/v1"
+api_key = "k"
+model = "shared"
+context_window = 200000
+supports_vision = false
+
+[providers.myproxy.models.shared]
+max_output_tokens = 4096
+"#,
+        )
+        .unwrap();
+        let provider = config.active_provider_config().unwrap();
+        let client = build_client(provider).unwrap();
+        let info = client
+            .resolve_model(&ModelId::from("shared"))
+            .expect("declared model should resolve");
+        assert_eq!(info.context_window, 200_000);
+        assert_eq!(info.max_output_tokens, 4096);
+        assert!(!info.capabilities.supports_vision);
     }
 }

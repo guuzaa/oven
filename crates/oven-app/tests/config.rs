@@ -11,8 +11,9 @@ fn merge_overrides_non_default_fields() {
 request_timeout_secs = 30
 max_retries = 5
 
-[provider]
-name = "deepseek"
+active = "deepseek"
+
+[providers.deepseek]
 model = "claude-3-5-haiku-20241022"
 base_url = "https://example.com/v1/"
 "#,
@@ -43,8 +44,9 @@ fn merge_overrides_reasoning_effort() {
     let mut base = AppConfig::default();
     let overlay = toml_lite(
         r#"
-[provider]
-name = "deepseek"
+active = "deepseek"
+
+[providers.deepseek]
 reasoning_effort = "medium"
 "#,
     );
@@ -56,7 +58,7 @@ reasoning_effort = "medium"
 }
 
 #[test]
-fn load_missing_files_returns_default() {
+fn missing_files_leave_defaults_untouched() {
     let tmp = tempdir::TempDir::new("oven-load").unwrap();
     let missing = tmp.path().join("nope.toml");
     let cfg = AppConfig::load(None, Some(&missing)).unwrap();
@@ -69,12 +71,12 @@ fn load_user_then_project_merges_with_project_precedence() {
     let user = tmp.path().join("user.toml");
     write(
         &user,
-        "max_retries = 1\n\n[provider]\nname = \"deepseek\"\nmodel = \"from-user\"\n",
+        "max_retries = 1\n\nactive = \"deepseek\"\n\n[providers.deepseek]\nmodel = \"from-user\"\n",
     );
     let project = tmp.path().join("project.toml");
     write(
         &project,
-        "max_retries = 9\n\n[provider]\nname = \"deepseek\"\nbase_url = \"from-project\"\n",
+        "max_retries = 9\n\nactive = \"deepseek\"\n\n[providers.deepseek]\nbase_url = \"from-project\"\n",
     );
 
     let cfg = AppConfig::load(Some(&user), Some(&project)).unwrap();
@@ -95,26 +97,43 @@ fn load_unions_provider_maps_and_keeps_user_keys() {
     let user = tmp.path().join("user.toml");
     write(
         &user,
-        "[provider]\nname = \"deepseek\"\nmodel = \"from-user\"\n\n[providers.deepseek]\napi_key = \"sk-ds\"\n[providers.xai]\napi_key = \"xai-key\"\n",
+        "active = \"deepseek\"\nmodel = \"from-user\"\n\n[providers.deepseek]\napi_key = \"sk-ds\"\n[providers.xai]\napi_key = \"xai-key\"\n",
     );
     let project = tmp.path().join("project.toml");
     write(
         &project,
-        "[provider]\nname = \"deepseek\"\nmodel = \"from-project\"\n\n[providers.xai]\nmodel = \"grok-4.6\"\n",
+        "active = \"xai\"\n\n[providers.xai]\nmodel = \"grok-4.6\"\n",
     );
 
     let cfg = AppConfig::load(Some(&user), Some(&project)).unwrap();
+    assert_eq!(cfg.active_provider.name, "xai");
     assert_eq!(
         cfg.active_provider_config().unwrap().model.as_deref(),
-        Some("from-project")
-    );
-    assert_eq!(
-        cfg.active_provider_config().unwrap().api_key.as_deref(),
-        Some("sk-ds")
+        Some("grok-4.6")
     );
     assert_eq!(cfg.providers["deepseek"].api_key.as_deref(), Some("sk-ds"));
     assert_eq!(cfg.providers["xai"].api_key.as_deref(), Some("xai-key"));
-    assert_eq!(cfg.providers["xai"].model.as_deref(), Some("grok-4.6"));
+}
+
+#[test]
+fn project_model_metadata_merges_field_by_field() {
+    let tmp = tempdir::TempDir::new("oven-load-model-merge").unwrap();
+    let user = tmp.path().join("user.toml");
+    write(
+        &user,
+        "active = \"myproxy\"\n\n[providers.myproxy]\napi_key = \"k\"\n\n[providers.myproxy.models.\"m\"]\ncontext_window = 200000\nmax_output_tokens = 8192\nsupports_vision = false\n",
+    );
+    let project = tmp.path().join("project.toml");
+    write(
+        &project,
+        "[providers.myproxy.models.\"m\"]\ncontext_window = 100000\n",
+    );
+
+    let cfg = AppConfig::load(Some(&user), Some(&project)).unwrap();
+    let params = &cfg.active_provider_config().unwrap().models["m"];
+    assert_eq!(params.context_window, Some(100_000));
+    assert_eq!(params.max_output_tokens, Some(8192));
+    assert_eq!(params.supports_vision, Some(false));
 }
 
 fn write(path: &Path, content: &str) {

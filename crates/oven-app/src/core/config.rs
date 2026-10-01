@@ -1,16 +1,23 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt;
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use oven_agent::DEFAULT_MAX_ITERS;
 use oven_llm::{ModelId, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as _, MapAccess, Visitor};
+use serde::ser::SerializeMap as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 pub mod mcp;
 
 pub use mcp::McpServerConfig;
+
+const DEFAULT_SUBAGENT_CONCURRENT: usize = 4;
+const DEFAULT_SUBAGENT_ITERS: usize = 60;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -28,8 +35,13 @@ pub enum ConfigError {
 
 /// LLM provider configuration. All fields optional so users can override just
 /// what they need; environment variables can supply the rest at runtime.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+///
+/// The canonical slug is the `[providers.<slug>]` table key, so `name` is only
+/// ever set in memory (and accepted on read for hand-written files) and never
+/// written back.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderConfig {
+    /// Canonical slug; also the `[providers.<slug>]` table key.
     pub name: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
@@ -37,27 +49,184 @@ pub struct ProviderConfig {
     pub protocol: Option<ProviderKind>,
     pub api_key: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// Per-model metadata declared with `[[providers.<slug>.models]]`.
-    /// Overrides the static catalog when the ids collide, and is the only
-    /// source of window sizes for custom vendors.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<ModelParams>,
+    /// Metadata every entry under `models` inherits where it leaves a field
+    /// unset, so a vendor whose models share one window declares it once. It
+    /// sits directly in the provider table.
+    pub metadata: ModelMetadata,
+    /// Per-model metadata declared in `[providers.<slug>.models.<wire-id>]`
+    /// tables. Overrides the static catalog when the ids collide, and is the
+    /// only source of window sizes for custom vendors.
+    pub models: BTreeMap<String, ModelMetadata>,
 }
 
-/// One `[[providers.<slug>.models]]` entry, kept as an array so the wire id
-/// sits in a plain value instead of a quoted table key. Unset limits stay
-/// unknown (skipped by request validation) and unset capabilities default to
-/// supported, so declaring a model keeps the passthrough behaviour of
-/// leaving it undeclared.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct ModelParams {
-    pub id: String,
+/// A provider table without the metadata keys, used to fill the rest: TOML
+/// cannot hand a [`serde::flatten`]ed field its keys — that needs
+/// `deserialize_any`, which buffers the table as one value — so the table is
+/// read once for the plain fields and once for the metadata keys, which
+/// [`ModelMetadata`] picks out while ignoring the rest.
+#[derive(Deserialize)]
+struct ProviderRest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    protocol: Option<ProviderKind>,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, deserialize_with = "models_from_toml")]
+    models: BTreeMap<String, ModelMetadata>,
+}
+
+/// Entries keyed by wire id; legacy array-of-tables files carry the id inside
+/// the entry instead.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModelsField {
+    Map(BTreeMap<String, ModelMetadata>),
+    Array(Vec<ModelEntry>),
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
+    #[serde(flatten)]
+    fields: ModelMetadata,
+}
+
+/// One model's metadata, kept id-less so declaring it is a quoted table key
+/// (`[providers.x.models."gpt-4.1"]`) rather than a repeated `id` field. The
+/// provider table's own flat metadata keys share it. Unset limits stay unknown
+/// (skipped by request validation) and unset capabilities default to supported,
+/// so declaring a model keeps the passthrough behaviour of leaving it
+/// undeclared.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelMetadata {
     pub context_window: Option<u32>,
     pub max_output_tokens: Option<u32>,
     pub supports_system_prompt: Option<bool>,
     pub supports_tools: Option<bool>,
     pub supports_streaming: Option<bool>,
     pub supports_vision: Option<bool>,
+}
+
+impl ModelMetadata {
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn merge_fields(&mut self, overlay: &Self) {
+        if overlay.context_window.is_some() {
+            self.context_window = overlay.context_window;
+        }
+        if overlay.max_output_tokens.is_some() {
+            self.max_output_tokens = overlay.max_output_tokens;
+        }
+        if overlay.supports_system_prompt.is_some() {
+            self.supports_system_prompt = overlay.supports_system_prompt;
+        }
+        if overlay.supports_tools.is_some() {
+            self.supports_tools = overlay.supports_tools;
+        }
+        if overlay.supports_streaming.is_some() {
+            self.supports_streaming = overlay.supports_streaming;
+        }
+        if overlay.supports_vision.is_some() {
+            self.supports_vision = overlay.supports_vision;
+        }
+    }
+
+    fn fill_missing(&mut self, src: &Self) {
+        self.context_window = self.context_window.or(src.context_window);
+        self.max_output_tokens = self.max_output_tokens.or(src.max_output_tokens);
+        self.supports_system_prompt = self.supports_system_prompt.or(src.supports_system_prompt);
+        self.supports_tools = self.supports_tools.or(src.supports_tools);
+        self.supports_streaming = self.supports_streaming.or(src.supports_streaming);
+        self.supports_vision = self.supports_vision.or(src.supports_vision);
+    }
+}
+
+fn models_from_toml<'de, D: Deserializer<'de>>(
+    de: D,
+) -> Result<BTreeMap<String, ModelMetadata>, D::Error> {
+    Ok(match ModelsField::deserialize(de)? {
+        ModelsField::Map(entries) => entries,
+        ModelsField::Array(entries) => entries
+            .into_iter()
+            .map(|entry| (entry.id, entry.fields))
+            .collect(),
+    })
+}
+
+impl<'de> Deserialize<'de> for ProviderConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ProviderTable)
+    }
+}
+
+struct ProviderTable;
+
+impl<'de> Visitor<'de> for ProviderTable {
+    type Value = ProviderConfig;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a provider table")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut table = toml::Table::new();
+        while let Some(key) = map.next_key::<String>()? {
+            table.insert(key, map.next_value()?);
+        }
+        let value = toml::Value::Table(table);
+        let rest: ProviderRest = value.clone().try_into().map_err(A::Error::custom)?;
+        let metadata: ModelMetadata = value.try_into().map_err(A::Error::custom)?;
+        Ok(ProviderConfig {
+            name: rest.name,
+            model: rest.model,
+            base_url: rest.base_url,
+            protocol: rest.protocol,
+            api_key: rest.api_key,
+            reasoning_effort: rest.reasoning_effort,
+            metadata,
+            models: rest.models,
+        })
+    }
+}
+
+/// Writes only what the file stores: `name` is the table key, the metadata
+/// keys sit flat in the provider table, and each model's id is its own table
+/// key.
+impl Serialize for ProviderConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("model", &self.model)?;
+        map.serialize_entry("base_url", &self.base_url)?;
+        map.serialize_entry("protocol", &self.protocol)?;
+        map.serialize_entry("api_key", &self.api_key)?;
+        map.serialize_entry("reasoning_effort", &self.reasoning_effort)?;
+        map.serialize_entry("context_window", &self.metadata.context_window)?;
+        map.serialize_entry("max_output_tokens", &self.metadata.max_output_tokens)?;
+        map.serialize_entry(
+            "supports_system_prompt",
+            &self.metadata.supports_system_prompt,
+        )?;
+        map.serialize_entry("supports_tools", &self.metadata.supports_tools)?;
+        map.serialize_entry("supports_streaming", &self.metadata.supports_streaming)?;
+        map.serialize_entry("supports_vision", &self.metadata.supports_vision)?;
+        if !self.models.is_empty() {
+            let models = ModelsRef {
+                models: &self.models,
+                inheriting: !self.metadata.is_empty(),
+            };
+            map.serialize_entry("models", &models)?;
+        }
+        map.end()
+    }
 }
 
 impl ProviderConfig {
@@ -67,36 +236,24 @@ impl ProviderConfig {
     /// Canonicalize `name` aliases and store `model` as a wire id (no vendor).
     pub fn normalize(&mut self) {
         if let Some(name) = self.name.take() {
-            let trimmed = name.trim();
-            if trimmed.is_empty() {
-                self.name = None;
-            } else {
-                self.name = Some(canonical_vendor(trimmed));
-            }
+            self.name = canonical_name(&name);
         }
         if let Some(model) = self.model.take() {
             self.model = Some(wire_model(&model));
         }
-        for model in &mut self.models {
-            model.id = wire_model(&model.id);
+        for (id, metadata) in mem::take(&mut self.models) {
+            self.models.entry(wire_model(&id)).or_insert(metadata);
         }
-        self.models.sort_by(|a, b| a.id.cmp(&b.id));
-        self.models.dedup_by(|dropped, kept| dropped.id == kept.id);
         if self.protocol.is_some() && !self.is_custom_vendor() {
             self.protocol = None;
         }
     }
 
     pub fn is_custom_vendor(&self) -> bool {
-        match self
-            .name
+        self.name
             .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            Some(name) => matches!(ProviderName::from(name), ProviderName::Custom(_)),
-            None => true,
-        }
+            .and_then(canonical_name)
+            .is_none_or(|name| matches!(ProviderName::from(name.as_str()), ProviderName::Custom(_)))
     }
 
     /// The effective model slug: `model` config wins, then the `OVEN_MODEL` env
@@ -114,21 +271,15 @@ impl ProviderConfig {
         qualify_model(Self::DEFAULT_MODEL, Some("deepseek"))
     }
 
+    /// Endpoint preset for a known vendor; `oven-llm` owns the one table.
     pub fn suggested_base_url(name: &str) -> Option<&'static str> {
-        match canonical_vendor(name).as_str() {
-            "openai" => Some("https://api.openai.com/v1"),
-            "deepseek" => Some("https://api.deepseek.com"),
-            "moonshot" => Some("https://api.moonshot.cn/v1"),
-            "zhipu" => Some("https://open.bigmodel.cn/api/paas/v4"),
-            "xai" => Some("https://api.x.ai/v1"),
-            _ => None,
-        }
+        ProviderName::from(name).base_url()
     }
 
     pub fn suggested_model(name: &str) -> Option<&'static str> {
         match canonical_vendor(name).as_str() {
             "openai" => Some("gpt-5.6-terra"),
-            "deepseek" => Some("deepseek-v4-flash"),
+            "deepseek" => Some(Self::DEFAULT_MODEL),
             "moonshot" => Some("kimi-k3"),
             "zhipu" => Some("glm-5.3"),
             "xai" => Some("grok-4.6"),
@@ -139,26 +290,21 @@ impl ProviderConfig {
     /// Fill `base_url` and `model` from [`name`](Self::name) presets.
     pub fn apply_name_presets(&mut self) {
         self.normalize();
-        let Some(name) = self.name.clone() else {
+        let Some(name) = self.name.as_deref() else {
             return;
         };
-        if let Some(url) = Self::suggested_base_url(&name) {
+        if let Some(url) = Self::suggested_base_url(name) {
             self.base_url = Some(url.to_string());
         }
-        if let Some(model) = Self::suggested_model(&name) {
+        if let Some(model) = Self::suggested_model(name) {
             self.model = Some(model.to_string());
         }
     }
 
     /// Provider from the canonical `name`, or the vendor segment of the model slug.
     pub fn effective_provider_name(&self) -> ProviderName {
-        if let Some(name) = self
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return ProviderName::from(name);
+        if let Some(name) = self.name.as_deref().and_then(canonical_name) {
+            return ProviderName::from(name.as_str());
         }
         match ModelId::from(self.effective_model().as_str()).vendor() {
             Some(vendor) => ProviderName::from(vendor),
@@ -197,19 +343,15 @@ impl ProviderConfig {
         self.effective_api_key().is_empty()
     }
 
-    /// Canonical vendor slug from `name`, or the vendor segment of `model`.
-    pub fn slug(&self) -> Option<String> {
-        if let Some(n) = self
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(canonical_vendor(n));
-        }
-        self.model
-            .as_deref()
-            .and_then(|raw| ModelId::from(raw).vendor().map(canonical_vendor))
+    /// Each declared model with [`metadata`](Self::metadata) filled in, keyed
+    /// by wire id. The stored entries stay as written, so saving never bakes an
+    /// inherited value into a model that only meant to follow the provider.
+    pub fn effective_models(&self) -> impl Iterator<Item = (&str, ModelMetadata)> + '_ {
+        self.models.iter().map(|(id, metadata)| {
+            let mut params = metadata.clone();
+            params.fill_missing(&self.metadata);
+            (id.as_str(), params)
+        })
     }
 
     /// Overlay `Some` fields from `overlay` onto `self`.
@@ -232,17 +374,17 @@ impl ProviderConfig {
         if let Some(e) = overlay.reasoning_effort {
             self.reasoning_effort = Some(e);
         }
-        for entry in &overlay.models {
-            if let Some(existing) = self.models.iter_mut().find(|m| m.id == entry.id) {
-                *existing = entry.clone();
-            } else {
-                self.models.push(entry.clone());
-            }
+        self.metadata.merge_fields(&overlay.metadata);
+        for (id, metadata) in &overlay.models {
+            self.models
+                .entry(id.clone())
+                .or_default()
+                .merge_fields(metadata);
         }
         self.normalize();
     }
 
-    /// Copy unset fields from `src`.
+    /// Copy unset fields from `src`, model by model.
     pub fn fill_missing(&mut self, src: &ProviderConfig) {
         if self.name.is_none() {
             self.name.clone_from(&src.name);
@@ -259,21 +401,36 @@ impl ProviderConfig {
         if self.api_key.is_none() {
             self.api_key.clone_from(&src.api_key);
         }
-        if self.models.is_empty() {
-            self.models = src.models.clone();
+        if self.reasoning_effort.is_none() {
+            self.reasoning_effort = src.reasoning_effort;
+        }
+        self.metadata.fill_missing(&src.metadata);
+        for (id, metadata) in &src.models {
+            self.models
+                .entry(id.clone())
+                .or_default()
+                .fill_missing(metadata);
         }
         self.normalize();
     }
 }
 
+/// `name` trimmed, or `None` when it is unset or blank.
+fn non_blank(name: &str) -> Option<&str> {
+    let name = name.trim();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Canonical vendor slug for a configured `name`.
+fn canonical_name(name: &str) -> Option<String> {
+    non_blank(name).map(canonical_vendor)
+}
+
 fn qualify_model(raw: &str, name: Option<&str>) -> String {
     let id = ModelId::from(raw);
-    if let Some(vendor) = id.vendor() {
-        id.qualify(vendor).to_string()
-    } else if let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) {
-        id.qualify(name).to_string()
-    } else {
-        raw.to_string()
+    match id.vendor().or_else(|| name.and_then(non_blank)) {
+        Some(vendor) => id.qualify(vendor).to_string(),
+        None => raw.to_string(),
     }
 }
 
@@ -286,32 +443,27 @@ fn wire_model(raw: &str) -> String {
 }
 
 /// Per-process behavioural knobs that are provider-agnostic.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
-    #[serde(rename = "provider")]
+    /// Active provider, written as the root `active` key. The slug is also the
+    /// `[providers.<slug>]` table key, so the saved file never repeats it.
     pub active_provider: ProviderSelection,
     /// Saved vendors keyed by canonical slug (`deepseek`, `xai`, …).
     pub providers: BTreeMap<String, ProviderConfig>,
-    #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
-    #[serde(default = "default_max_retries")]
     pub max_retries: u32,
-    #[serde(default = "default_base_backoff_ms")]
     pub base_backoff_ms: u64,
     /// Fraction of the model's context window that triggers automatic
     /// history compaction after a turn completes. `0` disables it. Has no
     /// effect when the active model's window size is unknown.
-    #[serde(default = "default_compact_threshold")]
     pub compact_threshold: f64,
     /// Provider round trips one turn may take before the loop asks whether to
     /// keep going. Bounds what a single user request can spend.
-    #[serde(default = "default_max_iters")]
     pub max_iters: usize,
     /// Tools to mount, by name (`file_read`, `file_write`, `bash`). Empty
     /// means the built-in default set.
     pub tools: Vec<String>,
     /// Delegation to subagents.
-    #[serde(default)]
     pub subagents: SubagentConfig,
     /// MCP server declarations. Key is the local id used to refer to a server.
     pub mcps: BTreeMap<String, McpServerConfig>,
@@ -324,6 +476,9 @@ pub struct ProviderSelection {
 
 #[derive(Debug, Deserialize)]
 struct RawAppConfig {
+    #[serde(default)]
+    active: Option<String>,
+    /// Legacy `[provider]` block, whose `name` used to carry the selection.
     #[serde(default)]
     provider: Option<ProviderConfig>,
     #[serde(default)]
@@ -346,27 +501,72 @@ struct RawAppConfig {
     mcps: BTreeMap<String, McpServerConfig>,
 }
 
+/// Model declarations, written as a map keyed by wire id. An entry that sets
+/// nothing of its own is dropped when the provider declares metadata to
+/// inherit; without such metadata it is what makes the id known.
+struct ModelsRef<'a> {
+    models: &'a BTreeMap<String, ModelMetadata>,
+    inheriting: bool,
+}
+
+impl Serialize for ModelsRef<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        for (id, metadata) in self.models {
+            if !self.inheriting || !metadata.is_empty() {
+                map.serialize_entry(id, metadata)?;
+            }
+        }
+        map.end()
+    }
+}
+
+/// The canonical on-disk shape: `active` at the root and providers keyed by
+/// slug. `active_provider` is skipped: the `active` key already carries it.
+impl Serialize for AppConfig {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("active", &self.active_provider.name)?;
+        map.serialize_entry("request_timeout_secs", &self.request_timeout_secs)?;
+        map.serialize_entry("max_retries", &self.max_retries)?;
+        map.serialize_entry("base_backoff_ms", &self.base_backoff_ms)?;
+        map.serialize_entry("compact_threshold", &self.compact_threshold)?;
+        map.serialize_entry("max_iters", &self.max_iters)?;
+        if !self.tools.is_empty() {
+            map.serialize_entry("tools", &self.tools)?;
+        }
+        if self.subagents != SubagentConfig::default() {
+            map.serialize_entry("subagents", &self.subagents)?;
+        }
+        if !self.mcps.is_empty() {
+            map.serialize_entry("mcps", &self.mcps)?;
+        }
+        if !self.providers.is_empty() {
+            map.serialize_entry("providers", &self.providers)?;
+        }
+        map.end()
+    }
+}
+
 /// How subagents are allowed to run. The tools a subagent may use come from
 /// its role, not from here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SubagentConfig {
     /// Mount the delegation tools. Disabled hides `task` and `task_output`.
-    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Subagents allowed to run at once. Further spawns wait for a slot.
-    #[serde(default = "default_subagent_concurrent")]
     pub max_concurrent: usize,
     /// Provider round trips one subagent may take.
-    #[serde(default = "default_subagent_iters")]
     pub max_iters: usize,
 }
 
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
-            enabled: default_true(),
-            max_concurrent: default_subagent_concurrent(),
-            max_iters: default_subagent_iters(),
+            enabled: true,
+            max_concurrent: DEFAULT_SUBAGENT_CONCURRENT,
+            max_iters: DEFAULT_SUBAGENT_ITERS,
         }
     }
 }
@@ -376,8 +576,6 @@ impl<'de> Deserialize<'de> for AppConfig {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-
         let raw = RawAppConfig::deserialize(deserializer)?;
         let mut config = Self {
             active_provider: ProviderSelection::default(),
@@ -397,7 +595,6 @@ impl<'de> Deserialize<'de> for AppConfig {
             let name = provider
                 .name
                 .clone()
-                .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| canonical_vendor(&key));
             provider.name = Some(name.clone());
             config
@@ -407,23 +604,30 @@ impl<'de> Deserialize<'de> for AppConfig {
                 .merge_fields(&provider);
         }
 
-        if let Some(mut provider) = raw.provider {
+        // Legacy `[provider]` block: its `name` was the selection and its
+        // other fields an override on top of the matching saved vendor.
+        let legacy = raw.provider.map(|mut provider| {
             provider.normalize();
-            let name = provider
-                .name
-                .clone()
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| Error::custom("[provider].name is required"))?;
-            let name = canonical_vendor(&name);
+            let name = provider.name.clone().unwrap_or_default();
             provider.name = Some(name.clone());
             config
                 .providers
                 .entry(name.clone())
                 .or_default()
                 .merge_fields(&provider);
-            config.active_provider.name = name;
-        } else if config.providers.len() == 1 {
-            config.active_provider.name = config.providers.keys().next().cloned().unwrap();
+            name
+        });
+
+        let active = raw
+            .active
+            .map(|name| canonical_vendor(&name))
+            .or(legacy)
+            .or_else(|| {
+                (config.providers.len() == 1)
+                    .then(|| config.providers.keys().next().cloned().unwrap())
+            });
+        if let Some(active) = active.filter(|name| config.providers.contains_key(name)) {
+            config.active_provider.name = active;
         }
 
         Ok(config)
@@ -445,15 +649,6 @@ fn default_compact_threshold() -> f64 {
 fn default_max_iters() -> usize {
     DEFAULT_MAX_ITERS
 }
-fn default_true() -> bool {
-    true
-}
-fn default_subagent_concurrent() -> usize {
-    4
-}
-fn default_subagent_iters() -> usize {
-    60
-}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -461,15 +656,13 @@ impl Default for AppConfig {
             active_provider: ProviderSelection {
                 name: "deepseek".into(),
             },
-            providers: [(
+            providers: BTreeMap::from([(
                 "deepseek".into(),
                 ProviderConfig {
                     name: Some("deepseek".into()),
                     ..Default::default()
                 },
-            )]
-            .into_iter()
-            .collect(),
+            )]),
             request_timeout_secs: default_request_timeout_secs(),
             max_retries: default_max_retries(),
             base_backoff_ms: default_base_backoff_ms(),
@@ -524,9 +717,7 @@ impl AppConfig {
                 self.tools.push(name);
             }
         }
-        for (id, cfg) in overlay.mcps {
-            self.mcps.insert(id, cfg);
-        }
+        self.mcps.extend(overlay.mcps);
     }
 
     pub fn active_provider_config(&self) -> Option<&ProviderConfig> {
@@ -585,15 +776,10 @@ impl AppConfig {
         project_config: Option<&Path>,
     ) -> Result<Self, ConfigError> {
         let mut cfg = AppConfig::default();
-        if let Some(p) = user_config
-            && let Some(loaded) = Self::load_file(p)?
-        {
-            cfg.merge(loaded);
-        }
-        if let Some(p) = project_config
-            && let Some(loaded) = Self::load_file(p)?
-        {
-            cfg.merge(loaded);
+        for path in [user_config, project_config].into_iter().flatten() {
+            if let Some(loaded) = Self::load_file(path)? {
+                cfg.merge(loaded);
+            }
         }
         Ok(cfg)
     }
@@ -643,29 +829,22 @@ impl AppConfig {
         Ok(path)
     }
 
-    /// Update one Provider and rewrite the file in the canonical format.
-    ///
-    /// # Panics
-    /// Panics if reading back the file does not contain the provider that was
-    /// just written into it.
+    /// Update one provider and rewrite the file in the canonical format. The
+    /// provider is the overlay's `name`, or the active one when unset.
     pub fn save_provider_at(path: &Path, overlay: &ProviderConfig) -> Result<(), ConfigError> {
         let mut config = Self::load_file(path)?.unwrap_or_default();
         let name = overlay
             .name
             .as_deref()
-            .map(canonical_vendor)
-            .filter(|name| !name.is_empty())
+            .and_then(canonical_name)
             .or_else(|| {
                 (!config.active_provider.name.is_empty())
                     .then(|| config.active_provider.name.clone())
             })
-            .ok_or_else(|| ConfigError::InvalidProvider("[provider].name is required".into()))?;
-        config
-            .providers
-            .entry(name.clone())
-            .or_default()
-            .merge_fields(overlay);
-        config.providers.get_mut(&name).unwrap().name = Some(name.clone());
+            .ok_or_else(|| ConfigError::InvalidProvider("provider name is required".into()))?;
+        let provider = config.providers.entry(name.clone()).or_default();
+        provider.merge_fields(overlay);
+        provider.name = Some(name.clone());
         config.active_provider.name = name;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -692,13 +871,13 @@ mod tests {
         AppConfig::ensure_user_config_at(&path).unwrap();
         assert!(path.exists());
         let cfg = AppConfig::load(None, Some(&path)).unwrap();
-        let expected: AppConfig =
-            toml::from_str(include_str!("../../config.example.toml")).unwrap();
+        let mut expected = AppConfig::default();
+        expected.merge(toml::from_str(DEFAULT_USER_CONFIG).unwrap());
         assert_eq!(cfg, expected);
 
         std::fs::write(
             &path,
-            "[provider]\nname = \"deepseek\"\nmodel = \"edited\"\n",
+            "active = \"deepseek\"\n[providers.deepseek]\nmodel = \"edited\"\n",
         )
         .unwrap();
         AppConfig::ensure_user_config_at(&path).unwrap();
@@ -710,14 +889,13 @@ mod tests {
     }
 
     #[test]
-    fn model_params_parse_merge_and_roundtrip() {
+    fn model_metadata_parses_merges_and_roundtrips() {
         let cfg: AppConfig = toml::from_str(
-            "[provider]\nname = \"myproxy\"\n\n[[providers.myproxy.models]]\nid = \"my-model\"\ncontext_window = 200000\nmax_output_tokens = 8192\nsupports_vision = false\n",
+            "active = \"myproxy\"\n\n[providers.myproxy]\napi_key = \"k\"\n\n[providers.myproxy.models.\"my-model\"]\ncontext_window = 200000\nmax_output_tokens = 8192\nsupports_vision = false\n",
         )
         .unwrap();
         let provider = cfg.active_provider_config().unwrap();
-        let params = &provider.models[0];
-        assert_eq!(params.id, "my-model");
+        let params = &provider.models["my-model"];
         assert_eq!(params.context_window, Some(200_000));
         assert_eq!(params.max_output_tokens, Some(8192));
         assert_eq!(params.supports_vision, Some(false));
@@ -725,13 +903,135 @@ mod tests {
 
         let mut base = ProviderConfig::default();
         base.merge_fields(provider);
-        assert_eq!(base.models[0].id, "my-model");
-        assert_eq!(base.models[0].context_window, Some(200_000));
+        assert_eq!(base.models["my-model"].context_window, Some(200_000));
 
         let text = toml::to_string_pretty(&cfg).unwrap();
-        assert!(text.contains("[[providers.myproxy.models]]"));
+        assert!(text.contains("[providers.myproxy.models.my-model]"));
+        assert!(!text.contains("id ="));
         let reparsed: AppConfig = toml::from_str(&text).unwrap();
         assert_eq!(reparsed, cfg);
+    }
+
+    #[test]
+    fn legacy_model_entries_still_parse() {
+        let cfg: AppConfig = toml::from_str(
+            "active = \"myproxy\"\n\n[[providers.myproxy.models]]\nid = \"my-model\"\ncontext_window = 200000\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.active_provider_config().unwrap().models["my-model"].context_window,
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn legacy_provider_block_selects_and_overrides() {
+        let cfg: AppConfig = toml::from_str(
+            "[provider]\nname = \"grok\"\nreasoning_effort = \"high\"\n\n[providers.xai]\napi_key = \"xai-key\"\nmodel = \"grok-4.6\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.active_provider.name, "xai");
+        let provider = cfg.active_provider_config().unwrap();
+        assert_eq!(provider.name.as_deref(), Some("xai"));
+        assert_eq!(provider.api_key.as_deref(), Some("xai-key"));
+        assert_eq!(provider.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(provider.model.as_deref(), Some("grok-4.6"));
+    }
+
+    #[test]
+    fn provider_metadata_fills_every_model_that_leaves_a_field_unset() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+active = "myproxy"
+
+[providers.myproxy]
+api_key = "k"
+context_window = 200000
+supports_vision = false
+
+[providers.myproxy.models."a"]
+max_output_tokens = 4096
+
+[providers.myproxy.models."b"]
+max_output_tokens = 8192
+supports_vision = true
+"#,
+        )
+        .unwrap();
+        let provider = cfg.active_provider_config().unwrap();
+        let models: Vec<_> = provider.effective_models().collect();
+        assert_eq!(models[0].0, "a");
+        assert_eq!(models[0].1.context_window, Some(200_000));
+        assert_eq!(models[0].1.supports_vision, Some(false));
+        assert_eq!(models[0].1.max_output_tokens, Some(4096));
+        assert_eq!(models[1].0, "b");
+        assert_eq!(models[1].1.context_window, Some(200_000));
+        assert_eq!(models[1].1.max_output_tokens, Some(8192));
+        assert_eq!(models[1].1.supports_vision, Some(true));
+        // The stored entries stay as written, so a save never bakes the
+        // inherited values in.
+        assert_eq!(provider.models["a"].context_window, None);
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("context_window = 200000"), "{text}");
+        assert!(text.contains("[providers.myproxy.models.a]"), "{text}");
+        assert_eq!(toml::from_str::<AppConfig>(&text).unwrap(), cfg);
+    }
+
+    #[test]
+    fn a_model_that_only_inherits_is_dropped_on_save() {
+        let cfg: AppConfig = toml::from_str(
+            "active = \"p\"\n\n[providers.p]\ncontext_window = 200000\n\n[providers.p.models.\"m\"]\n",
+        )
+        .unwrap();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!text.contains("models."), "{text}");
+        let reloaded: AppConfig = toml::from_str(&text).unwrap();
+        assert!(reloaded.providers["p"].models.is_empty());
+        assert_eq!(
+            reloaded.providers["p"].metadata.context_window,
+            Some(200_000)
+        );
+    }
+
+    #[test]
+    fn an_id_only_model_survives_when_no_metadata_is_declared() {
+        let cfg: AppConfig =
+            toml::from_str("active = \"p\"\n\n[providers.p.models.\"m\"]\n").unwrap();
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[providers.p.models.m]"), "{text}");
+        let reloaded: AppConfig = toml::from_str(&text).unwrap();
+        assert!(reloaded.providers["p"].models.contains_key("m"));
+    }
+
+    #[test]
+    fn provider_metadata_merges_across_files_field_by_field() {
+        let base: AppConfig = toml::from_str(
+            "active = \"p\"\n\n[providers.p]\ncontext_window = 200000\nmax_output_tokens = 8192\n",
+        )
+        .unwrap();
+        let overlay: AppConfig =
+            toml::from_str("[providers.p]\ncontext_window = 100000\n").unwrap();
+        let mut merged = AppConfig::default();
+        merged.merge(base);
+        merged.merge(overlay);
+        let metadata = &merged.providers["p"].metadata;
+        assert_eq!(metadata.context_window, Some(100_000));
+        assert_eq!(metadata.max_output_tokens, Some(8192));
+    }
+
+    #[test]
+    fn model_entry_overrides_provider_metadata() {
+        let cfg: AppConfig = toml::from_str(
+            "active = \"p\"\n\n[providers.p]\ncontext_window = 200000\nmax_output_tokens = 8192\n\n[providers.p.models.\"m\"]\ncontext_window = 1000000\n",
+        )
+        .unwrap();
+        let models: Vec<_> = cfg
+            .active_provider_config()
+            .unwrap()
+            .effective_models()
+            .collect();
+        assert_eq!(models[0].1.context_window, Some(1_000_000));
+        assert_eq!(models[0].1.max_output_tokens, Some(8192));
     }
 
     #[test]
@@ -749,7 +1049,7 @@ mod tests {
         let models: Vec<_> = merged.providers["p"]
             .models
             .iter()
-            .map(|m| (m.id.as_str(), m.context_window))
+            .map(|(id, metadata)| (id.as_str(), metadata.context_window))
             .collect();
         assert_eq!(models, vec![("a", Some(2)), ("b", Some(3))]);
     }
@@ -923,15 +1223,15 @@ mod tests {
         assert!(cfg.active_provider_config().unwrap().api_key.is_none());
         let text = std::fs::read_to_string(&path).unwrap();
         let retries_at = text.find("max_retries").expect("root max_retries");
-        let table_at = text.find("[provider]").expect("[provider]");
+        let table_at = text.find("[providers.proxy]").expect("[providers.proxy]");
         assert!(
-            retries_at < table_at,
-            "root keys must stay above [provider]: {text}"
+            text.starts_with("active = \"proxy\"") && retries_at < table_at,
+            "root keys must stay above [providers.proxy]: {text}"
         );
     }
 
     #[test]
-    fn save_provider_at_repairs_keys_swallowed_by_provider_table() {
+    fn save_provider_at_rewrites_legacy_provider_block() {
         let tmp = tempdir::TempDir::new("oven-save-provider-repair").unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(&path, "[provider]\nname = \"deepseek\"\nmodel = \"old\"\n").unwrap();
@@ -958,7 +1258,10 @@ mod tests {
             cfg.active_provider_config().unwrap().name.as_deref(),
             Some("moonshot")
         );
-        assert!(text.find("max_retries").unwrap() < text.find("[provider]").unwrap());
+        assert_eq!(cfg.providers["deepseek"].model.as_deref(), Some("old"));
+        assert!(text.contains("active = \"moonshot\""));
+        assert!(!text.contains("[provider]\n"));
+        assert!(text.find("max_retries").unwrap() < text.find("[providers.").unwrap());
     }
 
     #[test]

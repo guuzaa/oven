@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- A provider table can carry `context_window`, `max_output_tokens` and the `supports_*` flags directly, as defaults every `[providers.<slug>.models."<wire-id>"]` entry inherits wherever it leaves a field unset. A model that sets a field keeps its own value, an entry that only inherits is dropped when the file is rewritten, and the stored entries stay as written, so saving never bakes an inherited value into a model that only meant to follow the provider
+
+### Changed
+- **Breaking:** `[provider]` is gone: the active vendor is the root `active = "<slug>"`, and a provider is named by its `[providers.<slug>]` table key instead of a repeated `name`. Model metadata moves back to keyed tables — `[providers.<slug>.models."<wire-id>"]` — keeping the id out of the body, so ids with dots (`gpt-4.1`) just need quoting. Files still in the old shape keep loading and are rewritten on the next save, and a declared model now merges field by field across the user and project files instead of the newer entry replacing the older one outright
+- `ProviderConfig::suggested_base_url` reads `oven_llm::ProviderName::base_url` instead of keeping its own copy of the same five endpoints
+
 ## [0.0.9] - 2026-09-30
 
 ### Added
