@@ -30,8 +30,9 @@ pub struct AppState {
     pub history_thinking_ms: Vec<Option<u64>>,
     pub todos: TodoList,
     pub last_turn_usage: Usage,
-    /// Prompt-side tokens of the last response in the current turn; approximates
-    /// the current context size. Zero until a turn completes.
+    /// Tokens of the last response in the current turn that the context holds:
+    /// its input plus the output that joins the history. Zero until a turn
+    /// completes.
     pub context_tokens: u32,
     /// Context window of the active model, when known.
     pub context_window: Option<u32>,
@@ -81,15 +82,12 @@ impl AppState {
     }
 }
 
-/// Prompt-side tokens (input + cache reads) of the last response in the
-/// current turn.
+/// Tokens the last response in the current turn leaves in the context: the
+/// input it sent (cache reads included) plus the output it added to the
+/// history.
 pub(crate) fn context_tokens(agent: &Agent) -> u32 {
-    context_tokens_of(&agent.last_turn_usage())
-}
-
-/// Prompt-side tokens (input + cache reads) a usage report accounts for.
-pub fn context_tokens_of(usage: &Usage) -> u32 {
-    usage.input_tokens.saturating_add(usage.cache_read_tokens)
+    let usage = agent.last_turn_usage();
+    usage.input_tokens.saturating_add(usage.output_tokens)
 }
 
 /// Context window of `model`, when the router knows it.

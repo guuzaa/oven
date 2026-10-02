@@ -56,7 +56,7 @@ impl Agent {
             "{SUMMARY_PREAMBLE}\n\n{summary}"
         )));
         let stats = CompactStats {
-            before_tokens: usage.input_tokens.saturating_add(usage.cache_read_tokens),
+            before_tokens: usage.input_tokens,
             after_tokens: usage.output_tokens,
         };
         tracing::info!(
@@ -146,7 +146,7 @@ mod tests {
         agent.push_history(Message::assistant_text("done"));
 
         let stats = agent.compact().await.unwrap();
-        assert_eq!(stats.before_tokens, 100_000);
+        assert_eq!(stats.before_tokens, 90_000, "cache reads are input tokens");
         assert_eq!(stats.after_tokens, 500);
 
         let history: Vec<_> = agent.history().collect();

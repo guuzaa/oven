@@ -29,7 +29,7 @@ pub use core::input::Input;
 pub use core::mention::FileMentions;
 pub use core::provider::{provider_catalog, provider_models, verify};
 pub use core::session;
-pub use core::state::{AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens_of};
+pub use core::state::{AppPhase, AppState, HistoryChangeReason, SessionState};
 pub use core::{complete, config};
 pub use oven_agent::{
     AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AnswerTool,

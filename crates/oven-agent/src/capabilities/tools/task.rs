@@ -333,10 +333,7 @@ fn tally(steps: u32, tool_calls: u32) -> String {
 }
 
 fn tokens(usage: Usage) -> String {
-    let total = usage
-        .input_tokens
-        .saturating_add(usage.output_tokens)
-        .saturating_add(usage.cache_read_tokens);
+    let total = usage.input_tokens.saturating_add(usage.output_tokens);
     format!("{total} tokens")
 }
 
@@ -650,5 +647,12 @@ mod tests {
         let view = TaskTool::view_input(&json!({"description": "find it", "role": "explore"}));
         assert_eq!(view.summary, "Agent explore: find it");
         assert_eq!(TaskTool::view_input(&json!({})).summary, TaskTool::NAME);
+    }
+
+    #[test]
+    fn tokens_are_the_reported_input_and_output() {
+        let mut reported = usage(1000, 40);
+        reported.cache_read_tokens = 500;
+        assert_eq!(tokens(reported), "1040 tokens");
     }
 }

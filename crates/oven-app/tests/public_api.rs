@@ -6,7 +6,7 @@
 use oven_app::{
     App, AppBuilder, AppError, AppEvent, AppEventKind, AppId, AppPhase, AppState, CompactionEvent,
     FileMentions, HistoryChangeReason, Input, LocalShell, McpServerConfig, SessionState,
-    ShellEvent, ShellInput, SubagentEvent, ToolRegistry, context_tokens_of, display_shell_line,
+    ShellEvent, ShellInput, SubagentEvent, ToolRegistry, display_shell_line,
 };
 
 use oven_app::complete;

@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use crossterm::event::KeyEvent;
 use oven_app::{
     AgentEvent, AgentMode, AppEvent, AppEventKind, AppState, CompactionEvent, TurnEvent,
-    context_tokens_of,
 };
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
@@ -208,8 +207,9 @@ impl StatusBar {
         }
     }
 
-    /// Context occupancy plus the share of the prompt the KV cache served; a
-    /// running compaction reports itself instead.
+    /// Context occupancy — the last response's input plus the output it left in
+    /// the history — and the share of the prompt the KV cache served; a running
+    /// compaction reports itself instead.
     fn context_segment(&self, gray: Style) -> Option<Segment> {
         if self.compacting {
             return Some((COMPACTING.to_string(), theme::accent()));
@@ -223,7 +223,7 @@ impl StatusBar {
     }
 
     /// Share of the context window in use, or — when the window is unknown,
-    /// as with hand-configured providers — the prompt size itself.
+    /// as with hand-configured providers — the context size itself.
     fn context_label(&self) -> Option<String> {
         if let Some(pct) = context_percent(self.context_tokens, self.context_window) {
             return Some(format!("ctx {pct}%"));
@@ -243,7 +243,7 @@ impl Component for StatusBar {
                 AgentEvent::Turn(TurnEvent::Completed { usage, .. })
                 | AgentEvent::Usage { usage } => {
                     self.usage = *usage;
-                    self.context_tokens = context_tokens_of(usage);
+                    self.context_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
                 }
                 _ => {}
             },
@@ -336,13 +336,12 @@ fn context_percent(tokens: u32, window: Option<u32>) -> Option<u32> {
     (tokens > 0).then(|| u32::try_from(u64::from(tokens) * 100 / u64::from(window)).unwrap_or(0))
 }
 
-/// Share of the last turn's prompt-side tokens (`input + cache reads`, the
-/// accounting the app itself uses) that the cache answered; `None` while no
-/// prompt-side token has been recorded.
+/// Share of the last turn's input tokens that the cache answered — the reads
+/// are already counted among the input tokens; `None` while no input token has
+/// been recorded.
 fn cache_hit_percent(u: &Usage) -> Option<u32> {
-    let prompt = u.input_tokens.saturating_add(u.cache_read_tokens);
-    (prompt > 0).then(|| {
-        u32::try_from(u64::from(u.cache_read_tokens) * 100 / u64::from(prompt)).unwrap_or(0)
+    (u.input_tokens > 0).then(|| {
+        u32::try_from(u64::from(u.cache_read_tokens) * 100 / u64::from(u.input_tokens)).unwrap_or(0)
     })
 }
 
@@ -368,10 +367,10 @@ mod tests {
 
     const MODEL: &str = "deepseek-chat";
     const ROOT: &str = "rust/oven";
-    const CTX: &str = "ctx 42% · cache 39%";
+    const CTX: &str = "ctx 42% · cache 65%";
     /// The same bar with no context window known: the count stands in for the
     /// share.
-    const COUNTED: &str = "ctx 2.0k · cache 39%";
+    const COUNTED: &str = "ctx 2.0k · cache 65%";
     const SHORT_REPLY: &str = "current model: gpt-4o";
 
     fn usage() -> Usage {
@@ -463,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_window_falls_back_to_the_prompt_size() {
+    fn an_unknown_window_falls_back_to_the_context_size() {
         let bar = bar().with_context(1989, None);
         let rendered = row(80, &bar, &State::new());
         assert!(
@@ -477,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_hit_is_the_share_of_prompt_tokens_read_from_cache() {
+    fn cache_hit_is_the_share_of_input_tokens_read_from_cache() {
         assert_eq!(cache_hit_percent(&Usage::default()), None);
         let hit = |input: u32, cache: u32| Usage {
             input_tokens: input,
@@ -486,9 +485,9 @@ mod tests {
             reasoning_tokens: 0,
         };
         assert_eq!(cache_hit_percent(&hit(100, 0)), Some(0));
-        assert_eq!(cache_hit_percent(&hit(100, 50)), Some(33));
-        assert_eq!(cache_hit_percent(&hit(50, 50)), Some(50));
-        assert_eq!(cache_hit_percent(&hit(0, 50)), Some(100));
+        assert_eq!(cache_hit_percent(&hit(100, 50)), Some(50));
+        assert_eq!(cache_hit_percent(&hit(100, 100)), Some(100));
+        assert_eq!(cache_hit_percent(&hit(0, 50)), None);
     }
 
     #[test]
@@ -547,7 +546,7 @@ mod tests {
         assert_eq!(
             bar.context_label().as_deref(),
             Some("ctx 1%"),
-            "prompt-side tokens are the input and the cache reads (1989 of 100k)"
+            "the response's input and its own output are the context (1256 of 100k)"
         );
 
         bar.sync(&AppState {
