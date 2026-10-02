@@ -1998,6 +1998,7 @@ dependencies = [
  "oven-agent",
  "oven-host",
  "oven-llm",
+ "oven-mem",
  "rmcp",
  "serde",
  "serde_json",

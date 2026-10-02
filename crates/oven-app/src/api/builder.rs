@@ -9,6 +9,7 @@ use oven_agent::{
 #[cfg(test)]
 use oven_llm::Provider;
 use oven_llm::{Role, Router};
+use oven_mem::MemoryStore;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
@@ -42,6 +43,30 @@ and line numbers you found.";
 const GENERAL_GUIDANCE: &str = "You have the full tool set. Nobody can answer questions while you \
 work, so make the reasonable assumption, state it in your answer, and carry on.";
 
+#[cfg(test)]
+#[path = "builder_test.rs"]
+mod builder_test;
+
+fn append_catalog(mut system: String, catalog: &str) -> String {
+    if !system.ends_with('\n') {
+        system.push('\n');
+    }
+    system.push('\n');
+    system.push_str(catalog);
+    system
+}
+
+#[cfg(test)]
+impl AppBuilder {
+    fn system_without_memory(&self) -> String {
+        oven_agent::system_prompt(
+            &self.root,
+            &self.instructions,
+            self.skills.merged_system_prompt(),
+        )
+    }
+}
+
 fn role_system(system: &str, role: &str, guidance: &str) -> String {
     format!("{system}\n\n{}", subagent_preamble(role, guidance))
 }
@@ -53,6 +78,7 @@ pub struct AppBuilder {
     tools: ToolRegistry,
     mcps: McpRegistry,
     instructions: Vec<InstructionDoc>,
+    memory: Option<Arc<MemoryStore>>,
     mcp_connector: Arc<dyn McpConnector>,
 }
 
@@ -66,6 +92,7 @@ impl AppBuilder {
             tools: ToolRegistry::from_config(root, &[]),
             mcps: McpRegistry::new(),
             instructions: Vec::new(),
+            memory: None,
             mcp_connector: Arc::new(DefaultMcpConnector),
         }
     }
@@ -133,6 +160,13 @@ impl AppBuilder {
             .load_from_dirs(&dirs::skill_dirs(&self.root))
             .await;
         self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root).await;
+        self.memory = if config.memory.enabled {
+            Some(Arc::new(
+                MemoryStore::load(dirs::memory_roots(&self.root)).await,
+            ))
+        } else {
+            None
+        };
 
         for (id, server) in &config.mcps {
             let _ = self.mcps.register(id.clone(), server.clone());
@@ -204,11 +238,14 @@ impl AppBuilder {
             .map_err(AppError::Mcp)?;
         base.extend(mcp_tools.into_iter().map(|t| Arc::new(t) as Arc<dyn Tool>));
 
-        let system = oven_agent::system_prompt(
+        let mut system = oven_agent::system_prompt(
             &self.root,
             &self.instructions,
             self.skills.merged_system_prompt(),
         );
+        if let Some(catalog) = self.memory.as_ref().and_then(|store| store.catalog()) {
+            system = append_catalog(system, &catalog);
+        }
         let events = EventBus::new();
         let (wake, wake_rx) = mpsc::unbounded_channel();
         // `wake` goes to the supervisor, which keeps the channel open; the
