@@ -446,7 +446,7 @@ async fn handle_exposes_slash_commands() {
     assert_eq!(
         names,
         [
-            "clear", "compact", "exit", "model", "setup", "plan", "agents"
+            "clear", "compact", "exit", "model", "setup", "plan", "agents", "memory"
         ]
     );
     assert!(commands.iter().all(|(_, d)| !d.is_empty()));
