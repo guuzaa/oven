@@ -2042,6 +2042,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oven-mem"
+version = "0.0.9"
+dependencies = [
+ "oven-host",
+ "serde",
+ "serde_yaml",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "oven-tui"
 version = "0.0.9"
 dependencies = [

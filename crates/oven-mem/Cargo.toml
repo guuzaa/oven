@@ -6,5 +6,7 @@ edition = { workspace = true }
 rust-version = { workspace = true }
 
 [dependencies]
-thiserror = { workspace = true }
+oven-host = { workspace = true }
 serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
