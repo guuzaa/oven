@@ -61,6 +61,15 @@ pub enum MemoryScope {
     User,
 }
 
+impl MemoryScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::User => "user",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Memory {
     pub id: MemoryId,

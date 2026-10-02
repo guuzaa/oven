@@ -1,7 +1,9 @@
+mod catalog;
 mod error;
 mod format;
 mod model;
 
+pub use catalog::{IndexEntry, render_catalog};
 pub use error::MemoryError;
 pub use format::{parse, render};
 pub use model::{
