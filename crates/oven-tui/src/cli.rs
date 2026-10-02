@@ -37,7 +37,7 @@ impl Cli {
     /// The session id to use: an explicit `--session` wins; otherwise
     /// `--continue` resumes the most recent session recorded for the
     /// workspace root.
-    fn resolve_session_id(&self) -> Option<String> {
+    async fn resolve_session_id(&self) -> Option<String> {
         if let Some(id) = self.session.as_deref() {
             return Some(id.to_string());
         }
@@ -45,7 +45,7 @@ impl Cli {
             return None;
         }
         let dir = dirs::sessions_dir()?;
-        match session::recent_session_id(&dir, &self.dir) {
+        match session::recent_session_id(&dir, &self.dir).await {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("warning: resolving recent session: {e}");
@@ -54,9 +54,9 @@ impl Cli {
         }
     }
 
-    fn builder(&self) -> AppBuilder {
+    async fn builder(&self) -> AppBuilder {
         let mut builder = App::builder(&self.dir);
-        if let Err(e) = builder.load_config() {
+        if let Err(e) = builder.load_config().await {
             eprintln!("warning: loading config: {e}");
         }
         builder
@@ -76,7 +76,7 @@ impl Cli {
     }
 
     async fn interactive(&self, session: Option<&str>) -> ExitCode {
-        let builder = self.builder();
+        let builder = self.builder().await;
         let app = match builder.open_session(session).await {
             Ok(app) => app,
             Err(err) => {
@@ -98,23 +98,28 @@ impl Cli {
 
     pub async fn run(&self) -> ExitCode {
         log::init();
-        if let Some(command) = &self.command {
-            return commands::run(command, &self.dir).await;
-        }
-        match self.query.as_deref() {
-            Some(prompt) => {
-                tracing::info!(root = %self.dir.display(), headless = true, "oven starting");
-                self.headless(prompt.trim()).await
+        let code = if let Some(command) = &self.command {
+            commands::run(command, &self.dir).await
+        } else {
+            match self.query.as_deref() {
+                Some(prompt) => {
+                    tracing::info!(root = %self.dir.display(), headless = true, "oven starting");
+                    self.headless(prompt.trim()).await
+                }
+                None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
+                    let session = self.resolve_session_id().await;
+                    tracing::info!(root = %self.dir.display(), headless = false, "oven starting");
+                    self.interactive(session.as_deref()).await
+                }
+                None => {
+                    eprintln!(
+                        "usage: oven [-C DIR] [--session ID] [--continue] [-Q|--query QUERY]"
+                    );
+                    ExitCode::from(2)
+                }
             }
-            None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
-                let session = self.resolve_session_id();
-                tracing::info!(root = %self.dir.display(), headless = false, "oven starting");
-                self.interactive(session.as_deref()).await
-            }
-            None => {
-                eprintln!("usage: oven [-C DIR] [--session ID] [--continue] [-Q|--query QUERY]");
-                ExitCode::from(2)
-            }
-        }
+        };
+        log::shutdown();
+        code
     }
 }

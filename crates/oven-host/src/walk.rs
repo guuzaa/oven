@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
 use thiserror::Error;
+use tokio::sync::mpsc;
+
+const WALK_CHANNEL_CAPACITY: usize = 64;
 
 #[derive(Debug)]
 pub struct WalkEntry {
@@ -60,6 +63,32 @@ pub fn walk_all(root: impl AsRef<Path>) -> impl Iterator<Item = Result<WalkEntry
     walk::<All>(root)
 }
 
+pub fn walk_dir_stream(root: impl Into<PathBuf>) -> mpsc::Receiver<Result<WalkEntry, WalkError>> {
+    let root = root.into();
+    stream_walk(move || walk_dir(root))
+}
+
+pub fn walk_all_stream(root: impl Into<PathBuf>) -> mpsc::Receiver<Result<WalkEntry, WalkError>> {
+    let root = root.into();
+    stream_walk(move || walk_all(root))
+}
+
+fn stream_walk<F, I>(walk: F) -> mpsc::Receiver<Result<WalkEntry, WalkError>>
+where
+    F: FnOnce() -> I + Send + 'static,
+    I: Iterator<Item = Result<WalkEntry, WalkError>>,
+{
+    let (tx, rx) = mpsc::channel(WALK_CHANNEL_CAPACITY);
+    tokio::task::spawn_blocking(move || {
+        for entry in walk() {
+            if tx.blocking_send(entry).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
 fn walk<M: WalkMode>(root: impl AsRef<Path>) -> impl Iterator<Item = Result<WalkEntry, WalkError>> {
     let root = root.as_ref();
     let skip_dot_dirs = !root.join(".gitignore").is_file();
@@ -107,7 +136,7 @@ fn walk<M: WalkMode>(root: impl AsRef<Path>) -> impl Iterator<Item = Result<Walk
 
 #[cfg(test)]
 mod tests {
-    use super::{walk_all, walk_dir};
+    use super::{walk_all, walk_all_stream, walk_dir, walk_dir_stream};
     use std::fs;
     use std::path::Path;
 
@@ -195,5 +224,44 @@ mod tests {
         write(tmp.path(), ".hidden/x.txt", "x");
         let root = tmp.path();
         assert_eq!(rel_paths(walk_all(root), root), ["", "keep.txt"]);
+    }
+
+    async fn stream_rel_paths(root: &Path) -> Vec<String> {
+        let mut entries = walk_dir_stream(root);
+        let mut paths = Vec::new();
+        while let Some(entry) = entries.recv().await {
+            let path = entry.unwrap().path().strip_prefix(root).unwrap().to_owned();
+            paths.push(path.to_string_lossy().replace('\\', "/"));
+        }
+        paths.sort();
+        paths
+    }
+
+    #[tokio::test]
+    async fn stream_yields_the_same_entries_as_walk_dir() {
+        let tmp = tmp_dir();
+        write(tmp.path(), "keep.txt", "x");
+        write(tmp.path(), "src/nested/deep.rs", "x");
+        write(tmp.path(), ".hidden/x.txt", "x");
+        let root = tmp.path();
+        assert_eq!(stream_rel_paths(root).await, files(root));
+        let mut streamed = Vec::new();
+        let mut entries = walk_all_stream(root);
+        while let Some(entry) = entries.recv().await {
+            let path = entry.unwrap().path().strip_prefix(root).unwrap().to_owned();
+            streamed.push(path.to_string_lossy().replace('\\', "/"));
+        }
+        streamed.sort();
+        assert_eq!(streamed, rel_paths(walk_all(root), root));
+    }
+
+    #[tokio::test]
+    async fn stream_ends_after_the_last_entry() {
+        let tmp = tmp_dir();
+        write(tmp.path(), "keep.txt", "x");
+        let mut entries = walk_dir_stream(tmp.path());
+        assert!(entries.recv().await.is_some());
+        assert!(entries.recv().await.is_none());
+        assert!(entries.recv().await.is_none());
     }
 }

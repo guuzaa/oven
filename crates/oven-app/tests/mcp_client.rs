@@ -124,6 +124,7 @@ command = "ignored"
     let tmp = tempdir::TempDir::new("mcp-fail").unwrap();
     let app = AppBuilder::new(tmp.path())
         .with_config(cfg)
+        .await
         .with_mcp_connector(Arc::new(connector));
 
     let err = match app.open().await {
@@ -153,7 +154,7 @@ url = "http://127.0.0.1:1/mcp"
     )
     .unwrap();
     let tmp = tempdir::TempDir::new("mcp-http-bad-header").unwrap();
-    let app = AppBuilder::new(tmp.path()).with_config(cfg);
+    let app = AppBuilder::new(tmp.path()).with_config(cfg).await;
     let err = match app.open().await {
         Ok(_) => panic!("spawn should fail for an invalid http header"),
         Err(e) => e,

@@ -9,7 +9,7 @@ use crate::core::turn::TurnContext;
 use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
 use crate::core::error::AgentError;
 use crate::core::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
-use oven_host::walk_dir;
+use oven_host::walk_dir_stream;
 
 pub struct GrepTool {
     root: PathBuf,
@@ -109,20 +109,25 @@ impl Tool for GrepTool {
             .filter(|s| !s.is_empty())
             .unwrap_or(".");
         let base = resolve_within(&self.root, base_str)?;
-        if !base.exists() {
-            return Err(AgentError::from(format!(
-                "grep: not found: {}",
-                base.display()
-            )));
-        }
+        let meta = match tokio::fs::metadata(&base).await {
+            Ok(meta) => meta,
+            Err(_) => {
+                return Err(AgentError::from(format!(
+                    "grep: not found: {}",
+                    base.display()
+                )));
+            }
+        };
         let limit = parse_limit(args, self.max_results);
 
         let mut out = Vec::new();
-        if base.is_file() {
+        if meta.is_file() {
             let rel = base.strip_prefix(&self.root).unwrap_or(&base);
-            self.grep_file(&base, rel, &re, include.as_ref(), &mut out, limit)?;
+            self.grep_file(&base, rel, &re, include.as_ref(), &mut out, limit)
+                .await?;
         } else {
-            for entry in walk_dir(&base) {
+            let mut entries = walk_dir_stream(&base);
+            while let Some(entry) = entries.recv().await {
                 if out.len() >= limit {
                     break;
                 }
@@ -133,7 +138,8 @@ impl Tool for GrepTool {
                 if entry.is_file() {
                     let full = entry.path();
                     let rel = full.strip_prefix(&self.root).unwrap_or(full);
-                    self.grep_file(full, rel, &re, include.as_ref(), &mut out, limit)?;
+                    self.grep_file(full, rel, &re, include.as_ref(), &mut out, limit)
+                        .await?;
                 }
             }
         }
@@ -150,7 +156,7 @@ impl Tool for GrepTool {
 }
 
 impl GrepTool {
-    fn grep_file(
+    async fn grep_file(
         &self,
         full: &Path,
         rel: &Path,
@@ -165,7 +171,8 @@ impl GrepTool {
         {
             return Ok(());
         }
-        let bytes = std::fs::read(full)
+        let bytes = tokio::fs::read(full)
+            .await
             .map_err(|e| AgentError::from(format!("grep: read {}: {}", full.display(), e)))?;
         if bytes.contains(&0) {
             return Ok(());
@@ -299,6 +306,17 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("invalid regex"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn missing_path_reports_not_found() {
+        let tmp = tmp_dir();
+        let grep = GrepTool::new(tmp.path());
+        let err = grep
+            .run(&json!({"pattern": "x", "path": "missing"}), &turn())
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("not found"), "{}", err.message);
     }
 
     #[tokio::test]

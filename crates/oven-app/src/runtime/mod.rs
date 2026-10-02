@@ -114,7 +114,7 @@ impl Runtime {
     async fn handle(&mut self, input: Input) {
         tracing::debug!(kind = input.kind(), "runtime input");
         match input {
-            Input::Rewind => self.rewind(),
+            Input::Rewind => self.rewind().await,
             Input::Shell(command) if command.is_empty() => self.reject_empty_shell(),
             Input::Shell(command) => self.run_shell(command).await,
             Input::Slash { name, args } => self.run_slash(&name, &args).await,
@@ -122,7 +122,7 @@ impl Runtime {
         }
     }
 
-    pub(crate) fn persist_turn(&mut self) {
+    pub(crate) async fn persist_turn(&mut self) {
         let errors = match self.session.as_ref() {
             None => return,
             Some(store) => {
@@ -131,12 +131,13 @@ impl Runtime {
                 if rev == self.persisted_rev {
                     let pending = self.agent.history_records_from(self.persisted_messages);
                     if !pending.is_empty() {
-                        if let Err(error) = store.current().append_records(&pending) {
+                        let session = store.current();
+                        if let Err(error) = session.append_records(&pending).await {
                             errors.push(error.to_string());
                         } else {
                             store.mark_content(true);
                             self.persisted_messages = self.agent.history().len();
-                            if let Err(error) = record_recent_path(store) {
+                            if let Err(error) = record_recent_path(store).await {
                                 errors.push(error.to_string());
                             }
                         }
@@ -146,7 +147,7 @@ impl Runtime {
                     self.persisted_rev = rev;
                 }
                 if should_persist_todos(self.agent.todos(), self.agent.todo_written_this_turn())
-                    && let Err(error) = persist_todo_snapshot(store, self.agent.todos())
+                    && let Err(error) = persist_todo_snapshot(store, self.agent.todos()).await
                 {
                     errors.push(error.to_string());
                 }
@@ -213,11 +214,11 @@ impl Runtime {
         self.emit(AppEventKind::Compaction(CompactionEvent::Started));
         match self.agent.compact().await {
             Ok(stats) => {
-                self.switch_session();
+                self.switch_session().await;
                 if let Some(store) = &self.session {
                     self.agent.ensure_session_meta(store.root.clone());
                 }
-                self.persist_compacted();
+                self.persist_compacted().await;
                 self.sync_state();
                 self.emit_history_changed(HistoryChangeReason::Compacted);
                 self.emit(AppEventKind::Compaction(CompactionEvent::Completed {
@@ -240,24 +241,25 @@ impl Runtime {
 
     /// Write the compacted history (summary message) into the freshly
     /// switched session file.
-    fn persist_compacted(&mut self) {
+    async fn persist_compacted(&mut self) {
         self.persisted_rev = self.agent.history_revision();
         self.persisted_messages = 0;
         let mut errors = Vec::new();
         if let Some(store) = &self.session {
             let recs = self.agent.history_records();
-            match store.current().overwrite(&recs) {
+            let session = store.current();
+            match session.overwrite(&recs).await {
                 Ok(()) => {
                     store.mark_content(true);
                     self.persisted_messages = self.agent.history().len();
-                    if let Err(e) = record_recent_path(store) {
+                    if let Err(e) = record_recent_path(store).await {
                         errors.push(e.to_string());
                     }
                 }
                 Err(e) => errors.push(e.to_string()),
             }
             if !self.agent.todos().is_empty()
-                && let Err(e) = persist_todo_snapshot(store, self.agent.todos())
+                && let Err(e) = persist_todo_snapshot(store, self.agent.todos()).await
             {
                 errors.push(e.to_string());
             }
@@ -295,7 +297,7 @@ impl Runtime {
             CommandOutcome::Reply(text) => {
                 self.emit(AppEventKind::Notification { text });
             }
-            CommandOutcome::Cleared => self.clear_session(),
+            CommandOutcome::Cleared => self.clear_session().await,
             CommandOutcome::Compact => self.compact_history().await,
             CommandOutcome::Exit => {
                 self.emit(AppEventKind::Notification {
@@ -320,12 +322,12 @@ impl Runtime {
         }
     }
 
-    fn clear_session(&mut self) {
+    async fn clear_session(&mut self) {
         self.agent.clear_history();
         self.agent.set_todos(TodoList::default());
         self.shared.subagents.clear();
         self.shared.sync_subagents();
-        self.switch_session();
+        self.switch_session().await;
         if let Some(store) = &self.session {
             self.agent.ensure_session_meta(store.root.clone());
         }
@@ -426,7 +428,7 @@ impl Runtime {
         }
     }
 
-    fn rewind(&mut self) {
+    async fn rewind(&mut self) {
         let _ = self.agent.rewind_last_turn();
         let found = TodoList::from_history(self.agent.history());
         let restored = found.clone().unwrap_or_default();
@@ -440,7 +442,8 @@ impl Runtime {
                         items: restored.items.clone(),
                     });
                 }
-                match store.current().overwrite(&recs) {
+                let session = store.current();
+                match session.overwrite(&recs).await {
                     Ok(()) => {
                         store.mark_content(self.agent.history().len() != 0);
                         true
@@ -461,10 +464,10 @@ impl Runtime {
         self.emit_history_changed(HistoryChangeReason::Rewound);
     }
 
-    fn switch_session(&mut self) {
+    async fn switch_session(&mut self) {
         if let Some(store) = &self.session {
             let id = uuid::Uuid::now_v7().to_string();
-            match Session::open(&store.dir, &id) {
+            match Session::open(&store.dir, &id).await {
                 Ok(next) => {
                     record_session_span(next.id());
                     store.set_current(next);
@@ -536,22 +539,26 @@ pub(crate) fn spawn_runtime(
     App::new(app_id, inbox_tx, subscribers, join, slash, root, shared)
 }
 
-pub(crate) fn persist_todo_snapshot(
+pub(crate) async fn persist_todo_snapshot(
     store: &SessionStore,
     todos: &TodoList,
 ) -> Result<(), SessionError> {
-    store.current().append_records(&[Record::TodoList {
-        timestamp: oven_host::now_ms(),
-        items: todos.items.clone(),
-    }])
+    let session = store.current();
+    session
+        .append_records(&[Record::TodoList {
+            timestamp: oven_host::now_ms(),
+            items: todos.items.clone(),
+        }])
+        .await
 }
 
 pub(crate) fn should_persist_todos(todos: &TodoList, written_this_turn: bool) -> bool {
     written_this_turn || !todos.is_empty()
 }
 
-pub(crate) fn record_recent_path(store: &SessionStore) -> Result<(), SessionError> {
-    record_recent(&store.dir, Path::new(&store.root), store.current().id())
+pub(crate) async fn record_recent_path(store: &SessionStore) -> Result<(), SessionError> {
+    let id = store.current().id().to_string();
+    record_recent(&store.dir, Path::new(&store.root), &id).await
 }
 
 fn public_provider(provider: &ProviderConfig) -> ProviderConfig {

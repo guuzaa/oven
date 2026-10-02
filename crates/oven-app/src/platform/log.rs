@@ -1,4 +1,6 @@
-use oven_host::RotatingFile;
+use std::sync::OnceLock;
+
+use oven_host::{LOG_DROPPED_LINES, LOG_FLUSH_FAILED, RotatingFile};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -11,6 +13,8 @@ const RUST_LOG_ENV: &str = "RUST_LOG";
 const DEFAULT_LOG_FILTER: &str = "info";
 const LOG_HOME_MISSING: &str = "warning: logging: home directory not found";
 const LOG_OPEN_FAILED: &str = "warning: logging:";
+
+static LOG_HANDLE: OnceLock<RotatingFile> = OnceLock::new();
 
 pub fn init() {
     let Some(dir) = dirs::logs_dir() else {
@@ -25,7 +29,8 @@ pub fn init() {
             return;
         }
     };
-    let _ = tracing_subscriber::registry()
+    let installed = file.clone();
+    let initialized = tracing_subscriber::registry()
         .with(log_filter())
         .with(
             tracing_subscriber::fmt::layer()
@@ -34,6 +39,25 @@ pub fn init() {
                 .with_writer(move || file.clone()),
         )
         .try_init();
+    if initialized.is_ok() {
+        let _ = LOG_HANDLE.set(installed);
+    } else {
+        let _ = installed.shutdown();
+    }
+}
+
+pub fn shutdown() {
+    let Some(file) = LOG_HANDLE.get() else {
+        return;
+    };
+    if let Err(error) = file.sync() {
+        eprintln!("{LOG_FLUSH_FAILED} {error}");
+    }
+    let dropped = file.dropped();
+    if dropped > 0 {
+        eprintln!("{LOG_DROPPED_LINES} {dropped}");
+    }
+    let _ = file.shutdown();
 }
 
 fn log_filter() -> EnvFilter {
