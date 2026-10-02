@@ -38,7 +38,7 @@ impl Agent {
     /// and todo overlays composed on top of it.
     fn system_prompt(&self, mode: AgentMode) -> Option<String> {
         let history_system = self.history.system_message();
-        let base = self.system.as_deref().or_else(|| history_system.as_deref());
+        let base = self.system.as_deref().or(history_system.as_deref());
         prompt_template::compose_todo_system(
             base,
             mode,

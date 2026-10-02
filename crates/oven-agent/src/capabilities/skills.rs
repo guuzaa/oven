@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::string::String;
 
+use oven_host::split_frontmatter;
 use tokio::fs;
 
 /// Canonical filename of the guidance document inside a skill directory.
@@ -123,7 +124,7 @@ impl SkillRegistry {
             let Ok(raw) = fs::read_to_string(&file).await else {
                 continue;
             };
-            let Some(description) = parse_frontmatter(&raw) else {
+            let Some(description) = parse_description(&raw) else {
                 continue;
             };
             self.register(Box::new(FileSkill {
@@ -167,10 +168,8 @@ async fn find_skill_file(dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Parse the YAML frontmatter between `---` fences and return `description`.
-fn parse_frontmatter(raw: &str) -> Option<String> {
-    let rest = raw.trim_start().strip_prefix("---")?;
-    let (front, _) = rest.split_once("---")?;
+fn parse_description(raw: &str) -> Option<String> {
+    let (front, _) = split_frontmatter(raw)?;
     let meta: serde_yaml::Value = serde_yaml::from_str(front).ok()?;
     let desc = meta.get("description")?.as_str()?.trim().to_string();
     if desc.is_empty() { None } else { Some(desc) }
@@ -246,6 +245,15 @@ mod tests {
         let p = reg.merged_system_prompt().unwrap();
         assert!(p.contains("second"));
         assert!(!p.contains("first"));
+    }
+
+    #[test]
+    fn description_containing_dashes_is_kept_whole() {
+        assert_eq!(
+            parse_description("---\ndescription: HTTP/2 only --- no fallback\n---\nbody\n")
+                .as_deref(),
+            Some("HTTP/2 only --- no fallback")
+        );
     }
 
     #[tokio::test]
