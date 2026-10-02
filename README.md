@@ -185,6 +185,7 @@ rewinds the last exchange when idle. `Shift+Tab` toggles plan or ask mode and
 | `/plan`  | Toggle plan mode: `/plan [on\|off]` |
 | `/agents` | List subagents; `/agents <name>` opens one, `/agents stop <name\|all>` stops them |
 | `/compact`  | Compact conversation history into a summary; auto-compaction triggers at `compact_threshold`. |
+| `/memory` | List, show or remove memories: `/memory [show <ref> \| rm <ref>]`, where `<ref>` is `workspace/<id>`, `user/<id>` or a bare id |
 
 ## Build from source
 
