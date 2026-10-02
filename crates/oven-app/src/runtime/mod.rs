@@ -114,7 +114,7 @@ impl Runtime {
     async fn handle(&mut self, input: Input) {
         tracing::debug!(kind = input.kind(), "runtime input");
         match input {
-            Input::Rewind => self.rewind(),
+            Input::Rewind => self.rewind().await,
             Input::Shell(command) if command.is_empty() => self.reject_empty_shell(),
             Input::Shell(command) => self.run_shell(command).await,
             Input::Slash { name, args } => self.run_slash(&name, &args).await,
@@ -131,7 +131,8 @@ impl Runtime {
                 if rev == self.persisted_rev {
                     let pending = self.agent.history_records_from(self.persisted_messages);
                     if !pending.is_empty() {
-                        if let Err(error) = store.current().append_records(&pending) {
+                        let session = store.current();
+                        if let Err(error) = session.append_records(&pending).await {
                             errors.push(error.to_string());
                         } else {
                             store.mark_content(true);
@@ -146,7 +147,7 @@ impl Runtime {
                     self.persisted_rev = rev;
                 }
                 if should_persist_todos(self.agent.todos(), self.agent.todo_written_this_turn())
-                    && let Err(error) = persist_todo_snapshot(store, self.agent.todos())
+                    && let Err(error) = persist_todo_snapshot(store, self.agent.todos()).await
                 {
                     errors.push(error.to_string());
                 }
@@ -246,7 +247,8 @@ impl Runtime {
         let mut errors = Vec::new();
         if let Some(store) = &self.session {
             let recs = self.agent.history_records();
-            match store.current().overwrite(&recs) {
+            let session = store.current();
+            match session.overwrite(&recs).await {
                 Ok(()) => {
                     store.mark_content(true);
                     self.persisted_messages = self.agent.history().len();
@@ -257,7 +259,7 @@ impl Runtime {
                 Err(e) => errors.push(e.to_string()),
             }
             if !self.agent.todos().is_empty()
-                && let Err(e) = persist_todo_snapshot(store, self.agent.todos())
+                && let Err(e) = persist_todo_snapshot(store, self.agent.todos()).await
             {
                 errors.push(e.to_string());
             }
@@ -426,7 +428,7 @@ impl Runtime {
         }
     }
 
-    fn rewind(&mut self) {
+    async fn rewind(&mut self) {
         let _ = self.agent.rewind_last_turn();
         let found = TodoList::from_history(self.agent.history());
         let restored = found.clone().unwrap_or_default();
@@ -440,7 +442,8 @@ impl Runtime {
                         items: restored.items.clone(),
                     });
                 }
-                match store.current().overwrite(&recs) {
+                let session = store.current();
+                match session.overwrite(&recs).await {
                     Ok(()) => {
                         store.mark_content(self.agent.history().len() != 0);
                         true
@@ -536,14 +539,17 @@ pub(crate) fn spawn_runtime(
     App::new(app_id, inbox_tx, subscribers, join, slash, root, shared)
 }
 
-pub(crate) fn persist_todo_snapshot(
+pub(crate) async fn persist_todo_snapshot(
     store: &SessionStore,
     todos: &TodoList,
 ) -> Result<(), SessionError> {
-    store.current().append_records(&[Record::TodoList {
-        timestamp: oven_host::now_ms(),
-        items: todos.items.clone(),
-    }])
+    let session = store.current();
+    session
+        .append_records(&[Record::TodoList {
+            timestamp: oven_host::now_ms(),
+            items: todos.items.clone(),
+        }])
+        .await
 }
 
 pub(crate) fn should_persist_todos(todos: &TodoList, written_this_turn: bool) -> bool {

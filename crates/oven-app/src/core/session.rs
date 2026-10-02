@@ -14,12 +14,11 @@
 //! record after its message.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use oven_agent::Record;
 use oven_llm::{Message, Usage};
@@ -170,35 +169,39 @@ impl Session {
 
     /// Append many records (messages and token usage) in one open/flush
     /// cycle.
-    pub fn append_records(&self, records: &[Record]) -> Result<(), SessionError> {
+    pub async fn append_records(&self, records: &[Record]) -> Result<(), SessionError> {
         if records.is_empty() {
             return Ok(());
         }
-        let mut file = std::fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
+            .await
             .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        for record in records {
-            write_record(&mut file, record).map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        }
+        file.write_all(encode_records(records).as_bytes())
+            .await
+            .map_err(|e| SessionError::Io(self.path.clone(), e))?;
         file.flush()
+            .await
             .map_err(|e| SessionError::Io(self.path.clone(), e))
     }
 
     /// Replace the entire session file with `records`. Used by rewind, which
     /// truncates the persisted conversation together with its usage.
-    pub fn overwrite(&self, records: &[Record]) -> Result<(), SessionError> {
-        let mut file = std::fs::OpenOptions::new()
+    pub async fn overwrite(&self, records: &[Record]) -> Result<(), SessionError> {
+        let mut file = fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(&self.path)
+            .await
             .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        for record in records {
-            write_record(&mut file, record).map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        }
+        file.write_all(encode_records(records).as_bytes())
+            .await
+            .map_err(|e| SessionError::Io(self.path.clone(), e))?;
         file.flush()
+            .await
             .map_err(|e| SessionError::Io(self.path.clone(), e))
     }
 }
@@ -347,9 +350,14 @@ fn parse_line(line: &str) -> Result<Vec<Record>, serde_json::Error> {
     }
 }
 
-fn write_record(file: &mut impl Write, record: &Record) -> std::io::Result<()> {
-    let line = serde_json::to_string(record).expect("record serialization cannot fail");
-    writeln!(file, "{line}")
+fn encode_records(records: &[Record]) -> String {
+    let mut out = String::new();
+    for record in records {
+        let line = serde_json::to_string(record).expect("record serialization cannot fail");
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
 }
 
 fn validate_id(id: &str) -> Result<(), SessionError> {
@@ -416,9 +424,11 @@ mod tests {
                 message_record(2, Message::user_text("b")),
                 message_record(3, Message::user_text("c")),
             ])
+            .await
             .unwrap();
         session
             .overwrite(&[message_record(1, Message::user_text("only"))])
+            .await
             .unwrap();
         assert_eq!(session.load_records().await.unwrap().len(), 1);
     }
@@ -439,6 +449,7 @@ mod tests {
                 message_record(22, Message::assistant(vec![ContentBlock::text("hi")])),
                 usage_record(22, usage),
             ])
+            .await
             .unwrap();
 
         let loaded = session.load_records().await.unwrap();
@@ -559,6 +570,7 @@ mod tests {
                 Record::SessionMeta(meta.clone()),
                 message_record(1, Message::user_text("hello")),
             ])
+            .await
             .unwrap();
 
         let loaded = session.load_records().await.unwrap();
@@ -617,6 +629,7 @@ mod tests {
                     duration_ms: 1_500,
                 },
             ])
+            .await
             .unwrap();
 
         let loaded = session.load_records().await.unwrap();
@@ -697,11 +710,41 @@ mod tests {
                 },
                 message_record(3, Message::assistant(vec![ContentBlock::text("hi")])),
             ])
+            .await
             .unwrap();
 
         let loaded = session.load_records().await.unwrap();
         assert_eq!(loaded.len(), 3);
         assert!(matches!(&loaded[1], Record::TodoList { items, .. } if items.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn appended_records_are_one_line_each() {
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        session
+            .append_records(&[
+                message_record(1, Message::user_text("a")),
+                message_record(2, Message::user_text("b")),
+                usage_record(
+                    2,
+                    Usage {
+                        input_tokens: 1,
+                        output_tokens: 2,
+                        cache_read_tokens: 0,
+                        reasoning_tokens: 0,
+                    },
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let text = tokio::fs::read_to_string(session.path()).await.unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        for line in lines {
+            assert!(parse_line(line).is_ok(), "{line}");
+        }
     }
 
     #[test]
