@@ -3,8 +3,13 @@ use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
 use crate::core::session::{Session, canonical_root};
 use crate::core::state::{AppPhase, AppState, HistoryChangeReason};
+use crate::memory::{
+    AMBIGUOUS_MEMORY, DESCRIPTION_LABEL, KIND_LABEL, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY,
+    SOURCE_LABEL,
+};
 use crate::{App, AppBuilder, NodeStatus};
 use crate::{LocalShell, runtime::*};
+use oven_mem::NOT_FOUND;
 use std::borrow::Borrow;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,6 +54,7 @@ fn agents_from(agent: Agent) -> AppAgents {
         subagents,
         events,
         wake_rx,
+        memory: None,
     }
 }
 
@@ -3959,5 +3965,105 @@ async fn cancelling_a_turn_cancels_its_subagent() {
         matches!(subagents[0].status, NodeStatus::Cancelled),
         "{subagents:?}"
     );
+    handle.shutdown().await;
+}
+
+async fn memory_store(workspace: &Path, user: &Path) -> Arc<oven_mem::MemoryStore> {
+    Arc::new(
+        oven_mem::MemoryStore::load(oven_mem::MemoryRoots {
+            workspace: workspace.to_path_buf(),
+            user: Some(user.to_path_buf()),
+        })
+        .await,
+    )
+}
+
+fn write_memory_file(dir: &Path, id: &str, kind: &str, description: &str, body: &str, secs: u64) {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(format!("{id}.md"));
+    std::fs::write(
+        &path,
+        format!("---\nkind: {kind}\ndescription: {description}\nsource: session-1\n---\n\n{body}"),
+    )
+    .unwrap();
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap();
+}
+
+async fn spawn_memory_app(tmp: &tempdir::TempDir, store: Arc<oven_mem::MemoryStore>) -> App {
+    let mut app = AppBuilder::new(tmp.path());
+    app.set_memory(store);
+    spawn_app(&app, Box::new(MockProvider::new(vec![]))).await
+}
+
+#[tokio::test]
+async fn slash_memory_lists_shows_and_removes() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory").unwrap();
+    let workspace = tmp.path().join("workspace");
+    let user = tmp.path().join("user");
+    let empty = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    assert_eq!(empty.prompt("/memory").await.unwrap(), NO_MEMORIES);
+    empty.shutdown().await;
+
+    write_memory_file(&workspace, "older", "fact", "old fact", "old body\n", 10);
+    write_memory_file(&user, "newer", "preference", "new pref", "new body\n", 20);
+    let handle = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    assert_eq!(
+        handle.prompt("/memory").await.unwrap(),
+        "user/newer (preference) new pref\nworkspace/older (fact) old fact"
+    );
+    assert_eq!(
+        handle.prompt("/memory show workspace/older").await.unwrap(),
+        format!(
+            "{KIND_LABEL}: fact\n{DESCRIPTION_LABEL}: old fact\n{SOURCE_LABEL}: session-1\n\nold body\n",
+        )
+    );
+    assert_eq!(
+        handle.prompt("/memory rm user/newer").await.unwrap(),
+        format!("{REMOVED_MEMORY}: user/newer")
+    );
+    assert!(!user.join("newer.md").exists());
+    assert_eq!(
+        handle.prompt("/memory").await.unwrap(),
+        "workspace/older (fact) old fact"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn slash_memory_ambiguous_bare_id_and_unknown_rm_are_replies() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-ref").unwrap();
+    let workspace = tmp.path().join("workspace");
+    let user = tmp.path().join("user");
+    write_memory_file(&workspace, "shared", "fact", "from workspace", "ws\n", 1);
+    write_memory_file(&user, "shared", "fact", "from user", "user\n", 2);
+    let handle = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    assert_eq!(
+        handle.prompt("/memory show shared").await.unwrap(),
+        format!(
+            "{AMBIGUOUS_MEMORY}: {}/shared or {}/shared",
+            oven_mem::MemoryScope::Workspace,
+            oven_mem::MemoryScope::User
+        )
+    );
+    let missing = handle.prompt("/memory rm missing").await.unwrap();
+    assert_eq!(missing, format!("{NOT_FOUND}: missing"));
+    assert!(user.join("shared.md").is_file());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn slash_memory_disabled_replies() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-off").unwrap();
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig {
+            memory: crate::config::MemoryConfig { enabled: false },
+            ..AppConfig::default()
+        })
+        .await;
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+    assert_eq!(handle.prompt("/memory").await.unwrap(), MEMORY_DISABLED);
     handle.shutdown().await;
 }

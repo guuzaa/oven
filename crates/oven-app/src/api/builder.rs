@@ -68,6 +68,10 @@ impl AppBuilder {
             self.skills.merged_system_prompt(),
         )
     }
+
+    pub(crate) fn set_memory(&mut self, store: Arc<MemoryStore>) {
+        self.memory = Some(store);
+    }
 }
 
 fn role_system(system: &str, role: &str, guidance: &str) -> String {
@@ -305,6 +309,7 @@ impl AppBuilder {
             subagents,
             events,
             wake_rx,
+            memory: self.memory.clone(),
         })
     }
 

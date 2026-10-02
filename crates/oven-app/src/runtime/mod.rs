@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use oven_agent::{Agent, Record, RunPolicy, TodoList};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
+use oven_mem::MemoryStore;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
@@ -38,6 +39,7 @@ pub(crate) struct AppAgents {
     pub(crate) subagents: Arc<Subagents>,
     pub(crate) events: EventBus,
     pub(crate) wake_rx: mpsc::UnboundedReceiver<()>,
+    pub(crate) memory: Option<Arc<MemoryStore>>,
 }
 
 pub(crate) struct Runtime {
@@ -48,6 +50,8 @@ pub(crate) struct Runtime {
     pub(crate) root: PathBuf,
     pub(crate) session: Option<SessionStore>,
     pub(crate) slash: Arc<SlashRegistry>,
+    /// The store `AppBuilder` loaded, when memory is enabled.
+    pub(crate) memory: Option<Arc<MemoryStore>>,
     /// What one user turn may spend. Derived from config at startup so the
     /// same budget reaches every run the runtime starts.
     pub(crate) policy: RunPolicy,
@@ -74,6 +78,7 @@ impl Runtime {
         let AppAgents {
             main: agent,
             wake_rx,
+            memory,
             ..
         } = agents;
         Self {
@@ -83,6 +88,7 @@ impl Runtime {
             root,
             session,
             slash,
+            memory,
             policy,
             persisted_messages,
             persisted_rev,
@@ -318,6 +324,13 @@ impl Runtime {
             }
             CommandOutcome::FocusSubagent { id } => {
                 self.emit(AppEventKind::Subagent(SubagentEvent::Focus { id }));
+            }
+            CommandOutcome::Memory(action) => {
+                let text = match &self.memory {
+                    Some(store) => crate::memory::apply(store, action).await,
+                    None => crate::memory::MEMORY_DISABLED.to_owned(),
+                };
+                self.emit(AppEventKind::Notification { text });
             }
         }
     }

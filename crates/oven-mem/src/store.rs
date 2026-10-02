@@ -135,7 +135,7 @@ impl MemoryStore {
         render_catalog(&entries)
     }
 
-    fn entries(&self) -> Vec<IndexEntry> {
+    pub fn entries(&self) -> Vec<IndexEntry> {
         let guard = self
             .index
             .read()
