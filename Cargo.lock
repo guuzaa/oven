@@ -2048,7 +2048,10 @@ dependencies = [
  "oven-host",
  "serde",
  "serde_yaml",
+ "tempdir",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
