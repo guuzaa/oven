@@ -122,7 +122,7 @@ impl Runtime {
         }
     }
 
-    pub(crate) fn persist_turn(&mut self) {
+    pub(crate) async fn persist_turn(&mut self) {
         let errors = match self.session.as_ref() {
             None => return,
             Some(store) => {
@@ -136,7 +136,7 @@ impl Runtime {
                         } else {
                             store.mark_content(true);
                             self.persisted_messages = self.agent.history().len();
-                            if let Err(error) = record_recent_path(store) {
+                            if let Err(error) = record_recent_path(store).await {
                                 errors.push(error.to_string());
                             }
                         }
@@ -213,11 +213,11 @@ impl Runtime {
         self.emit(AppEventKind::Compaction(CompactionEvent::Started));
         match self.agent.compact().await {
             Ok(stats) => {
-                self.switch_session();
+                self.switch_session().await;
                 if let Some(store) = &self.session {
                     self.agent.ensure_session_meta(store.root.clone());
                 }
-                self.persist_compacted();
+                self.persist_compacted().await;
                 self.sync_state();
                 self.emit_history_changed(HistoryChangeReason::Compacted);
                 self.emit(AppEventKind::Compaction(CompactionEvent::Completed {
@@ -240,7 +240,7 @@ impl Runtime {
 
     /// Write the compacted history (summary message) into the freshly
     /// switched session file.
-    fn persist_compacted(&mut self) {
+    async fn persist_compacted(&mut self) {
         self.persisted_rev = self.agent.history_revision();
         self.persisted_messages = 0;
         let mut errors = Vec::new();
@@ -250,7 +250,7 @@ impl Runtime {
                 Ok(()) => {
                     store.mark_content(true);
                     self.persisted_messages = self.agent.history().len();
-                    if let Err(e) = record_recent_path(store) {
+                    if let Err(e) = record_recent_path(store).await {
                         errors.push(e.to_string());
                     }
                 }
@@ -295,7 +295,7 @@ impl Runtime {
             CommandOutcome::Reply(text) => {
                 self.emit(AppEventKind::Notification { text });
             }
-            CommandOutcome::Cleared => self.clear_session(),
+            CommandOutcome::Cleared => self.clear_session().await,
             CommandOutcome::Compact => self.compact_history().await,
             CommandOutcome::Exit => {
                 self.emit(AppEventKind::Notification {
@@ -320,12 +320,12 @@ impl Runtime {
         }
     }
 
-    fn clear_session(&mut self) {
+    async fn clear_session(&mut self) {
         self.agent.clear_history();
         self.agent.set_todos(TodoList::default());
         self.shared.subagents.clear();
         self.shared.sync_subagents();
-        self.switch_session();
+        self.switch_session().await;
         if let Some(store) = &self.session {
             self.agent.ensure_session_meta(store.root.clone());
         }
@@ -461,10 +461,10 @@ impl Runtime {
         self.emit_history_changed(HistoryChangeReason::Rewound);
     }
 
-    fn switch_session(&mut self) {
+    async fn switch_session(&mut self) {
         if let Some(store) = &self.session {
             let id = uuid::Uuid::now_v7().to_string();
-            match Session::open(&store.dir, &id) {
+            match Session::open(&store.dir, &id).await {
                 Ok(next) => {
                     record_session_span(next.id());
                     store.set_current(next);
@@ -550,8 +550,9 @@ pub(crate) fn should_persist_todos(todos: &TodoList, written_this_turn: bool) ->
     written_this_turn || !todos.is_empty()
 }
 
-pub(crate) fn record_recent_path(store: &SessionStore) -> Result<(), SessionError> {
-    record_recent(&store.dir, Path::new(&store.root), store.current().id())
+pub(crate) async fn record_recent_path(store: &SessionStore) -> Result<(), SessionError> {
+    let id = store.current().id().to_string();
+    record_recent(&store.dir, Path::new(&store.root), &id).await
 }
 
 fn public_provider(provider: &ProviderConfig) -> ProviderConfig {

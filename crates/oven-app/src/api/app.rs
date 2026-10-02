@@ -232,9 +232,11 @@ impl App {
                         text.push_str(&t);
                     }
                     AgentEvent::Turn(TurnEvent::Completed { .. } | TurnEvent::Cancelled { .. }) => {
+                        self.wait_until_idle().await;
                         return Ok(text);
                     }
                     AgentEvent::Turn(TurnEvent::Failed { error, .. }) => {
+                        self.wait_until_idle().await;
                         return Err(AppError::Runtime(error.message));
                     }
                     AgentEvent::Turn(TurnEvent::LoopLimitReached { request_id, .. }) => {
@@ -249,8 +251,12 @@ impl App {
                     ShellEvent::Started { .. } => {
                         in_turn = true;
                     }
-                    ShellEvent::Finished { output, .. } => return Ok(output),
+                    ShellEvent::Finished { output, .. } => {
+                        self.wait_until_idle().await;
+                        return Ok(output);
+                    }
                     ShellEvent::Failed { error, output, .. } => {
+                        self.wait_until_idle().await;
                         return Err(AppError::Runtime(if output.is_empty() {
                             error
                         } else {
@@ -278,6 +284,18 @@ impl App {
                 }
                 Some(_) => {}
                 None => return Err(AppError::ChannelClosed),
+            }
+        }
+    }
+
+    async fn wait_until_idle(&self) {
+        let mut state = self.state.clone();
+        loop {
+            if state.borrow().phase.is_idle() {
+                return;
+            }
+            if state.changed().await.is_err() {
+                return;
             }
         }
     }

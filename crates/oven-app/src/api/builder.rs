@@ -323,10 +323,10 @@ impl AppBuilder {
         sessions_dir: &Path,
         session_id: Option<&str>,
     ) -> Result<App, AppError> {
-        let session = Session::resolve(sessions_dir, session_id)?;
+        let session = Session::resolve(sessions_dir, session_id).await?;
         let span = session_span(Some(session.id()));
         async {
-            let prior = session.load_records()?;
+            let prior = session.load_records().await?;
             let mut agents = self.build_interactive_agent().await?;
             let records: Vec<_> = prior
                 .iter()

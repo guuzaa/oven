@@ -57,7 +57,7 @@ impl Runtime {
         self.shared.sync_subagents();
 
         if result.is_ok() {
-            self.persist_turn();
+            self.persist_turn().await;
         }
 
         self.sync_state();
@@ -134,7 +134,7 @@ impl Runtime {
 
         self.agent
             .push_history(Message::user_text(shell.to_string()));
-        self.persist_turn();
+        self.persist_turn().await;
         self.sync_state();
         self.shared.set_phase(AppPhase::Idle);
     }

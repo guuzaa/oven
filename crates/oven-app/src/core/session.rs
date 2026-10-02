@@ -14,10 +14,12 @@
 //! record after its message.
 
 use std::collections::BTreeMap;
-use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+
+use tokio::fs;
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use oven_agent::Record;
 use oven_llm::{Message, Usage};
@@ -105,27 +107,27 @@ struct RecordLine {
 impl Session {
     /// Open (or create) the session file for `id`. The file is created lazily
     /// on the first append.
-    pub fn open(dir: &Path, id: &str) -> Result<Self, SessionError> {
+    pub async fn open(dir: &Path, id: &str) -> Result<Self, SessionError> {
         validate_id(id)?;
-        if !dir.exists() {
-            fs::create_dir_all(dir).map_err(|e| SessionError::Io(dir.to_path_buf(), e))?;
-        }
+        fs::create_dir_all(dir)
+            .await
+            .map_err(|e| SessionError::Io(dir.to_path_buf(), e))?;
         Ok(Self {
             id: id.to_string(),
             path: dir.join(format!("{id}.jsonl")),
         })
     }
 
-    pub fn resolve(dir: &Path, id: Option<&str>) -> Result<Self, SessionError> {
+    pub async fn resolve(dir: &Path, id: Option<&str>) -> Result<Self, SessionError> {
         if let Some(id) = id {
-            let candidate = Self::open(dir, id)?;
-            if candidate.path().exists() {
+            let candidate = Self::open(dir, id).await?;
+            if fs::try_exists(candidate.path()).await.unwrap_or(false) {
                 return Ok(candidate);
             }
         }
 
         let uuid = uuid::Uuid::now_v7().to_string();
-        Self::open(dir, &uuid)
+        Self::open(dir, &uuid).await
     }
 
     pub fn id(&self) -> &str {
@@ -141,25 +143,29 @@ impl Session {
     /// `Record` format, the legacy `{"message": ..., "usage": ...}` envelope
     /// (a non-zero usage becomes a `TokenUsage` record after its message),
     /// and legacy bare-`Message` lines (timestamp 0).
-    pub fn load_records(&self) -> Result<Vec<Record>, SessionError> {
-        match fs::File::open(&self.path) {
-            Ok(f) => {
-                let reader = BufReader::new(f);
-                let mut out = Vec::new();
-                for (i, line) in reader.lines().enumerate() {
-                    let line = line.map_err(|e| SessionError::Io(self.path.clone(), e))?;
-                    if line.trim().is_empty() {
-                        continue;
-                    }
-                    let records = parse_line(&line)
-                        .map_err(|e| SessionError::Parse(self.path.clone(), i + 1, e))?;
-                    out.extend(records);
-                }
-                Ok(out)
+    pub async fn load_records(&self) -> Result<Vec<Record>, SessionError> {
+        let file = match fs::File::open(&self.path).await {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(SessionError::Io(self.path.clone(), e)),
+        };
+        let mut lines = BufReader::new(file).lines();
+        let mut out = Vec::new();
+        let mut line_no = 0usize;
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .map_err(|e| SessionError::Io(self.path.clone(), e))?
+        {
+            line_no += 1;
+            if line.trim().is_empty() {
+                continue;
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(SessionError::Io(self.path.clone(), e)),
+            let records = parse_line(&line)
+                .map_err(|e| SessionError::Parse(self.path.clone(), line_no, e))?;
+            out.extend(records);
         }
+        Ok(out)
     }
 
     /// Append many records (messages and token usage) in one open/flush
@@ -168,7 +174,7 @@ impl Session {
         if records.is_empty() {
             return Ok(());
         }
-        let mut file = fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
@@ -183,7 +189,7 @@ impl Session {
     /// Replace the entire session file with `records`. Used by rewind, which
     /// truncates the persisted conversation together with its usage.
     pub fn overwrite(&self, records: &[Record]) -> Result<(), SessionError> {
-        let mut file = fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
@@ -260,33 +266,37 @@ fn recent_path(dir: &Path) -> PathBuf {
     dir.join("cwd_latest.json")
 }
 
-fn load_recent(dir: &Path) -> Result<BTreeMap<String, String>, SessionError> {
+async fn load_recent(dir: &Path) -> Result<BTreeMap<String, String>, SessionError> {
     let path = recent_path(dir);
-    match fs::read_to_string(&path) {
+    match fs::read_to_string(&path).await {
         Ok(text) => serde_json::from_str(&text).map_err(|e| SessionError::Parse(path, 1, e)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::default()),
         Err(e) => Err(SessionError::Io(path, e)),
     }
 }
 
-fn save_recent(dir: &Path, map: &BTreeMap<String, String>) -> Result<(), SessionError> {
+async fn save_recent(dir: &Path, map: &BTreeMap<String, String>) -> Result<(), SessionError> {
     let path = recent_path(dir);
     let tmp = dir.join("cwd_latest.json.tmp");
     let text = serde_json::to_string_pretty(map).expect("recent map serialization cannot fail");
-    fs::write(&tmp, text).map_err(|e| SessionError::Io(path.clone(), e))?;
-    fs::rename(&tmp, &path).map_err(|e| SessionError::Io(path.clone(), e))
+    fs::write(&tmp, text)
+        .await
+        .map_err(|e| SessionError::Io(path.clone(), e))?;
+    fs::rename(&tmp, &path)
+        .await
+        .map_err(|e| SessionError::Io(path.clone(), e))
 }
 
 /// Remember that `session_id` is the most recent session used in `root`.
-pub fn record_recent(dir: &Path, root: &Path, session_id: &str) -> Result<(), SessionError> {
-    let mut map = load_recent(dir)?;
+pub async fn record_recent(dir: &Path, root: &Path, session_id: &str) -> Result<(), SessionError> {
+    let mut map = load_recent(dir).await?;
     map.insert(canonical_root(root), session_id.to_string());
-    save_recent(dir, &map)
+    save_recent(dir, &map).await
 }
 
 /// The most recent session id recorded for `root`, if any.
-pub fn recent_session_id(dir: &Path, root: &Path) -> Result<Option<String>, SessionError> {
-    Ok(load_recent(dir)?.get(&canonical_root(root)).cloned())
+pub async fn recent_session_id(dir: &Path, root: &Path) -> Result<Option<String>, SessionError> {
+    Ok(load_recent(dir).await?.get(&canonical_root(root)).cloned())
 }
 
 /// Parse one JSONL line into records.
@@ -389,17 +399,17 @@ mod tests {
         Record::TokenUsage { timestamp, usage }
     }
 
-    #[test]
-    fn load_missing_returns_empty() {
+    #[tokio::test]
+    async fn load_missing_returns_empty() {
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "missing").unwrap();
-        assert!(session.load_records().unwrap().is_empty());
+        let session = Session::open(tmp.path(), "missing").await.unwrap();
+        assert!(session.load_records().await.unwrap().is_empty());
     }
 
-    #[test]
-    fn overwrite_truncates() {
+    #[tokio::test]
+    async fn overwrite_truncates() {
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         session
             .append_records(&[
                 message_record(1, Message::user_text("a")),
@@ -410,13 +420,13 @@ mod tests {
         session
             .overwrite(&[message_record(1, Message::user_text("only"))])
             .unwrap();
-        assert_eq!(session.load_records().unwrap().len(), 1);
+        assert_eq!(session.load_records().await.unwrap().len(), 1);
     }
 
-    #[test]
-    fn records_roundtrip_preserves_usage_and_timestamps() {
+    #[tokio::test]
+    async fn records_roundtrip_preserves_usage_and_timestamps() {
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         let usage = Usage {
             input_tokens: 123,
             output_tokens: 45,
@@ -431,7 +441,7 @@ mod tests {
             ])
             .unwrap();
 
-        let loaded = session.load_records().unwrap();
+        let loaded = session.load_records().await.unwrap();
         assert_eq!(loaded.len(), 3);
         match (&loaded[0], &loaded[1], &loaded[2]) {
             (
@@ -459,12 +469,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn load_accepts_legacy_bare_message_lines() {
+    #[tokio::test]
+    async fn load_accepts_legacy_bare_message_lines() {
         use std::io::Write;
 
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         let mut file = std::fs::File::create(session.path()).unwrap();
         writeln!(
             file,
@@ -474,19 +484,19 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let loaded = session.load_records().unwrap();
+        let loaded = session.load_records().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(
             matches!(&loaded[0], Record::Message { timestamp: 0, message } if message.role == oven_llm::Role::User)
         );
     }
 
-    #[test]
-    fn load_accepts_legacy_envelope_lines() {
+    #[tokio::test]
+    async fn load_accepts_legacy_envelope_lines() {
         use std::io::Write;
 
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         let mut file = std::fs::File::create(session.path()).unwrap();
         // Non-zero usage: expands into a message plus a token-usage record.
         writeln!(
@@ -504,7 +514,7 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let loaded = session.load_records().unwrap();
+        let loaded = session.load_records().await.unwrap();
         assert_eq!(loaded.len(), 3);
         match (&loaded[0], &loaded[1]) {
             (
@@ -528,18 +538,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bad_id_rejected() {
+    #[tokio::test]
+    async fn bad_id_rejected() {
         let tmp = tmp();
-        assert!(Session::open(tmp.path(), "../escape").is_err());
-        assert!(Session::open(tmp.path(), "a/b").is_err());
-        assert!(Session::open(tmp.path(), "").is_err());
+        assert!(Session::open(tmp.path(), "../escape").await.is_err());
+        assert!(Session::open(tmp.path(), "a/b").await.is_err());
+        assert!(Session::open(tmp.path(), "").await.is_err());
     }
 
-    #[test]
-    fn session_meta_record_roundtrips() {
+    #[tokio::test]
+    async fn session_meta_record_roundtrips() {
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         let meta = SessionMeta {
             root: "/ws".into(),
             created_at: 123,
@@ -551,34 +561,42 @@ mod tests {
             ])
             .unwrap();
 
-        let loaded = session.load_records().unwrap();
+        let loaded = session.load_records().await.unwrap();
         assert!(
             matches!(&loaded[0], Record::SessionMeta(m) if m == &meta),
             "meta must parse from the first line"
         );
     }
 
-    #[test]
-    fn recent_index_records_latest_session_per_root() {
+    #[tokio::test]
+    async fn recent_index_records_latest_session_per_root() {
         let tmp = tmp();
         let root = PathBuf::from("/ws");
-        assert_eq!(recent_session_id(tmp.path(), &root).unwrap(), None);
+        assert_eq!(recent_session_id(tmp.path(), &root).await.unwrap(), None);
 
-        record_recent(tmp.path(), &root, "s1").unwrap();
+        record_recent(tmp.path(), &root, "s1").await.unwrap();
         assert_eq!(
-            recent_session_id(tmp.path(), &root).unwrap().as_deref(),
+            recent_session_id(tmp.path(), &root)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("s1")
         );
 
-        record_recent(tmp.path(), &root, "s2").unwrap();
+        record_recent(tmp.path(), &root, "s2").await.unwrap();
         assert_eq!(
-            recent_session_id(tmp.path(), &root).unwrap().as_deref(),
+            recent_session_id(tmp.path(), &root)
+                .await
+                .unwrap()
+                .as_deref(),
             Some("s2"),
             "latest recording wins"
         );
 
         assert_eq!(
-            recent_session_id(tmp.path(), Path::new("/other")).unwrap(),
+            recent_session_id(tmp.path(), Path::new("/other"))
+                .await
+                .unwrap(),
             None
         );
 
@@ -586,10 +604,10 @@ mod tests {
         assert!(!tmp.path().join("cwd_latest.json.tmp").exists());
     }
 
-    #[test]
-    fn thinking_records_roundtrip() {
+    #[tokio::test]
+    async fn thinking_records_roundtrip() {
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         session
             .append_records(&[
                 message_record(1, Message::user_text("q")),
@@ -601,7 +619,7 @@ mod tests {
             ])
             .unwrap();
 
-        let loaded = session.load_records().unwrap();
+        let loaded = session.load_records().await.unwrap();
         assert_eq!(loaded.len(), 3);
         assert!(matches!(
             &loaded[2],
@@ -612,12 +630,12 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn unknown_type_is_skipped_and_messages_still_load() {
+    #[tokio::test]
+    async fn unknown_type_is_skipped_and_messages_still_load() {
         use std::io::Write;
 
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         let mut file = std::fs::File::create(session.path()).unwrap();
         writeln!(file, r#"{{"type":"future_widget","payload":1}}"#).unwrap();
         writeln!(
@@ -632,19 +650,19 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let loaded = session.load_records().unwrap();
+        let loaded = session.load_records().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(
             matches!(&loaded[0], Record::Message { message, .. } if message.role == oven_llm::Role::User)
         );
     }
 
-    #[test]
-    fn legacy_envelope_still_loads_after_type_skip() {
+    #[tokio::test]
+    async fn legacy_envelope_still_loads_after_type_skip() {
         use std::io::Write;
 
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         let mut file = std::fs::File::create(session.path()).unwrap();
         writeln!(file, r#"{{"type":"future_widget","payload":1}}"#).unwrap();
         writeln!(
@@ -655,7 +673,7 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let loaded = session.load_records().unwrap();
+        let loaded = session.load_records().await.unwrap();
         assert_eq!(loaded.len(), 2);
         assert!(
             matches!(&loaded[0], Record::Message { timestamp: 0, message } if message.role == oven_llm::Role::User)
@@ -666,10 +684,10 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn todo_list_records_roundtrip() {
+    #[tokio::test]
+    async fn todo_list_records_roundtrip() {
         let tmp = tmp();
-        let session = Session::open(tmp.path(), "s").unwrap();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
         session
             .append_records(&[
                 message_record(1, Message::user_text("hello")),
@@ -681,7 +699,7 @@ mod tests {
             ])
             .unwrap();
 
-        let loaded = session.load_records().unwrap();
+        let loaded = session.load_records().await.unwrap();
         assert_eq!(loaded.len(), 3);
         assert!(matches!(&loaded[1], Record::TodoList { items, .. } if items.is_empty()));
     }

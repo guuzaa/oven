@@ -65,7 +65,7 @@ async fn spawn_app(app: &AppBuilder, provider: Box<dyn Provider>) -> App {
 }
 
 async fn spawn_app_session(app: &AppBuilder, provider: Box<dyn Provider>, session: Session) -> App {
-    let prior = session.load_records().unwrap();
+    let prior = session.load_records().await.unwrap();
     let mut agents = app.build_agent_with_provider(provider).await.unwrap();
     let records: Vec<_> = prior
         .iter()
@@ -663,7 +663,7 @@ async fn slash_compact_replaces_history_and_switches_session() {
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock = MockProvider::new(vec![text_response("one"), text_response("the summary")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
 
     assert_eq!(handle.prompt("hello").await.unwrap(), "one");
@@ -700,8 +700,10 @@ async fn slash_compact_replaces_history_and_switches_session() {
     let new_id = handle.session_id().expect("session id after compact");
     assert_ne!(new_id, "s1");
     let records = Session::open(&dir, &new_id)
+        .await
         .unwrap()
         .load_records()
+        .await
         .unwrap();
     assert!(records.iter().any(|r| matches!(
         r,
@@ -1144,12 +1146,12 @@ async fn session_persists_across_spawns() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock1 = MockProvider::new(vec![text_response("one")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock1), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     handle.shutdown().await;
 
-    let loaded = loaded_messages(&dir, "s1");
+    let loaded = loaded_messages(&dir, "s1").await;
     assert!(loaded.iter().any(|m| {
         m.role == Role::User
             && m.content
@@ -1164,12 +1166,12 @@ async fn session_persists_across_spawns() {
     }));
 
     let mock2 = MockProvider::new(vec![text_response("two")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
     handle.shutdown().await;
 
-    let loaded = loaded_messages(&dir, "s1");
+    let loaded = loaded_messages(&dir, "s1").await;
     assert_eq!(loaded.iter().filter(|m| m.role == Role::User).count(), 2);
 }
 
@@ -1182,7 +1184,7 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
 
     // First process: two turns, each mocked as 10 in / 5 out.
     let mock1 = MockProvider::new(vec![text_response("one"), text_response("two")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock1), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
@@ -1198,7 +1200,12 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
     // The persisted file carries one TokenUsage record per turn; the
     // cumulative sum survives the restart. The TUI status bar shows the
     // last turn's record, not the session total.
-    let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
+    let records = Session::open(&dir, "s1")
+        .await
+        .unwrap()
+        .load_records()
+        .await
+        .unwrap();
     let persisted: Usage = records
         .iter()
         .filter_map(|r| match r {
@@ -1218,7 +1225,7 @@ async fn resumed_session_restores_usage_and_rewind_rolls_it_back() {
 
     // Second process: resume, then rewind the last exchange.
     let mock2 = MockProvider::new(vec![text_response("three")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
     let timed = handle.history_timed_shared();
     assert_eq!(timed.len(), history(&handle).len());
@@ -1268,7 +1275,7 @@ async fn thinking_duration_survives_a_session_resume() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![thinking_response(THINKING, "one")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     assert!(
@@ -1282,8 +1289,10 @@ async fn thinking_duration_survives_a_session_resume() {
 
     assert!(
         Session::open(&dir, "s1")
+            .await
             .unwrap()
             .load_records()
+            .await
             .unwrap()
             .iter()
             .any(
@@ -1292,7 +1301,7 @@ async fn thinking_duration_survives_a_session_resume() {
         "the transcript rebuilds thinking time from the persisted record"
     );
 
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
     assert!(
         timed_thinking_ms(&handle)
@@ -1313,7 +1322,7 @@ async fn slash_clear_starts_new_session() {
 
     // Turn 1 persists a message so the file is non-empty.
     let mock = MockProvider::new(vec![text_response("one"), text_response("fresh")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
 
@@ -1328,7 +1337,7 @@ async fn slash_clear_starts_new_session() {
     assert!(uuid::Uuid::parse_str(&sid_after_clear).is_ok());
     handle.shutdown().await;
 
-    let old = loaded_messages(&dir, "s1");
+    let old = loaded_messages(&dir, "s1").await;
     assert!(old.iter().any(|m| {
         m.role == Role::User
             && m.content
@@ -1355,7 +1364,7 @@ async fn slash_clear_starts_new_session() {
     }
     assert_eq!(fresh_ids.len(), 1, "expected one fresh uuid session file");
     assert_eq!(fresh_ids, [sid_after_clear]);
-    let fresh = loaded_messages(&dir, &fresh_ids[0]);
+    let fresh = loaded_messages(&dir, &fresh_ids[0]).await;
     assert_eq!(fresh.iter().filter(|m| m.role == Role::User).count(), 1);
     assert!(fresh.iter().any(|m| {
         m.role == Role::User
@@ -1373,7 +1382,7 @@ async fn open_session_creates_uuid_when_id_missing() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one")]);
-    let session = Session::resolve(&dir, Some("missing")).unwrap();
+    let session = Session::resolve(&dir, Some("missing")).await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert!(history(&handle).is_empty(), "fresh session has no history");
     assert_eq!(handle.prompt("hello").await.unwrap(), "one");
@@ -1399,7 +1408,7 @@ async fn fresh_session_without_messages_has_no_id_and_no_file() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![]);
-    let session = Session::resolve(&dir, None).unwrap();
+    let session = Session::resolve(&dir, None).await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert!(
         handle.session_id().is_none(),
@@ -1422,7 +1431,7 @@ async fn clear_without_new_messages_has_no_id_and_no_file() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
 
@@ -1452,7 +1461,7 @@ async fn open_session_without_id_creates_uuid() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one")]);
-    let session = Session::resolve(&dir, None).unwrap();
+    let session = Session::resolve(&dir, None).await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("hi").await.unwrap(), "one");
     let sid = handle.session_id().expect("session id present");
@@ -1479,13 +1488,13 @@ async fn open_session_resumes_existing_id() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock1 = MockProvider::new(vec![text_response("one")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock1), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     handle.shutdown().await;
 
     let mock2 = MockProvider::new(vec![text_response("two")]);
-    let session = Session::resolve(&dir, Some("s1")).unwrap();
+    let session = Session::resolve(&dir, Some("s1")).await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
     assert_eq!(handle.session_id().as_deref(), Some("s1"));
     let resumed = history(&handle);
@@ -1511,7 +1520,7 @@ async fn open_session_resumes_existing_id() {
         .filter(|n| n.ends_with(".jsonl"))
         .collect();
     assert_eq!(files, ["s1.jsonl"]);
-    let loaded = loaded_messages(&dir, "s1");
+    let loaded = loaded_messages(&dir, "s1").await;
     assert_eq!(loaded.iter().filter(|m| m.role == Role::User).count(), 2);
 }
 
@@ -1792,14 +1801,19 @@ async fn session_persists_root_meta_and_recent_index() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one")]);
-    let session = Session::resolve(&dir, None).unwrap();
+    let session = Session::resolve(&dir, None).await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("hi").await.unwrap(), "one");
     let sid = handle.session_id().expect("session id after content");
     handle.shutdown().await;
 
     // The session file's first record is the meta with the root.
-    let records = Session::open(&dir, &sid).unwrap().load_records().unwrap();
+    let records = Session::open(&dir, &sid)
+        .await
+        .unwrap()
+        .load_records()
+        .await
+        .unwrap();
     match &records[0] {
         Record::SessionMeta(meta) => {
             assert_eq!(meta.root, canonical_root(tmp.path()));
@@ -1810,7 +1824,10 @@ async fn session_persists_root_meta_and_recent_index() {
 
     // The recent index maps this root to the session id.
     assert_eq!(
-        recent_session_id(&dir, tmp.path()).unwrap().as_deref(),
+        recent_session_id(&dir, tmp.path())
+            .await
+            .unwrap()
+            .as_deref(),
         Some(sid.as_str())
     );
 }
@@ -1825,7 +1842,7 @@ async fn clear_updates_recent_index_to_fresh_session() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one"), text_response("fresh")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
 
@@ -1837,16 +1854,21 @@ async fn clear_updates_recent_index_to_fresh_session() {
     handle.shutdown().await;
 
     assert_eq!(
-        recent_session_id(&dir, tmp.path()).unwrap().as_deref(),
+        recent_session_id(&dir, tmp.path())
+            .await
+            .unwrap()
+            .as_deref(),
         Some(fresh.as_str()),
         "/clear session becomes the recent one for the root"
     );
 }
 
-fn loaded_messages(dir: &Path, id: &str) -> Vec<Message> {
+async fn loaded_messages(dir: &Path, id: &str) -> Vec<Message> {
     Session::open(dir, id)
+        .await
         .unwrap()
         .load_records()
+        .await
         .unwrap()
         .into_iter()
         .filter_map(|record| match record {
@@ -1936,7 +1958,7 @@ async fn rewind_truncates_persisted_session_file() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one"), text_response("two")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
@@ -1951,7 +1973,7 @@ async fn rewind_truncates_persisted_session_file() {
     );
     handle.shutdown().await;
 
-    let loaded = loaded_messages(&dir, "s1");
+    let loaded = loaded_messages(&dir, "s1").await;
     assert_eq!(user_texts(&loaded), vec!["first"]);
 }
 
@@ -1963,7 +1985,7 @@ async fn rewind_all_turns_clears_session_content() {
     std::fs::create_dir_all(&dir).unwrap();
 
     let mock = MockProvider::new(vec![text_response("one")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     assert_eq!(handle.session_id().as_deref(), Some("s1"));
@@ -2643,13 +2665,18 @@ async fn never_todo_write_session_has_no_todo_list_line() {
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock = MockProvider::new(vec![text_response("one"), text_response("two")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
     handle.shutdown().await;
 
-    let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
+    let records = Session::open(&dir, "s1")
+        .await
+        .unwrap()
+        .load_records()
+        .await
+        .unwrap();
     assert!(
         !records.iter().any(|r| matches!(r, Record::TodoList { .. })),
         "never-write sessions must not grow a todo_list line"
@@ -2667,7 +2694,7 @@ async fn todo_write_appends_snapshot_without_advancing_prefix() {
         text_response("cleared"),
         text_response("next"),
     ]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let path = session.path().to_path_buf();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("clear list").await.unwrap(), "cleared");
@@ -2681,7 +2708,7 @@ async fn todo_write_appends_snapshot_without_advancing_prefix() {
     assert_eq!(handle.prompt("second").await.unwrap(), "next");
     handle.shutdown().await;
 
-    let loaded = loaded_messages(&dir, "s1");
+    let loaded = loaded_messages(&dir, "s1").await;
     assert_eq!(user_texts(&loaded), vec!["clear list", "second"]);
 }
 
@@ -2815,7 +2842,7 @@ async fn rewind_restores_previous_todo_list() {
         ),
         text_response("second"),
     ]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
     let handle = spawn_runtime(
         AppId::next(),
@@ -2845,7 +2872,12 @@ async fn rewind_restores_previous_todo_list() {
     assert_eq!(handle.todos().items[0].id, "a");
     handle.shutdown().await;
 
-    let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
+    let records = Session::open(&dir, "s1")
+        .await
+        .unwrap()
+        .load_records()
+        .await
+        .unwrap();
     let last_list = records.iter().rev().find_map(|r| match r {
         Record::TodoList { items, .. } => Some(items.as_slice()),
         _ => None,
@@ -2870,7 +2902,7 @@ async fn next_prompt_clears_finished_todos() {
         text_response("done"),
         text_response("next"),
     ]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
     assert_eq!(handle.prompt("t1").await.unwrap(), "done");
     assert_eq!(handle.todos().items[0].id, "a");
@@ -2878,7 +2910,12 @@ async fn next_prompt_clears_finished_todos() {
     assert!(handle.todos().is_empty());
     handle.shutdown().await;
 
-    let records = Session::open(&dir, "s1").unwrap().load_records().unwrap();
+    let records = Session::open(&dir, "s1")
+        .await
+        .unwrap()
+        .load_records()
+        .await
+        .unwrap();
     let last_list = records.iter().rev().find_map(|r| match r {
         Record::TodoList { items, .. } => Some(items.as_slice()),
         _ => None,
@@ -2902,13 +2939,13 @@ async fn resume_hydrates_todos_from_snapshot() {
         ),
         text_response("one"),
     ]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock1), session).await;
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     handle.shutdown().await;
 
     let mock2 = MockProvider::new(vec![text_response("two")]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock2), session).await;
     assert_eq!(handle.todos().items.len(), 1);
     assert_eq!(handle.todos().items[0].id, "keep");
@@ -2932,7 +2969,7 @@ async fn slash_clear_does_not_copy_todos_to_new_session() {
         text_response("one"),
         text_response("fresh"),
     ]);
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
     let handle = spawn_runtime(
         AppId::next(),
@@ -2951,7 +2988,12 @@ async fn slash_clear_does_not_copy_todos_to_new_session() {
     let sid = handle.session_id().expect("new session");
     handle.shutdown().await;
 
-    let fresh = Session::open(&dir, &sid).unwrap().load_records().unwrap();
+    let fresh = Session::open(&dir, &sid)
+        .await
+        .unwrap()
+        .load_records()
+        .await
+        .unwrap();
     assert!(
         !fresh.iter().any(|r| matches!(r, Record::TodoList { .. })),
         "new session must not inherit the old todo_list"
@@ -3241,12 +3283,12 @@ async fn bang_shell_persists_and_rewinds() {
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
     let _ = handle.prompt("!echo persisted").await.unwrap();
     handle.shutdown().await;
 
-    let loaded = loaded_messages(&dir, "s1");
+    let loaded = loaded_messages(&dir, "s1").await;
     let text = loaded
         .iter()
         .find(|m| m.role == Role::User)
@@ -3260,7 +3302,7 @@ async fn bang_shell_persists_and_rewinds() {
     let parsed = LocalShell::try_parse(text).expect("envelope");
     assert_eq!(parsed.command, "echo persisted");
 
-    let session = Session::open(&dir, "s1").unwrap();
+    let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
     assert_eq!(history(&handle).len(), 1);
     let mut sub = handle.subscribe();

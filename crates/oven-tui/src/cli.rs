@@ -37,7 +37,7 @@ impl Cli {
     /// The session id to use: an explicit `--session` wins; otherwise
     /// `--continue` resumes the most recent session recorded for the
     /// workspace root.
-    fn resolve_session_id(&self) -> Option<String> {
+    async fn resolve_session_id(&self) -> Option<String> {
         if let Some(id) = self.session.as_deref() {
             return Some(id.to_string());
         }
@@ -45,7 +45,7 @@ impl Cli {
             return None;
         }
         let dir = dirs::sessions_dir()?;
-        match session::recent_session_id(&dir, &self.dir) {
+        match session::recent_session_id(&dir, &self.dir).await {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("warning: resolving recent session: {e}");
@@ -107,7 +107,7 @@ impl Cli {
                     self.headless(prompt.trim()).await
                 }
                 None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
-                    let session = self.resolve_session_id();
+                    let session = self.resolve_session_id().await;
                     tracing::info!(root = %self.dir.display(), headless = false, "oven starting");
                     self.interactive(session.as_deref()).await
                 }
