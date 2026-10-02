@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Durable memory in `oven-mem`: one markdown file per fact or preference under `<root>/.oven/memory` and `~/.oven/memory`. The catalog is appended to the system prompt, `memory_read`, `memory_write` and `memory_forget` are the model's tools, and `/memory` plus `oven mem` (`ls`, `show`, `rm`, `edit`) list, show and remove them. `[memory] enabled = false` mounts no tools, builds no store and adds nothing to the prompt
 - `oven model` configures providers without starting the TUI: `ls` lists every configured model next to the catalog `oven-llm` ships (and, with `--refresh`, what each endpoint reports), `add` walks a vendor into `~/.oven/config.toml` and `rm` drops a provider or one declaration. Every question of `add` is also a flag, so a script answers nothing and a missing required one fails naming it; the key is read without echo, a one-token request verifies the endpoint before anything is saved, and `--activate` is what switches the model — `add` otherwise leaves the selection alone. The subcommands live in `crates/oven-tui/src/commands/`, where config is still reached only through `oven-app`
 - `commands/prompt.rs`: the line prompts a subcommand asks, behind a `Prompter` trait, so the walk is testable with scripted answers and a session with no terminal answers nothing instead of blocking
 - `AppConfig::load_file` / `save_at` / `empty` / `remove_provider` / `remove_model`, and `provider_toml` for a preview with the API key masked: `save_provider_at` could only merge, so deleting a provider or a model had no path

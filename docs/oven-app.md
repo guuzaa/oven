@@ -1,8 +1,8 @@
 # oven-app
 
 `oven-app` is the application layer. It composes `oven-agent` (the agent loop
-and tools), `oven-host` (shell and process infrastructure) and `oven-llm`
-(providers, routing, model catalog) into one long-lived task driven by
+and tools), `oven-host` (shell and process infrastructure), `oven-mem` (durable
+memory) and `oven-llm` (providers, routing, model catalog) into one long-lived task driven by
 commands, and publishes facts back as events. It makes no rendering decisions
 and owns no presentation state: `oven-tui` is a client of this crate, so the
 same runtime also serves headless runs.
@@ -34,7 +34,7 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 | `src/inbox.rs` | the queue of inputs for the driver, counting the prompts nobody took. |
 | `src/shared.rs` | what `App` and the runtime both reach: state, events, the running turn, its pending request, shutdown. |
 | `src/shared/live.rs` | what applies while a turn holds the driver: `/model`, `/agents`, `/exit`. |
-| `src/builder.rs` | service composition: config → tools, MCP servers, skills, agent. |
+| `src/builder.rs` | service composition: config → tools, MCP servers, skills, memory, agent. |
 | `src/runtime/mod.rs` | the runtime actor — input loop, dispatch, persistence. |
 | `src/runtime/turn.rs` | what happens while a turn runs — the driver turn, shell, slash commands. |
 | `src/subagent.rs` | delegated runs — the registry, the concurrency cap, one task per subagent. |
@@ -197,7 +197,7 @@ a session that was opened but never persisted stays invisible to `/continue`.
 
 ## Slash commands
 
-`slash/` defines one trait and six built-ins; the registry is extensible:
+`slash/` defines one trait and seven built-ins; the registry is extensible:
 
 ```rust
 pub struct CommandContext<'a> {
@@ -220,7 +220,7 @@ anything that moves app state still comes back as an outcome.
 `cx.agent()` hands back the driver, or `AppError::AgentBusy` while a running turn
 holds it. That one call is what decides whether a command applies mid-turn or
 waits: `/agents` never asks, so it works while a subagent is being watched;
-`/clear`, `/setup`, `/plan`, `/model` and `/compact` all ask, so they queue.
+`/clear`, `/setup`, `/plan`, `/model`, `/compact` and `/memory` all ask, so they queue.
 
 | Command | Does |
 | --- | --- |
@@ -231,12 +231,14 @@ waits: `/agents` never asks, so it works while a subagent is being watched;
 | `/exit` | emits `goodbye` and `Exited` |
 | `/plan on/off` | toggles plan mode, replying with the current mode and the mode list |
 | `/agents [stop <name\|all> \| forget <name>]` | lists subagents, or focuses, stops and drops one |
+| `/memory [show <ref> \| rm <ref>]` | lists memories, or shows or removes one. `<ref>` is `workspace/<id>`, `user/<id>`, or a bare id when it is unique |
 
 Commands return a `CommandOutcome` the runtime interprets — `Reply` becomes a
 notification, `Passthrough` falls through to an agent turn, `Exit` emits
 `Exited`, `ModeChanged` switches the live mode, `ModelChanged`/
-`ProviderChanged` rebuild routing, and `Cleared` and `Compact` touch
-persistence. Nothing in `slash/` performs IO of its own.
+`ProviderChanged` rebuild routing, `Cleared` and `Compact` touch
+persistence, and `Memory` is performed by the runtime against the store the
+builder loaded. Nothing in `slash/` performs IO of its own.
 
 `complete.rs` holds the prefix rule the completion lists in the TUI select with:
 ASCII-case-insensitive, an empty query keeping every key, and `matches_model`
@@ -261,7 +263,11 @@ vendors require a `base_url`, and per-model context windows can be declared so
 custom gateways still get ctx% and auto-compaction. `save_provider_at` rewrites
 the file in the canonical format whenever `/model` or `/setup` changes something.
 
-The CLI subcommands edit config instead, so the API is split by intent rather
+`oven mem ls`, `show`, `rm` and `edit` use the same operations as `/memory`,
+through `oven_app::memory`, without starting the TUI. `edit` opens the file in
+`$VISUAL` or `$EDITOR`.
+
+Config is edited by its own CLI subcommands, so that API is split by intent rather
 than by file: `load_file` reads one file with nothing merged in, `save_at`
 writes a whole config back, and `remove_provider` / `remove_model` are the
 deletions the merge-only `save_provider_at` cannot express — removing the
@@ -288,7 +294,10 @@ with a short timeout; an auth error surfaces as `API key rejected: …`.
 
 `tools.rs` mounts a named set of tools per workspace: `file_read`,
 `file_write`, `file_edit`, `bash`, `glob`, `grep`, `todo_write` and `answer`,
-plus `read_skill` added by the builder. An empty config list means the built-in
+plus `read_skill` added by the builder. When `[memory] enabled` is on (the
+default), the builder also mounts `memory_read`, `memory_write` and
+`memory_forget` and appends the memory catalog to the system prompt.
+`enabled = false` does none of that. An empty config list means the built-in
 defaults; unknown names are skipped silently.
 
 `answer` is how the model asks the user something: it publishes a `Question`
