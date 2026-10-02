@@ -10,7 +10,7 @@ use oven_llm::{
     Role, StopReason, StreamEvent, Usage,
 };
 
-use crate::capabilities::memory::{MemoryReadTool, MemoryWriteTool};
+use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
 use crate::core::config::{AppConfig, MemoryConfig};
 
 use super::AppBuilder;
@@ -245,12 +245,15 @@ fn has_tool(tools: &[String], name: &str) -> bool {
 }
 
 #[tokio::test]
-async fn memory_write_is_excluded_from_subagent_roles() {
+async fn memory_writers_are_excluded_from_subagent_roles() {
     let tmp = tempdir::TempDir::new("memory-write-roles").unwrap();
     let captured = capture(tmp.path(), AppConfig::default()).await;
     assert!(has_tool(&captured.driver_tools, MemoryWriteTool::NAME));
     assert!(!has_tool(&captured.explore_tools, MemoryWriteTool::NAME));
     assert!(!has_tool(&captured.general_tools, MemoryWriteTool::NAME));
+    assert!(has_tool(&captured.driver_tools, MemoryForgetTool::NAME));
+    assert!(!has_tool(&captured.explore_tools, MemoryForgetTool::NAME));
+    assert!(!has_tool(&captured.general_tools, MemoryForgetTool::NAME));
 }
 
 struct ScriptedProvider {

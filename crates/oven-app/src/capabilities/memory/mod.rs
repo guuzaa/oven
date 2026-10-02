@@ -1,9 +1,11 @@
+mod forget;
 mod read;
 mod write;
 
 use oven_agent::AgentError;
 use oven_mem::{MemoryError, MemoryId, MemoryKind, MemoryScope};
 
+pub(crate) use forget::MemoryForgetTool;
 pub(crate) use read::MemoryReadTool;
 pub(crate) use write::MemoryWriteTool;
 

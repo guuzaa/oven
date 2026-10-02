@@ -109,6 +109,27 @@ impl MemoryStore {
         Ok(outcome)
     }
 
+    pub async fn forget(&self, scope: MemoryScope, id: &MemoryId) -> Result<(), MemoryError> {
+        let root = self.scope_root(scope)?.to_path_buf();
+        let path = memory_path(&root, id);
+        match fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(MemoryError::NotFound {
+                    scope,
+                    id: id.clone(),
+                });
+            }
+            Err(err) => {
+                return Err(MemoryError::Io {
+                    message: err.to_string(),
+                });
+            }
+        }
+        self.remove_index(scope, id);
+        Ok(())
+    }
+
     pub fn catalog(&self) -> Option<String> {
         let entries = self.entries();
         render_catalog(&entries)
@@ -150,6 +171,14 @@ impl MemoryStore {
                 modified,
             },
         );
+    }
+
+    fn remove_index(&self, scope: MemoryScope, id: &MemoryId) {
+        let mut guard = self
+            .index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.remove(&(scope, id.clone()));
     }
 
     fn scope_root(&self, scope: MemoryScope) -> Result<&Path, MemoryError> {
@@ -648,5 +677,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(memory.source.as_deref(), Some("01J8Z"));
+    }
+
+    #[tokio::test]
+    async fn forget_removes_the_file_and_the_index_entry() {
+        let (_tmp, workspace, store) = workspace_store("mem-forget").await;
+        store
+            .put(sample("proxy-requires-http2", "proxy fact", "body\n", None))
+            .await
+            .unwrap();
+        store
+            .put(sample("kept", "kept fact", "body\n", None))
+            .await
+            .unwrap();
+        store
+            .forget(
+                MemoryScope::Workspace,
+                &MemoryId::new("proxy-requires-http2").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(!workspace.join("proxy-requires-http2.md").exists());
+        let catalog = store.catalog().unwrap();
+        assert!(!catalog.contains("proxy-requires-http2"));
+        assert!(catalog.contains("- workspace/kept kept fact"));
+    }
+
+    #[tokio::test]
+    async fn forget_unknown_id_is_not_found() {
+        let (_tmp, workspace, store) = workspace_store("mem-forget-missing").await;
+        store
+            .put(sample("kept", "kept fact", "body\n", None))
+            .await
+            .unwrap();
+        let before = store.catalog();
+        let id = MemoryId::new("missing").unwrap();
+        let err = store.forget(MemoryScope::Workspace, &id).await.unwrap_err();
+        assert_eq!(
+            err,
+            MemoryError::NotFound {
+                scope: MemoryScope::Workspace,
+                id: id.clone(),
+            }
+        );
+        assert_eq!(err.to_string(), format!("{NOT_FOUND}: workspace/{id}"));
+        assert_eq!(store.catalog(), before);
+        assert!(workspace.join("kept.md").is_file());
     }
 }

@@ -16,7 +16,7 @@ use tracing::Instrument;
 use crate::App;
 use crate::capabilities::mcp::McpRegistry;
 use crate::capabilities::mcp::client::{DefaultMcpConnector, McpConnector};
-use crate::capabilities::memory::{MemoryReadTool, MemoryWriteTool};
+use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
 use crate::capabilities::subagent::{Role as SubagentRole, SubagentParts, Subagents};
 use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
@@ -35,6 +35,7 @@ const CHILD_TOOLS_EXCLUDED: &[&str] = &[
     TaskTool::NAME,
     TaskOutputTool::NAME,
     MemoryWriteTool::NAME,
+    MemoryForgetTool::NAME,
 ];
 
 const EXPLORE_ROLE: &str = "explore";
@@ -252,6 +253,7 @@ impl AppBuilder {
                 Arc::clone(store),
                 session_id.map(str::to_owned),
             )));
+            base.push(Arc::new(MemoryForgetTool::new(Arc::clone(store))));
         }
 
         let mut system = oven_agent::system_prompt(
