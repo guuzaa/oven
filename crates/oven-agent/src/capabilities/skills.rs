@@ -4,9 +4,8 @@
 //! Each skill is a directory containing a `SKILL.md` file with a
 //! `description:` YAML frontmatter. Only the description is injected into
 //! the system prompt (as `- **<id>**: <description>` lines); the full document
-//! body is never loaded up front. Instead it is read from disk on demand
-//! via [`SkillRegistry::content`], which backs the
-//! [`SkillReadTool`](crate::capabilities::tools::SkillReadTool).
+//! body is never loaded up front. [`SkillReadTool`](crate::capabilities::tools::SkillReadTool)
+//! reads it from the paths reported by [`SkillRegistry::sources`].
 //!
 //! Discovery is directory-driven: [`SkillRegistry::load_from_dirs`] scans
 //! each directory's immediate subdirectories. The app layer decides which
@@ -30,8 +29,8 @@ pub trait Skill: Send + Sync {
     fn id(&self) -> &str;
     /// Short description injected into the system prompt.
     fn description(&self) -> &str;
-    /// Source document on disk. When present, [`SkillRegistry::content`] can
-    /// load the full guidance dynamically; otherwise the skill has no body.
+    /// Source document on disk. When present, the skill body can be read on
+    /// demand; otherwise the skill has no body.
     fn source(&self) -> Option<&Path> {
         None
     }
@@ -82,13 +81,6 @@ impl SkillRegistry {
         } else {
             Some(parts.join("\n"))
         }
-    }
-
-    /// Dynamically load the full guidance document for a skill from disk.
-    /// Content is read on every call, so edits take effect immediately.
-    pub fn content(&self, id: &str) -> Option<String> {
-        let path = self.skills.get(id)?.source()?;
-        std::fs::read_to_string(path).ok()
     }
 
     /// Discover skills from the given directories. For each immediate
@@ -212,10 +204,6 @@ mod tests {
         let p = reg.merged_system_prompt().unwrap();
         assert!(p.contains("- **files**: read files carefully"));
         assert!(!p.contains("full guidance"));
-        assert_eq!(
-            reg.content("files").unwrap(),
-            "---\ndescription: read files carefully\n---\nfull guidance\n"
-        );
     }
 
     #[test]
@@ -253,26 +241,5 @@ mod tests {
         let mut reg = SkillRegistry::new();
         reg.load_from_dirs(&[tmp.path().to_path_buf()]);
         assert!(!reg.contains("x"));
-    }
-
-    #[test]
-    fn content_is_loaded_dynamically() {
-        let tmp = tempdir::TempDir::new("skill-dynamic").unwrap();
-        std::fs::create_dir_all(tmp.path().join("s")).unwrap();
-        let file = tmp.path().join("s").join(SKILL_FILE);
-        std::fs::write(&file, "---\ndescription: d\n---\nbody 1\n").unwrap();
-
-        let mut reg = SkillRegistry::new();
-        reg.load_from_dirs(&[tmp.path().to_path_buf()]);
-        assert_eq!(
-            reg.content("s").unwrap(),
-            "---\ndescription: d\n---\nbody 1\n"
-        );
-
-        std::fs::write(&file, "---\ndescription: d\n---\nbody 2\n").unwrap();
-        assert_eq!(
-            reg.content("s").unwrap(),
-            "---\ndescription: d\n---\nbody 2\n"
-        );
     }
 }

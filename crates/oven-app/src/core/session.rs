@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oven_agent::{Record, SessionMeta};
+use oven_agent::Record;
 use oven_llm::{Message, Usage};
 use serde::Deserialize;
 use thiserror::Error;
@@ -162,38 +162,6 @@ impl Session {
         }
     }
 
-    /// Read all messages from disk, dropping token-usage records. See
-    /// [`load_records`](Self::load_records).
-    pub fn load(&self) -> Result<Vec<Message>, SessionError> {
-        self.load_records().map(|records| {
-            records
-                .into_iter()
-                .filter_map(|r| match r {
-                    Record::Message { message, .. } => Some(message),
-                    Record::TokenUsage { .. }
-                    | Record::Thinking { .. }
-                    | Record::SessionMeta(_)
-                    | Record::TodoList { .. } => None,
-                })
-                .collect()
-        })
-    }
-
-    /// Read the session's metadata record (its workspace root and creation
-    /// time), the first line of the file. `None` for a missing file, an
-    /// empty file, or a legacy session that predates meta records.
-    pub fn load_meta(&self) -> Result<Option<SessionMeta>, SessionError> {
-        let Some(line) = read_first_line(&self.path)? else {
-            return Ok(None);
-        };
-        let records =
-            parse_line(&line).map_err(|e| SessionError::Parse(self.path.clone(), 1, e))?;
-        Ok(records.into_iter().find_map(|r| match r {
-            Record::SessionMeta(meta) => Some(meta),
-            _ => None,
-        }))
-    }
-
     /// Append many records (messages and token usage) in one open/flush
     /// cycle.
     pub fn append_records(&self, records: &[Record]) -> Result<(), SessionError> {
@@ -226,36 +194,6 @@ impl Session {
         }
         file.flush()
             .map_err(|e| SessionError::Io(self.path.clone(), e))
-    }
-
-    /// Delete the session file. Idempotent for missing files.
-    pub fn delete(&self) -> Result<(), SessionError> {
-        match fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(SessionError::Io(self.path.clone(), e)),
-        }
-    }
-
-    /// List the session ids present in `dir`.
-    pub fn list(dir: &Path) -> Result<Vec<String>, SessionError> {
-        let mut out = Vec::new();
-        let read = match fs::read_dir(dir) {
-            Ok(r) => r,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(SessionError::Io(dir.to_path_buf(), e)),
-        };
-        for entry in read {
-            let entry = entry.map_err(|e| SessionError::Io(dir.to_path_buf(), e))?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-            {
-                out.push(stem.to_string());
-            }
-        }
-        out.sort();
-        Ok(out)
     }
 }
 
@@ -351,28 +289,6 @@ pub fn recent_session_id(dir: &Path, root: &Path) -> Result<Option<String>, Sess
     Ok(load_recent(dir)?.get(&canonical_root(root)).cloned())
 }
 
-fn read_first_line(path: &Path) -> Result<Option<String>, SessionError> {
-    match fs::File::open(path) {
-        Ok(f) => {
-            let mut line = String::new();
-            let mut reader = BufReader::new(f);
-            let n = reader
-                .read_line(&mut line)
-                .map_err(|e| SessionError::Io(path.to_path_buf(), e))?;
-            if n == 0 {
-                return Ok(None);
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(trimmed.to_string()))
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(SessionError::Io(path.to_path_buf(), e)),
-    }
-}
-
 /// Parse one JSONL line into records.
 ///
 /// Keep in sync with `oven_agent::Record` variants. Unknown tags are skipped
@@ -436,6 +352,7 @@ fn validate_id(id: &str) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oven_agent::SessionMeta;
     use oven_llm::ContentBlock;
 
     fn tmp() -> tempdir::TempDir {
@@ -476,7 +393,7 @@ mod tests {
     fn load_missing_returns_empty() {
         let tmp = tmp();
         let session = Session::open(tmp.path(), "missing").unwrap();
-        assert!(session.load().unwrap().is_empty());
+        assert!(session.load_records().unwrap().is_empty());
     }
 
     #[test]
@@ -493,7 +410,7 @@ mod tests {
         session
             .overwrite(&[message_record(1, Message::user_text("only"))])
             .unwrap();
-        assert_eq!(session.load().unwrap().len(), 1);
+        assert_eq!(session.load_records().unwrap().len(), 1);
     }
 
     #[test]
@@ -540,8 +457,6 @@ mod tests {
             }
             _ => panic!("unexpected record kinds"),
         }
-        // load() drops the token-usage record.
-        assert_eq!(session.load().unwrap().len(), 2);
     }
 
     #[test]
@@ -564,7 +479,6 @@ mod tests {
         assert!(
             matches!(&loaded[0], Record::Message { timestamp: 0, message } if message.role == oven_llm::Role::User)
         );
-        assert_eq!(session.load().unwrap().len(), 1);
     }
 
     #[test]
@@ -612,8 +526,6 @@ mod tests {
         assert!(
             matches!(&loaded[2], Record::Message { timestamp: 0, message } if message.role == oven_llm::Role::User)
         );
-        // load() drops the token-usage record.
-        assert_eq!(session.load().unwrap().len(), 2);
     }
 
     #[test]
@@ -625,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn session_meta_record_roundtrips_and_load_drops_it() {
+    fn session_meta_record_roundtrips() {
         let tmp = tmp();
         let session = Session::open(tmp.path(), "s").unwrap();
         let meta = SessionMeta {
@@ -644,21 +556,6 @@ mod tests {
             matches!(&loaded[0], Record::SessionMeta(m) if m == &meta),
             "meta must parse from the first line"
         );
-        assert_eq!(session.load_meta().unwrap(), Some(meta));
-        assert_eq!(session.load().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn load_meta_missing_or_legacy_returns_none() {
-        let tmp = tmp();
-        let missing = Session::open(tmp.path(), "missing").unwrap();
-        assert_eq!(missing.load_meta().unwrap(), None);
-
-        let legacy = Session::open(tmp.path(), "legacy").unwrap();
-        legacy
-            .append_records(&[message_record(1, Message::user_text("old"))])
-            .unwrap();
-        assert_eq!(legacy.load_meta().unwrap(), None);
     }
 
     #[test]
@@ -690,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_records_roundtrip_and_are_dropped_from_messages() {
+    fn thinking_records_roundtrip() {
         let tmp = tmp();
         let session = Session::open(tmp.path(), "s").unwrap();
         session
@@ -713,7 +610,6 @@ mod tests {
                 duration_ms: 1_500
             }
         ));
-        assert_eq!(session.load().unwrap().len(), 2);
     }
 
     #[test]
@@ -741,7 +637,6 @@ mod tests {
         assert!(
             matches!(&loaded[0], Record::Message { message, .. } if message.role == oven_llm::Role::User)
         );
-        assert_eq!(session.load().unwrap().len(), 1);
     }
 
     #[test]
@@ -772,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn load_drops_todo_list_records() {
+    fn todo_list_records_roundtrip() {
         let tmp = tmp();
         let session = Session::open(tmp.path(), "s").unwrap();
         session
@@ -789,7 +684,6 @@ mod tests {
         let loaded = session.load_records().unwrap();
         assert_eq!(loaded.len(), 3);
         assert!(matches!(&loaded[1], Record::TodoList { items, .. } if items.is_empty()));
-        assert_eq!(session.load().unwrap().len(), 2);
     }
 
     #[test]

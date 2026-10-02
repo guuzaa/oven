@@ -1149,7 +1149,7 @@ async fn session_persists_across_spawns() {
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
     handle.shutdown().await;
 
-    let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+    let loaded = loaded_messages(&dir, "s1");
     assert!(loaded.iter().any(|m| {
         m.role == Role::User
             && m.content
@@ -1169,7 +1169,7 @@ async fn session_persists_across_spawns() {
     assert_eq!(handle.prompt("second").await.unwrap(), "two");
     handle.shutdown().await;
 
-    let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+    let loaded = loaded_messages(&dir, "s1");
     assert_eq!(loaded.iter().filter(|m| m.role == Role::User).count(), 2);
 }
 
@@ -1328,7 +1328,7 @@ async fn slash_clear_starts_new_session() {
     assert!(uuid::Uuid::parse_str(&sid_after_clear).is_ok());
     handle.shutdown().await;
 
-    let old = Session::open(&dir, "s1").unwrap().load().unwrap();
+    let old = loaded_messages(&dir, "s1");
     assert!(old.iter().any(|m| {
         m.role == Role::User
             && m.content
@@ -1355,7 +1355,7 @@ async fn slash_clear_starts_new_session() {
     }
     assert_eq!(fresh_ids.len(), 1, "expected one fresh uuid session file");
     assert_eq!(fresh_ids, [sid_after_clear]);
-    let fresh = Session::open(&dir, &fresh_ids[0]).unwrap().load().unwrap();
+    let fresh = loaded_messages(&dir, &fresh_ids[0]);
     assert_eq!(fresh.iter().filter(|m| m.role == Role::User).count(), 1);
     assert!(fresh.iter().any(|m| {
         m.role == Role::User
@@ -1511,7 +1511,7 @@ async fn open_session_resumes_existing_id() {
         .filter(|n| n.ends_with(".jsonl"))
         .collect();
     assert_eq!(files, ["s1.jsonl"]);
-    let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+    let loaded = loaded_messages(&dir, "s1");
     assert_eq!(loaded.iter().filter(|m| m.role == Role::User).count(), 2);
 }
 
@@ -1843,6 +1843,19 @@ async fn clear_updates_recent_index_to_fresh_session() {
     );
 }
 
+fn loaded_messages(dir: &Path, id: &str) -> Vec<Message> {
+    Session::open(dir, id)
+        .unwrap()
+        .load_records()
+        .unwrap()
+        .into_iter()
+        .filter_map(|record| match record {
+            Record::Message { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
 fn user_texts<M: Borrow<Message>>(messages: &[M]) -> Vec<String> {
     messages
         .iter()
@@ -1938,7 +1951,7 @@ async fn rewind_truncates_persisted_session_file() {
     );
     handle.shutdown().await;
 
-    let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+    let loaded = loaded_messages(&dir, "s1");
     assert_eq!(user_texts(&loaded), vec!["first"]);
 }
 
@@ -2668,7 +2681,7 @@ async fn todo_write_appends_snapshot_without_advancing_prefix() {
     assert_eq!(handle.prompt("second").await.unwrap(), "next");
     handle.shutdown().await;
 
-    let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+    let loaded = loaded_messages(&dir, "s1");
     assert_eq!(user_texts(&loaded), vec!["clear list", "second"]);
 }
 
@@ -3233,7 +3246,7 @@ async fn bang_shell_persists_and_rewinds() {
     let _ = handle.prompt("!echo persisted").await.unwrap();
     handle.shutdown().await;
 
-    let loaded = Session::open(&dir, "s1").unwrap().load().unwrap();
+    let loaded = loaded_messages(&dir, "s1");
     let text = loaded
         .iter()
         .find(|m| m.role == Role::User)

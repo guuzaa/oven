@@ -850,20 +850,6 @@ impl AppConfig {
             .map_err(|e| ConfigError::Write(path.to_path_buf(), e))
     }
 
-    pub fn save_user_provider(overlay: &ProviderConfig) -> Result<PathBuf, ConfigError> {
-        let path = Self::default_user_config_path().ok_or_else(|| {
-            ConfigError::Write(
-                PathBuf::from("<config_home>"),
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "no config dir on this platform",
-                ),
-            )
-        })?;
-        Self::save_provider_at(&path, overlay)?;
-        Ok(path)
-    }
-
     /// Update one provider and rewrite the file in the canonical format. The
     /// provider is the overlay's `name`, or the active one when unset.
     pub fn save_provider_at(path: &Path, overlay: &ProviderConfig) -> Result<(), ConfigError> {
