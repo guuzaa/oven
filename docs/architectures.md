@@ -275,7 +275,7 @@ turn ends, in arrival order. Keyboard mode toggle is `App::set_mode` and applies
 
 ## Agent events
 
-Emitted during one LLM turn. History and model stay on the committed `Message` / `AppState`. Todo and usage updates are the exception: the agent emits `TodosChanged` / `Usage` as soon as a provider response reports them, and a frontend consumes them where they land — the checklist widget from `AgentEvent::TodosChanged`, the context gauge's prompt-side tokens from `AgentEvent::Usage`.
+Emitted during one LLM turn. History and model stay on the committed `Message` / `AppState`. Todo and usage updates are the exception: the agent emits `TodosChanged` / `Usage` as soon as a provider response reports them, and a frontend consumes them where they land — the checklist widget from `AgentEvent::TodosChanged`, the context gauge's input plus output tokens from `AgentEvent::Usage`.
 
 ```rust
 pub struct AgentEventEnvelope {

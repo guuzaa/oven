@@ -165,10 +165,11 @@ cannot say is that the history was replaced, so that goes out as
 `HistoryChanged { reason }` (`Rewound`, `Cleared`, `Compacted`, `External`): a
 view rebuilds itself from the state and tells a rewind from a `/clear`.
 
-`context_tokens` is prompt-side tokens (input plus cache reads) of the last
-response and `context_window` comes from the router's model info; both refresh on
-every `AgentEvent::Usage`, so the ctx% moves during a turn instead of only at
-its end. Unknown windows disable the ctx% display and auto-compaction.
+`context_tokens` is the input of the last response (cache reads included) plus the
+output it added to the history, and `context_window` comes from the router's model
+info; both refresh on every `AgentEvent::Usage`, so the ctx% moves during a turn
+instead of only at its end. Unknown windows disable the ctx% display and
+auto-compaction.
 
 ## Sessions
 
