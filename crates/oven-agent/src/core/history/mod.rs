@@ -228,6 +228,12 @@ impl History {
             }
             None => self.turn_usage.push((*usage, timestamp)),
         }
+        tracing::debug!(
+            input_tokens = usage.input_tokens,
+            output_tokens = usage.output_tokens,
+            cache_read_tokens = usage.cache_read_tokens,
+            "turn usage recorded"
+        );
     }
 }
 

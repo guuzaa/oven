@@ -211,6 +211,7 @@ impl Agent {
                     duration_ms,
                     input_tokens = output.usage.input_tokens,
                     output_tokens = output.usage.output_tokens,
+                    cache_read_tokens = output.usage.cache_read_tokens,
                     "turn completed"
                 );
             }
