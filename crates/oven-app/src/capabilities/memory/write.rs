@@ -6,6 +6,7 @@ use oven_mem::{Memory, MemoryScope, MemoryStore, PutOutcome};
 use serde_json::{Value, json};
 
 use super::{parse_id, parse_kind, parse_scope};
+use crate::core::session::SessionStore;
 
 const MISSING_SCOPE: &str = "memory_write: missing 'scope' string argument";
 const MISSING_ID: &str = "memory_write: missing 'id' string argument";
@@ -18,7 +19,7 @@ const PREVIOUS_DESCRIPTION: &str = "previous description";
 
 pub struct MemoryWriteTool {
     store: Arc<MemoryStore>,
-    source: Option<String>,
+    sessions: Option<SessionStore>,
 }
 
 impl MemoryWriteTool {
@@ -35,8 +36,12 @@ existing id to revise a memory instead of adding a second phrasing. If what
 you want to save is a multi-step procedure, suggest a skill to the user
 instead of writing a memory.";
 
-    pub fn new(store: Arc<MemoryStore>, source: Option<String>) -> Self {
-        Self { store, source }
+    pub fn new(store: Arc<MemoryStore>, sessions: Option<SessionStore>) -> Self {
+        Self { store, sessions }
+    }
+
+    fn source(&self) -> Option<String> {
+        self.sessions.as_ref().map(SessionStore::current_id)
     }
 }
 
@@ -92,7 +97,7 @@ impl Tool for MemoryWriteTool {
                 description: description.to_owned(),
                 body: body.to_owned(),
                 scope,
-                source: self.source.clone(),
+                source: self.source(),
             })
             .await
             .map_err(|err| AgentError::from(err.to_string()))?;
@@ -128,6 +133,8 @@ mod tests {
     use oven_mem::{MemoryId, MemoryRoots, MemoryScope, MemoryStore};
     use serde_json::json;
 
+    use crate::core::session::{Session, SessionStore};
+
     use super::{CREATED_MEMORY, MemoryWriteTool, PREVIOUS_DESCRIPTION, REPLACED_MEMORY};
 
     const SESSION: &str = "01J8Z";
@@ -148,9 +155,17 @@ mod tests {
             user: None,
         })
         .await;
+        let sessions = match source {
+            Some(id) => {
+                let dir = tmp.path().join("sessions");
+                let session = Session::open(&dir, id).await.unwrap();
+                Some(SessionStore::new(session, tmp.path(), true))
+            }
+            None => None,
+        };
         (
             tmp,
-            MemoryWriteTool::new(std::sync::Arc::new(loaded), source.map(str::to_owned)),
+            MemoryWriteTool::new(std::sync::Arc::new(loaded), sessions),
         )
     }
 

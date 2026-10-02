@@ -55,6 +55,7 @@ fn agents_from(agent: Agent) -> AppAgents {
         events,
         wake_rx,
         memory: None,
+        session: None,
     }
 }
 
@@ -72,7 +73,11 @@ async fn spawn_app(app: &AppBuilder, provider: Box<dyn Provider>) -> App {
 
 async fn spawn_app_session(app: &AppBuilder, provider: Box<dyn Provider>, session: Session) -> App {
     let prior = session.load_records().await.unwrap();
-    let mut agents = app.build_agent_with_provider(provider).await.unwrap();
+    let sessions = crate::core::session::SessionStore::new(session.clone(), app.root(), false);
+    let mut agents = app
+        .build_agent_with_provider_session(provider, Some(sessions))
+        .await
+        .unwrap();
     let records: Vec<_> = prior
         .iter()
         .filter(|r| !matches!(r, Record::Message { message, .. } if message.role == Role::System))
@@ -4065,5 +4070,66 @@ async fn slash_memory_disabled_replies() {
         .await;
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     assert_eq!(handle.prompt("/memory").await.unwrap(), MEMORY_DISABLED);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn memory_source_follows_the_session_after_clear() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-source").unwrap();
+    let sessions = tmp.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let workspace = tmp.path().join(".oven").join("memory");
+    let mut app = AppBuilder::new(tmp.path());
+    app.set_memory(memory_store(&workspace, &tmp.path().join("unused-user")).await);
+    let write = |id: &str| {
+        tool_response(
+            "c1",
+            crate::capabilities::memory::MemoryWriteTool::NAME,
+            serde_json::json!({
+                "scope": "workspace",
+                "id": id,
+                "kind": "fact",
+                "description": id,
+                "body": "body\n",
+            }),
+        )
+    };
+    let session = Session::open(&sessions, "session-one").await.unwrap();
+    let handle = spawn_app_session(
+        &app,
+        Box::new(MockProvider::new(vec![
+            write("first-fact"),
+            text_response("saved"),
+            write("second-fact"),
+            text_response("saved again"),
+        ])),
+        session,
+    )
+    .await;
+    assert_eq!(handle.prompt("remember one").await.unwrap(), "saved");
+    handle.prompt("/clear").await.unwrap();
+    assert_eq!(handle.prompt("remember two").await.unwrap(), "saved again");
+    let new_id = handle
+        .session_id()
+        .expect("the second write's session has content");
+    assert_ne!(new_id, "session-one");
+
+    let store = memory_store(&workspace, &tmp.path().join("unused-user")).await;
+    let first = store
+        .read(
+            oven_mem::MemoryScope::Workspace,
+            &oven_mem::MemoryId::new("first-fact").unwrap(),
+        )
+        .await
+        .unwrap();
+    let second = store
+        .read(
+            oven_mem::MemoryScope::Workspace,
+            &oven_mem::MemoryId::new("second-fact").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.source.as_deref(), Some("session-one"));
+    assert_eq!(second.source.as_deref(), Some(new_id.as_str()));
     handle.shutdown().await;
 }

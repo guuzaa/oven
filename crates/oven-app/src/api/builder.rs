@@ -22,7 +22,7 @@ use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 use crate::core::event::{AppId, EventBus};
-use crate::core::session::{Session, canonical_root, session_span};
+use crate::core::session::{Session, SessionStore, canonical_root, session_span};
 use crate::platform::dirs;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
 use crate::{SkillRegistry, ToolRegistry};
@@ -205,13 +205,13 @@ impl AppBuilder {
 
     pub(crate) async fn build_interactive_agent(
         &self,
-        session_id: Option<&str>,
+        sessions: Option<SessionStore>,
     ) -> Result<AppAgents, AppError> {
         let model = self.active_model()?;
         let mut agents = self
             .build_agent_with_router(
                 crate::core::provider::build_interactive_router(&self.config)?,
-                session_id,
+                sessions,
             )
             .await?;
         agents.main.set_model(model);
@@ -230,9 +230,18 @@ impl AppBuilder {
         &self,
         provider: Box<dyn Provider>,
     ) -> Result<AppAgents, AppError> {
+        self.build_agent_with_provider_session(provider, None).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn build_agent_with_provider_session(
+        &self,
+        provider: Box<dyn Provider>,
+        sessions: Option<SessionStore>,
+    ) -> Result<AppAgents, AppError> {
         let mut router = Router::new();
         router.register(provider);
-        self.build_agent_with_router(router, None).await
+        self.build_agent_with_router(router, sessions).await
     }
 
     /// Compose one app's agents: the conversation driver, the subagents it
@@ -242,7 +251,7 @@ impl AppBuilder {
     pub(crate) async fn build_agent_with_router(
         &self,
         router: Router,
-        session_id: Option<&str>,
+        sessions: Option<SessionStore>,
     ) -> Result<AppAgents, AppError> {
         let mut base = self.tools.merged_tools();
         let mcp_tools = self
@@ -255,7 +264,7 @@ impl AppBuilder {
             base.push(Arc::new(MemoryReadTool::new(Arc::clone(store))));
             base.push(Arc::new(MemoryWriteTool::new(
                 Arc::clone(store),
-                session_id.map(str::to_owned),
+                sessions.clone(),
             )));
             base.push(Arc::new(MemoryForgetTool::new(Arc::clone(store))));
         }
@@ -310,6 +319,7 @@ impl AppBuilder {
             events,
             wake_rx,
             memory: self.memory.clone(),
+            session: sessions,
         })
     }
 
@@ -389,9 +399,8 @@ impl AppBuilder {
         let span = session_span(Some(session.id()));
         async {
             let prior = session.load_records().await?;
-            let mut agents = self
-                .build_interactive_agent(Some(session.id()))
-                .await?;
+            let sessions = SessionStore::new(session.clone(), &self.root, false);
+            let mut agents = self.build_interactive_agent(Some(sessions)).await?;
             let records: Vec<_> = prior
                 .iter()
                 .filter(
