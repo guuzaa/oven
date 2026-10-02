@@ -42,19 +42,19 @@ pub async fn write(path: &Path, content: impl AsRef<[u8]>) -> io::Result<()> {
     fs::write(path, content).await
 }
 
-pub fn write_atomic(path: &Path, content: impl AsRef<[u8]>) -> io::Result<()> {
+pub async fn write_atomic(path: &Path, content: impl AsRef<[u8]>) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).await?;
     }
     let temp = atomic_temp_path(path);
-    if let Err(err) = std::fs::write(&temp, content) {
-        let _ = std::fs::remove_file(&temp);
+    if let Err(err) = fs::write(&temp, content).await {
+        let _ = fs::remove_file(&temp).await;
         return Err(err);
     }
-    if let Err(err) = std::fs::rename(&temp, path) {
-        let _ = std::fs::remove_file(&temp);
+    if let Err(err) = fs::rename(&temp, path).await {
+        let _ = fs::remove_file(&temp).await;
         return Err(err);
     }
     Ok(())
@@ -75,28 +75,28 @@ mod tests {
     use super::{PathError, resolve_within, write_atomic};
     use std::path::Path;
 
-    #[test]
-    fn write_atomic_creates_missing_parents() {
+    #[tokio::test]
+    async fn write_atomic_creates_missing_parents() {
         let tmp = tempdir::TempDir::new("atomic-parents").unwrap();
         let path = tmp.path().join("a").join("b").join("note.md");
-        write_atomic(&path, "hello").unwrap();
+        write_atomic(&path, "hello").await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
     }
 
-    #[test]
-    fn write_atomic_replaces_existing_content() {
+    #[tokio::test]
+    async fn write_atomic_replaces_existing_content() {
         let tmp = tempdir::TempDir::new("atomic-replace").unwrap();
         let path = tmp.path().join("note.md");
-        write_atomic(&path, "old").unwrap();
-        write_atomic(&path, "new").unwrap();
+        write_atomic(&path, "old").await.unwrap();
+        write_atomic(&path, "new").await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
-    #[test]
-    fn write_atomic_leaves_no_temp_file() {
+    #[tokio::test]
+    async fn write_atomic_leaves_no_temp_file() {
         let tmp = tempdir::TempDir::new("atomic-clean").unwrap();
         let path = tmp.path().join("note.md");
-        write_atomic(&path, "body").unwrap();
+        write_atomic(&path, "body").await.unwrap();
         let names = dir_names(tmp.path());
         assert_eq!(names, vec!["note.md".to_owned()]);
     }
@@ -111,12 +111,12 @@ mod tests {
         assert!(!name.ends_with(".md"));
     }
 
-    #[test]
-    fn write_atomic_removes_temp_when_rename_fails() {
+    #[tokio::test]
+    async fn write_atomic_removes_temp_when_rename_fails() {
         let tmp = tempdir::TempDir::new("atomic-fail").unwrap();
         let path = tmp.path().join("note.md");
         std::fs::create_dir(&path).unwrap();
-        assert!(write_atomic(&path, "body").is_err());
+        assert!(write_atomic(&path, "body").await.is_err());
         let hidden: Vec<_> = dir_names(tmp.path())
             .into_iter()
             .filter(|name| name.starts_with('.'))
