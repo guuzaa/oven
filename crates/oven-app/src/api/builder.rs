@@ -132,7 +132,7 @@ impl AppBuilder {
         self.skills
             .load_from_dirs(&dirs::skill_dirs(&self.root))
             .await;
-        self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root);
+        self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root).await;
 
         for (id, server) in &config.mcps {
             let _ = self.mcps.register(id.clone(), server.clone());

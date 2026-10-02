@@ -79,14 +79,14 @@ mod tests {
         assert!(prompt.starts_with(BASE_PROMPT.trim()));
     }
 
-    #[test]
-    fn system_prompt_includes_instruction_docs() {
+    #[tokio::test]
+    async fn system_prompt_includes_instruction_docs() {
         let tmp = tempdir::TempDir::new("app-instructions").unwrap();
         let root = tmp.path().join("ws");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("CLAUDE.md"), "project rules\n").unwrap();
 
-        let docs = load_instructions(None, &root);
+        let docs = load_instructions(None, &root).await;
         let prompt = system_prompt(&root, &docs, None);
         assert!(prompt.contains("## Project Instructions"));
         assert!(prompt.contains("project rules"));
