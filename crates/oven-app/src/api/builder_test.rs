@@ -9,6 +9,7 @@ use oven_llm::{
     StreamEvent, Usage,
 };
 
+use crate::capabilities::memory::MemoryReadTool;
 use crate::core::config::{AppConfig, MemoryConfig};
 
 use super::AppBuilder;
@@ -36,19 +37,26 @@ struct CapturedPrompt {
     driver: String,
     explore: String,
     general: String,
+    explore_tools: Vec<String>,
+}
+
+#[derive(Clone)]
+struct SeenCall {
+    system: String,
+    tools: Vec<String>,
 }
 
 struct CaptureProvider {
-    systems: Arc<Mutex<Vec<String>>>,
+    calls: Arc<Mutex<Vec<SeenCall>>>,
 }
 
 #[async_trait]
 impl Provider for CaptureProvider {
     async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        self.systems
-            .lock()
-            .unwrap()
-            .push(req.system.clone().unwrap_or_default());
+        self.calls.lock().unwrap().push(SeenCall {
+            system: req.system.clone().unwrap_or_default(),
+            tools: req.tools.iter().map(|tool| tool.name.clone()).collect(),
+        });
         Ok(Response {
             id: "resp".into(),
             model: "mock".into(),
@@ -84,11 +92,11 @@ impl Provider for CaptureProvider {
 }
 
 async fn capture(root: &Path, config: AppConfig) -> CapturedPrompt {
-    let systems = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
     let app = AppBuilder::new(root).with_config(config).await;
     let mut agents = app
         .build_agent_with_provider(Box::new(CaptureProvider {
-            systems: Arc::clone(&systems),
+            calls: Arc::clone(&calls),
         }))
         .await
         .unwrap();
@@ -121,23 +129,23 @@ async fn capture(root: &Path, config: AppConfig) -> CapturedPrompt {
             .await
             .unwrap();
     }
-    let systems = systems.lock().unwrap().clone();
+    let calls = calls.lock().unwrap().clone();
+    let call = |mark: &str| {
+        calls
+            .iter()
+            .find(|call| call.system.contains(mark))
+            .expect("matching request")
+    };
+    let driver = calls
+        .iter()
+        .find(|call| !call.system.contains(SUBAGENT_MARK))
+        .expect("driver system");
+    let explore = call(EXPLORE_MARK);
     CapturedPrompt {
-        driver: systems
-            .iter()
-            .find(|system| !system.contains(SUBAGENT_MARK))
-            .cloned()
-            .expect("driver system"),
-        explore: systems
-            .iter()
-            .find(|system| system.contains(EXPLORE_MARK))
-            .cloned()
-            .expect("explore system"),
-        general: systems
-            .iter()
-            .find(|system| system.contains(GENERAL_MARK))
-            .cloned()
-            .expect("general system"),
+        driver: driver.system.clone(),
+        explore: explore.system.clone(),
+        general: call(GENERAL_MARK).system.clone(),
+        explore_tools: explore.tools.clone(),
     }
 }
 
@@ -206,4 +214,22 @@ async fn disabled_or_empty_matches_prompt_without_memory() {
     assert_eq!(disabled.driver, expected);
     assert_eq!(disabled.explore, empty.explore);
     assert_eq!(disabled.general, empty.general);
+    assert!(
+        !disabled
+            .explore_tools
+            .iter()
+            .any(|name| name == MemoryReadTool::NAME)
+    );
+}
+
+#[tokio::test]
+async fn memory_read_is_in_the_explore_tool_set() {
+    let tmp = tempdir::TempDir::new("memory-read-explore").unwrap();
+    let captured = capture(tmp.path(), AppConfig::default()).await;
+    assert!(
+        captured
+            .explore_tools
+            .iter()
+            .any(|name| name == MemoryReadTool::NAME)
+    );
 }

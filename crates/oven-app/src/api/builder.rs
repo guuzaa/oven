@@ -16,6 +16,7 @@ use tracing::Instrument;
 use crate::App;
 use crate::capabilities::mcp::McpRegistry;
 use crate::capabilities::mcp::client::{DefaultMcpConnector, McpConnector};
+use crate::capabilities::memory::MemoryReadTool;
 use crate::capabilities::subagent::{Role as SubagentRole, SubagentParts, Subagents};
 use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
@@ -237,6 +238,9 @@ impl AppBuilder {
             .await
             .map_err(AppError::Mcp)?;
         base.extend(mcp_tools.into_iter().map(|t| Arc::new(t) as Arc<dyn Tool>));
+        if let Some(store) = &self.memory {
+            base.push(Arc::new(MemoryReadTool::new(Arc::clone(store))));
+        }
 
         let mut system = oven_agent::system_prompt(
             &self.root,

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::MemoryError;
@@ -34,6 +36,12 @@ impl MemoryId {
     }
 }
 
+impl fmt::Display for MemoryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 fn is_id_char(c: char) -> bool {
     c.is_ascii_lowercase() || c.is_ascii_digit() || c == ID_DASH
 }
@@ -67,6 +75,12 @@ impl MemoryScope {
             Self::Workspace => "workspace",
             Self::User => "user",
         }
+    }
+}
+
+impl fmt::Display for MemoryScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

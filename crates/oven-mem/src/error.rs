@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::model::MAX_ID;
+use crate::model::{MAX_ID, MemoryId, MemoryScope};
 
 pub const EMPTY_ID: &str = "memory id is empty";
 pub const LEADING_DASH: &str = "memory id must not start with '-'";
@@ -12,6 +12,8 @@ pub const UNKNOWN_KIND: &str = "unknown memory kind";
 pub const EXPECTED_KINDS: &str = "fact or preference";
 pub const MISSING_DESCRIPTION: &str = "memory description is missing or empty";
 pub const INVALID_FRONTMATTER: &str = "memory frontmatter is not valid yaml";
+pub const NOT_FOUND: &str = "memory not found";
+pub const USER_SCOPE_UNAVAILABLE: &str = "user memory scope is unavailable";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MemoryError {
@@ -33,4 +35,10 @@ pub enum MemoryError {
     MissingDescription,
     #[error("{INVALID_FRONTMATTER}")]
     InvalidFrontmatter,
+    #[error("{NOT_FOUND}: {scope}/{id}")]
+    NotFound { scope: MemoryScope, id: MemoryId },
+    #[error("{USER_SCOPE_UNAVAILABLE}")]
+    UserScopeUnavailable,
+    #[error("{message}")]
+    Io { message: String },
 }

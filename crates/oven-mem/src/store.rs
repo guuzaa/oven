@@ -8,8 +8,9 @@ use tokio::fs;
 use tracing::warn;
 
 use crate::catalog::{IndexEntry, render_catalog};
+use crate::error::MemoryError;
 use crate::format::parse;
-use crate::model::{MemoryId, MemoryScope};
+use crate::model::{Memory, MemoryId, MemoryScope};
 
 const MARKDOWN_EXT: &str = "md";
 
@@ -19,6 +20,7 @@ pub struct MemoryRoots {
 }
 
 pub struct MemoryStore {
+    roots: MemoryRoots,
     index: RwLock<BTreeMap<(MemoryScope, MemoryId), IndexEntry>>,
 }
 
@@ -30,8 +32,28 @@ impl MemoryStore {
             load_root(&mut index, user, MemoryScope::User).await;
         }
         Self {
+            roots,
             index: RwLock::new(index),
         }
+    }
+
+    pub async fn read(&self, scope: MemoryScope, id: &MemoryId) -> Result<Memory, MemoryError> {
+        let path = memory_path(self.scope_root(scope)?, id);
+        let raw = match fs::read_to_string(&path).await {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(MemoryError::NotFound {
+                    scope,
+                    id: id.clone(),
+                });
+            }
+            Err(err) => {
+                return Err(MemoryError::Io {
+                    message: err.to_string(),
+                });
+            }
+        };
+        parse(id.clone(), scope, &raw)
     }
 
     pub fn catalog(&self) -> Option<String> {
@@ -45,6 +67,17 @@ impl MemoryStore {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.values().cloned().collect()
+    }
+
+    fn scope_root(&self, scope: MemoryScope) -> Result<&Path, MemoryError> {
+        match scope {
+            MemoryScope::Workspace => Ok(&self.roots.workspace),
+            MemoryScope::User => self
+                .roots
+                .user
+                .as_deref()
+                .ok_or(MemoryError::UserScopeUnavailable),
+        }
     }
 }
 
@@ -110,6 +143,10 @@ async fn load_root(
     }
 }
 
+fn memory_path(root: &Path, id: &MemoryId) -> PathBuf {
+    root.join(format!("{}.{MARKDOWN_EXT}", id.as_str()))
+}
+
 fn markdown_id(path: &Path) -> Option<MemoryId> {
     if path.extension().and_then(|ext| ext.to_str()) != Some(MARKDOWN_EXT) {
         return None;
@@ -134,7 +171,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{MemoryRoots, MemoryStore};
-    use crate::model::MemoryKind;
+    use crate::error::{MemoryError, NOT_FOUND, USER_SCOPE_UNAVAILABLE};
+    use crate::model::{MemoryId, MemoryKind, MemoryScope};
 
     const BODY_TOKEN: &str = "BODY-NOT-IN-CATALOG";
 
@@ -261,6 +299,75 @@ mod tests {
         })
         .await;
         assert!(store.catalog().is_none());
+    }
+
+    #[tokio::test]
+    async fn read_sees_a_body_edited_after_load() {
+        let tmp = tempdir::TempDir::new("mem-read-edit").unwrap();
+        let workspace = tmp.path().join("workspace");
+        let path = write_memory(
+            &workspace,
+            "proxy-requires-http2",
+            MemoryKind::Fact,
+            "proxy fact",
+        );
+        let store = MemoryStore::load(MemoryRoots {
+            workspace,
+            user: None,
+        })
+        .await;
+        std::fs::write(
+            &path,
+            "---\nkind: fact\ndescription: proxy fact\n---\n\nedited body\n",
+        )
+        .unwrap();
+        let memory = store
+            .read(
+                MemoryScope::Workspace,
+                &MemoryId::new("proxy-requires-http2").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(memory.body, "edited body\n");
+        assert_eq!(memory.description, "proxy fact");
+    }
+
+    #[tokio::test]
+    async fn read_unknown_id_is_not_found() {
+        let tmp = tempdir::TempDir::new("mem-read-missing").unwrap();
+        let store = MemoryStore::load(MemoryRoots {
+            workspace: tmp.path().join("workspace"),
+            user: None,
+        })
+        .await;
+        let id = MemoryId::new("missing").unwrap();
+        let err = store.read(MemoryScope::Workspace, &id).await.unwrap_err();
+        assert_eq!(
+            err,
+            MemoryError::NotFound {
+                scope: MemoryScope::Workspace,
+                id: id.clone(),
+            }
+        );
+        assert_eq!(err.to_string(), format!("{NOT_FOUND}: workspace/{id}"));
+    }
+
+    #[tokio::test]
+    async fn read_user_scope_without_a_root_is_unavailable() {
+        let tmp = tempdir::TempDir::new("mem-read-no-user").unwrap();
+        let workspace = tmp.path().join("workspace");
+        write_memory(&workspace, "shared-id", MemoryKind::Fact, "workspace only");
+        let store = MemoryStore::load(MemoryRoots {
+            workspace,
+            user: None,
+        })
+        .await;
+        let err = store
+            .read(MemoryScope::User, &MemoryId::new("shared-id").unwrap())
+            .await
+            .unwrap_err();
+        assert_eq!(err, MemoryError::UserScopeUnavailable);
+        assert_eq!(err.to_string(), USER_SCOPE_UNAVAILABLE);
     }
 
     #[tokio::test]
