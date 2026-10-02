@@ -9,7 +9,7 @@ use crate::core::turn::TurnContext;
 use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
 use crate::core::error::AgentError;
 use crate::core::matching::compile_glob;
-use oven_host::walk_dir;
+use oven_host::walk_dir_stream;
 
 pub struct GlobTool {
     root: PathBuf,
@@ -80,7 +80,10 @@ impl Tool for GlobTool {
             .filter(|s| !s.is_empty())
             .unwrap_or(".");
         let base = resolve_within(&self.root, base_str)?;
-        if !base.is_dir() {
+        let is_dir = tokio::fs::metadata(&base)
+            .await
+            .is_ok_and(|meta| meta.is_dir());
+        if !is_dir {
             return Err(AgentError::from(format!(
                 "glob: not a directory: {}",
                 base.display()
@@ -89,7 +92,8 @@ impl Tool for GlobTool {
         let limit = parse_limit(args, self.max_results);
 
         let mut hits = Vec::new();
-        for entry in walk_dir(&base) {
+        let mut entries = walk_dir_stream(&base);
+        while let Some(entry) = entries.recv().await {
             if hits.len() >= limit {
                 break;
             }
