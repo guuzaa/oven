@@ -19,6 +19,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::string::String;
 
+use tokio::fs;
+
 /// Canonical filename of the guidance document inside a skill directory.
 pub(crate) const SKILL_FILE: &str = "SKILL.md";
 
@@ -88,28 +90,37 @@ impl SkillRegistry {
     /// frontmatter, the directory name becomes the skill id. Later
     /// directories override earlier ones; missing or unreadable entries are
     /// skipped.
-    pub fn load_from_dirs(&mut self, dirs: &[PathBuf]) {
+    pub async fn load_from_dirs(&mut self, dirs: &[PathBuf]) {
         for dir in dirs {
-            self.load_from_dir(dir);
+            self.load_from_dir(dir).await;
         }
     }
 
-    fn load_from_dir(&mut self, dir: &Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
+    async fn load_from_dir(&mut self, dir: &Path) {
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(_) => return,
         };
-        for entry in entries.flatten() {
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
             let dir_path = entry.path();
-            if !dir_path.is_dir() {
+            let Ok(meta) = fs::metadata(&dir_path).await else {
+                continue;
+            };
+            if !meta.is_dir() {
                 continue;
             }
             let Some(id) = dir_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            let Some(file) = find_skill_file(&dir_path) else {
+            let Some(file) = find_skill_file(&dir_path).await else {
                 continue;
             };
-            let Ok(raw) = std::fs::read_to_string(&file) else {
+            let Ok(raw) = fs::read_to_string(&file).await else {
                 continue;
             };
             let Some(description) = parse_frontmatter(&raw) else {
@@ -144,11 +155,16 @@ impl Skill for FileSkill {
     }
 }
 
-fn find_skill_file(dir: &Path) -> Option<PathBuf> {
-    [SKILL_FILE]
-        .into_iter()
-        .map(|name| dir.join(name))
-        .find(|p| p.is_file())
+async fn find_skill_file(dir: &Path) -> Option<PathBuf> {
+    for name in [SKILL_FILE] {
+        let path = dir.join(name);
+        if let Ok(meta) = fs::metadata(&path).await
+            && meta.is_file()
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Parse the YAML frontmatter between `---` fences and return `description`.
@@ -187,8 +203,8 @@ mod tests {
         assert!(SkillRegistry::new().merged_system_prompt().is_none());
     }
 
-    #[test]
-    fn loads_skills_from_directories() {
+    #[tokio::test]
+    async fn loads_skills_from_directories() {
         let tmp = tempdir::TempDir::new("skill-fs").unwrap();
         let dir = tmp.path();
         std::fs::create_dir_all(dir.join("files")).unwrap();
@@ -199,15 +215,15 @@ mod tests {
         .unwrap();
 
         let mut reg = SkillRegistry::new();
-        reg.load_from_dirs(&[dir.to_path_buf()]);
+        reg.load_from_dirs(&[dir.to_path_buf()]).await;
         assert!(reg.contains("files"));
         let p = reg.merged_system_prompt().unwrap();
         assert!(p.contains("- **files**: read files carefully"));
         assert!(!p.contains("full guidance"));
     }
 
-    #[test]
-    fn later_dirs_override_same_skill_id() {
+    #[tokio::test]
+    async fn later_dirs_override_same_skill_id() {
         let tmp = tempdir::TempDir::new("skill-override").unwrap();
         let a = tmp.path().join("a");
         let b = tmp.path().join("b");
@@ -226,20 +242,20 @@ mod tests {
         .unwrap();
 
         let mut reg = SkillRegistry::new();
-        reg.load_from_dirs(&[a, b]);
+        reg.load_from_dirs(&[a, b]).await;
         let p = reg.merged_system_prompt().unwrap();
         assert!(p.contains("second"));
         assert!(!p.contains("first"));
     }
 
-    #[test]
-    fn skills_without_description_are_skipped() {
+    #[tokio::test]
+    async fn skills_without_description_are_skipped() {
         let tmp = tempdir::TempDir::new("skill-nodesc").unwrap();
         std::fs::create_dir_all(tmp.path().join("x")).unwrap();
         std::fs::write(tmp.path().join("x").join(SKILL_FILE), "no frontmatter here").unwrap();
 
         let mut reg = SkillRegistry::new();
-        reg.load_from_dirs(&[tmp.path().to_path_buf()]);
+        reg.load_from_dirs(&[tmp.path().to_path_buf()]).await;
         assert!(!reg.contains("x"));
     }
 }

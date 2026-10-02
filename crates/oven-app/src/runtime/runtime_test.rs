@@ -1116,22 +1116,24 @@ async fn setup_slash_rejects_kind() {
 #[tokio::test]
 async fn spawn_applies_configured_reasoning_effort() {
     let tmp = tempdir::TempDir::new("app-spawn-effort").unwrap();
-    let app = AppBuilder::new(tmp.path()).with_config(AppConfig {
-        active_provider: ProviderSelection {
-            name: "mock".into(),
-        },
-        providers: [(
-            "mock".into(),
-            ProviderConfig {
-                name: Some("mock".into()),
-                reasoning_effort: Some(oven_llm::ReasoningEffort::Medium),
-                ..Default::default()
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig {
+            active_provider: ProviderSelection {
+                name: "mock".into(),
             },
-        )]
-        .into_iter()
-        .collect(),
-        ..AppConfig::default()
-    });
+            providers: [(
+                "mock".into(),
+                ProviderConfig {
+                    name: Some("mock".into()),
+                    reasoning_effort: Some(oven_llm::ReasoningEffort::Medium),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..AppConfig::default()
+        })
+        .await;
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     let out = handle.prompt("/model").await.unwrap();
     assert!(out.contains("reasoning effort: medium"));
@@ -3467,13 +3469,15 @@ async fn subagents_can_be_turned_off() {
         ),
         text_response("no subagent for me"),
     ]);
-    let app = AppBuilder::new(tmp.path()).with_config(AppConfig {
-        subagents: crate::core::config::SubagentConfig {
-            enabled: false,
-            ..Default::default()
-        },
-        ..AppConfig::default()
-    });
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig {
+            subagents: crate::core::config::SubagentConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..AppConfig::default()
+        })
+        .await;
     let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
     let handle = spawn_runtime(
         AppId::next(),

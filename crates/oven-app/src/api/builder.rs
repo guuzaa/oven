@@ -110,26 +110,28 @@ impl AppBuilder {
     /// loading, tools requested in `tools:` are mounted, MCP servers declared
     /// under `mcps:` are registered, and skills are discovered from the
     /// filesystem.
-    pub fn load_config(&mut self) -> Result<(), AppError> {
+    pub async fn load_config(&mut self) -> Result<(), AppError> {
         AppConfig::ensure_user_config()?;
         let user = AppConfig::default_user_config_path();
         let project = AppConfig::default_project_config_path(&self.root);
         let cfg = AppConfig::load(user.as_deref(), Some(&project))?;
-        self.apply_config(cfg);
+        self.apply_config(cfg).await;
         Ok(())
     }
 
     /// Use an explicit, already-loaded config (e.g. for tests).
-    pub fn with_config(mut self, config: AppConfig) -> Self {
-        self.apply_config(config);
+    pub async fn with_config(mut self, config: AppConfig) -> Self {
+        self.apply_config(config).await;
         self
     }
 
-    fn apply_config(&mut self, config: AppConfig) {
+    async fn apply_config(&mut self, config: AppConfig) {
         self.tools = ToolRegistry::from_config(&self.root, &config.tools);
         self.mcps = McpRegistry::new();
         self.skills = SkillRegistry::new();
-        self.skills.load_from_dirs(&dirs::skill_dirs(&self.root));
+        self.skills
+            .load_from_dirs(&dirs::skill_dirs(&self.root))
+            .await;
         self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root);
 
         for (id, server) in &config.mcps {

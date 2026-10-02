@@ -39,7 +39,7 @@ impl App {
 
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self, AppError> {
         let mut builder = Self::builder(root);
-        builder.load_config()?;
+        builder.load_config().await?;
         builder.open().await
     }
 

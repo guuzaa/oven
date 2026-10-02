@@ -54,9 +54,9 @@ impl Cli {
         }
     }
 
-    fn builder(&self) -> AppBuilder {
+    async fn builder(&self) -> AppBuilder {
         let mut builder = App::builder(&self.dir);
-        if let Err(e) = builder.load_config() {
+        if let Err(e) = builder.load_config().await {
             eprintln!("warning: loading config: {e}");
         }
         builder
@@ -76,7 +76,7 @@ impl Cli {
     }
 
     async fn interactive(&self, session: Option<&str>) -> ExitCode {
-        let builder = self.builder();
+        let builder = self.builder().await;
         let app = match builder.open_session(session).await {
             Ok(app) => app,
             Err(err) => {

@@ -173,6 +173,7 @@ async fn mcp_tools_mounted_on_agent() {
     );
     let app = AppBuilder::new(tmp.path())
         .with_config(cfg)
+        .await
         .with_mcp_connector(Arc::new(connector));
 
     let mock = MockProvider::new(vec![
@@ -282,7 +283,7 @@ url = "http://{addr}/mcp"
 "#
     ))
     .unwrap();
-    let app = AppBuilder::new(tmp.path()).with_config(cfg);
+    let app = AppBuilder::new(tmp.path()).with_config(cfg).await;
 
     let mock = MockProvider::new(vec![
         Response {

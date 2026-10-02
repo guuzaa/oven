@@ -135,6 +135,7 @@ fn test_config() -> oven_app::config::AppConfig {
 async fn test_ui(root: &tempdir::TempDir) -> Ui {
     let app = oven_app::AppBuilder::new(root.path())
         .with_config(test_config())
+        .await
         .open()
         .await
         .unwrap();

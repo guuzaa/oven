@@ -6,8 +6,8 @@ use std::path::Path;
 use oven_app::config::AppConfig;
 use oven_app::{AppBuilder, McpServerConfig};
 
-#[test]
-fn config_enables_tools_and_mcps() {
+#[tokio::test]
+async fn config_enables_tools_and_mcps() {
     let tmp = tempdir::TempDir::new("app-apply").unwrap();
     let root = tmp.path().join("ws");
     std::fs::create_dir_all(&root).unwrap();
@@ -27,7 +27,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     assert!(cfg.mcps.contains_key("filesystem"));
     assert_eq!(cfg.mcps.get("filesystem").unwrap().command, "npx");
 
-    let app = AppBuilder::new(&root).with_config(cfg);
+    let app = AppBuilder::new(&root).with_config(cfg).await;
     let tools = app.tools().merged_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     assert!(names.contains(&"file_read"));
@@ -39,17 +39,17 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
     assert_eq!(fs.command, "npx");
 }
 
-#[test]
-fn unknown_tool_is_skipped_silently() {
+#[tokio::test]
+async fn unknown_tool_is_skipped_silently() {
     let cfg: AppConfig = toml::from_str(r#"tools = ["file_read", "nope-tool"]"#).unwrap();
     let tmp = tempdir::TempDir::new("app-unknown-ids").unwrap();
-    let app = AppBuilder::new(tmp.path()).with_config(cfg);
+    let app = AppBuilder::new(tmp.path()).with_config(cfg).await;
     assert!(app.tools().contains("file_read"));
     assert!(!app.tools().contains("nope-tool"));
 }
 
-#[test]
-fn filesystem_skills_are_loaded_and_mounted() {
+#[tokio::test]
+async fn filesystem_skills_are_loaded_and_mounted() {
     let tmp = tempdir::TempDir::new("app-skill-fs").unwrap();
     let root = tmp.path();
     let dir = root.join(".oven/skills/test");
@@ -60,7 +60,9 @@ fn filesystem_skills_are_loaded_and_mounted() {
     )
     .unwrap();
 
-    let app = AppBuilder::new(root).with_config(AppConfig::default());
+    let app = AppBuilder::new(root)
+        .with_config(AppConfig::default())
+        .await;
     assert!(app.skills().contains("test"));
     let prompt = app.skills().merged_system_prompt().unwrap();
     assert!(prompt.contains("- **test**: be precise"));
@@ -95,15 +97,15 @@ fn register_skill_contributes_description() {
     assert!(prompt.contains("use the tools carefully"));
 }
 
-#[test]
-fn empty_command_mcp_is_dropped() {
+#[tokio::test]
+async fn empty_command_mcp_is_dropped() {
     let cfg_toml = r#"
 [mcps.bad]
 command = ""
 "#;
     let cfg: AppConfig = toml::from_str(cfg_toml).unwrap();
     let tmp = tempdir::TempDir::new("app-bad-mcp").unwrap();
-    let app = AppBuilder::new(tmp.path()).with_config(cfg);
+    let app = AppBuilder::new(tmp.path()).with_config(cfg).await;
     assert!(app.mcps().is_empty());
 }
 
