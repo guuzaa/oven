@@ -8,7 +8,7 @@ mod walk;
 
 pub use command::{CommandError, CommandOutput, run_shell_command};
 pub use decode::decode_command_output;
-pub use filesystem::{PathError, resolve_within, write};
+pub use filesystem::{PathError, resolve_within, write, write_atomic};
 pub use frontmatter::split_frontmatter;
 pub use rotate::{LOG_DROPPED_LINES, LOG_FLUSH_FAILED, LOG_MAX_BYTES, LOG_MAX_FILES, RotatingFile};
 pub use time::{as_ms, now_ms};
