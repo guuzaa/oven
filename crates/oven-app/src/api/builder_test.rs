@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -5,11 +6,11 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use oven_agent::{CancellationToken, NullSink, SpawnRequest, SubagentSpawner, TurnContext, TurnId};
 use oven_llm::{
-    ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response, Role, StopReason,
-    StreamEvent, Usage,
+    ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
+    Role, StopReason, StreamEvent, Usage,
 };
 
-use crate::capabilities::memory::MemoryReadTool;
+use crate::capabilities::memory::{MemoryReadTool, MemoryWriteTool};
 use crate::core::config::{AppConfig, MemoryConfig};
 
 use super::AppBuilder;
@@ -37,7 +38,9 @@ struct CapturedPrompt {
     driver: String,
     explore: String,
     general: String,
+    driver_tools: Vec<String>,
     explore_tools: Vec<String>,
+    general_tools: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -61,7 +64,7 @@ impl Provider for CaptureProvider {
             id: "resp".into(),
             model: "mock".into(),
             role: Role::Assistant,
-            content: vec![oven_llm::ContentBlock::text("ok")],
+            content: vec![ContentBlock::text("ok")],
             stop_reason: Some(StopReason::EndTurn),
             usage: Some(Usage {
                 input_tokens: 1,
@@ -141,11 +144,14 @@ async fn capture(root: &Path, config: AppConfig) -> CapturedPrompt {
         .find(|call| !call.system.contains(SUBAGENT_MARK))
         .expect("driver system");
     let explore = call(EXPLORE_MARK);
+    let general = call(GENERAL_MARK);
     CapturedPrompt {
         driver: driver.system.clone(),
         explore: explore.system.clone(),
-        general: call(GENERAL_MARK).system.clone(),
+        general: general.system.clone(),
+        driver_tools: driver.tools.clone(),
         explore_tools: explore.tools.clone(),
+        general_tools: general.tools.clone(),
     }
 }
 
@@ -232,4 +238,144 @@ async fn memory_read_is_in_the_explore_tool_set() {
             .iter()
             .any(|name| name == MemoryReadTool::NAME)
     );
+}
+
+fn has_tool(tools: &[String], name: &str) -> bool {
+    tools.iter().any(|tool| tool == name)
+}
+
+#[tokio::test]
+async fn memory_write_is_excluded_from_subagent_roles() {
+    let tmp = tempdir::TempDir::new("memory-write-roles").unwrap();
+    let captured = capture(tmp.path(), AppConfig::default()).await;
+    assert!(has_tool(&captured.driver_tools, MemoryWriteTool::NAME));
+    assert!(!has_tool(&captured.explore_tools, MemoryWriteTool::NAME));
+    assert!(!has_tool(&captured.general_tools, MemoryWriteTool::NAME));
+}
+
+struct ScriptedProvider {
+    systems: Arc<Mutex<Vec<String>>>,
+    responses: Mutex<VecDeque<Response>>,
+}
+
+#[async_trait]
+impl Provider for ScriptedProvider {
+    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        self.systems
+            .lock()
+            .unwrap()
+            .push(req.system.clone().unwrap_or_default());
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more mock responses".into(),
+            })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+        None
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("mock".into())
+    }
+}
+
+fn tool_response(name: &str, input: serde_json::Value) -> Response {
+    Response {
+        id: "resp".into(),
+        model: "mock".into(),
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "c1".into(),
+            name: name.into(),
+            input,
+            raw_arguments: None,
+        }],
+        stop_reason: Some(StopReason::ToolUse),
+        usage: Some(Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        }),
+    }
+}
+
+fn text_response(text: &str) -> Response {
+    Response {
+        id: "resp".into(),
+        model: "mock".into(),
+        role: Role::Assistant,
+        content: vec![ContentBlock::text(text)],
+        stop_reason: Some(StopReason::EndTurn),
+        usage: Some(Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn write_does_not_change_the_driver_system_prompt() {
+    let tmp = tempdir::TempDir::new("memory-write-frozen").unwrap();
+    write_workspace_memory(tmp.path());
+    let systems = Arc::new(Mutex::new(Vec::new()));
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig::default())
+        .await;
+    let mut agents = app
+        .build_agent_with_provider(Box::new(ScriptedProvider {
+            systems: Arc::clone(&systems),
+            responses: Mutex::new(VecDeque::from([
+                tool_response(
+                    MemoryWriteTool::NAME,
+                    serde_json::json!({
+                        "scope": "workspace",
+                        "id": MEMORY_ID,
+                        "kind": "fact",
+                        "description": "brand new description",
+                        "body": "updated body\n",
+                    }),
+                ),
+                text_response("done"),
+            ])),
+        }))
+        .await
+        .unwrap();
+    let ctx = TurnContext::new(
+        TurnId::next(),
+        CancellationToken::new(),
+        agents.main.selection(),
+    );
+    agents.main.step(&mut NullSink, &ctx).await.unwrap();
+    agents.main.step(&mut NullSink, &ctx).await.unwrap();
+    let systems = systems.lock().unwrap().clone();
+    assert_eq!(systems.len(), 2);
+    assert_eq!(systems[0], systems[1]);
+    assert!(systems[0].contains(CATALOG_ENTRY));
+    assert!(!systems[0].contains("brand new description"));
+    let raw = std::fs::read_to_string(
+        tmp.path()
+            .join(".oven")
+            .join("memory")
+            .join(format!("{MEMORY_ID}.md")),
+    )
+    .unwrap();
+    assert!(raw.contains("brand new description"));
 }

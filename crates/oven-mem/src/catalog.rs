@@ -25,6 +25,10 @@ pub struct IndexEntry {
     pub modified: SystemTime,
 }
 
+pub fn within_catalog_budget(entries: &[IndexEntry]) -> bool {
+    entries.is_empty() || compose(entries, entries.len()).chars().count() <= MAX_CATALOG_CHARS
+}
+
 pub fn render_catalog(entries: &[IndexEntry]) -> Option<String> {
     if entries.is_empty() {
         return None;

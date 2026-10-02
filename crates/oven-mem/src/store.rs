@@ -7,16 +7,22 @@ use std::time::SystemTime;
 use tokio::fs;
 use tracing::warn;
 
-use crate::catalog::{IndexEntry, render_catalog};
+use crate::catalog::{IndexEntry, render_catalog, within_catalog_budget};
 use crate::error::MemoryError;
-use crate::format::parse;
-use crate::model::{Memory, MemoryId, MemoryScope};
+use crate::format::{parse, render};
+use crate::model::{MAX_BODY, MAX_DESCRIPTION, Memory, MemoryId, MemoryScope};
 
 const MARKDOWN_EXT: &str = "md";
 
 pub struct MemoryRoots {
     pub workspace: PathBuf,
     pub user: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PutOutcome {
+    Created,
+    Replaced { previous_description: String },
 }
 
 pub struct MemoryStore {
@@ -56,6 +62,53 @@ impl MemoryStore {
         parse(id.clone(), scope, &raw)
     }
 
+    pub async fn put(&self, mut memory: Memory) -> Result<PutOutcome, MemoryError> {
+        memory.description = memory.description.trim().to_owned();
+        if memory.description.is_empty() {
+            return Err(MemoryError::MissingDescription);
+        }
+        if memory.description.chars().count() > MAX_DESCRIPTION {
+            return Err(MemoryError::DescriptionTooLong);
+        }
+        if memory.body.chars().count() > MAX_BODY {
+            return Err(MemoryError::BodyTooLong);
+        }
+        let root = self.scope_root(memory.scope)?.to_path_buf();
+        let path = memory_path(&root, &memory.id);
+        let outcome = match fs::read_to_string(&path).await {
+            Ok(raw) => {
+                let previous_description = parse(memory.id.clone(), memory.scope, &raw)
+                    .map(|old| old.description)
+                    .unwrap_or_default();
+                PutOutcome::Replaced {
+                    previous_description,
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => PutOutcome::Created,
+            Err(err) => {
+                return Err(MemoryError::Io {
+                    message: err.to_string(),
+                });
+            }
+        };
+        if !self.budget_allows(&memory) {
+            return Err(MemoryError::CatalogTooLong);
+        }
+        if let Err(err) = oven_host::write_atomic(&path, render(&memory)).await {
+            warn!(path = %path.display(), error = %err, "memory write failed");
+            return Err(MemoryError::Io {
+                message: err.to_string(),
+            });
+        }
+        let modified = fs::metadata(&path)
+            .await
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .unwrap_or_else(SystemTime::now);
+        self.upsert(&memory, modified);
+        Ok(outcome)
+    }
+
     pub fn catalog(&self) -> Option<String> {
         let entries = self.entries();
         render_catalog(&entries)
@@ -67,6 +120,36 @@ impl MemoryStore {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.values().cloned().collect()
+    }
+
+    fn budget_allows(&self, memory: &Memory) -> bool {
+        let mut entries = self.entries();
+        entries.retain(|entry| !(entry.scope == memory.scope && entry.id == memory.id));
+        entries.push(IndexEntry {
+            scope: memory.scope,
+            id: memory.id.clone(),
+            kind: memory.kind,
+            description: memory.description.clone(),
+            modified: SystemTime::now(),
+        });
+        within_catalog_budget(&entries)
+    }
+
+    fn upsert(&self, memory: &Memory, modified: SystemTime) {
+        let mut guard = self
+            .index
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.insert(
+            (memory.scope, memory.id.clone()),
+            IndexEntry {
+                scope: memory.scope,
+                id: memory.id.clone(),
+                kind: memory.kind,
+                description: memory.description.clone(),
+                modified,
+            },
+        );
     }
 
     fn scope_root(&self, scope: MemoryScope) -> Result<&Path, MemoryError> {
@@ -170,9 +253,14 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
-    use super::{MemoryRoots, MemoryStore};
-    use crate::error::{MemoryError, NOT_FOUND, USER_SCOPE_UNAVAILABLE};
-    use crate::model::{MemoryId, MemoryKind, MemoryScope};
+    use super::{MemoryRoots, MemoryStore, PutOutcome};
+    use crate::error::{
+        BODY_TOO_LONG, CATALOG_TOO_LONG, DESCRIPTION_TOO_LONG, MemoryError, NOT_FOUND,
+        USER_SCOPE_UNAVAILABLE,
+    };
+    use crate::model::{
+        MAX_BODY, MAX_CATALOG_CHARS, MAX_DESCRIPTION, Memory, MemoryId, MemoryKind, MemoryScope,
+    };
 
     const BODY_TOKEN: &str = "BODY-NOT-IN-CATALOG";
 
@@ -393,5 +481,172 @@ mod tests {
         let new_at = catalog.find("- workspace/newer new fact").unwrap();
         let old_at = catalog.find("- workspace/older old fact").unwrap();
         assert!(new_at < old_at);
+    }
+
+    fn sample(id: &str, description: &str, body: &str, source: Option<&str>) -> Memory {
+        Memory {
+            id: MemoryId::new(id).unwrap(),
+            kind: MemoryKind::Fact,
+            description: description.to_owned(),
+            body: body.to_owned(),
+            scope: MemoryScope::Workspace,
+            source: source.map(str::to_owned),
+        }
+    }
+
+    async fn workspace_store(name: &str) -> (tempdir::TempDir, PathBuf, MemoryStore) {
+        let tmp = tempdir::TempDir::new(name).unwrap();
+        let workspace = tmp.path().join("workspace");
+        let store = MemoryStore::load(MemoryRoots {
+            workspace: workspace.clone(),
+            user: None,
+        })
+        .await;
+        (tmp, workspace, store)
+    }
+
+    #[tokio::test]
+    async fn put_creates_a_memory() {
+        let (_tmp, workspace, store) = workspace_store("mem-put-create").await;
+        let outcome = store
+            .put(sample("proxy-requires-http2", "proxy fact", "body\n", None))
+            .await
+            .unwrap();
+        assert_eq!(outcome, PutOutcome::Created);
+        assert!(workspace.join("proxy-requires-http2.md").is_file());
+        assert!(
+            store
+                .catalog()
+                .unwrap()
+                .contains("- workspace/proxy-requires-http2 proxy fact")
+        );
+    }
+
+    #[tokio::test]
+    async fn put_replaced_quotes_a_file_written_behind_the_store() {
+        let (_tmp, workspace, store) = workspace_store("mem-put-replace").await;
+        store
+            .put(sample(
+                "proxy-requires-http2",
+                "indexed fact",
+                "body\n",
+                None,
+            ))
+            .await
+            .unwrap();
+        std::fs::write(
+            workspace.join("proxy-requires-http2.md"),
+            "---\nkind: fact\ndescription: from disk\n---\n\nsecret\n",
+        )
+        .unwrap();
+        let outcome = store
+            .put(sample(
+                "proxy-requires-http2",
+                "revised fact",
+                "new body\n",
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            PutOutcome::Replaced {
+                previous_description: "from disk".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn put_rejects_each_limit_by_name() {
+        let (_tmp, workspace, store) = workspace_store("mem-put-limits").await;
+        let long_description = "d".repeat(MAX_DESCRIPTION + 1);
+        let err = store
+            .put(sample("too-long", &long_description, "body", None))
+            .await
+            .unwrap_err();
+        assert_eq!(err, MemoryError::DescriptionTooLong);
+        assert_eq!(
+            err.to_string(),
+            format!("{DESCRIPTION_TOO_LONG} ({MAX_DESCRIPTION})")
+        );
+        assert!(!workspace.join("too-long.md").exists());
+
+        let long_body = "b".repeat(MAX_BODY + 1);
+        let err = store
+            .put(sample("too-long", "ok", &long_body, None))
+            .await
+            .unwrap_err();
+        assert_eq!(err, MemoryError::BodyTooLong);
+        assert_eq!(err.to_string(), format!("{BODY_TOO_LONG} ({MAX_BODY})"));
+        assert!(store.catalog().is_none());
+    }
+
+    #[tokio::test]
+    async fn put_budget_rejection_leaves_the_index_unchanged() {
+        let (_tmp, workspace, store) = workspace_store("mem-put-budget").await;
+        let description = "d".repeat(MAX_DESCRIPTION);
+        let mut n = 0usize;
+        let before = loop {
+            let id = format!("m{n:03}");
+            let before = store.catalog();
+            let err = store
+                .put(sample(&id, &description, "body", None))
+                .await
+                .err();
+            if let Some(err) = err {
+                assert_eq!(err, MemoryError::CatalogTooLong);
+                assert_eq!(
+                    err.to_string(),
+                    format!("{CATALOG_TOO_LONG} ({MAX_CATALOG_CHARS})")
+                );
+                assert!(!workspace.join(format!("{id}.md")).exists());
+                break before;
+            }
+            n += 1;
+            assert!(n < 200, "catalog budget was never reached");
+        };
+        assert_eq!(store.catalog(), before);
+        assert!(n > 0, "the first memory should fit");
+    }
+
+    #[tokio::test]
+    async fn put_disk_failure_leaves_the_index_unchanged() {
+        let (_tmp, workspace, store) = workspace_store("mem-put-disk").await;
+        store
+            .put(sample("kept", "kept fact", "body\n", None))
+            .await
+            .unwrap();
+        let before = store.catalog();
+        std::fs::remove_dir_all(&workspace).unwrap();
+        std::fs::write(&workspace, "not a directory").unwrap();
+        let err = store
+            .put(sample("other", "other fact", "body\n", None))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MemoryError::Io { .. }));
+        assert_eq!(store.catalog(), before);
+        assert!(before.unwrap().contains("kept fact"));
+    }
+
+    #[tokio::test]
+    async fn put_persists_source() {
+        let (_tmp, _workspace, store) = workspace_store("mem-put-source").await;
+        store
+            .put(sample(
+                "proxy-requires-http2",
+                "proxy fact",
+                "body\n",
+                Some("01J8Z"),
+            ))
+            .await
+            .unwrap();
+        let memory = store
+            .read(
+                MemoryScope::Workspace,
+                &MemoryId::new("proxy-requires-http2").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(memory.source.as_deref(), Some("01J8Z"));
     }
 }

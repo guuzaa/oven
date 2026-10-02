@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use crate::model::{MAX_ID, MemoryId, MemoryScope};
+use crate::model::{MAX_BODY, MAX_CATALOG_CHARS, MAX_DESCRIPTION, MAX_ID, MemoryId, MemoryScope};
 
 pub const EMPTY_ID: &str = "memory id is empty";
 pub const LEADING_DASH: &str = "memory id must not start with '-'";
@@ -14,6 +14,9 @@ pub const MISSING_DESCRIPTION: &str = "memory description is missing or empty";
 pub const INVALID_FRONTMATTER: &str = "memory frontmatter is not valid yaml";
 pub const NOT_FOUND: &str = "memory not found";
 pub const USER_SCOPE_UNAVAILABLE: &str = "user memory scope is unavailable";
+pub const DESCRIPTION_TOO_LONG: &str = "memory description exceeds MAX_DESCRIPTION";
+pub const BODY_TOO_LONG: &str = "memory body exceeds MAX_BODY";
+pub const CATALOG_TOO_LONG: &str = "memory catalog exceeds MAX_CATALOG_CHARS";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MemoryError {
@@ -39,6 +42,12 @@ pub enum MemoryError {
     NotFound { scope: MemoryScope, id: MemoryId },
     #[error("{USER_SCOPE_UNAVAILABLE}")]
     UserScopeUnavailable,
+    #[error("{DESCRIPTION_TOO_LONG} ({MAX_DESCRIPTION})")]
+    DescriptionTooLong,
+    #[error("{BODY_TOO_LONG} ({MAX_BODY})")]
+    BodyTooLong,
+    #[error("{CATALOG_TOO_LONG} ({MAX_CATALOG_CHARS})")]
+    CatalogTooLong,
     #[error("{message}")]
     Io { message: String },
 }

@@ -16,7 +16,7 @@ use tracing::Instrument;
 use crate::App;
 use crate::capabilities::mcp::McpRegistry;
 use crate::capabilities::mcp::client::{DefaultMcpConnector, McpConnector};
-use crate::capabilities::memory::MemoryReadTool;
+use crate::capabilities::memory::{MemoryReadTool, MemoryWriteTool};
 use crate::capabilities::subagent::{Role as SubagentRole, SubagentParts, Subagents};
 use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
@@ -34,6 +34,7 @@ const CHILD_TOOLS_EXCLUDED: &[&str] = &[
     TodoWriteTool::NAME,
     TaskTool::NAME,
     TaskOutputTool::NAME,
+    MemoryWriteTool::NAME,
 ];
 
 const EXPLORE_ROLE: &str = "explore";
@@ -190,17 +191,23 @@ impl AppBuilder {
 
     pub(crate) async fn build_agent(&self) -> Result<AppAgents, AppError> {
         let model = self.active_model()?;
-        let mut agents = self.build_agent_with_router(self.build_router()?).await?;
+        let mut agents = self
+            .build_agent_with_router(self.build_router()?, None)
+            .await?;
         agents.main.set_model(model);
         Ok(agents)
     }
 
-    pub(crate) async fn build_interactive_agent(&self) -> Result<AppAgents, AppError> {
+    pub(crate) async fn build_interactive_agent(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<AppAgents, AppError> {
         let model = self.active_model()?;
         let mut agents = self
-            .build_agent_with_router(crate::core::provider::build_interactive_router(
-                &self.config,
-            )?)
+            .build_agent_with_router(
+                crate::core::provider::build_interactive_router(&self.config)?,
+                session_id,
+            )
             .await?;
         agents.main.set_model(model);
         Ok(agents)
@@ -220,7 +227,7 @@ impl AppBuilder {
     ) -> Result<AppAgents, AppError> {
         let mut router = Router::new();
         router.register(provider);
-        self.build_agent_with_router(router).await
+        self.build_agent_with_router(router, None).await
     }
 
     /// Compose one app's agents: the conversation driver, the subagents it
@@ -230,6 +237,7 @@ impl AppBuilder {
     pub(crate) async fn build_agent_with_router(
         &self,
         router: Router,
+        session_id: Option<&str>,
     ) -> Result<AppAgents, AppError> {
         let mut base = self.tools.merged_tools();
         let mcp_tools = self
@@ -240,6 +248,10 @@ impl AppBuilder {
         base.extend(mcp_tools.into_iter().map(|t| Arc::new(t) as Arc<dyn Tool>));
         if let Some(store) = &self.memory {
             base.push(Arc::new(MemoryReadTool::new(Arc::clone(store))));
+            base.push(Arc::new(MemoryWriteTool::new(
+                Arc::clone(store),
+                session_id.map(str::to_owned),
+            )));
         }
 
         let mut system = oven_agent::system_prompt(
@@ -346,7 +358,7 @@ impl AppBuilder {
     /// caller never has to provide.
     pub async fn open_session(&self, session_id: Option<&str>) -> Result<App, AppError> {
         let Some(dir) = dirs::sessions_dir() else {
-            let agents = self.build_interactive_agent().await?;
+            let agents = self.build_interactive_agent(None).await?;
             self.log_open(&agents.main);
             return Ok(spawn_runtime(
                 AppId::next(),
@@ -370,7 +382,9 @@ impl AppBuilder {
         let span = session_span(Some(session.id()));
         async {
             let prior = session.load_records().await?;
-            let mut agents = self.build_interactive_agent().await?;
+            let mut agents = self
+                .build_interactive_agent(Some(session.id()))
+                .await?;
             let records: Vec<_> = prior
                 .iter()
                 .filter(
