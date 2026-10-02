@@ -3,6 +3,7 @@ members = [
     "crates/oven-agent",
     "crates/oven-app",
     "crates/oven-host",
+    "crates/oven-mem",
     "crates/oven-tui",
 ]
 resolver = "2"
@@ -17,6 +18,7 @@ description = "A toy coding agent for joy only."
 oven-app = { path = "./crates/oven-app" }
 oven-agent = { path = "./crates/oven-agent" }
 oven-host = { path = "./crates/oven-host" }
+oven-mem = { path = "./crates/oven-mem" }
 oven-tui = { path = "./crates/oven-tui" }
 oven-llm = { version = "0.4.2" }
 

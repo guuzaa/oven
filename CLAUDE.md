@@ -34,5 +34,6 @@
 # Architectures
 - `oven-agent`: agent loop and tools
 - `oven-host`: host system interaction infrastructure
+- `oven-mem`: durable memory; files, index, catalog
 - `oven-app`: app layer; service composition, mcp, slash commands
 - `oven-tui`: entry point; render events and state; send commands

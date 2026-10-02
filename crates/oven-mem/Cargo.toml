@@ -1,0 +1,10 @@
+[package]
+name = "oven-mem"
+description = "Durable agent memory for Oven"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
