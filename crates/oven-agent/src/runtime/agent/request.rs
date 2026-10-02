@@ -33,33 +33,39 @@ impl Agent {
             .collect()
     }
 
+    /// The system prompt of the next request: the configured one, or the
+    /// first system message in the history when there is none, with the mode
+    /// and todo overlays composed on top of it.
+    fn system_prompt(&self, mode: AgentMode) -> Option<String> {
+        let history_system = self.history.system_message();
+        let base = self.system.as_deref().or_else(|| history_system.as_deref());
+        prompt_template::compose_todo_system(
+            base,
+            mode,
+            &self.todos,
+            self.wants_plan_reminder(mode),
+        )
+    }
+
+    /// Plan mode asks for a todo update when the previous step used tools
+    /// without writing to the list.
+    fn wants_plan_reminder(&self, mode: AgentMode) -> bool {
+        mode == AgentMode::Plan && self.todo_dirty && !self.todos.is_empty()
+    }
+
     pub(crate) fn build_request(&self) -> Request {
         let mode = self.selection.mode();
         let (model, reasoning_effort) = self.selection.model();
-        let tools = self.llm_tools(mode);
-        let mut system = self.system.clone();
-        let todos = &self.todos;
-        let mut messages = Vec::with_capacity(self.history.len());
-        for m in self.history.messages() {
-            if m.role == Role::System {
-                if system.is_none() {
-                    system = m.system_prompt();
-                }
-            } else {
-                messages.push(m.clone());
-            }
-        }
-        system = prompt_template::compose_todo_system(
-            system.as_deref(),
-            mode,
-            todos,
-            mode == AgentMode::Plan && self.todo_dirty && !todos.is_empty(),
-        );
         Request {
             model,
-            system,
-            messages,
-            tools,
+            system: self.system_prompt(mode),
+            messages: self
+                .history
+                .messages()
+                .filter(|m| m.role != Role::System)
+                .cloned()
+                .collect(),
+            tools: self.llm_tools(mode),
             tool_choice: ToolChoice::Auto,
             sampling: SamplingParams {
                 temperature: Some(1.0),

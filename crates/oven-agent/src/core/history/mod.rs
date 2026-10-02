@@ -146,6 +146,15 @@ impl History {
         self.messages.iter().map(|(m, _)| &**m)
     }
 
+    /// The text of the first system message in the conversation. A resumed
+    /// session drops persisted system messages, so one is only here when a
+    /// caller pushed it explicitly.
+    pub fn system_message(&self) -> Option<String> {
+        self.messages()
+            .find(|m| m.role == Role::System)
+            .and_then(|m| m.system_prompt())
+    }
+
     /// The messages as shared handles. A snapshot of the conversation then
     /// costs one refcount per message instead of copying every message.
     pub fn shared_messages(&self) -> impl ExactSizeIterator<Item = &Arc<Message>> + '_ {
