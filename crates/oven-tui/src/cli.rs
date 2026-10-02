@@ -98,23 +98,28 @@ impl Cli {
 
     pub async fn run(&self) -> ExitCode {
         log::init();
-        if let Some(command) = &self.command {
-            return commands::run(command, &self.dir).await;
-        }
-        match self.query.as_deref() {
-            Some(prompt) => {
-                tracing::info!(root = %self.dir.display(), headless = true, "oven starting");
-                self.headless(prompt.trim()).await
+        let code = if let Some(command) = &self.command {
+            commands::run(command, &self.dir).await
+        } else {
+            match self.query.as_deref() {
+                Some(prompt) => {
+                    tracing::info!(root = %self.dir.display(), headless = true, "oven starting");
+                    self.headless(prompt.trim()).await
+                }
+                None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
+                    let session = self.resolve_session_id();
+                    tracing::info!(root = %self.dir.display(), headless = false, "oven starting");
+                    self.interactive(session.as_deref()).await
+                }
+                None => {
+                    eprintln!(
+                        "usage: oven [-C DIR] [--session ID] [--continue] [-Q|--query QUERY]"
+                    );
+                    ExitCode::from(2)
+                }
             }
-            None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
-                let session = self.resolve_session_id();
-                tracing::info!(root = %self.dir.display(), headless = false, "oven starting");
-                self.interactive(session.as_deref()).await
-            }
-            None => {
-                eprintln!("usage: oven [-C DIR] [--session ID] [--continue] [-Q|--query QUERY]");
-                ExitCode::from(2)
-            }
-        }
+        };
+        log::shutdown();
+        code
     }
 }
