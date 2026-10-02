@@ -135,6 +135,10 @@ impl MemoryStore {
         render_catalog(&entries)
     }
 
+    pub fn path(&self, scope: MemoryScope, id: &MemoryId) -> Result<PathBuf, MemoryError> {
+        Ok(memory_path(self.scope_root(scope)?, id))
+    }
+
     pub fn entries(&self) -> Vec<IndexEntry> {
         let guard = self
             .index

@@ -1,8 +1,11 @@
 //! Human-facing memory operations shared by `/memory` and `oven mem`.
 
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use oven_mem::{Memory, MemoryError, MemoryId, MemoryScope, MemoryStore, NOT_FOUND};
+pub use oven_mem::MemoryStore;
+use oven_mem::{Memory, MemoryError, MemoryId, MemoryScope, NOT_FOUND};
 
 use crate::core::error::AppError;
 
@@ -15,6 +18,7 @@ pub(crate) const UNKNOWN_SCOPE: &str = "unknown memory scope";
 pub(crate) const KIND_LABEL: &str = "kind";
 pub(crate) const DESCRIPTION_LABEL: &str = "description";
 pub(crate) const SOURCE_LABEL: &str = "source";
+pub(crate) const NO_EDITOR: &str = "neither VISUAL nor EDITOR is set";
 
 const SHOW: &str = "show";
 const RM: &str = "rm";
@@ -52,11 +56,43 @@ pub(crate) fn parse_ref(raw: &str) -> Result<MemoryRef, AppError> {
     }
 }
 
+pub async fn open(root: &Path) -> Arc<MemoryStore> {
+    Arc::new(MemoryStore::load(crate::dirs::memory_roots(root)).await)
+}
+
+pub async fn list(store: &MemoryStore) -> String {
+    apply(store, MemoryAction::List).await
+}
+
+pub async fn show(store: &MemoryStore, raw: &str) -> Result<String, AppError> {
+    Ok(apply(store, MemoryAction::Show(parse_ref(raw)?)).await)
+}
+
+pub async fn remove(store: &MemoryStore, raw: &str) -> Result<String, AppError> {
+    Ok(apply(store, MemoryAction::Remove(parse_ref(raw)?)).await)
+}
+
+pub async fn file_path(store: &MemoryStore, raw: &str) -> Result<PathBuf, AppError> {
+    let (scope, id) = resolve(store, &parse_ref(raw)?).map_err(AppError::Runtime)?;
+    store
+        .path(scope, &id)
+        .map_err(|err| AppError::Runtime(err.to_string()))
+}
+
+pub fn editor_program(visual: Option<&str>, editor: Option<&str>) -> Result<String, AppError> {
+    visual
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| editor.map(str::trim).filter(|value| !value.is_empty()))
+        .map(str::to_owned)
+        .ok_or_else(|| AppError::Runtime(NO_EDITOR.to_owned()))
+}
+
 pub(crate) async fn apply(store: &MemoryStore, action: MemoryAction) -> String {
     match action {
         MemoryAction::List => render_list(store),
-        MemoryAction::Show(memory_ref) => show(store, &memory_ref).await,
-        MemoryAction::Remove(memory_ref) => remove(store, &memory_ref).await,
+        MemoryAction::Show(memory_ref) => show_ref(store, &memory_ref).await,
+        MemoryAction::Remove(memory_ref) => remove_ref(store, &memory_ref).await,
     }
 }
 
@@ -103,14 +139,14 @@ fn render_list(store: &MemoryStore) -> String {
     out
 }
 
-async fn show(store: &MemoryStore, memory_ref: &MemoryRef) -> String {
+async fn show_ref(store: &MemoryStore, memory_ref: &MemoryRef) -> String {
     match load(store, memory_ref).await {
         Ok(memory) => render_show(&memory),
         Err(text) => text,
     }
 }
 
-async fn remove(store: &MemoryStore, memory_ref: &MemoryRef) -> String {
+async fn remove_ref(store: &MemoryStore, memory_ref: &MemoryRef) -> String {
     let (scope, id) = match resolve(store, memory_ref) {
         Ok(found) => found,
         Err(text) => return text,
@@ -285,7 +321,7 @@ mod tests {
         let workspace = tmp.path().join("workspace");
         let user = tmp.path().join("user");
         let empty = loaded(&workspace, &user).await;
-        assert_eq!(apply(&empty, MemoryAction::List).await, NO_MEMORIES);
+        assert_eq!(list(&empty).await, NO_MEMORIES);
 
         write_memory(
             &workspace,
@@ -307,7 +343,7 @@ mod tests {
         );
         let store = loaded(&workspace, &user).await;
         assert_eq!(
-            apply(&store, MemoryAction::List).await,
+            list(&store).await,
             format!(
                 "user/{PREF_ID} ({}) {PREF_DESCRIPTION}\nworkspace/{PROXY_ID} ({}) {PROXY_DESCRIPTION}",
                 MemoryKind::Preference.as_str(),
@@ -341,18 +377,16 @@ mod tests {
         );
         let store = loaded(&workspace, &user).await;
         assert_eq!(
-            apply(
-                &store,
-                MemoryAction::Show(scoped(MemoryScope::Workspace, PROXY_ID))
-            )
-            .await,
+            show(&store, &format!("workspace/{PROXY_ID}"))
+                .await
+                .unwrap(),
             format!(
                 "{KIND_LABEL}: {}\n{DESCRIPTION_LABEL}: {PROXY_DESCRIPTION}\n{SOURCE_LABEL}: {SOURCE}\n\n{PROXY_BODY}",
                 MemoryKind::Fact.as_str()
             )
         );
         assert_eq!(
-            apply(&store, MemoryAction::Show(MemoryRef::Bare(id(PREF_ID)))).await,
+            show(&store, PREF_ID).await.unwrap(),
             format!(
                 "{KIND_LABEL}: {}\n{DESCRIPTION_LABEL}: {PREF_DESCRIPTION}\n\nalways\n",
                 MemoryKind::Preference.as_str()
@@ -384,7 +418,7 @@ mod tests {
             2,
         );
         let store = loaded(&workspace, &user).await;
-        let text = apply(&store, MemoryAction::Show(MemoryRef::Bare(id(PROXY_ID)))).await;
+        let text = show(&store, PROXY_ID).await.unwrap();
         assert_eq!(
             text,
             format!(
@@ -410,25 +444,67 @@ mod tests {
             1,
         );
         let store = loaded(&workspace, &user).await;
-        let missing = id("missing");
+        let missing = "missing";
         assert_eq!(
-            apply(
-                &store,
-                MemoryAction::Remove(MemoryRef::Bare(missing.clone()))
-            )
-            .await,
+            remove(&store, missing).await.unwrap(),
             format!("{NOT_FOUND}: {missing}")
         );
         assert!(workspace.join(format!("{PROXY_ID}.md")).is_file());
         assert_eq!(
-            apply(
-                &store,
-                MemoryAction::Remove(scoped(MemoryScope::Workspace, PROXY_ID))
-            )
-            .await,
+            remove(&store, &format!("workspace/{PROXY_ID}"))
+                .await
+                .unwrap(),
             format!("{REMOVED_MEMORY}: {}/{PROXY_ID}", MemoryScope::Workspace)
         );
         assert!(!workspace.join(format!("{PROXY_ID}.md")).exists());
-        assert_eq!(apply(&store, MemoryAction::List).await, NO_MEMORIES);
+        assert_eq!(list(&store).await, NO_MEMORIES);
+    }
+
+    #[tokio::test]
+    async fn edit_path_resolves_a_unique_ref() {
+        let tmp = tempdir::TempDir::new("memory-edit-path").unwrap();
+        let workspace = tmp.path().join("workspace");
+        let user = tmp.path().join("user");
+        write_memory(
+            &workspace,
+            PROXY_ID,
+            MemoryKind::Fact,
+            PROXY_DESCRIPTION,
+            PROXY_BODY,
+            None,
+            1,
+        );
+        write_memory(
+            &user,
+            PREF_ID,
+            MemoryKind::Preference,
+            PREF_DESCRIPTION,
+            "always\n",
+            None,
+            1,
+        );
+        let store = loaded(&workspace, &user).await;
+        assert_eq!(
+            file_path(&store, &format!("workspace/{PROXY_ID}"))
+                .await
+                .unwrap(),
+            workspace.join(format!("{PROXY_ID}.md"))
+        );
+        assert_eq!(
+            file_path(&store, PREF_ID).await.unwrap(),
+            user.join(format!("{PREF_ID}.md"))
+        );
+        let err = file_path(&store, "missing").await.unwrap_err();
+        assert_eq!(err.to_string(), format!("{NOT_FOUND}: missing"));
+    }
+
+    #[test]
+    fn editor_program_prefers_visual_and_errors_when_unset() {
+        assert_eq!(editor_program(Some("vim"), Some("nano")).unwrap(), "vim");
+        assert_eq!(editor_program(Some("  "), Some(" nano ")).unwrap(), "nano");
+        let err = editor_program(None, Some("  ")).unwrap_err();
+        assert_eq!(err.to_string(), NO_EDITOR);
+        let err = editor_program(None, None).unwrap_err();
+        assert_eq!(err.to_string(), NO_EDITOR);
     }
 }
