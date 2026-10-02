@@ -3991,7 +3991,10 @@ fn write_memory_file(dir: &Path, id: &str, kind: &str, description: &str, body: 
         format!("---\nkind: {kind}\ndescription: {description}\nsource: session-1\n---\n\n{body}"),
     )
     .unwrap();
-    std::fs::File::open(&path)
+    // SetFileTime needs FILE_WRITE_ATTRIBUTES; a read-only handle is denied on Windows.
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
         .unwrap();

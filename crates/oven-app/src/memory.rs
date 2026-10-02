@@ -301,7 +301,10 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::File::open(&path)
+        // SetFileTime needs FILE_WRITE_ATTRIBUTES; a read-only handle is denied on Windows.
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
             .unwrap();

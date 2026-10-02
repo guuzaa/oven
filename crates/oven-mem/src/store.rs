@@ -497,14 +497,15 @@ mod tests {
         let workspace = tmp.path().join("workspace");
         let older = write_memory(&workspace, "older", MemoryKind::Fact, "old fact");
         let newer = write_memory(&workspace, "newer", MemoryKind::Fact, "new fact");
-        File::open(&older)
-            .unwrap()
-            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(10))
-            .unwrap();
-        File::open(&newer)
-            .unwrap()
-            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(20))
-            .unwrap();
+        // SetFileTime needs FILE_WRITE_ATTRIBUTES; a read-only handle is denied on Windows.
+        for (path, secs) in [(&older, 10), (&newer, 20)] {
+            File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+                .unwrap();
+        }
         let store = MemoryStore::load(MemoryRoots {
             workspace,
             user: None,
