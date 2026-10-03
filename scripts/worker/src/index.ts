@@ -14,6 +14,8 @@ const ONE_YEAR_SECONDS = 31_536_000;
 const ONE_MINUTE_SECONDS = 60;
 const MAX_REDIRECTS = 3;
 
+const SITE_INDEX = "index.html";
+
 const RELEASE_ASSET = /^\/dl\/(v[\w.\-]+)\/([\w.\-]+)$/;
 const INSTALLER_SCRIPT = /^\/install\.(sh|ps1)$/;
 const TAGGED_RELEASE = /^\/tags\/(v[\w.\-]+)$/;
@@ -36,6 +38,11 @@ const PASSTHROUGH_HEADERS = ["content-type", "content-length", "content-disposit
 
 interface Env {
   GITHUB_TOKEN?: string;
+  ASSETS: AssetFetcher;
+}
+
+interface AssetFetcher {
+  fetch(request: Request): Promise<Response>;
 }
 
 interface EdgeCache {
@@ -125,6 +132,12 @@ function varyByAgent(response: Response): Response {
   const headers = new Headers(response.headers);
   headers.set("vary", "user-agent");
   return new Response(response.body, { status: response.status, headers });
+}
+
+// Anything the routes above do not claim is the site. Its views are chosen
+// client-side, so a hard refresh of /downloads must return the same document.
+function serveSite(request: Request, env: Env): Promise<Response> {
+  return env.ASSETS.fetch(new Request(new URL(SITE_INDEX, request.url)));
 }
 
 // Serves /install, which picks the script for the caller, and the explicit
@@ -222,6 +235,6 @@ export default {
       return serve(request, ctx, pathname, upstream, env.GITHUB_TOKEN, ONE_MINUTE_SECONDS);
     }
 
-    return new Response(`not found: ${pathname}\n`, { status: 404, headers: NO_STORE });
+    return serveSite(request, env);
   },
 };

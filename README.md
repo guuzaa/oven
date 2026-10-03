@@ -25,6 +25,9 @@ irm https://oven.paulden.site/install | iex
 
 Restart your terminal, then verify with `oven --help`.
 
+The same host serves [a small site](https://oven.paulden.site/downloads) with the
+per-platform release assets, if you would rather download by hand.
+
 ## Usage
 
 ```bash

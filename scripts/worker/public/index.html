@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>oven — a toy coding agent for joy only</title>
+    <meta name="description" content="oven is a small terminal coding agent written in Rust. It reads and edits your files, runs shell commands and remembers your project." />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./app.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#" data-link>
+        <img class="brand-mark" src="./icon.svg" alt="" width="32" height="32" />oven
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="#features" data-link>Features</a>
+        <a href="#run" data-link>Usage</a>
+        <a href="#tui" data-link>TUI</a>
+        <a href="/downloads" data-link data-nav="downloads">Downloads</a>
+        <a class="nav-gh" href="https://github.com/guuzaa/oven" rel="noopener">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="app">
+      <section class="view" data-view="home">
+        <div class="hero">
+          <div class="hero-copy">
+            <p class="chip"><span class="chip-dot" aria-hidden="true"></span>early &amp; experimental · not production-ready</p>
+            <h1>A toy <span class="hl">coding agent</span> for joy only.</h1>
+            <p class="lede">
+              oven reads and edits your files, runs shell commands, delegates to subagents and remembers
+              your project between sessions. Bring any OpenAI-compatible model. Written in Rust.
+            </p>
+
+            <div class="install" id="install">
+              <div class="tabs" role="tablist" aria-label="Platform">
+                <button class="tab" type="button" role="tab" id="tab-unix" aria-controls="panel-unix" aria-selected="true">macOS / Linux</button>
+                <button class="tab" type="button" role="tab" id="tab-windows" aria-controls="panel-windows" aria-selected="false">Windows</button>
+              </div>
+              <div class="code" role="tabpanel" id="panel-unix" aria-labelledby="tab-unix">
+                <pre><span class="prompt" aria-hidden="true">$ </span><code>curl -fsSL <span data-mirror>https://oven.paulden.site</span>/install | bash</code></pre>
+                <button class="copy" type="button" data-copy>Copy</button>
+              </div>
+              <div class="code" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
+                <pre><span class="prompt" aria-hidden="true">PS&gt; </span><code>irm <span data-mirror>https://oven.paulden.site</span>/install | iex</code></pre>
+                <button class="copy" type="button" data-copy>Copy</button>
+              </div>
+            </div>
+            <p class="hint">
+              The installer picks the release for your platform and checks its digest against the GitHub
+              release. Restart your terminal, then run <code>oven --help</code>.
+              <a href="/downloads" data-link>Manual downloads →</a>
+            </p>
+          </div>
+
+          <div class="hero-art">
+            <img class="mascot" src="./icon.svg" alt="oven mascot: a smiling little oven" width="168" height="168" />
+            <div class="window" aria-label="Example one-shot run">
+              <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>~/my-project</span></div>
+              <pre><span class="t-prompt">$</span> oven -Q "what does this project do?"
+<span class="t-out">A Rust CLI that parses Markdown and renders
+it to HTML. Entry point is src/main.rs; the
+parser lives in src/parse/.</span>
+<span class="t-prompt">$</span> oven <span class="t-dim"># opens the interactive TUI</span>
+<span class="t-prompt">$</span> <span class="caret" aria-hidden="true"></span></pre>
+            </div>
+          </div>
+        </div>
+
+        <section id="features">
+          <h2>What's in the oven</h2>
+          <ul class="features">
+            <li class="feature">
+              <span class="feature-icon" aria-hidden="true">📝</span>
+              <h3>Reads &amp; edits code</h3>
+              <p>Built-in <code>file_read</code>, <code>file_edit</code>, <code>file_write</code>, <code>glob</code> and <code>grep</code> tools work inside your workspace.</p>
+            </li>
+            <li class="feature">
+              <span class="feature-icon" aria-hidden="true">🐚</span>
+              <h3>Runs your shell</h3>
+              <p>The agent runs commands with <code>bash</code>. Type <code>!cargo test</code> in the TUI to run a command yourself and share its output.</p>
+            </li>
+            <li class="feature">
+              <span class="feature-icon" aria-hidden="true">🧠</span>
+              <h3>Durable memory</h3>
+              <p>Remembers facts per workspace and per user. Manage them with <code>oven mem</code> or <code>/memory</code>, or skip them with <code>--amnesia</code>.</p>
+            </li>
+            <li class="feature">
+              <span class="feature-icon" aria-hidden="true">🧁</span>
+              <h3>Subagents</h3>
+              <p>Delegates side jobs to concurrent subagents. Watch or stop them with <code>/agents</code>.</p>
+            </li>
+            <li class="feature">
+              <span class="feature-icon" aria-hidden="true">🔌</span>
+              <h3>Any compatible model</h3>
+              <p>Speaks OpenAI chat completions or responses. DeepSeek, xAI, Moonshot, Zhipu and your own proxy via <code>oven model add</code>.</p>
+            </li>
+            <li class="feature">
+              <span class="feature-icon" aria-hidden="true">🧩</span>
+              <h3>MCP, skills, rules</h3>
+              <p>Mounts MCP servers (stdio or HTTP), loads <code>SKILL.md</code> skills and injects <code>AGENTS.md</code> / <code>CLAUDE.md</code>.</p>
+            </li>
+          </ul>
+        </section>
+
+        <section id="run">
+          <h2>Two ways to run it</h2>
+          <div class="modes">
+            <article class="mode">
+              <p class="mode-tag">interactive</p>
+              <h3>Chat in the TUI</h3>
+              <pre><code>oven
+oven -c              # latest session here
+oven -s my-session   # named session
+oven -C ~/project    # other workspace</code></pre>
+              <p>Needs a real terminal. Sessions are saved as JSONL under <code>~/.oven/sessions/</code>.</p>
+            </article>
+            <article class="mode">
+              <p class="mode-tag mode-tag-alt">headless</p>
+              <h3>One-shot with <code>-Q</code></h3>
+              <pre><code>oven -Q "what does this project do?"
+oven -Q "summarize HEAD" &gt; notes.md
+oven --amnesia -Q "explain src/main.rs"</code></pre>
+              <p>
+                No TUI: prints the answer to stdout and exits, which makes it scriptable. Without <code>-Q</code>,
+                <code>oven</code> in a pipe prints its usage and exits with code 2.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <section id="tui">
+          <h2>Inside the TUI</h2>
+          <div class="cheats">
+            <div class="cheat">
+              <h3>Keys</h3>
+              <dl>
+                <dt><kbd>Enter</kbd></dt><dd>send the prompt</dd>
+                <dt><kbd>Shift</kbd>+<kbd>Tab</kbd></dt><dd>cycle <b>agent</b> → <b>plan</b> → <b>ask</b> (read-only, shell needs approval)</dd>
+                <dt><kbd>Esc</kbd> <kbd>Esc</kbd></dt><dd>cancel a running turn, or rewind the last exchange</dd>
+                <dt><kbd>@</kbd></dt><dd>mention a file</dd>
+                <dt><kbd>!</kbd>cmd</dt><dd>run a shell command yourself</dd>
+                <dt><kbd>Ctrl</kbd>+<kbd>C</kbd></dt><dd>quit</dd>
+              </dl>
+            </div>
+            <div class="cheat">
+              <h3>Slash commands</h3>
+              <dl>
+                <dt><code>/model</code></dt><dd>switch model: <code>/model &lt;id&gt; [none|low|medium|high]</code></dd>
+                <dt><code>/setup</code></dt><dd>configure a provider</dd>
+                <dt><code>/plan</code></dt><dd>toggle plan mode</dd>
+                <dt><code>/agents</code></dt><dd>list, open or stop subagents</dd>
+                <dt><code>/compact</code></dt><dd>summarize history to free context</dd>
+                <dt><code>/memory</code></dt><dd>list, show or remove memories</dd>
+                <dt><code>/clear</code></dt><dd>start a new session</dd>
+                <dt><code>/exit</code></dt><dd>quit</dd>
+              </dl>
+            </div>
+          </div>
+        </section>
+
+        <section id="setup">
+          <h2>Ready in three steps</h2>
+          <ol class="steps">
+            <li class="step">
+              <h3>Install</h3>
+              <p>Run the one-liner above, then restart your terminal.</p>
+            </li>
+            <li class="step">
+              <h3>Add a model</h3>
+              <pre><code>oven model add</code></pre>
+              <p>Or just set env vars for one run: <code>OVEN_MODEL</code>, <code>OVEN_API_KEY</code>, <code>OVEN_BASE_URL</code>.</p>
+            </li>
+            <li class="step">
+              <h3>Start cooking</h3>
+              <pre><code>cd your-project &amp;&amp; oven</code></pre>
+              <p>Config lives in <code>.oven.toml</code> or <code>~/.oven/config.toml</code>. <code>oven --help</code> lists every flag.</p>
+            </li>
+          </ol>
+        </section>
+      </section>
+
+      <section class="view" data-view="downloads" hidden>
+        <h1 class="page-title">Downloads</h1>
+        <p class="lede">
+          The one-liner is the recommended install. Grab a release asset directly if you prefer —
+          <a href="#install" data-link>back to the install command</a>.
+        </p>
+        <div class="release" id="release" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p class="footer-brand"><img src="./icon.svg" alt="" width="24" height="24" />Baked with Rust · MIT licensed</p>
+      <p class="footer-links">
+        <a href="https://github.com/guuzaa/oven">GitHub</a>
+        <a href="https://github.com/guuzaa/oven/blob/master/README.md">README</a>
+        <a href="https://github.com/guuzaa/oven/tree/master/docs">Docs</a>
+        <a href="https://github.com/guuzaa/oven/releases">Releases</a>
+      </p>
+      <p class="footer-note">Downloads and installers are mirrored by the oven worker; GitHub stays the source of truth.</p>
+    </footer>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

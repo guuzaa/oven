@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <style>
+    .steam { animation: rise 2.4s ease-in-out infinite; transform-box: fill-box; transform-origin: bottom; }
+    .steam.late { animation-delay: 1.2s; }
+    .eyes { animation: blink 4s infinite; transform-box: fill-box; transform-origin: center; }
+    @keyframes rise { 0%, 100% { opacity: .35; transform: translateY(1px) scaleY(.85); } 50% { opacity: 1; transform: translateY(-1px) scaleY(1); } }
+    @keyframes blink { 0%, 94%, 100% { transform: scaleY(1); } 97% { transform: scaleY(.1); } }
+    @media (prefers-reduced-motion: reduce) { .steam, .eyes { animation: none; } }
+  </style>
+  <g fill="none" stroke="#ffb48f" stroke-width="3.2" stroke-linecap="round">
+    <path class="steam" d="M25 13c-3-2.5 3-4.5 0-8" />
+    <path class="steam late" d="M39 13c-3-2.5 3-4.5 0-8" />
+  </g>
+  <rect x="14" y="54" width="9" height="7" rx="3.5" fill="#c9562a" />
+  <rect x="41" y="54" width="9" height="7" rx="3.5" fill="#c9562a" />
+  <rect x="5" y="15" width="54" height="43" rx="15" fill="#ff8550" />
+  <rect x="5" y="15" width="54" height="13" rx="6.5" fill="#ff9b6b" />
+  <circle cx="15" cy="21.5" r="3" fill="#fff4e8" />
+  <circle cx="24" cy="21.5" r="3" fill="#fff4e8" />
+  <rect x="38" y="19.5" width="15" height="4" rx="2" fill="#ffd36e" />
+  <rect x="11.5" y="31" width="41" height="22" rx="9" fill="#fff4e8" />
+  <g class="eyes" fill="#3a2117">
+    <circle cx="24.5" cy="40" r="2.8" />
+    <circle cx="39.5" cy="40" r="2.8" />
+  </g>
+  <ellipse cx="18.5" cy="45.5" rx="3.2" ry="1.9" fill="#ffa3b5" />
+  <ellipse cx="45.5" cy="45.5" rx="3.2" ry="1.9" fill="#ffa3b5" />
+  <path d="M29 44.5q3 3.2 6 0" fill="none" stroke="#3a2117" stroke-width="2.2" stroke-linecap="round" />
+</svg>
