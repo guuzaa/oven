@@ -306,24 +306,50 @@ impl Transcript {
             origin -= 1;
             origin = self.skip_prompt_up(origin);
         }
-        self.top = Some(origin);
+        self.anchor_scroll(origin);
     }
 
     pub(super) fn scroll_down(&mut self, n: u16) {
-        let total = self.total_lines();
-        let height = self.content_height();
-        let max_top = total.saturating_sub(height);
+        let tail = self.body_start(None);
         let mut origin = self.body_origin();
         for _ in 0..n {
-            if origin >= max_top {
-                origin = max_top;
+            if origin >= tail {
+                origin = tail;
                 break;
             }
             origin += 1;
-            origin = self.skip_prompt_down(origin, max_top);
+            origin = self.skip_prompt_down(origin, tail);
         }
-        let top = origin.min(max_top);
-        self.top = (top.saturating_add(height) < total).then_some(top);
+        self.anchor_scroll(origin);
+    }
+
+    /// Anchors `origin` only when it draws a body line above the tail. Landing
+    /// on the tail, or inside a prompt the tail already pins, keeps following
+    /// new rows.
+    fn anchor_scroll(&mut self, origin: usize) {
+        self.top = (self.body_start(Some(origin)) < self.body_start(None)).then_some(origin);
+    }
+
+    /// First wrapped body line `top` draws. `None` follows the tail.
+    ///
+    /// A short turn draws that line at the prompt's end, past the index that
+    /// would fill the viewport from the last line. The lines between the two
+    /// are above the viewport, so a scroll that stops there is not the tail.
+    fn body_start(&self, top: Option<usize>) -> usize {
+        let total = self.total_lines();
+        if total == 0 {
+            return 0;
+        }
+        let prompt = self.prompt_for_focus(top, total);
+        let height = Self::content_rows(self.area.height, prompt);
+        let max_top = total.saturating_sub(height);
+        let mut start = top.unwrap_or(max_top);
+        if let Some((_, end)) = prompt
+            && start < end
+        {
+            start = end;
+        }
+        start
     }
 
     /// First body line under the pinned prompt. Following the tail uses the
@@ -336,14 +362,6 @@ impl Transcript {
             return self.render_start;
         }
         self.total_lines().saturating_sub(self.height().max(1))
-    }
-
-    fn content_height(&self) -> usize {
-        let sticky = self
-            .sticky_prompt
-            .map(|(_, height)| usize::from(height))
-            .unwrap_or(0);
-        self.height().saturating_sub(sticky).max(1)
     }
 
     /// A prompt is a header, so scrolling up through it lands on the previous
@@ -825,15 +843,7 @@ impl Transcript {
                 break;
             }
         }
-        let height = Self::content_rows(area_height, prompt);
-        let max_top = total.saturating_sub(height);
-        let mut start = self.top.unwrap_or(max_top);
-        if let Some((_, prompt_end)) = prompt
-            && start < prompt_end
-        {
-            start = prompt_end;
-        }
-        (prompt, start)
+        (prompt, self.body_start(self.top))
     }
 
     fn content_rows(area_height: u16, prompt: Option<(usize, usize)>) -> usize {
@@ -853,10 +863,11 @@ impl Transcript {
         if height == 0 || total == 0 {
             return;
         }
-        let max_top = total.saturating_sub(height);
-        if let Some(top) = self.top {
-            let top = top.min(max_top);
-            self.top = (top.saturating_add(height) < total).then_some(top);
+        if self
+            .top
+            .is_some_and(|top| self.body_start(Some(top)) >= self.body_start(None))
+        {
+            self.top = None;
         }
     }
 

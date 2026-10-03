@@ -2131,6 +2131,107 @@ fn scrolling_between_turns_swaps_the_pinned_prompt() {
 }
 
 #[test]
+fn wheel_up_while_thinking_is_shorter_than_the_viewport_sticks() {
+    const WIDTH: u16 = 80;
+    const HEIGHT: u16 = 24;
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.start_user_turn("earlier question");
+    fill(&mut t, 30);
+    t.on_event(&completed());
+    t.start_user_turn("current question");
+    stream_thinking(&mut t, 3);
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    let row = |terminal: &Terminal<TestBackend>, y| {
+        let buffer = terminal.backend().buffer();
+        (0..WIDTH)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
+    let paint = |t: &mut Transcript, terminal: &mut Terminal<TestBackend>| {
+        terminal
+            .draw(|f| t.draw(f, f.area(), &State::new()))
+            .unwrap();
+    };
+    paint(&mut t, &mut terminal);
+    assert!(row(&terminal, 1).contains("current question"));
+
+    let thinking_row = (0..HEIGHT)
+        .find(|y| row(&terminal, *y).contains(THINKING_LABEL))
+        .expect("thinking header on screen");
+    t.handle_mouse(
+        mouse(MouseEventKind::ScrollUp, 4, thinking_row),
+        &State::new(),
+    );
+    let scrolled = t.top;
+    paint(&mut t, &mut terminal);
+
+    assert_eq!(t.top, scrolled, "the redraw must keep the wheel step");
+    assert!(t.top.is_some());
+    assert!(
+        row(&terminal, 1).contains("earlier question"),
+        "scrolling off the short turn pins the turn above it: {:?}",
+        row(&terminal, 1)
+    );
+
+    t.scroll_down(u16::MAX);
+    paint(&mut t, &mut terminal);
+    assert!(t.top.is_none(), "scrolling down returns to the tail");
+    assert!(row(&terminal, 1).contains("current question"));
+    assert!(
+        (0..HEIGHT).any(|y| row(&terminal, y).contains(THINKING_LABEL)),
+        "the thinking row is back on screen"
+    );
+}
+
+#[test]
+fn wheel_up_with_nothing_above_the_turn_keeps_following_the_tail() {
+    const WIDTH: u16 = 80;
+    const HEIGHT: u16 = 24;
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.area.height = HEIGHT;
+    t.start_user_turn("only question");
+    stream_thinking(&mut t, 3);
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    let screen = |terminal: &Terminal<TestBackend>| -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..HEIGHT)
+            .map(|y| {
+                (0..WIDTH)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    };
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let before = screen(&terminal);
+    t.handle_mouse(mouse(MouseEventKind::ScrollUp, 4, 4), &State::new());
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+
+    assert!(t.top.is_none(), "a no-op wheel must not freeze the tail");
+    assert_eq!(screen(&terminal), before);
+
+    t.on_event(&thinking("still going\n"));
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    assert!(t.top.is_none());
+    assert!(
+        screen(&terminal)
+            .iter()
+            .any(|row| row.contains("still going")),
+        "later thinking stays on screen"
+    );
+}
+
+#[test]
 fn shell_turn_uses_shell_row_and_rewinds_with_bang_prefix() {
     let mut t = Transcript::new();
     wide(&mut t);
