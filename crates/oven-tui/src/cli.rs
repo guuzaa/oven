@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use oven_app::{App, AppBuilder, dirs, log, session};
+use oven_app::{App, AppBuilder, AppError, dirs, log, session};
 
 use crate::commands::{self, Command};
 use crate::runtime::ui::Ui;
@@ -28,6 +28,10 @@ pub struct Cli {
     /// Run a one-shot query and exit
     #[arg(long, short = 'Q', value_name = "QUERY")]
     query: Option<String>,
+
+    /// Run without durable memory: no memory tools, nothing recalled into the prompt
+    #[arg(long)]
+    amnesia: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -59,11 +63,25 @@ impl Cli {
         if let Err(e) = builder.load_config().await {
             eprintln!("warning: loading config: {e}");
         }
+        self.load_memory(&mut builder).await;
         builder
     }
 
+    async fn load_memory(&self, builder: &mut AppBuilder) {
+        if !self.amnesia {
+            builder.load_memory().await;
+        }
+    }
+
+    async fn query(&self, prompt: &str) -> Result<String, AppError> {
+        let mut builder = App::builder(&self.dir);
+        builder.load_config().await?;
+        self.load_memory(&mut builder).await;
+        builder.query(prompt).await
+    }
+
     async fn headless(&self, prompt: &str) -> ExitCode {
-        match App::query(&self.dir, prompt).await {
+        match self.query(prompt).await {
             Ok(resp) => {
                 println!("{resp}");
                 ExitCode::SUCCESS
@@ -103,17 +121,17 @@ impl Cli {
         } else {
             match self.query.as_deref() {
                 Some(prompt) => {
-                    tracing::info!(root = %self.dir.display(), headless = true, "oven starting");
+                    tracing::info!(root = %self.dir.display(), headless = true, amnesia = self.amnesia, "oven starting");
                     self.headless(prompt.trim()).await
                 }
                 None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
                     let session = self.resolve_session_id().await;
-                    tracing::info!(root = %self.dir.display(), headless = false, "oven starting");
+                    tracing::info!(root = %self.dir.display(), headless = false, amnesia = self.amnesia, "oven starting");
                     self.interactive(session.as_deref()).await
                 }
                 None => {
                     eprintln!(
-                        "usage: oven [-C DIR] [--session ID] [--continue] [-Q|--query QUERY]"
+                        "usage: oven [-C DIR] [--session ID] [--continue] [--amnesia] [-Q|--query QUERY]"
                     );
                     ExitCode::from(2)
                 }

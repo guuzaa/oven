@@ -40,17 +40,8 @@ impl App {
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self, AppError> {
         let mut builder = Self::builder(root);
         builder.load_config().await?;
+        builder.load_memory().await;
         builder.open().await
-    }
-
-    pub async fn query(
-        root: impl Into<PathBuf>,
-        prompt: impl Into<String>,
-    ) -> Result<String, AppError> {
-        let app = Self::open(root).await?;
-        let out = app.prompt(prompt).await;
-        app.shutdown().await;
-        out
     }
 
     pub(crate) fn new(

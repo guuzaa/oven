@@ -176,13 +176,6 @@ impl AppBuilder {
             .load_from_dirs(&dirs::skill_dirs(&self.root))
             .await;
         self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root).await;
-        self.memory = if config.memory.enabled {
-            Some(Arc::new(
-                MemoryStore::load(dirs::memory_roots(&self.root)).await,
-            ))
-        } else {
-            None
-        };
 
         for (id, server) in &config.mcps {
             let _ = self.mcps.register(id.clone(), server.clone());
@@ -197,6 +190,14 @@ impl AppBuilder {
             Box::new(SkillReadTool::new(sources.clone()))
         });
         self.config = config;
+    }
+
+    /// Load durable memory from the workspace and user roots. Without it the
+    /// builder mounts no memory tools and adds nothing to the system prompt.
+    pub async fn load_memory(&mut self) {
+        self.memory = Some(Arc::new(
+            MemoryStore::load(dirs::memory_roots(&self.root)).await,
+        ));
     }
 
     fn build_router(&self) -> Result<Router, AppError> {
@@ -379,6 +380,14 @@ impl AppBuilder {
             self.config.clone(),
             AppConfig::default_user_config_path(),
         ))
+    }
+
+    /// Open without a session, run one prompt and shut down.
+    pub async fn query(&self, prompt: impl Into<String>) -> Result<String, AppError> {
+        let app = self.open().await?;
+        let out = app.prompt(prompt).await;
+        app.shutdown().await;
+        out
     }
 
     /// Start with a persisted session under the platform data dir. `Some(id)`

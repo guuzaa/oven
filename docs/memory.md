@@ -203,7 +203,7 @@ The guidance on *when* to read, write, revise and forget lives in
 appends to the system prompt right before the catalog whenever memory is
 enabled, even with an empty catalog, so the first memory still gets written.
 The guidance on *what* is worth writing lives in the `memory_write` tool
-description. Both are present exactly when the tools are, so `enabled = false`
+description. Both are present exactly when the tools are, so `--amnesia`
 leaves no trace. Tool description:
 
 ```text
@@ -269,8 +269,7 @@ Consequences worth stating:
 description edited by hand or a file dropped into the directory. A body is
 never stale: `memory_read` reads the disk.
 - **No memories, no block.** An empty `<memory>` block is pure noise.
-`enabled = false` and an empty catalog produce the same system prompt as
-before this feature.
+`--amnesia` produces the same system prompt as before this feature.
 - **Compaction needs nothing.** The system prompt is not history; compaction
 replaces the history and the catalog stays where it was.
 - `oven-agent` **needs nothing.** The catalog is a string the app appends to
@@ -332,7 +331,7 @@ oven-agent      │        (unchanged)
 | `Memory`, limits, id validation, file parse/render              | `oven-mem`  | nouns and their pure rules                                        |
 | `MemoryStore` (load, index, read, put, forget), catalog block   | `oven-mem`  | the directories and their I/O, usable without an agent            |
 | `memory_read`, `memory_write`, `memory_forget`                  | `oven-app`  | adapters to `oven_agent::Tool`, like `McpTool`; one file each     |
-| `dirs::memory_roots(root)`, `[memory]` config, wiring, `/memory` | `oven-app`  | exactly like `dirs::skill_dirs` and the `apply_config` skill load |
+| `dirs::memory_roots(root)`, `load_memory`, wiring, `/memory`     | `oven-app`  | exactly like `dirs::skill_dirs` and the `apply_config` skill load |
 | `oven mem ls | show | rm | edit`                                | `oven-tui`  | through `oven-app`, like `oven model`                             |
 
 
@@ -350,8 +349,8 @@ the memory directory is chosen by the app, not by the model.
 
 ## App integration
 
-`AppBuilder::apply_config` loads the store right after skills, renders the
-catalog into the system prompt, and builds the three tools into the base tool
+`AppBuilder::load_memory` loads the store; building the agents then renders
+the catalog into the system prompt and adds the three tools to the base tool
 set. The runtime keeps the same `Arc<MemoryStore>` for `/memory`.
 
 `session`'s hydration path needs nothing: memory does not live in the session
@@ -362,7 +361,7 @@ file, and a resumed session finds exactly the memories its workspace has.
 | ---------- | ------------------------------------------------------------------------------------------------------------------- |
 | `/memory`  | new slash command: list, `show <ref>`, `rm <ref>` (`workspace/<id>`, `user/<id>`, or a bare id)                      |
 | `oven mem` | new CLI subcommand: `ls`, `show`, `rm`, `edit`, without starting the TUI                                            |
-| config     | `[memory] enabled`, default on. `enabled = false` mounts no tools, builds no store, and adds nothing to any request |
+| `oven`     | `--amnesia` flag, memory on by default. It mounts no tools, builds no store, and adds nothing to any request        |
 
 
 `SlashCommand::execute` is synchronous and `CommandContext` carries the

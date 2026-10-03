@@ -15,7 +15,7 @@ use oven_llm::{
 use oven_mem::{MemoryRoots, MemoryStore};
 
 use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
-use crate::core::config::{AppConfig, MemoryConfig};
+use crate::core::config::AppConfig;
 
 use super::AppBuilder;
 
@@ -101,22 +101,22 @@ impl Provider for CaptureProvider {
 /// Memory roots the caller owns, so the developer's `~/.oven/memory` never
 /// leaks into the prompt these tests assert on.
 async fn isolated_app(root: &Path, config: AppConfig) -> AppBuilder {
-    let enabled = config.memory.enabled;
     let mut app = AppBuilder::new(root).with_config(config).await;
-    if enabled {
-        let store = MemoryStore::load(MemoryRoots {
-            workspace: root.join(".oven").join("memory"),
-            user: Some(root.join("user-memory")),
-        })
-        .await;
-        app.set_memory(Arc::new(store));
-    }
+    let store = MemoryStore::load(MemoryRoots {
+        workspace: root.join(".oven").join("memory"),
+        user: Some(root.join("user-memory")),
+    })
+    .await;
+    app.set_memory(Arc::new(store));
     app
 }
 
 async fn capture(root: &Path, config: AppConfig) -> CapturedPrompt {
+    capture_app(isolated_app(root, config).await).await
+}
+
+async fn capture_app(app: AppBuilder) -> CapturedPrompt {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let app = isolated_app(root, config).await;
     let mut agents = app
         .build_agent_with_provider(Box::new(CaptureProvider {
             calls: Arc::clone(&calls),
@@ -241,16 +241,14 @@ async fn empty_store_adds_guidance_without_catalog() {
 }
 
 #[tokio::test]
-async fn disabled_matches_prompt_without_memory() {
+async fn unloaded_matches_prompt_without_memory() {
     let tmp = tempdir::TempDir::new("memory-prompt-off").unwrap();
     write_workspace_memory(tmp.path());
-    let config = AppConfig {
-        memory: MemoryConfig { enabled: false },
-        ..AppConfig::default()
-    };
-    let app = isolated_app(tmp.path(), config.clone()).await;
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig::default())
+        .await;
     let expected = base_prompt(&app);
-    let disabled = capture(tmp.path(), config).await;
+    let disabled = capture_app(app).await;
     assert_eq!(disabled.driver, expected);
     assert!(!disabled.driver.contains(MEMORY_PROMPT));
     assert!(!disabled.driver.contains(MEMORY_TAG));

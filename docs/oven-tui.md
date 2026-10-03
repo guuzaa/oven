@@ -56,17 +56,18 @@ decides what `Esc` does and `core/hint.rs` says which keys apply, so the status
 bar and the composer border cannot disagree. `platform` is where a side effect
 happens; `core` performs none.
 
-`Cli` has three flags: `--cd/-C` (workspace root, global so it may follow a
+`Cli` has these flags: `--cd/-C` (workspace root, global so it may follow a
 subcommand), `--session/-s` and `--continue/-c` (mutually exclusive session
-selection; an explicit id wins, otherwise the newest session for this root), and
-`--query/-Q`.
+selection; an explicit id wins, otherwise the newest session for this root),
+`--query/-Q`, and `--amnesia` (skip loading durable memory for this run, in
+both interactive and headless modes; `oven mem` is unaffected).
 
 `Cli::run` dispatches to one of four modes:
 
 | Condition | Behavior |
 | --- | --- |
 | a subcommand is present | run it and exit; no session, no TUI (`oven model …`) |
-| `--query QUERY` present | headless: `App::query`, print the response, exit. No TUI is started. |
+| `--query QUERY` present | headless: `AppBuilder::query`, print the response, exit. No TUI is started. |
 | `--query` absent and stdin/stdout are both TTYs | interactive: `Ui::run` |
 | `--query` absent and either side is not a TTY | print usage, exit code `2` |
 

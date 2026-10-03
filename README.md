@@ -45,6 +45,9 @@ oven -c                 # resume the most recent session in this directory
 # Work in a different directory
 oven -C /path/to/project
 
+# Run without durable memory: no memory tools, nothing recalled into the prompt
+oven --amnesia
+
 # List, add and remove provider models without starting the TUI
 oven model
 oven model add            # asks for what the flags leave out

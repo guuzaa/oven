@@ -496,8 +496,6 @@ pub struct AppConfig {
     pub tools: Vec<String>,
     /// Delegation to subagents.
     pub subagents: SubagentConfig,
-    /// Durable memory. `enabled = false` mounts no tools and adds nothing to the prompt.
-    pub memory: MemoryConfig,
     /// MCP server declarations. Key is the local id used to refer to a server.
     pub mcps: BTreeMap<String, McpServerConfig>,
 }
@@ -530,8 +528,6 @@ struct RawAppConfig {
     tools: Vec<String>,
     #[serde(default)]
     subagents: SubagentConfig,
-    #[serde(default)]
-    memory: MemoryConfig,
     #[serde(default)]
     mcps: BTreeMap<String, McpServerConfig>,
 }
@@ -575,9 +571,6 @@ impl Serialize for AppConfig {
         if self.subagents != SubagentConfig::default() {
             map.serialize_entry("subagents", &self.subagents)?;
         }
-        if self.memory != MemoryConfig::default() {
-            map.serialize_entry("memory", &self.memory)?;
-        }
         if !self.mcps.is_empty() {
             map.serialize_entry("mcps", &self.mcps)?;
         }
@@ -599,20 +592,6 @@ pub struct SubagentConfig {
     pub max_concurrent: usize,
     /// Provider round trips one subagent may take.
     pub max_iters: usize,
-}
-
-/// Whether memory is loaded for this process. Default on; disabling leaves
-/// the system prompt and the tool set exactly as they were without the feature.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct MemoryConfig {
-    pub enabled: bool,
-}
-
-impl Default for MemoryConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
 }
 
 impl Default for SubagentConfig {
@@ -641,7 +620,6 @@ impl<'de> Deserialize<'de> for AppConfig {
             max_iters: raw.max_iters,
             tools: raw.tools,
             subagents: raw.subagents,
-            memory: raw.memory,
             mcps: raw.mcps,
         };
 
@@ -725,7 +703,6 @@ impl Default for AppConfig {
             max_iters: default_max_iters(),
             tools: Vec::new(),
             subagents: SubagentConfig::default(),
-            memory: MemoryConfig::default(),
             mcps: BTreeMap::new(),
         }
     }
@@ -772,9 +749,6 @@ impl AppConfig {
             if !self.tools.contains(&name) {
                 self.tools.push(name);
             }
-        }
-        if overlay.memory != MemoryConfig::default() {
-            self.memory = overlay.memory;
         }
         self.mcps.extend(overlay.mcps);
     }
@@ -1618,25 +1592,6 @@ supports_vision = true
             toml::from_str("active = \"p\"\n\n[providers.p]\nmodel = \"gpt-4o\"\n").unwrap();
         assert_eq!(config.remove_model("p", "gpt-4o"), Some(true));
         assert!(config.providers["p"].model.is_none());
-    }
-
-    #[test]
-    fn memory_defaults_to_enabled_and_merges_when_disabled() {
-        assert!(AppConfig::default().memory.enabled);
-        let parsed: AppConfig = toml::from_str("active = \"deepseek\"\n").unwrap();
-        assert!(parsed.memory.enabled);
-
-        let disabled: AppConfig = toml::from_str("[memory]\nenabled = false\n").unwrap();
-        assert!(!disabled.memory.enabled);
-
-        let mut base = AppConfig::default();
-        base.merge(disabled);
-        assert!(!base.memory.enabled);
-
-        let overlay: AppConfig = toml::from_str("max_retries = 9\n").unwrap();
-        base.merge(overlay);
-        assert!(!base.memory.enabled);
-        assert_eq!(base.max_retries, 9);
     }
 
     #[test]

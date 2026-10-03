@@ -42,11 +42,14 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 `App` has three constructors:
 
 ```text
-App::builder(root) ─▶ load_config() ─▶ open()            // no session on disk
-                                 └──▶ open_session(id)   // JSONL under ~/.oven/sessions
-App::open(root)     ─▶ builder + open; a broken config is an error
-App::query(root, p) ─▶ open, run one prompt, shut down; used for headless runs
+App::builder(root) ─▶ load_config() ─▶ [load_memory()] ─▶ open()            // no session on disk
+                                                    ├──▶ open_session(id)   // JSONL under ~/.oven/sessions
+                                                    └──▶ query(p)           // open, one prompt, shut down
+App::open(root)     ─▶ builder + load_memory + open; a broken config is an error
 ```
+
+`load_memory` is opt-in on the builder: skipping it (`oven --amnesia`) mounts
+no memory tools and adds nothing to the system prompt.
 
 Only `open_session` reaches an LLM (it builds the interactive router); `open`
 uses the non-interactive one. `open_session(None)` resolves the newest session
@@ -58,7 +61,7 @@ bypasses the filesystem entirely, which is how the tests build an app.
 the runtime dropped without ever running them, so a frontend can tell the user
 what it lost on the way out.
 
-`App::prompt` is the convenience path used by both `App::query` and the tests: it
+`App::prompt` is the convenience path used by both `AppBuilder::query` and the tests: it
 subscribes, submits the prompt, then collects text deltas until the turn
 completes, fails, cancels, a shell command finishes, or a non-turn notification
 arrives. Loop-limit prompts are answered with `LoopLimitDecision::Exit` so a
@@ -294,10 +297,10 @@ with a short timeout; an auth error surfaces as `API key rejected: …`.
 
 `tools.rs` mounts a named set of tools per workspace: `file_read`,
 `file_write`, `file_edit`, `bash`, `glob`, `grep`, `todo_write` and `answer`,
-plus `read_skill` added by the builder. When `[memory] enabled` is on (the
-default), the builder also mounts `memory_read`, `memory_write` and
-`memory_forget` and appends the memory catalog to the system prompt.
-`enabled = false` does none of that. An empty config list means the built-in
+plus `read_skill` added by the builder. After `AppBuilder::load_memory` (the
+CLI calls it unless `--amnesia` is passed), the builder also mounts
+`memory_read`, `memory_write` and `memory_forget` and appends the memory
+catalog to the system prompt. An empty config list means the built-in
 defaults; unknown names are skipped silently.
 
 `answer` is how the model asks the user something: it publishes a `Question`

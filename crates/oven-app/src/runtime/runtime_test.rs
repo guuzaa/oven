@@ -4065,12 +4065,7 @@ async fn slash_memory_ambiguous_bare_id_and_unknown_rm_are_replies() {
 #[tokio::test]
 async fn slash_memory_disabled_replies() {
     let tmp = tempdir::TempDir::new("app-runtime-memory-off").unwrap();
-    let app = AppBuilder::new(tmp.path())
-        .with_config(AppConfig {
-            memory: crate::config::MemoryConfig { enabled: false },
-            ..AppConfig::default()
-        })
-        .await;
+    let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     assert_eq!(handle.prompt("/memory").await.unwrap(), MEMORY_DISABLED);
     handle.shutdown().await;
