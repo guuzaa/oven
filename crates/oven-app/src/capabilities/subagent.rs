@@ -17,7 +17,7 @@ use oven_agent::{
     SubagentSpawner, Tool, ToolEvent, TurnContext, TurnEvent, TurnId,
 };
 use oven_host::{as_ms, now_ms};
-use oven_llm::Usage;
+use oven_llm::{ModelId, Usage};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use crate::core::event::{BusSink, EventBus};
@@ -230,6 +230,21 @@ impl Subagents {
         self.notify();
     }
 
+    /// The model a subagent runs on, qualified and checked against the same
+    /// router that will serve it: a bad `model` fails here, naming `list_models`,
+    /// instead of deep inside the subagent's first request.
+    fn resolve_model(&self, model: &ModelId) -> Result<ModelId, AgentError> {
+        let router = self.router.read().unwrap_or_else(PoisonError::into_inner);
+        let qualified = router.qualify(model);
+        router.provider(&qualified).map_err(|_| {
+            AgentError::from(format!(
+                "unknown model '{}'; use list_models to see the available models",
+                qualified
+            ))
+        })?;
+        Ok(qualified)
+    }
+
     fn notify(&self) {
         let _ = self.wake.send(());
     }
@@ -272,6 +287,7 @@ impl SubagentSpawner for Subagents {
             .upgrade()
             .ok_or_else(|| AgentError::from("subagents are shutting down"))?;
         let (cancel, link) = self.scoped_token(&request.cancellation);
+        let model = self.resolve_model(&request.model)?;
         let id = AgentId::next();
         let turn_id = TurnId::next();
         let name = {
@@ -302,7 +318,7 @@ impl SubagentSpawner for Subagents {
         let mut agent = Agent::with_router(self.router.clone(), role.tools.clone())
             .with_id(id)
             .with_system(role.system.clone())
-            .with_model(request.model.clone());
+            .with_model(model);
         agent.set_reasoning_effort(request.reasoning_effort);
         let ctx = TurnContext::new(turn_id, cancel, agent.selection())
             .with_policy(RunPolicy::default().with_max_iters(self.max_iters));
@@ -550,6 +566,16 @@ mod tests {
             1,
             "dropping every subagent is a change an empty registry still has"
         );
+    }
+
+    #[test]
+    fn an_unavailable_model_points_at_list_models() {
+        let subagents = bare();
+        let err = subagents
+            .resolve_model(&ModelId::from("nope/model"))
+            .unwrap_err();
+        assert!(err.message.contains("nope/model"), "{}", err.message);
+        assert!(err.message.contains("list_models"), "{}", err.message);
     }
 
     #[test]

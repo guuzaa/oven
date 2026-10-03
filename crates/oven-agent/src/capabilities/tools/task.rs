@@ -8,7 +8,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oven_llm::Usage;
+use oven_llm::{ModelId, Usage};
 use serde_json::{Value, json};
 
 use crate::capabilities::tools::{Tool, ToolCaps, ToolPermission, ToolView, require_str};
@@ -22,6 +22,8 @@ use crate::core::turn::TurnContext;
 const BACKGROUND_HINT: &str = "Read its result later with task_output.";
 const NO_SUBAGENTS: &str = "no subagents have run in this session";
 const PLAN_MODE_NOTE: &str = " In plan mode only the read-only roles may run.";
+const MODEL_NOTE: &str = " By default a subagent runs on your model; pass `model` to run it on \
+                          another, and ask `list_models` which models exist.";
 
 /// A subagent's report is a tool result like any other, so it is capped
 /// before it reaches the caller's context.
@@ -86,6 +88,13 @@ impl TaskTool {
             )));
         }
         let (model, reasoning_effort) = cx.model();
+        let model = args
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+            .map(ModelId::from)
+            .unwrap_or(model);
         Ok(SpawnRequest {
             role: role.name.clone(),
             label,
@@ -163,6 +172,10 @@ impl Tool for TaskTool {
                     "type": "string",
                     "enum": self.roles.iter().map(|role| role.name.clone()).collect::<Vec<_>>(),
                     "description": "Which subagent to run. Defaults to the first listed role."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Model for the subagent, e.g. `deepseek/deepseek-v4-flash`. Defaults to your model; see `list_models` for what is available."
                 },
                 "background": {
                     "type": "boolean",
@@ -274,6 +287,7 @@ fn describe(roles: &[RoleSpec]) -> String {
     for role in roles {
         let _ = write!(text, " `{}` — {};", role.name, role.description);
     }
+    text.push_str(MODEL_NOTE);
     text.push_str(PLAN_MODE_NOTE);
     text
 }
@@ -510,6 +524,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_model_argument_overrides_the_callers_model() {
+        let spawner = MockSpawner::new(completed());
+        tool(spawner.clone())
+            .run(
+                &json!({"description": "find it", "prompt": "go", "model": "deepseek/deepseek-v4-pro"}),
+                &TurnContext::for_test(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            spawner.seen.lock().unwrap()[0].model.as_str(),
+            "deepseek/deepseek-v4-pro"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blank_model_argument_falls_back_to_the_callers_model() {
+        let spawner = MockSpawner::new(completed());
+        tool(spawner.clone())
+            .run(
+                &json!({"description": "find it", "prompt": "go", "model": "  "}),
+                &TurnContext::for_test(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(spawner.seen.lock().unwrap()[0].model.as_str(), "default");
+    }
+
+    #[tokio::test]
     async fn an_unknown_role_lists_the_available_ones() {
         let err = tool(MockSpawner::new(completed()))
             .run(
@@ -639,6 +682,7 @@ mod tests {
         let text = describe(&[role("explore", true), role("general", false)]);
         assert!(text.contains("`explore` — explore things"), "{text}");
         assert!(text.contains("`general` — general things"), "{text}");
+        assert!(text.contains(MODEL_NOTE), "{text}");
         assert!(text.contains(PLAN_MODE_NOTE), "{text}");
     }
 

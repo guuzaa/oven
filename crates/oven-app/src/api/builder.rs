@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use oven_agent::{
-    Agent, AgentId, AnswerTool, InstructionDoc, Record, RoleSpec, Skill, SkillReadTool,
-    SubagentSpawner, TaskOutputTool, TaskTool, TodoWriteTool, Tool, ToolPermission,
+    Agent, AgentId, AnswerTool, InstructionDoc, ListModelsTool, Record, RoleSpec, Skill,
+    SkillReadTool, SubagentSpawner, TaskOutputTool, TaskTool, TodoWriteTool, Tool, ToolPermission,
     load_instructions, router_handle, subagent_preamble,
 };
 #[cfg(test)]
@@ -22,6 +22,7 @@ use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 use crate::core::event::{AppId, EventBus};
+use crate::core::provider::RouterCatalog;
 use crate::core::session::{Session, SessionStore, canonical_root, session_span};
 use crate::platform::dirs;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
@@ -301,6 +302,9 @@ impl AppBuilder {
                 subagents.role_specs(),
             )));
             tools.push(Arc::new(TaskOutputTool::new(spawner)));
+            tools.push(Arc::new(ListModelsTool::new(Arc::new(RouterCatalog::new(
+                router.clone(),
+            )))));
         }
         let mut main = Agent::with_router(router, tools)
             .with_id(main_id)

@@ -19,7 +19,8 @@ mod runtime;
 pub use capabilities::skills::{Skill, SkillRegistry};
 pub use capabilities::tools::{
     AnswerTool, BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool,
-    GlobTool, GrepTool, SkillReadTool, TaskOutputTool, TaskTool, TodoWriteTool, Tool, present_tool,
+    GlobTool, GrepTool, ListModelsTool, SkillReadTool, TaskOutputTool, TaskTool, TodoWriteTool,
+    Tool, present_tool,
 };
 pub use core::error::{AgentError, MAX_ITERS_EXCEEDED};
 pub use core::event::{
@@ -33,6 +34,7 @@ pub use core::interaction::{
     Question, QuestionOption, RequestSink, UserRequest, UserRequestId, UserResponse,
 };
 pub use core::mode::{AgentMode, ToolAccess};
+pub use core::models::ModelCatalog;
 pub use core::prompt_template::{
     InstructionDoc, InstructionScope, load_instructions, subagent_preamble, system_prompt,
 };

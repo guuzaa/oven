@@ -4,7 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use oven_agent::{CancellationToken, NullSink, SpawnRequest, SubagentSpawner, TurnContext, TurnId};
+use oven_agent::{
+    CancellationToken, ListModelsTool, NullSink, SpawnRequest, SubagentSpawner, TurnContext, TurnId,
+};
 use oven_llm::{
     ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
     Role, StopReason, StreamEvent, Usage,
@@ -254,6 +256,28 @@ async fn memory_writers_are_excluded_from_subagent_roles() {
     assert!(has_tool(&captured.driver_tools, MemoryForgetTool::NAME));
     assert!(!has_tool(&captured.explore_tools, MemoryForgetTool::NAME));
     assert!(!has_tool(&captured.general_tools, MemoryForgetTool::NAME));
+}
+
+#[tokio::test]
+async fn list_models_is_mounted_for_the_driver_only() {
+    let tmp = tempdir::TempDir::new("model-list-mount").unwrap();
+    let captured = capture(tmp.path(), AppConfig::default()).await;
+    assert!(has_tool(&captured.driver_tools, ListModelsTool::NAME));
+    assert!(!has_tool(&captured.explore_tools, ListModelsTool::NAME));
+    assert!(!has_tool(&captured.general_tools, ListModelsTool::NAME));
+
+    let off = capture(
+        tmp.path(),
+        AppConfig {
+            subagents: crate::core::config::SubagentConfig {
+                enabled: false,
+                ..AppConfig::default().subagents
+            },
+            ..AppConfig::default()
+        },
+    )
+    .await;
+    assert!(!has_tool(&off.driver_tools, ListModelsTool::NAME));
 }
 
 struct ScriptedProvider {

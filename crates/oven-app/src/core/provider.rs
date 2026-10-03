@@ -1,6 +1,7 @@
+use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
-use oven_agent::RetryingProvider;
+use oven_agent::{ModelCatalog, RetryingProvider, RouterHandle};
 use oven_llm::{
     ModelCapabilities, ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Request,
     Router,
@@ -93,6 +94,25 @@ pub fn provider_catalog(provider: &ProviderConfig) -> Vec<ModelInfo> {
     build_client_with(provider, CATALOG_KEY)
         .map(|client| client.known_models())
         .unwrap_or_default()
+}
+
+/// The models the app's shared router can serve, read live so a `/setup`
+/// swap is picked up. Subagent model validation reads the same router.
+pub(crate) struct RouterCatalog(RouterHandle);
+
+impl RouterCatalog {
+    pub(crate) fn new(router: RouterHandle) -> Self {
+        Self(router)
+    }
+}
+
+impl ModelCatalog for RouterCatalog {
+    fn models(&self) -> Vec<ModelInfo> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .known_models()
+    }
 }
 
 /// Models the endpoint reports on `GET /models`. Unlike the static catalog
