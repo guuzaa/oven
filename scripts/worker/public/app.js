@@ -7,11 +7,23 @@ const TAB_SELECTOR = '[role="tab"]';
 const RELEASE_PATH = "/latest";
 const ASSET_PATH = "/dl";
 const RELEASES_URL = "https://github.com/guuzaa/oven/releases";
+const RELEASE_TAG_URL = `${RELEASES_URL}/tag`;
+const CHANGELOG_PATH = "/changelog";
+const CHANGELOG_UPSTREAM = "https://raw.githubusercontent.com/guuzaa/oven/master/CHANGELOG.md";
+const HTML_TYPE = "text/html";
+const FILE_PROTOCOL = "file:";
 const HOME_ROUTE = "/";
-const DOWNLOADS_ROUTE = "/downloads";
+const HOME_VIEW = "home";
+const ROUTE_VIEWS = { "/downloads": "downloads", "/releases": "releases" };
 
 const SITE_TITLE = "oven — a toy coding agent for joy only";
-const ROUTE_TITLES = { home: SITE_TITLE, downloads: "Downloads — oven" };
+const ROUTE_TITLES = { home: SITE_TITLE, downloads: "Downloads — oven", releases: "Releases — oven" };
+
+const RELEASE_HEADING = /^## \[([^\]]+)\](?:\s+-\s+(.+))?$/;
+const SECTION_HEADING = /^### (.+)$/;
+const LIST_ITEM = /^- (.+)$/;
+const TAGGED_VERSION = /^\d/;
+const INLINE_TOKEN = /`([^`]+)`|\*\*(.+?)\*\*|\*([^*\s][^*]*)\*/g;
 
 const COPY_LABEL_RESET_MS = 1_200;
 const SIZE_UNITS = ["B", "KiB", "MiB", "GiB"];
@@ -92,14 +104,19 @@ function initCopy() {
   }
 }
 
-function activeView() {
-  const { pathname } = new URL(location.href);
-  return pathname.replace(/\/+$/, "") === DOWNLOADS_ROUTE ? "downloads" : "home";
+function viewFor(pathname) {
+  return ROUTE_VIEWS[pathname.replace(/\/+$/, "")] ?? HOME_VIEW;
+}
+
+function shownView() {
+  return document.querySelector(`${VIEW_SELECTOR}:not([hidden])`)?.dataset.view;
 }
 
 function renderRoute() {
-  const view = activeView();
+  showView(viewFor(location.pathname), location.hash);
+}
 
+function showView(view, hash) {
   for (const section of document.querySelectorAll(VIEW_SELECTOR)) {
     section.hidden = section.dataset.view !== view;
   }
@@ -112,7 +129,7 @@ function renderRoute() {
   }
   document.title = ROUTE_TITLES[view] ?? SITE_TITLE;
 
-  const anchor = location.hash ? document.querySelector(location.hash) : null;
+  const anchor = hash ? document.querySelector(hash) : null;
   if (anchor) {
     anchor.scrollIntoView({ behavior: "smooth", block: "start" });
   } else {
@@ -121,6 +138,8 @@ function renderRoute() {
 
   if (view === "downloads") {
     void renderRelease();
+  } else if (view === "releases") {
+    void renderChangelog();
   }
 }
 
@@ -134,10 +153,16 @@ function initLinks() {
     // another view needs routing back to the home document first.
     const href = link.getAttribute("href") ?? "";
     const isSection = href.startsWith("#");
-    if (isSection && activeView() === "home") {
+    if (isSection && shownView() === HOME_VIEW) {
       return;
     }
     const target = isSection ? new URL(`${HOME_ROUTE}${href}`, location.href) : new URL(link.href);
+    // No server answers /releases from file://, so views switch in place.
+    if (location.protocol === FILE_PROTOCOL) {
+      event.preventDefault();
+      showView(viewFor(target.pathname), target.hash);
+      return;
+    }
     if (target.origin !== location.origin) {
       return;
     }
@@ -199,6 +224,141 @@ async function renderRelease() {
   for (const asset of assets) {
     host.append(releaseRow(tag, asset));
   }
+  appendReleasesLink(host);
+}
+
+// The worker mirrors the changelog; GitHub serves it with open CORS, so a
+// local preview without the worker still renders. Any unknown worker path is
+// answered with index.html, which must not be parsed as the changelog.
+async function fetchChangelog() {
+  for (const url of [CHANGELOG_PATH, CHANGELOG_UPSTREAM]) {
+    try {
+      const response = await fetch(url);
+      if (response.ok && !response.headers.get("content-type")?.includes(HTML_TYPE)) {
+        return await response.text();
+      }
+    } catch {
+      continue;
+    }
+  }
+  throw new Error("changelog is unavailable from the mirror and GitHub");
+}
+
+function parseChangelog(text) {
+  const releases = [];
+  let items = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const heading = RELEASE_HEADING.exec(line);
+    if (heading) {
+      releases.push({ version: heading[1], date: heading[2] ?? "", sections: [] });
+      items = null;
+      continue;
+    }
+    const release = releases.at(-1);
+    if (!release) {
+      continue;
+    }
+    const section = SECTION_HEADING.exec(line);
+    if (section) {
+      items = [];
+      release.sections.push({ title: section[1], items });
+      continue;
+    }
+    const item = LIST_ITEM.exec(line);
+    if (item) {
+      if (!items) {
+        items = [];
+        release.sections.push({ title: "", items });
+      }
+      items.push(item[1]);
+    } else if (line && items?.length) {
+      items[items.length - 1] += ` ${line}`;
+    }
+  }
+  return releases;
+}
+
+function inlineMarkdown(text) {
+  const fragment = document.createDocumentFragment();
+  let cursor = 0;
+  for (const match of text.matchAll(INLINE_TOKEN)) {
+    const [whole, code, strong, emphasis] = match;
+    fragment.append(text.slice(cursor, match.index));
+    if (code !== undefined) {
+      fragment.append(el("code", undefined, code));
+    } else if (strong !== undefined) {
+      fragment.append(el("strong", undefined, strong));
+    } else {
+      fragment.append(el("em", undefined, emphasis));
+    }
+    cursor = match.index + whole.length;
+  }
+  fragment.append(text.slice(cursor));
+  return fragment;
+}
+
+function changelogEntry({ version, date, sections }, open) {
+  const tagged = TAGGED_VERSION.test(version);
+  const entry = el("details", "entry");
+  entry.open = open;
+
+  const summary = el("summary", "entry-head");
+  summary.append(el("span", tagged ? "entry-version" : "entry-version entry-unreleased", tagged ? `v${version}` : version));
+  if (date) {
+    const time = el("time", "entry-date", date);
+    time.dateTime = date;
+    summary.append(time);
+  }
+  const counts = sections
+    .filter((section) => section.title)
+    .map((section) => `${section.items.length} ${section.title.toLowerCase()}`)
+    .join(" · ");
+  if (counts) {
+    summary.append(el("span", "entry-counts", counts));
+  }
+  entry.append(summary);
+
+  for (const { title, items } of sections) {
+    if (title) {
+      entry.append(el("h3", `entry-section entry-${title.toLowerCase()}`, title));
+    }
+    const list = el("ul", "entry-items");
+    for (const item of items) {
+      const row = el("li");
+      row.append(inlineMarkdown(item));
+      list.append(row);
+    }
+    entry.append(list);
+  }
+
+  if (tagged) {
+    const link = el("a", "entry-link", "View release on GitHub →");
+    link.href = `${RELEASE_TAG_URL}/v${encodeURIComponent(version)}`;
+    link.rel = "noopener";
+    entry.append(link);
+  }
+  return entry;
+}
+
+async function renderChangelog() {
+  const host = document.getElementById("changelog");
+  if (!host) {
+    return;
+  }
+  host.replaceChildren(el("p", "release-empty", "loading changelog…"));
+
+  let releases;
+  try {
+    releases = parseChangelog(await fetchChangelog());
+  } catch {
+    host.replaceChildren(el("p", "release-empty", "Could not load the changelog."));
+    appendReleasesLink(host);
+    return;
+  }
+
+  const listed = releases.filter((release) => release.sections.some((section) => section.items.length));
+  host.replaceChildren(...listed.map((release, index) => changelogEntry(release, index === 0)));
   appendReleasesLink(host);
 }
 

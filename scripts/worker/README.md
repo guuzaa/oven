@@ -11,6 +11,7 @@ kept in sync here.
 | `/tags/<tag>` | `api.github.com/repos/guuzaa/oven/releases/tags/<tag>` | 60 s |
 | `/install`, `/install.sh`, `/install.ps1` | `raw.githubusercontent.com/guuzaa/oven/<branch>/scripts/` | 60 s |
 | `/latest` | `api.github.com/repos/guuzaa/oven/releases/latest` | 60 s |
+| `/changelog` | `raw.githubusercontent.com/guuzaa/oven/<branch>/CHANGELOG.md` | 60 s |
 | `/_health` | — | no-store |
 | anything else | `public/index.html` (see [Site](#site)) | static assets |
 
@@ -22,11 +23,15 @@ no npm dependencies — the site is still deployed by `npx wrangler@latest deplo
 
 A path that is neither an asset nor a route above reaches the worker, which
 answers with `index.html` through the `ASSETS` binding (`binding = "ASSETS"`), so
-a hard refresh of `/downloads` works. `app.js` then switches between the `home`
-and `downloads` views by `location.pathname` and intercepts `[data-link]` clicks
-with `history.pushState`. The `/downloads` page reads `/latest` from this worker
-and links each asset through `/dl/<tag>/<asset>`, so the list is always the
-current release.
+a hard refresh of `/downloads` or `/releases` works. `app.js` then switches
+between the `home`, `downloads` and `releases` views by `location.pathname` and
+intercepts `[data-link]` clicks with `history.pushState`. The `/downloads` page
+reads `/latest` from this worker and links each asset through
+`/dl/<tag>/<asset>`, so the list is always the current release. The `/releases`
+page parses `/changelog` in the browser — one card per `## [x.y.z] - date`
+heading, grouped by its `###` sections — and falls back to
+`raw.githubusercontent.com` (open CORS) when the route is missing, as in a plain
+static preview.
 
 Install snippets rewrite `https://oven.paulden.site` to `location.origin`, so a
 copy-paste from `wrangler dev` or a renamed zone shows the host in use.

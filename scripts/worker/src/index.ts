@@ -15,6 +15,7 @@ const ONE_MINUTE_SECONDS = 60;
 const MAX_REDIRECTS = 3;
 
 const SITE_INDEX = "index.html";
+const CHANGELOG_PATH = "/changelog";
 
 const RELEASE_ASSET = /^\/dl\/(v[\w.\-]+)\/([\w.\-]+)$/;
 const INSTALLER_SCRIPT = /^\/install\.(sh|ps1)$/;
@@ -233,6 +234,10 @@ export default {
     if (pathname === "/latest") {
       const upstream = `${API_BASE}/releases/latest`;
       return serve(request, ctx, pathname, upstream, env.GITHUB_TOKEN, ONE_MINUTE_SECONDS);
+    }
+
+    if (pathname === CHANGELOG_PATH) {
+      return serve(request, ctx, pathname, `${RAW_BASE}/CHANGELOG.md`, undefined, ONE_MINUTE_SECONDS);
     }
 
     return serveSite(request, env);

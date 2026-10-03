@@ -11,13 +11,14 @@
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="#" data-link>
-        <img class="brand-mark" src="./icon.svg" alt="" width="32" height="32" />oven
+      <a class="brand" href="#" data-link aria-label="oven home">
+        <img class="brand-mark" src="./icon.svg" alt="" width="32" height="32" /><span class="brand-name">oven</span>
       </a>
       <nav class="nav" aria-label="Main">
         <a href="#features" data-link>Features</a>
         <a href="#run" data-link>Usage</a>
         <a href="#tui" data-link>TUI</a>
+        <a href="/releases" data-link data-nav="releases">Releases</a>
         <a href="/downloads" data-link data-nav="downloads">Downloads</a>
         <a class="nav-gh" href="https://github.com/guuzaa/oven" rel="noopener">GitHub</a>
       </nav>
@@ -190,6 +191,16 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
         </p>
         <div class="release" id="release" aria-live="polite"></div>
       </section>
+
+      <section class="view" data-view="releases" hidden>
+        <h1 class="page-title">Releases</h1>
+        <p class="lede">
+          What changed in each version, straight from
+          <a href="https://github.com/guuzaa/oven/blob/master/CHANGELOG.md" rel="noopener">CHANGELOG.md</a>.
+          <a href="/downloads" data-link>Get the latest build →</a>
+        </p>
+        <div class="changelog" id="changelog" aria-live="polite"></div>
+      </section>
     </main>
 
     <footer class="footer">
@@ -198,7 +209,7 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
         <a href="https://github.com/guuzaa/oven">GitHub</a>
         <a href="https://github.com/guuzaa/oven/blob/master/README.md">README</a>
         <a href="https://github.com/guuzaa/oven/tree/master/docs">Docs</a>
-        <a href="https://github.com/guuzaa/oven/releases">Releases</a>
+        <a href="/releases" data-link>Releases</a>
       </p>
       <p class="footer-note">Downloads and installers are mirrored by the oven worker; GitHub stays the source of truth.</p>
     </footer>
