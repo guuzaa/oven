@@ -12,7 +12,7 @@ use oven_llm::{ContentBlock, Message, Response, Usage};
 
 use super::Agent;
 use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
-use crate::capabilities::tools::{TodoWriteTool, Tool};
+use crate::capabilities::tools::{TodoWriteTool, Tool, present_tool};
 use crate::core::error::{AgentError, MAX_ITERS_EXCEEDED};
 use crate::core::event::{AgentEvent, CallOutcome, ToolEvent, ToolResult, TurnEvent};
 use crate::core::identity::ToolCallId;
@@ -101,7 +101,9 @@ impl Agent {
                     call_id: ToolCallId::next(),
                     name: name.clone(),
                     input: input.clone(),
-                    view: crate::capabilities::tools::present_tool(name, input),
+                    view: tool
+                        .as_ref()
+                        .map_or_else(|| present_tool(name, input), |tool| tool.view(input)),
                     todos,
                     exclusive: caps.is_some_and(|caps| caps.exclusive),
                     tool,

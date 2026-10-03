@@ -12,6 +12,7 @@ use oven_llm::{
     ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
     Role, StopReason, StreamEvent, Usage,
 };
+use oven_mem::{MemoryRoots, MemoryStore};
 
 use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
 use crate::core::config::{AppConfig, MemoryConfig};
@@ -97,9 +98,25 @@ impl Provider for CaptureProvider {
     }
 }
 
+/// Memory roots the caller owns, so the developer's `~/.oven/memory` never
+/// leaks into the prompt these tests assert on.
+async fn isolated_app(root: &Path, config: AppConfig) -> AppBuilder {
+    let enabled = config.memory.enabled;
+    let mut app = AppBuilder::new(root).with_config(config).await;
+    if enabled {
+        let store = MemoryStore::load(MemoryRoots {
+            workspace: root.join(".oven").join("memory"),
+            user: Some(root.join("user-memory")),
+        })
+        .await;
+        app.set_memory(Arc::new(store));
+    }
+    app
+}
+
 async fn capture(root: &Path, config: AppConfig) -> CapturedPrompt {
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let app = AppBuilder::new(root).with_config(config).await;
+    let app = isolated_app(root, config).await;
     let mut agents = app
         .build_agent_with_provider(Box::new(CaptureProvider {
             calls: Arc::clone(&calls),
@@ -208,9 +225,7 @@ async fn guidance_precedes_catalog() {
 #[tokio::test]
 async fn empty_store_adds_guidance_without_catalog() {
     let tmp = tempdir::TempDir::new("memory-prompt-empty").unwrap();
-    let app = AppBuilder::new(tmp.path())
-        .with_config(AppConfig::default())
-        .await;
+    let app = isolated_app(tmp.path(), AppConfig::default()).await;
     let expected = super::append_block(base_prompt(&app), MEMORY_PROMPT);
     let empty = capture(tmp.path(), AppConfig::default()).await;
     assert_eq!(empty.driver, expected);
@@ -233,9 +248,7 @@ async fn disabled_matches_prompt_without_memory() {
         memory: MemoryConfig { enabled: false },
         ..AppConfig::default()
     };
-    let app = AppBuilder::new(tmp.path())
-        .with_config(config.clone())
-        .await;
+    let app = isolated_app(tmp.path(), config.clone()).await;
     let expected = base_prompt(&app);
     let disabled = capture(tmp.path(), config).await;
     assert_eq!(disabled.driver, expected);
@@ -390,9 +403,7 @@ async fn write_does_not_change_the_driver_system_prompt() {
     let tmp = tempdir::TempDir::new("memory-write-frozen").unwrap();
     write_workspace_memory(tmp.path());
     let systems = Arc::new(Mutex::new(Vec::new()));
-    let app = AppBuilder::new(tmp.path())
-        .with_config(AppConfig::default())
-        .await;
+    let app = isolated_app(tmp.path(), AppConfig::default()).await;
     let mut agents = app
         .build_agent_with_provider(Box::new(ScriptedProvider {
             systems: Arc::clone(&systems),

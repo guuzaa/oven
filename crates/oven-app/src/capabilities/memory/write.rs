@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, TurnContext};
+use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, ToolView, TurnContext};
 use oven_mem::{Memory, MemoryScope, MemoryStore, PutOutcome};
 use serde_json::{Value, json};
 
+use super::view::memory_view;
 use super::{parse_id, parse_kind, parse_scope};
 use crate::core::session::SessionStore;
 
@@ -24,6 +25,7 @@ pub struct MemoryWriteTool {
 
 impl MemoryWriteTool {
     pub const NAME: &'static str = "memory_write";
+    pub const VERB: &'static str = "Memorized";
 
     pub const DESCRIPTION: &'static str = "\
 Save a fact that will still be true and useful in a later session: a gotcha
@@ -40,6 +42,10 @@ instead of writing a memory.";
         Self { store, sessions }
     }
 
+    pub fn view_input(input: &Value) -> ToolView {
+        memory_view(Self::NAME, Self::VERB, input)
+    }
+
     fn source(&self) -> Option<String> {
         self.sessions.as_ref().map(SessionStore::current_id)
     }
@@ -53,6 +59,10 @@ impl Tool for MemoryWriteTool {
 
     fn description(&self) -> &'static str {
         Self::DESCRIPTION
+    }
+
+    fn view(&self, input: &Value) -> ToolView {
+        Self::view_input(input)
     }
 
     fn schema(&self) -> Value {

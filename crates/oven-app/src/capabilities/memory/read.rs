@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, TurnContext};
+use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, ToolView, TurnContext};
 use oven_mem::MemoryStore;
 use serde_json::{Value, json};
 
+use super::view::memory_view;
 use super::{parse_id, parse_scope};
 
 const MISSING_SCOPE: &str = "memory_read: missing 'scope' string argument";
@@ -18,9 +19,14 @@ pub struct MemoryReadTool {
 
 impl MemoryReadTool {
     pub const NAME: &'static str = "memory_read";
+    pub const VERB: &'static str = "Recalled";
 
     pub fn new(store: Arc<MemoryStore>) -> Self {
         Self { store }
+    }
+
+    pub fn view_input(input: &Value) -> ToolView {
+        memory_view(Self::NAME, Self::VERB, input)
     }
 }
 
@@ -28,6 +34,10 @@ impl MemoryReadTool {
 impl Tool for MemoryReadTool {
     fn name(&self) -> &str {
         Self::NAME
+    }
+
+    fn view(&self, input: &Value) -> ToolView {
+        Self::view_input(input)
     }
 
     fn description(&self) -> &'static str {

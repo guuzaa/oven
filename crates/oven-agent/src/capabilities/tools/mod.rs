@@ -46,8 +46,8 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn schema(&self) -> Value;
-    fn view(&self, _input: &Value) -> ToolView {
-        ToolView::named(self.name())
+    fn view(&self, input: &Value) -> ToolView {
+        present_tool(self.name(), input)
     }
     fn result_detail(&self, _result: &ToolResult) -> Option<String> {
         None

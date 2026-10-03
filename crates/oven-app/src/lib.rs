@@ -22,6 +22,7 @@ mod runtime;
 pub use api::{App, AppBuilder};
 pub use capabilities::mcp;
 pub use capabilities::tools::ToolRegistry;
+pub use capabilities::view::present_tool;
 pub use core::config::McpServerConfig;
 pub use core::error::AppError;
 pub use core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
@@ -36,7 +37,7 @@ pub use oven_agent::{
     ApprovalDecision, CallOutcome, CancellationToken, LoopLimitDecision, NodeInfo, NodeStatus,
     Question, QuestionOption, RoleSpec, Skill, SkillRegistry, StepStop, StreamEvent, TodoItem,
     TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
-    UserRequestId, UserResponse, present_tool,
+    UserRequestId, UserResponse,
 };
 pub use platform::shell::{LocalShell, ShellInput, display_shell_line};
 pub use platform::{dirs, log};

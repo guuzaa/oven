@@ -1,5 +1,6 @@
 mod forget;
 mod read;
+mod view;
 mod write;
 
 use oven_agent::AgentError;
@@ -7,6 +8,7 @@ use oven_mem::{MemoryError, MemoryId, MemoryKind, MemoryScope};
 
 pub(crate) use forget::MemoryForgetTool;
 pub(crate) use read::MemoryReadTool;
+pub(crate) use view::present_memory_tool;
 pub(crate) use write::MemoryWriteTool;
 
 const UNKNOWN_SCOPE: &str = "unknown memory scope";
