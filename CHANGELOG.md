@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.0.10] - 2026-10-03
 
 ### Added
 - Durable memory in `oven-mem`: one markdown file per fact or preference under `<root>/.oven/memory` and `~/.oven/memory`. The catalog is appended to the system prompt, `memory_read`, `memory_write` and `memory_forget` are the model's tools, and `/memory` plus `oven mem` (`ls`, `show`, `rm`, `edit`) list, show and remove them. `oven --amnesia` mounts no tools, builds no store and adds nothing to the prompt for that run
@@ -10,6 +10,7 @@
 - `oven_app::provider_catalog` reads the shipped catalog through a throwaway client with a placeholder key, `provider_models` is the real `GET /models`, and `verify` sends one token
 - `ModelMetadata::from_info` and a public `ModelMetadata::merge_fields`
 - A provider table can carry `context_window`, `max_output_tokens` and the `supports_*` flags directly, as defaults every `[providers.<slug>.models."<wire-id>"]` entry inherits wherever it leaves a field unset. A model that sets a field keeps its own value, an entry that only inherits is dropped when the file is rewritten, and the stored entries stay as written, so saving never bakes an inherited value into a model that only meant to follow the provider
+- Create a landing page at `oven.paulden.site`
 
 ### Changed
 - **Breaking:** `Session::open`, `resolve`, `load_records`, `append_records`, `overwrite`, `record_recent`, and `recent_session_id` are async. The JSONL layout is unchanged
