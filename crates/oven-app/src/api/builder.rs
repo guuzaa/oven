@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use oven_agent::{
-    Agent, AgentId, AnswerTool, InstructionDoc, ListModelsTool, Record, RoleSpec, Skill,
-    SkillReadTool, SubagentSpawner, TaskOutputTool, TaskTool, TodoWriteTool, Tool, ToolPermission,
-    load_instructions, router_handle, subagent_preamble,
+    Agent, AgentId, AnswerTool, InstructionDoc, ListModelsTool, MEMORY_PROMPT, Record, RoleSpec,
+    Skill, SkillReadTool, SubagentSpawner, TaskOutputTool, TaskTool, TodoWriteTool, Tool,
+    ToolPermission, load_instructions, router_handle, subagent_preamble,
 };
 #[cfg(test)]
 use oven_llm::Provider;
@@ -51,13 +51,21 @@ work, so make the reasonable assumption, state it in your answer, and carry on."
 #[path = "builder_test.rs"]
 mod builder_test;
 
-fn append_catalog(mut system: String, catalog: &str) -> String {
+fn append_block(mut system: String, block: &str) -> String {
     if !system.ends_with('\n') {
         system.push('\n');
     }
     system.push('\n');
-    system.push_str(catalog);
+    system.push_str(block);
     system
+}
+
+fn append_memory(mut system: String, store: &MemoryStore) -> String {
+    system = append_block(system, MEMORY_PROMPT);
+    match store.catalog() {
+        Some(catalog) => append_block(system, &catalog),
+        None => system,
+    }
 }
 
 #[cfg(test)]
@@ -275,8 +283,8 @@ impl AppBuilder {
             &self.instructions,
             self.skills.merged_system_prompt(),
         );
-        if let Some(catalog) = self.memory.as_ref().and_then(|store| store.catalog()) {
-            system = append_catalog(system, &catalog);
+        if let Some(store) = &self.memory {
+            system = append_memory(system, store);
         }
         let events = EventBus::new();
         let (wake, wake_rx) = mpsc::unbounded_channel();

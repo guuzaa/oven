@@ -198,9 +198,13 @@ know about roles or modes: `AgentMode::Ask` hides the two writers. Note that
 memory write is *visible* (it renders as a tool call in the transcript) but not
 *gated*. That is why the trust section below matters.
 
-The guidance on when a fact is worth writing lives in the `memory_write` tool
-description, not in the system prompt. It is present exactly when the tool is,
-so `enabled = false` leaves no trace. Draft:
+The guidance on *when* to read, write, revise and forget lives in
+`oven-agent`'s `prompt_template/memory.md` (`MEMORY_PROMPT`), which the app
+appends to the system prompt right before the catalog whenever memory is
+enabled, even with an empty catalog, so the first memory still gets written.
+The guidance on *what* is worth writing lives in the `memory_write` tool
+description. Both are present exactly when the tools are, so `enabled = false`
+leaves no trace. Tool description:
 
 ```text
 Save a fact that will still be true and useful in a later session: a gotcha

@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use oven_agent::{
-    CancellationToken, ListModelsTool, NullSink, SpawnRequest, SubagentSpawner, TurnContext, TurnId,
+    CancellationToken, ListModelsTool, MEMORY_PROMPT, NullSink, SpawnRequest, SubagentSpawner,
+    TurnContext, TurnId,
 };
 use oven_llm::{
     ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
@@ -192,12 +193,25 @@ async fn catalog_reaches_driver_and_role_prompts() {
 }
 
 #[tokio::test]
-async fn disabled_or_empty_matches_prompt_without_memory() {
-    let tmp = tempdir::TempDir::new("memory-prompt-off").unwrap();
+async fn guidance_precedes_catalog() {
+    let tmp = tempdir::TempDir::new("memory-guidance-order").unwrap();
+    write_workspace_memory(tmp.path());
+    let captured = capture(tmp.path(), AppConfig::default()).await;
+    let guidance = captured
+        .driver
+        .find(MEMORY_PROMPT)
+        .expect("memory guidance");
+    let catalog = captured.driver.find(MEMORY_TAG).expect("memory catalog");
+    assert!(guidance < catalog);
+}
+
+#[tokio::test]
+async fn empty_store_adds_guidance_without_catalog() {
+    let tmp = tempdir::TempDir::new("memory-prompt-empty").unwrap();
     let app = AppBuilder::new(tmp.path())
         .with_config(AppConfig::default())
         .await;
-    let expected = base_prompt(&app);
+    let expected = super::append_block(base_prompt(&app), MEMORY_PROMPT);
     let empty = capture(tmp.path(), AppConfig::default()).await;
     assert_eq!(empty.driver, expected);
     assert!(!empty.driver.contains(MEMORY_TAG));
@@ -209,19 +223,32 @@ async fn disabled_or_empty_matches_prompt_without_memory() {
         empty.general,
         super::role_system(&expected, super::GENERAL_ROLE, super::GENERAL_GUIDANCE)
     );
+}
 
+#[tokio::test]
+async fn disabled_matches_prompt_without_memory() {
+    let tmp = tempdir::TempDir::new("memory-prompt-off").unwrap();
     write_workspace_memory(tmp.path());
-    let disabled = capture(
-        tmp.path(),
-        AppConfig {
-            memory: MemoryConfig { enabled: false },
-            ..AppConfig::default()
-        },
-    )
-    .await;
+    let config = AppConfig {
+        memory: MemoryConfig { enabled: false },
+        ..AppConfig::default()
+    };
+    let app = AppBuilder::new(tmp.path())
+        .with_config(config.clone())
+        .await;
+    let expected = base_prompt(&app);
+    let disabled = capture(tmp.path(), config).await;
     assert_eq!(disabled.driver, expected);
-    assert_eq!(disabled.explore, empty.explore);
-    assert_eq!(disabled.general, empty.general);
+    assert!(!disabled.driver.contains(MEMORY_PROMPT));
+    assert!(!disabled.driver.contains(MEMORY_TAG));
+    assert_eq!(
+        disabled.explore,
+        super::role_system(&expected, super::EXPLORE_ROLE, super::EXPLORE_GUIDANCE)
+    );
+    assert_eq!(
+        disabled.general,
+        super::role_system(&expected, super::GENERAL_ROLE, super::GENERAL_GUIDANCE)
+    );
     assert!(
         !disabled
             .explore_tools

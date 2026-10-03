@@ -4,6 +4,7 @@ use std::path::Path;
 use super::instructions::InstructionDoc;
 
 const BASE_PROMPT: &str = include_str!("system_prompt.md");
+pub const MEMORY_PROMPT: &str = include_str!("memory.md");
 
 pub fn system_prompt(
     root: &Path,
