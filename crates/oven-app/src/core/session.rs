@@ -211,6 +211,7 @@ struct SharedSession {
     has_content: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct SessionStore {
     pub(crate) dir: PathBuf,
     pub(crate) root: String,
@@ -258,6 +259,12 @@ impl SessionStore {
     pub(crate) fn session_id(&self) -> Option<String> {
         let shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         shared.has_content.then(|| shared.session.id().to_string())
+    }
+
+    /// The session file that is current, including one `/clear` just opened
+    /// that has no messages yet.
+    pub(crate) fn current_id(&self) -> String {
+        self.current().id().to_string()
     }
 }
 

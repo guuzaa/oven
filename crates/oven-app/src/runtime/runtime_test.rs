@@ -3,8 +3,13 @@ use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
 use crate::core::session::{Session, canonical_root};
 use crate::core::state::{AppPhase, AppState, HistoryChangeReason};
+use crate::memory::{
+    AMBIGUOUS_MEMORY, DESCRIPTION_LABEL, KIND_LABEL, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY,
+    SOURCE_LABEL,
+};
 use crate::{App, AppBuilder, NodeStatus};
 use crate::{LocalShell, runtime::*};
+use oven_mem::NOT_FOUND;
 use std::borrow::Borrow;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -49,6 +54,8 @@ fn agents_from(agent: Agent) -> AppAgents {
         subagents,
         events,
         wake_rx,
+        memory: None,
+        session: None,
     }
 }
 
@@ -66,7 +73,11 @@ async fn spawn_app(app: &AppBuilder, provider: Box<dyn Provider>) -> App {
 
 async fn spawn_app_session(app: &AppBuilder, provider: Box<dyn Provider>, session: Session) -> App {
     let prior = session.load_records().await.unwrap();
-    let mut agents = app.build_agent_with_provider(provider).await.unwrap();
+    let sessions = crate::core::session::SessionStore::new(session.clone(), app.root(), false);
+    let mut agents = app
+        .build_agent_with_provider_session(provider, Some(sessions))
+        .await
+        .unwrap();
     let records: Vec<_> = prior
         .iter()
         .filter(|r| !matches!(r, Record::Message { message, .. } if message.role == Role::System))
@@ -440,7 +451,7 @@ async fn handle_exposes_slash_commands() {
     assert_eq!(
         names,
         [
-            "clear", "compact", "exit", "model", "setup", "plan", "agents"
+            "clear", "compact", "exit", "model", "setup", "plan", "agents", "memory"
         ]
     );
     assert!(commands.iter().all(|(_, d)| !d.is_empty()));
@@ -3959,5 +3970,169 @@ async fn cancelling_a_turn_cancels_its_subagent() {
         matches!(subagents[0].status, NodeStatus::Cancelled),
         "{subagents:?}"
     );
+    handle.shutdown().await;
+}
+
+async fn memory_store(workspace: &Path, user: &Path) -> Arc<oven_mem::MemoryStore> {
+    Arc::new(
+        oven_mem::MemoryStore::load(oven_mem::MemoryRoots {
+            workspace: workspace.to_path_buf(),
+            user: Some(user.to_path_buf()),
+        })
+        .await,
+    )
+}
+
+fn write_memory_file(dir: &Path, id: &str, kind: &str, description: &str, body: &str, secs: u64) {
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join(format!("{id}.md"));
+    std::fs::write(
+        &path,
+        format!("---\nkind: {kind}\ndescription: {description}\nsource: session-1\n---\n\n{body}"),
+    )
+    .unwrap();
+    // SetFileTime needs FILE_WRITE_ATTRIBUTES; a read-only handle is denied on Windows.
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        .unwrap();
+}
+
+async fn spawn_memory_app(tmp: &tempdir::TempDir, store: Arc<oven_mem::MemoryStore>) -> App {
+    let mut app = AppBuilder::new(tmp.path());
+    app.set_memory(store);
+    spawn_app(&app, Box::new(MockProvider::new(vec![]))).await
+}
+
+#[tokio::test]
+async fn slash_memory_lists_shows_and_removes() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory").unwrap();
+    let workspace = tmp.path().join("workspace");
+    let user = tmp.path().join("user");
+    let empty = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    assert_eq!(empty.prompt("/memory").await.unwrap(), NO_MEMORIES);
+    empty.shutdown().await;
+
+    write_memory_file(&workspace, "older", "fact", "old fact", "old body\n", 10);
+    write_memory_file(&user, "newer", "preference", "new pref", "new body\n", 20);
+    let handle = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    assert_eq!(
+        handle.prompt("/memory").await.unwrap(),
+        "user/newer (preference) new pref\nworkspace/older (fact) old fact"
+    );
+    assert_eq!(
+        handle.prompt("/memory show workspace/older").await.unwrap(),
+        format!(
+            "{KIND_LABEL}: fact\n{DESCRIPTION_LABEL}: old fact\n{SOURCE_LABEL}: session-1\n\nold body\n",
+        )
+    );
+    assert_eq!(
+        handle.prompt("/memory rm user/newer").await.unwrap(),
+        format!("{REMOVED_MEMORY}: user/newer")
+    );
+    assert!(!user.join("newer.md").exists());
+    assert_eq!(
+        handle.prompt("/memory").await.unwrap(),
+        "workspace/older (fact) old fact"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn slash_memory_ambiguous_bare_id_and_unknown_rm_are_replies() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-ref").unwrap();
+    let workspace = tmp.path().join("workspace");
+    let user = tmp.path().join("user");
+    write_memory_file(&workspace, "shared", "fact", "from workspace", "ws\n", 1);
+    write_memory_file(&user, "shared", "fact", "from user", "user\n", 2);
+    let handle = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    assert_eq!(
+        handle.prompt("/memory show shared").await.unwrap(),
+        format!(
+            "{AMBIGUOUS_MEMORY}: {}/shared or {}/shared",
+            oven_mem::MemoryScope::Workspace,
+            oven_mem::MemoryScope::User
+        )
+    );
+    let missing = handle.prompt("/memory rm missing").await.unwrap();
+    assert_eq!(missing, format!("{NOT_FOUND}: missing"));
+    assert!(user.join("shared.md").is_file());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn slash_memory_disabled_replies() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-off").unwrap();
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig {
+            memory: crate::config::MemoryConfig { enabled: false },
+            ..AppConfig::default()
+        })
+        .await;
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+    assert_eq!(handle.prompt("/memory").await.unwrap(), MEMORY_DISABLED);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn memory_source_follows_the_session_after_clear() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-source").unwrap();
+    let sessions = tmp.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let workspace = tmp.path().join(".oven").join("memory");
+    let mut app = AppBuilder::new(tmp.path());
+    app.set_memory(memory_store(&workspace, &tmp.path().join("unused-user")).await);
+    let write = |id: &str| {
+        tool_response(
+            "c1",
+            crate::capabilities::memory::MemoryWriteTool::NAME,
+            serde_json::json!({
+                "scope": "workspace",
+                "id": id,
+                "kind": "fact",
+                "description": id,
+                "body": "body\n",
+            }),
+        )
+    };
+    let session = Session::open(&sessions, "session-one").await.unwrap();
+    let handle = spawn_app_session(
+        &app,
+        Box::new(MockProvider::new(vec![
+            write("first-fact"),
+            text_response("saved"),
+            write("second-fact"),
+            text_response("saved again"),
+        ])),
+        session,
+    )
+    .await;
+    assert_eq!(handle.prompt("remember one").await.unwrap(), "saved");
+    handle.prompt("/clear").await.unwrap();
+    assert_eq!(handle.prompt("remember two").await.unwrap(), "saved again");
+    let new_id = handle
+        .session_id()
+        .expect("the second write's session has content");
+    assert_ne!(new_id, "session-one");
+
+    let store = memory_store(&workspace, &tmp.path().join("unused-user")).await;
+    let first = store
+        .read(
+            oven_mem::MemoryScope::Workspace,
+            &oven_mem::MemoryId::new("first-fact").unwrap(),
+        )
+        .await
+        .unwrap();
+    let second = store
+        .read(
+            oven_mem::MemoryScope::Workspace,
+            &oven_mem::MemoryId::new("second-fact").unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.source.as_deref(), Some("session-one"));
+    assert_eq!(second.source.as_deref(), Some(new_id.as_str()));
     handle.shutdown().await;
 }

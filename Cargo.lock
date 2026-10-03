@@ -1998,6 +1998,7 @@ dependencies = [
  "oven-agent",
  "oven-host",
  "oven-llm",
+ "oven-mem",
  "rmcp",
  "serde",
  "serde_json",
@@ -2039,6 +2040,19 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "oven-mem"
+version = "0.0.9"
+dependencies = [
+ "oven-host",
+ "serde",
+ "serde_yaml",
+ "tempdir",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

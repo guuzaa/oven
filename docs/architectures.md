@@ -45,9 +45,9 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | `oven-llm` | `Message`, `Usage`, provider I/O |
 | `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `AgentEvent`, `EventSink`, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, history/todo domain models, the `SubagentSpawner` protocol and its `NodeInfo`/`NodeStatus` vocabulary, provider retry decoration |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
-| `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
-| `oven-app` | `App`, `AppBuilder`, `Input`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, subagent supervision, tracing subscriber install |
-| `oven-tui` | render events and state; send commands |
+| `oven-mem` | Durable memory: `Memory`, limits, id validation, file format, `MemoryStore`, catalog rendering |
+| `oven-app` | `App`, `AppBuilder`, `Input`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, `[memory]` config, tracing subscriber install |
+| `oven-tui` | render events and state; send commands; `oven mem` |
 
 `oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
 
@@ -120,7 +120,8 @@ The dependency direction is:
 ```text
 oven-tui ──► oven-app ──► oven-agent ──► oven-llm
                    │          │
-                   └──────────┴──► oven-host
+                   ├──────────┴──► oven-host
+                   └──► oven-mem ──► oven-host
 ```
 
 `oven-host` may depend on operating-system and third-party implementation crates such as Tokio and `ignore`, but those types do not appear in its public API. Consumers use host-owned types such as `WalkEntry`, `PathError`, and `CommandError`. Pattern matching remains an Agent concern.
@@ -148,7 +149,8 @@ oven-agent::Tool
   ├── FileWriteTool / FileEditTool                ──► oven-host write
   ├── BashTool                                    ──► oven-host process
   ├── GlobTool / GrepTool                         ──► oven-agent matching + oven-host walk
-  └── TaskTool / TaskOutputTool                   ──► oven-agent SubagentSpawner (oven-app implements it)
+  ├── TaskTool / TaskOutputTool                   ──► oven-agent SubagentSpawner (oven-app implements it)
+  └── memory_read / memory_write / memory_forget  ──► oven-mem MemoryStore
 ```
 
 `Tool::run(&self, args, cx: &TurnContext)` receives the whole run context rather

@@ -9,18 +9,20 @@ use oven_agent::{
 #[cfg(test)]
 use oven_llm::Provider;
 use oven_llm::{Role, Router};
+use oven_mem::MemoryStore;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::App;
 use crate::capabilities::mcp::McpRegistry;
 use crate::capabilities::mcp::client::{DefaultMcpConnector, McpConnector};
+use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
 use crate::capabilities::subagent::{Role as SubagentRole, SubagentParts, Subagents};
 use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 use crate::core::event::{AppId, EventBus};
-use crate::core::session::{Session, canonical_root, session_span};
+use crate::core::session::{Session, SessionStore, canonical_root, session_span};
 use crate::platform::dirs;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
 use crate::{SkillRegistry, ToolRegistry};
@@ -32,6 +34,8 @@ const CHILD_TOOLS_EXCLUDED: &[&str] = &[
     TodoWriteTool::NAME,
     TaskTool::NAME,
     TaskOutputTool::NAME,
+    MemoryWriteTool::NAME,
+    MemoryForgetTool::NAME,
 ];
 
 const EXPLORE_ROLE: &str = "explore";
@@ -41,6 +45,34 @@ write, edit or run anything, so report what should change instead of changing it
 and line numbers you found.";
 const GENERAL_GUIDANCE: &str = "You have the full tool set. Nobody can answer questions while you \
 work, so make the reasonable assumption, state it in your answer, and carry on.";
+
+#[cfg(test)]
+#[path = "builder_test.rs"]
+mod builder_test;
+
+fn append_catalog(mut system: String, catalog: &str) -> String {
+    if !system.ends_with('\n') {
+        system.push('\n');
+    }
+    system.push('\n');
+    system.push_str(catalog);
+    system
+}
+
+#[cfg(test)]
+impl AppBuilder {
+    fn system_without_memory(&self) -> String {
+        oven_agent::system_prompt(
+            &self.root,
+            &self.instructions,
+            self.skills.merged_system_prompt(),
+        )
+    }
+
+    pub(crate) fn set_memory(&mut self, store: Arc<MemoryStore>) {
+        self.memory = Some(store);
+    }
+}
 
 fn role_system(system: &str, role: &str, guidance: &str) -> String {
     format!("{system}\n\n{}", subagent_preamble(role, guidance))
@@ -53,6 +85,7 @@ pub struct AppBuilder {
     tools: ToolRegistry,
     mcps: McpRegistry,
     instructions: Vec<InstructionDoc>,
+    memory: Option<Arc<MemoryStore>>,
     mcp_connector: Arc<dyn McpConnector>,
 }
 
@@ -66,6 +99,7 @@ impl AppBuilder {
             tools: ToolRegistry::from_config(root, &[]),
             mcps: McpRegistry::new(),
             instructions: Vec::new(),
+            memory: None,
             mcp_connector: Arc::new(DefaultMcpConnector),
         }
     }
@@ -133,6 +167,13 @@ impl AppBuilder {
             .load_from_dirs(&dirs::skill_dirs(&self.root))
             .await;
         self.instructions = load_instructions(dirs::config_home().as_deref(), &self.root).await;
+        self.memory = if config.memory.enabled {
+            Some(Arc::new(
+                MemoryStore::load(dirs::memory_roots(&self.root)).await,
+            ))
+        } else {
+            None
+        };
 
         for (id, server) in &config.mcps {
             let _ = self.mcps.register(id.clone(), server.clone());
@@ -155,17 +196,23 @@ impl AppBuilder {
 
     pub(crate) async fn build_agent(&self) -> Result<AppAgents, AppError> {
         let model = self.active_model()?;
-        let mut agents = self.build_agent_with_router(self.build_router()?).await?;
+        let mut agents = self
+            .build_agent_with_router(self.build_router()?, None)
+            .await?;
         agents.main.set_model(model);
         Ok(agents)
     }
 
-    pub(crate) async fn build_interactive_agent(&self) -> Result<AppAgents, AppError> {
+    pub(crate) async fn build_interactive_agent(
+        &self,
+        sessions: Option<SessionStore>,
+    ) -> Result<AppAgents, AppError> {
         let model = self.active_model()?;
         let mut agents = self
-            .build_agent_with_router(crate::core::provider::build_interactive_router(
-                &self.config,
-            )?)
+            .build_agent_with_router(
+                crate::core::provider::build_interactive_router(&self.config)?,
+                sessions,
+            )
             .await?;
         agents.main.set_model(model);
         Ok(agents)
@@ -183,9 +230,18 @@ impl AppBuilder {
         &self,
         provider: Box<dyn Provider>,
     ) -> Result<AppAgents, AppError> {
+        self.build_agent_with_provider_session(provider, None).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn build_agent_with_provider_session(
+        &self,
+        provider: Box<dyn Provider>,
+        sessions: Option<SessionStore>,
+    ) -> Result<AppAgents, AppError> {
         let mut router = Router::new();
         router.register(provider);
-        self.build_agent_with_router(router).await
+        self.build_agent_with_router(router, sessions).await
     }
 
     /// Compose one app's agents: the conversation driver, the subagents it
@@ -195,6 +251,7 @@ impl AppBuilder {
     pub(crate) async fn build_agent_with_router(
         &self,
         router: Router,
+        sessions: Option<SessionStore>,
     ) -> Result<AppAgents, AppError> {
         let mut base = self.tools.merged_tools();
         let mcp_tools = self
@@ -203,12 +260,23 @@ impl AppBuilder {
             .await
             .map_err(AppError::Mcp)?;
         base.extend(mcp_tools.into_iter().map(|t| Arc::new(t) as Arc<dyn Tool>));
+        if let Some(store) = &self.memory {
+            base.push(Arc::new(MemoryReadTool::new(Arc::clone(store))));
+            base.push(Arc::new(MemoryWriteTool::new(
+                Arc::clone(store),
+                sessions.clone(),
+            )));
+            base.push(Arc::new(MemoryForgetTool::new(Arc::clone(store))));
+        }
 
-        let system = oven_agent::system_prompt(
+        let mut system = oven_agent::system_prompt(
             &self.root,
             &self.instructions,
             self.skills.merged_system_prompt(),
         );
+        if let Some(catalog) = self.memory.as_ref().and_then(|store| store.catalog()) {
+            system = append_catalog(system, &catalog);
+        }
         let events = EventBus::new();
         let (wake, wake_rx) = mpsc::unbounded_channel();
         // `wake` goes to the supervisor, which keeps the channel open; the
@@ -250,6 +318,8 @@ impl AppBuilder {
             subagents,
             events,
             wake_rx,
+            memory: self.memory.clone(),
+            session: sessions,
         })
     }
 
@@ -305,7 +375,7 @@ impl AppBuilder {
     /// caller never has to provide.
     pub async fn open_session(&self, session_id: Option<&str>) -> Result<App, AppError> {
         let Some(dir) = dirs::sessions_dir() else {
-            let agents = self.build_interactive_agent().await?;
+            let agents = self.build_interactive_agent(None).await?;
             self.log_open(&agents.main);
             return Ok(spawn_runtime(
                 AppId::next(),
@@ -329,7 +399,8 @@ impl AppBuilder {
         let span = session_span(Some(session.id()));
         async {
             let prior = session.load_records().await?;
-            let mut agents = self.build_interactive_agent().await?;
+            let sessions = SessionStore::new(session.clone(), &self.root, false);
+            let mut agents = self.build_interactive_agent(Some(sessions)).await?;
             let records: Vec<_> = prior
                 .iter()
                 .filter(

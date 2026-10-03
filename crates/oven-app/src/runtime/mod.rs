@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use oven_agent::{Agent, Record, RunPolicy, TodoList};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
+use oven_mem::MemoryStore;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
@@ -38,6 +39,9 @@ pub(crate) struct AppAgents {
     pub(crate) subagents: Arc<Subagents>,
     pub(crate) events: EventBus,
     pub(crate) wake_rx: mpsc::UnboundedReceiver<()>,
+    pub(crate) memory: Option<Arc<MemoryStore>>,
+    /// The same store the memory write tool reads, when a session exists.
+    pub(crate) session: Option<SessionStore>,
 }
 
 pub(crate) struct Runtime {
@@ -48,6 +52,8 @@ pub(crate) struct Runtime {
     pub(crate) root: PathBuf,
     pub(crate) session: Option<SessionStore>,
     pub(crate) slash: Arc<SlashRegistry>,
+    /// The store `AppBuilder` loaded, when memory is enabled.
+    pub(crate) memory: Option<Arc<MemoryStore>>,
     /// What one user turn may spend. Derived from config at startup so the
     /// same budget reaches every run the runtime starts.
     pub(crate) policy: RunPolicy,
@@ -74,6 +80,7 @@ impl Runtime {
         let AppAgents {
             main: agent,
             wake_rx,
+            memory,
             ..
         } = agents;
         Self {
@@ -83,6 +90,7 @@ impl Runtime {
             root,
             session,
             slash,
+            memory,
             policy,
             persisted_messages,
             persisted_rev,
@@ -319,6 +327,13 @@ impl Runtime {
             CommandOutcome::FocusSubagent { id } => {
                 self.emit(AppEventKind::Subagent(SubagentEvent::Focus { id }));
             }
+            CommandOutcome::Memory(action) => {
+                let text = match &self.memory {
+                    Some(store) => crate::memory::apply(store, action).await,
+                    None => crate::memory::MEMORY_DISABLED.to_owned(),
+                };
+                self.emit(AppEventKind::Notification { text });
+            }
         }
     }
 
@@ -506,17 +521,29 @@ pub(crate) fn spawn_runtime(
         .map(public_provider)
         .unwrap_or_default();
     let configured_providers = config.configured_providers();
-    let span = current_or_session_span(session.as_ref().map(Session::id));
-    let (session_store, session_state) = match session {
-        Some(s) => {
-            let has_content = agents.main.history().len() != 0;
-            let id = has_content.then(|| s.id().to_string());
-            (
-                Some(SessionStore::new(s, &root, has_content)),
-                SessionState { id },
-            )
+    let attached = agents.session.clone();
+    let span_id = attached
+        .as_ref()
+        .map(SessionStore::current_id)
+        .or_else(|| session.as_ref().map(|open| open.id().to_string()));
+    let span = current_or_session_span(span_id.as_deref());
+    let (session_store, session_state) = if let Some(store) = attached {
+        let has_content = agents.main.history().len() != 0;
+        store.mark_content(has_content);
+        let id = store.session_id();
+        (Some(store), SessionState { id })
+    } else {
+        match session {
+            Some(s) => {
+                let has_content = agents.main.history().len() != 0;
+                let id = has_content.then(|| s.id().to_string());
+                (
+                    Some(SessionStore::new(s, &root, has_content)),
+                    SessionState { id },
+                )
+            }
+            None => (None, SessionState { id: None }),
         }
-        None => (None, SessionState { id: None }),
     };
     let state = AppState::from_agent(&agents.main, provider, configured_providers, session_state);
     let (state_tx, _) = watch::channel(state);

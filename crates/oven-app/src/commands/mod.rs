@@ -6,6 +6,7 @@ mod agents;
 mod clear;
 mod compact;
 mod exit;
+mod memory;
 mod model;
 mod plan;
 mod setup;
@@ -15,11 +16,13 @@ use oven_agent::{Agent, AgentId, AgentMode};
 use crate::capabilities::subagent::Subagents;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
+use crate::memory::MemoryAction;
 
 pub use agents::Agents;
 pub use clear::Clear;
 pub use compact::Compact;
 pub use exit::Exit;
+pub use memory::Memory;
 pub(crate) use model::{Model, ModelDirective};
 pub use plan::Plan;
 pub use setup::Setup;
@@ -80,6 +83,7 @@ pub enum CommandOutcome {
     FocusSubagent {
         id: AgentId,
     },
+    Memory(MemoryAction),
     Passthrough,
 }
 
@@ -109,6 +113,7 @@ impl SlashRegistry {
         r.register(Box::new(Setup));
         r.register(Box::new(Plan));
         r.register(Box::new(Agents));
+        r.register(Box::new(Memory));
         r
     }
 
@@ -260,6 +265,9 @@ mod tests {
             "  /plan",
             "/agents",
             "/agents stop all",
+            "/memory",
+            "/memory show workspace/proxy",
+            "/memory rm user/pref",
         ] {
             assert!(
                 reg.invocation(text).is_some(),
@@ -278,7 +286,7 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 7);
+        assert_eq!(cmds.len(), 8);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "compact" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
@@ -286,6 +294,7 @@ mod tests {
         assert!(cmds.iter().any(|(n, d)| n == "setup" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "plan" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "agents" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, d)| n == "memory" && !d.is_empty()));
     }
 
     #[test]
