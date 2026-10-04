@@ -21,6 +21,13 @@ kept in sync here.
 hand-written `index.html`, `app.css`, `app.js` and `icon.svg`, no build step and
 no npm dependencies — the site is still deployed by `npx wrangler@latest deploy`.
 
+`docs.html` (with `docs.css` and `docs.js`) is a separate page: an interactive
+walk through one turn — the agent loop, tool calls, plan mode, subagents and
+memory. Workers static assets serve it at `/docs` (the default
+`html_handling = "auto-trailing-slash"` drops the extension), so it never
+reaches the worker and does not load `app.js`. Its walkthrough is data at the
+top of `docs.js`; keep it in step with `docs/*.md` when the flow changes.
+
 A path that is neither an asset nor a route above reaches the worker, which
 answers with `index.html` through the `ASSETS` binding (`binding = "ASSETS"`), so
 a hard refresh of `/downloads` or `/releases` works. `app.js` then switches

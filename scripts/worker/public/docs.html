@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>How oven works — oven docs</title>
+    <meta name="description" content="An interactive walk through one oven conversation: the agent loop, tool calls, plan mode and its checklist, subagents and durable memory." />
+    <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./app.css" />
+    <link rel="stylesheet" href="./docs.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="oven home">
+        <img class="brand-mark" src="./icon.svg" alt="" width="32" height="32" /><span class="brand-name">Oven</span>
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="/#features">Features</a>
+        <a href="/#run">Usage</a>
+        <a href="/#tui">TUI</a>
+        <a href="/docs" data-nav="docs" aria-current="page">Docs</a>
+        <a href="/releases" data-nav="releases">Releases</a>
+        <a href="/downloads" data-nav="downloads">Downloads</a>
+        <a class="nav-gh" href="https://github.com/guuzaa/oven" rel="noopener">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <div class="hero doc-hero">
+        <div class="hero-copy">
+          <p class="chip"><span class="chip-dot" aria-hidden="true"></span>docs · how it works</p>
+          <h1>Follow one prompt <span class="hl">through the oven</span>.</h1>
+          <p class="lede">
+            What happens between pressing <kbd>Enter</kbd> and the final answer: the agent loop, tool calls,
+            plan mode and its checklist, subagents and durable memory. Step through a real turn below or jump to a part.
+          </p>
+          <nav class="doc-toc" aria-label="On this page">
+            <a href="#trace">Trace a turn</a>
+            <a href="#loop">Agent loop</a>
+            <a href="#tools">Tool calls</a>
+            <a href="#plan">Plan &amp; todos</a>
+            <a href="#subagents">Subagents</a>
+            <a href="#memory">Memory</a>
+            <a href="#ending">Ending a turn</a>
+          </nav>
+        </div>
+
+        <div class="doc-stack" aria-label="Crates, top to bottom">
+          <div class="doc-layer" data-lane="tui"><b>oven-tui</b><span>keys, screen, <code>oven</code> binary</span></div>
+          <div class="doc-layer" data-lane="app"><b>oven-app</b><span>runtime actor, sessions, subagents, slash commands</span></div>
+          <div class="doc-layer" data-lane="agent"><b>oven-agent</b><span>the loop, tools, todos, prompts</span></div>
+          <div class="doc-row">
+            <div class="doc-layer" data-lane="llm"><b>oven-llm</b><span>providers, streaming</span></div>
+            <div class="doc-layer" data-lane="host"><b>oven-host</b><span>files, processes</span></div>
+            <div class="doc-layer" data-lane="mem"><b>oven-mem</b><span>durable memory</span></div>
+          </div>
+          <p class="doc-stack-note">Commands flow down, events flow up. A layer only reaches the ones below it.</p>
+        </div>
+      </div>
+
+      <section id="trace">
+        <h2>Trace a turn</h2>
+        <p class="doc-intro">
+          The user is in <b>plan</b> mode and asks for a small feature. Step through the turn and watch which crate is
+          working, what reaches the screen and which events go out on the bus. Use the arrow keys once the player has focus.
+        </p>
+
+        <div class="trace" id="trace-player" tabindex="0" aria-label="Turn tracer">
+          <ol class="lanes" id="trace-lanes" aria-label="Active crates">
+            <li data-lane="tui">tui</li>
+            <li data-lane="app">app</li>
+            <li data-lane="agent">agent</li>
+            <li data-lane="llm">llm</li>
+            <li data-lane="host">host</li>
+            <li data-lane="mem">mem</li>
+          </ol>
+
+          <div class="trace-body">
+            <div class="window trace-screen" aria-label="What the TUI shows">
+              <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>~/tiny-cli · oven</span></div>
+              <div class="tui">
+                <div class="tui-log" id="trace-log" aria-live="polite"></div>
+                <div class="tui-todos" id="trace-todos" hidden></div>
+                <div class="tui-strip" id="trace-strip" hidden></div>
+                <div class="tui-status" id="trace-status"></div>
+              </div>
+            </div>
+
+            <article class="trace-card" aria-live="polite">
+              <p class="trace-meta"><span class="trace-chapter" id="trace-chapter"></span><span id="trace-count"></span></p>
+              <h3 id="trace-title"></h3>
+              <p id="trace-text"></p>
+              <h4>Events</h4>
+              <ul class="trace-events" id="trace-events"></ul>
+              <h4>Where</h4>
+              <p class="trace-where" id="trace-where"></p>
+            </article>
+          </div>
+
+          <div class="trace-controls">
+            <button class="ctl" type="button" id="trace-prev" aria-label="Previous step">◀</button>
+            <button class="ctl ctl-main" type="button" id="trace-play">Play</button>
+            <button class="ctl" type="button" id="trace-next" aria-label="Next step">▶</button>
+            <ol class="trace-dots" id="trace-dots" aria-label="Steps"></ol>
+          </div>
+        </div>
+      </section>
+
+      <section id="loop">
+        <h2>The agent loop</h2>
+        <p class="doc-intro">
+          <code>Agent::run</code> is one loop policy over <code>Agent::step</code>. A step is one provider round trip plus
+          the tools it asked for; the loop keeps stepping until a reply asks for no tools. Click a stage, or animate two laps.
+        </p>
+        <div class="loop">
+          <div class="loop-flow">
+            <ol class="loop-nodes" id="loop-nodes"></ol>
+            <button class="ctl ctl-main" type="button" id="loop-animate">Animate two steps</button>
+          </div>
+          <article class="mode loop-detail" aria-live="polite">
+            <p class="mode-tag" id="loop-tag"></p>
+            <h3 id="loop-title"></h3>
+            <p id="loop-text"></p>
+            <pre class="doc-code" id="loop-code"></pre>
+          </article>
+        </div>
+      </section>
+
+      <section id="tools">
+        <h2>Tool calls</h2>
+        <p class="doc-intro">
+          Every tool declares what it may do — read, write, execute or reach outside — and the mode decides what that
+          means. The model only sees tools it is allowed to call. Switch modes to compare.
+        </p>
+        <div class="tool-panel">
+          <div class="tabs" role="tablist" aria-label="Mode" id="tool-modes"></div>
+          <ul class="tool-grid" id="tool-grid"></ul>
+          <p class="tool-legend">
+            <span class="badge badge-ok">offered</span>
+            <span class="badge badge-ask">asks first</span>
+            <span class="badge badge-off">hidden</span>
+            <span class="badge badge-ex">exclusive</span>
+            <span class="tool-mode-note" id="tool-mode-note"></span>
+          </p>
+        </div>
+
+        <h3 class="doc-sub">One reply, five calls</h3>
+        <p class="doc-intro">
+          Calls from one reply run at the same time. Approvals are asked one by one in the model's order, tools that rewrite
+          a file or talk to the user take turns, and results enter the history in the order the model asked — which is
+          what a provider expects back.
+        </p>
+        <div class="par">
+          <div class="par-head">
+            <button class="ctl ctl-main" type="button" id="par-run">Run the step</button>
+            <span class="par-clock" id="par-clock">t = 0.0s</span>
+          </div>
+          <ol class="par-rows" id="par-rows"></ol>
+          <div class="par-lists">
+            <div><h4>Finished events (completion order)</h4><ol id="par-finished"></ol></div>
+            <div><h4>History (request order)</h4><ol id="par-history"></ol></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="plan">
+        <h2>Plan mode &amp; the checklist</h2>
+        <p class="doc-intro">
+          There is no separate todo mode: the checklist lives on <b>plan</b> mode. <kbd>Shift</kbd>+<kbd>Tab</kbd> switches
+          live; the next step picks it up. Each <code>todo_write</code> replaces the whole list. Walk through one plan.
+        </p>
+        <div class="plan">
+          <div class="plan-left">
+            <ol class="plan-steps" id="plan-steps"></ol>
+            <article class="plan-note" aria-live="polite">
+              <h3 id="plan-title"></h3>
+              <p id="plan-text"></p>
+            </article>
+          </div>
+          <div class="plan-right">
+            <h4>System prompt of the next request</h4>
+            <ol class="prompt-stack" id="plan-stack"></ol>
+            <h4>Checklist widget</h4>
+            <ul class="plan-todos" id="plan-todos"></ul>
+          </div>
+        </div>
+        <ul class="facts">
+          <li><b>Whole list, every time.</b> At most 40 items and only one <code>in_progress</code>; an invalid list is rejected and the old one stays.</li>
+          <li><b>Survives mode switches.</b> Leaving plan mode drops the plan prompt and <code>todo_write</code>, but a non-empty list stays in the prompt.</li>
+          <li><b>Persisted.</b> The list is saved as a <code>TodoList</code> record in the session file, so a resumed session shows it again.</li>
+        </ul>
+      </section>
+
+      <section id="subagents">
+        <h2>Subagents</h2>
+        <p class="doc-intro">
+          The <code>task</code> tool hands a self-contained job to another <code>Agent</code> with its own history, on the
+          same router and the same tool instances. Only its final report comes back as the tool result.
+        </p>
+        <div class="sub">
+          <div class="sub-roles">
+            <article class="mode">
+              <p class="mode-tag">explore</p>
+              <h3>Read-only</h3>
+              <p>Every tool whose permission is <i>read</i>: <code>file_read</code>, <code>glob</code>, <code>grep</code>, <code>memory_read</code>… The only role plan mode allows.</p>
+            </article>
+            <article class="mode">
+              <p class="mode-tag mode-tag-alt">general</p>
+              <h3>Full tool set</h3>
+              <p>Everything except <code>answer</code>, <code>todo_write</code>, <code>task</code>, <code>task_output</code> and the memory writers: no questions, no plan, no nesting.</p>
+            </article>
+          </div>
+
+          <div class="sub-life">
+            <h4>Lifecycle — click a state</h4>
+            <div class="life" id="life"></div>
+            <p class="life-text" id="life-text" aria-live="polite"></p>
+          </div>
+
+          <div class="sub-flow">
+            <div class="tabs" role="tablist" aria-label="Delivery" id="sub-modes"></div>
+            <ol class="seq" id="sub-seq"></ol>
+          </div>
+        </div>
+        <ul class="facts">
+          <li><b>Never waits on you.</b> A subagent's turn has no request sink, so it can't ask for approval or a question; its role decides what it may do.</li>
+          <li><b>Stops with its parent.</b> One cancel token per subagent, linked to app shutdown, to the turn that spawned it and to <code>/agents stop</code>.</li>
+          <li><b>Lives for the app run.</b> Only the <code>task</code> call and its report are saved. By default 4 run at once and the rest queue as <i>pending</i>.</li>
+        </ul>
+      </section>
+
+      <section id="memory">
+        <h2>Memory</h2>
+        <p class="doc-intro">
+          History, compaction and todos die with the session. Memory is what outlives it: one markdown file per memory,
+          a one-line description of each in the system prompt, and the body read on demand.
+        </p>
+        <div class="memory">
+          <div class="window mem-file">
+            <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>.oven/memory/tests-need-proxy-flag.md</span></div>
+            <pre><span class="t-dim">---</span>
+<span class="t-prompt">kind:</span> fact
+<span class="t-prompt">description:</span> Integration tests need OVEN_TEST_PROXY=1 or they hang on DNS.
+<span class="t-prompt">source:</span> 01J8Z…
+<span class="t-dim">---</span>
+<span class="t-out">Run `OVEN_TEST_PROXY=1 cargo test -p tiny-cli`. Without it the
+resolver blocks for 30s per test. Seen in CI and locally.</span></pre>
+          </div>
+          <div class="mem-side">
+            <dl class="mem-scopes">
+              <dt><code>&lt;root&gt;/.oven/memory/</code></dt><dd>workspace scope: facts about this repository</dd>
+              <dt><code>~/.oven/memory/</code></dt><dd>user scope: preferences that follow you</dd>
+            </dl>
+            <p>
+              <b>Facts</b> can go stale, so the model checks them against the code. <b>Preferences</b> are followed unless
+              you or the project instructions say otherwise. The catalog is rendered once when the agents are built, so it
+              stays a cached prompt prefix; a new memory shows up in the catalog next session.
+            </p>
+            <p>Tools: <code>memory_read</code>, <code>memory_write</code> (upsert by id), <code>memory_forget</code>. Humans use <code>/memory</code> or <code>oven mem</code>. <code>--amnesia</code> turns it all off.</p>
+          </div>
+        </div>
+
+        <h3 class="doc-sub">Would oven remember this?</h3>
+        <ul class="quiz" id="quiz"></ul>
+      </section>
+
+      <section id="ending">
+        <h2>Ending a turn</h2>
+        <p class="doc-intro">
+          A turn ends with exactly one of <code>Completed</code>, <code>Cancelled</code> or <code>Failed</code>. The
+          runtime then saves, publishes the new state and may compact before it goes back to idle. Click a phase.
+        </p>
+        <div class="phases">
+          <div class="phase-map" id="phase-map"></div>
+          <p class="phase-text" id="phase-text" aria-live="polite"></p>
+        </div>
+        <ol class="steps doc-steps">
+          <li class="step">
+            <h3>Save</h3>
+            <p>New history records are appended to the session JSONL under <code>~/.oven/sessions/</code>, plus a checklist snapshot when it changed.</p>
+          </li>
+          <li class="step">
+            <h3>Publish</h3>
+            <p>The runtime writes the new <code>AppState</code> to a watch channel: events say <i>something happened</i>, state says <i>what is true</i>.</p>
+          </li>
+          <li class="step">
+            <h3>Compact?</h3>
+            <p>Past 80% of the model's context window, the history is summarized into one message in a fresh session file. Todos survive.</p>
+          </li>
+          <li class="step">
+            <h3>Idle</h3>
+            <p>Inputs queued during the turn now run in order. <kbd>Esc</kbd> <kbd>Esc</kbd> undoes the last exchange — your message, the reply and the tools it ran. Mid-turn the same two keys cancel instead, and a queued prompt goes back to the composer first.</p>
+          </li>
+        </ol>
+      </section>
+
+      <section id="more">
+        <h2>Read the design notes</h2>
+        <ul class="features">
+          <li class="feature">
+            <span class="feature-icon" aria-hidden="true">🧭</span>
+            <h3><a href="https://github.com/guuzaa/oven/blob/master/docs/architectures.md" rel="noopener">Architecture</a></h3>
+            <p>Commands, events, state; the phase and turn machines; every invariant.</p>
+          </li>
+          <li class="feature">
+            <span class="feature-icon" aria-hidden="true">🧁</span>
+            <h3><a href="https://github.com/guuzaa/oven/blob/master/docs/subagents.md" rel="noopener">Subagents</a></h3>
+            <p>The supervisor, roles, cancellation and the seams left for loop and graph engineering.</p>
+          </li>
+          <li class="feature">
+            <span class="feature-icon" aria-hidden="true">🧠</span>
+            <h3><a href="https://github.com/guuzaa/oven/blob/master/docs/memory.md" rel="noopener">Memory</a></h3>
+            <p>Why files and not RAG, the trust model and every failure mode.</p>
+          </li>
+          <li class="feature">
+            <span class="feature-icon" aria-hidden="true">🧱</span>
+            <h3><a href="https://github.com/guuzaa/oven/blob/master/docs/oven-app.md" rel="noopener">App layer</a></h3>
+            <p>The runtime actor, sessions, slash commands and MCP.</p>
+          </li>
+          <li class="feature">
+            <span class="feature-icon" aria-hidden="true">🖥️</span>
+            <h3><a href="https://github.com/guuzaa/oven/blob/master/docs/oven-tui.md" rel="noopener">TUI</a></h3>
+            <p>The event loop, transcript, widgets and the <kbd>Esc</kbd> ladder.</p>
+          </li>
+          <li class="feature">
+            <span class="feature-icon" aria-hidden="true">📚</span>
+            <h3><a href="https://github.com/guuzaa/oven/tree/master/docs" rel="noopener">All docs</a></h3>
+            <p>Every design note in the repository.</p>
+          </li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p class="footer-brand"><img src="./icon.svg" alt="" width="24" height="24" />Baked with Rust · MIT licensed</p>
+      <p class="footer-links">
+        <a href="https://github.com/guuzaa/oven">GitHub</a>
+        <a href="https://github.com/guuzaa/oven/blob/master/README.md">README</a>
+        <a href="/docs">Docs</a>
+        <a href="/releases">Releases</a>
+      </p>
+      <p class="footer-note">Simplified from the source on <code>master</code>; the design notes on GitHub are the reference.</p>
+    </footer>
+
+    <script src="./docs.js" defer></script>
+  </body>
+</html>

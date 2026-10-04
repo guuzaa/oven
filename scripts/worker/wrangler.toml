@@ -12,5 +12,6 @@ directory = "./public"
 binding = "ASSETS"
 
 [observability.logs]
-enabled = false
+enabled = true
 invocation_logs = true
+head_sampling_rate = 0.1
