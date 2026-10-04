@@ -169,7 +169,9 @@ reasoning_effort = "low"
 ```
 
 - `tools` — capabilities the agent can invoke (`file_read`, `file_write`,
-  `bash`, `glob`, `grep`); an empty list means the defaults.
+  `bash`, `glob`, `grep`, `web_fetch`); an empty list means the defaults.
+  `web_fetch` saves a page into the workspace: HTML becomes markdown unless
+  `format` is `text`.
 - `max_iters` — provider round trips one turn may take before the loop asks
   whether to continue; `[subagents]` tunes delegation (`enabled`,
   `max_concurrent`, and the subagents' own `max_iters`).

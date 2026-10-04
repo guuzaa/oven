@@ -31,7 +31,14 @@ crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
 async-stream = "0.3"
 bytes = "1"
-reqwest = { version = "0.12", features = ["stream", "json"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "gzip",
+    "http2",
+    "json",
+    "rustls-tls",
+    "stream",
+    "system-proxy",
+] }
 ratatui = "0.30.2"
 tui-textarea-2 = "0.12"
 unicode-width = "0.2"
@@ -48,6 +55,7 @@ tokio-stream = "0.1"
 mockall = "0.15.0"
 wiremock = "0.6.5"
 globset = "0.4"
+htmd = "0.5"
 ignore = "0.4"
 regex = "1"
 http = "1"

@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `web_fetch` fetches an `http` or `https` URL and writes the page into the workspace. HTML is stored as markdown by default; set `format` to `text` for plain text. A failed fetch returns an error and writes nothing
+
 ## [0.0.10] - 2026-10-03
 
 ### Added

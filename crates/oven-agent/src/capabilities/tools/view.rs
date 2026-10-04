@@ -9,7 +9,7 @@ use crate::core::view::ToolView;
 
 use super::{
     AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,
-    TaskOutputTool, TaskTool, TodoWriteTool,
+    TaskOutputTool, TaskTool, TodoWriteTool, WebFetchTool,
 };
 
 pub fn present_tool(name: &str, input: &Value) -> ToolView {
@@ -20,6 +20,7 @@ pub fn present_tool(name: &str, input: &Value) -> ToolView {
         FileWriteTool::NAME => FileWriteTool::view_input(input),
         GlobTool::NAME => GlobTool::view_input(input),
         GrepTool::NAME => GrepTool::view_input(input),
+        WebFetchTool::NAME => WebFetchTool::view_input(input),
         TodoWriteTool::NAME => TodoWriteTool::view_input(input),
         TaskTool::NAME => TaskTool::view_input(input),
         TaskOutputTool::NAME => TaskOutputTool::view_input(input),
@@ -100,6 +101,18 @@ mod tests {
         assert_eq!(
             present_tool(GrepTool::NAME, &json!({ "pattern": "foo" })).summary,
             "Search foo"
+        );
+        assert_eq!(
+            present_tool(
+                WebFetchTool::NAME,
+                &json!({ "url": "https://example.com/docs", "path": "docs/page.md" })
+            )
+            .summary,
+            "Fetch https://example.com/docs into docs/page.md"
+        );
+        assert_eq!(
+            present_tool(WebFetchTool::NAME, &json!({})).summary,
+            WebFetchTool::NAME
         );
         assert_eq!(
             present_tool(

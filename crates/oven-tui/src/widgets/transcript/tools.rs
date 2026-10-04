@@ -15,6 +15,7 @@ enum ToolKind {
     Edited,
     Wrote,
     Asked,
+    Fetched,
     Other(String),
 }
 
@@ -27,6 +28,7 @@ impl From<&str> for ToolKind {
             "Edit" => Self::Edited,
             "Write" => Self::Wrote,
             "Ask" => Self::Asked,
+            "Fetch" => Self::Fetched,
             _ => Self::Other(value.to_string()),
         }
     }
@@ -41,6 +43,7 @@ impl ToolKind {
             Self::Edited => ("Edited", "file"),
             Self::Wrote => ("Wrote", "file"),
             Self::Asked => ("Asked", "question"),
+            Self::Fetched => ("Fetched", "page"),
             Self::Other(action) if count == SINGLE_CALL => return action.clone(),
             Self::Other(action) => return format!("{action} ×{count}"),
         };
@@ -259,6 +262,19 @@ mod tests {
         };
         assert_eq!(title, "Ask which database?");
         assert_eq!(detail.body(), "postgres");
+    }
+
+    #[test]
+    fn fetches_are_counted_in_the_burst_title() {
+        let mut burst = ToolBurst::default();
+        burst.start("1".into(), "Fetch https://example.com into page.md", None);
+        assert_eq!(burst.title(), "Fetched 1 page");
+        burst.start(
+            "2".into(),
+            "Fetch https://example.com/docs into docs.md",
+            None,
+        );
+        assert_eq!(burst.title(), "Fetched 2 pages");
     }
 
     #[test]

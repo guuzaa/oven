@@ -149,6 +149,7 @@ oven-agent::Tool
   ├── FileWriteTool / FileEditTool                ──► oven-host write
   ├── BashTool                                    ──► oven-host process
   ├── GlobTool / GrepTool                         ──► oven-agent matching + oven-host walk
+  ├── WebFetchTool                                ──► reqwest
   ├── TaskTool / TaskOutputTool                   ──► oven-agent SubagentSpawner (oven-app implements it)
   └── memory_read / memory_write / memory_forget  ──► oven-mem MemoryStore
 ```

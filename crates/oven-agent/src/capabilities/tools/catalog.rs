@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::{
     AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,
-    TodoWriteTool, Tool,
+    TodoWriteTool, Tool, WebFetchTool,
 };
 
 pub struct BuiltinTool {
@@ -34,6 +34,10 @@ pub const BUILTIN_TOOLS: &[BuiltinTool] = &[
     BuiltinTool {
         name: GrepTool::NAME,
         make: |r| Box::new(GrepTool::new(r)),
+    },
+    BuiltinTool {
+        name: WebFetchTool::NAME,
+        make: |r| Box::new(WebFetchTool::new(r)),
     },
     BuiltinTool {
         name: TodoWriteTool::NAME,

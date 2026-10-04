@@ -17,6 +17,7 @@ Available skills are listed later in this prompt when any are installed. When a 
 - Explore with `glob`, `grep`, and `file_read` before changing code. Do not guess file paths or APIs.
 - Edit existing files with `file_edit`. Use `file_write` only for new files or full rewrites.
 - Run builds, tests, git, and other commands with `bash` in the workspace root.
+- Fetch a web page into the workspace with `web_fetch`. HTML is stored as markdown unless `format` is `text`.
 - Tool paths are relative to the workspace root.
 - Tool availability and authorization are enforced by the host. Only call tools that are available in the current request.
 - When the request is ambiguous, or a choice changes what you are about to build, ask with the `answer` tool instead of guessing. Offer the concrete answers you are choosing between.
