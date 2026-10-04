@@ -1,7 +1,25 @@
+<div align="center">
+
+<img src="./scripts/worker/public/icon.svg" alt="Oven" width="112" height="112" />
+
 # Oven
 
-A terminal coding agent. Oven connects to an LLM, reads and writes files in
-your project, runs shell commands, and helps you get things done.
+A toy coding agent for joy only.
+
+Oven reads and edits your files, runs shell commands, delegates to subagents and remembers your project between sessions.
+
+<p>
+<img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-ff8550" alt="Platform: macOS, Linux, Windows" />
+<img src="https://img.shields.io/badge/rust-1.92%2B-ff8550" alt="Rust 1.92+" />
+<a href="https://github.com/guuzaa/oven/releases/latest"><img src="https://img.shields.io/github/v/release/guuzaa/oven?label=release&color=ff8550" alt="Latest release" /></a>
+<a href="https://github.com/guuzaa/oven/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-ff8550" alt="License: MIT" /></a>
+</p>
+
+[Install](#install) · [Usage](#usage) · [Configuration](#configuration) ·
+[Interactive mode](#interactive-mode) · [Build from source](#build-from-source) ·
+[License](#license)
+
+</div>
 
 > [!WARNING]
 > **Status: not production-ready.**
@@ -20,13 +38,11 @@ Windows (PowerShell):
 irm https://oven.paulden.site/install | iex
 ```
 
-`/install` serves the script matching the caller (`PowerShell/` in the
-`User-Agent` selects `install.ps1`); `/install.sh` and `/install.ps1` still work.
+> [!NOTE]
+> `/install` serves the script matching the caller (`PowerShell/` in the
+> `User-Agent` selects `install.ps1`); `/install.sh` and `/install.ps1` still work.
 
 Restart your terminal, then verify with `oven --help`.
-
-The same host serves [a small site](https://oven.paulden.site/downloads) with the
-per-platform release assets, if you would rather download by hand.
 
 ## Usage
 
@@ -59,16 +75,19 @@ oven model rm xai
 
 Run `oven --help` for the full CLI.
 
-## Logs
-
-Oven writes a rotating log to `~/.oven/logs/oven.log` (10 MiB per file, one backup). The TUI never prints logs to the terminal. Increase verbosity with `OVEN_LOG=debug` (or `RUST_LOG`).
-
 ## How it works
 
-Oven runs inside your project directory and speaks the OpenAI chat
-completions format, so any compatible provider works. The model can read and
-write files, run shell commands, and delegate jobs to subagents
+Oven runs inside your project directory and speaks the OpenAI chat completions
+format, so any compatible provider works. The model can read and write files,
+run shell commands, and delegate jobs to subagents
 ([`docs/subagents.md`](docs/subagents.md)).
+
+- Durable memory under `.oven/memory` / `~/.oven/memory`, injected into the
+  system prompt and managed with `memory_read`, `memory_write`,
+  `memory_forget` or `/memory` ([`docs/memory.md`](docs/memory.md))
+- MCP servers mounted as `<server>_<tool>` ([`docs/oven-app.md`](docs/oven-app.md))
+- Sessions as JSONL files under `~/.oven/sessions/`, resumed with `-c`
+- The architecture is described in [`docs/architectures.md`](docs/architectures.md)
 
 ## Configuration
 
@@ -193,6 +212,10 @@ rewinds the last exchange when idle. `Shift+Tab` toggles plan or ask mode and
 | `/compact`  | Compact conversation history into a summary; auto-compaction triggers at `compact_threshold`. |
 | `/memory` | List, show or remove memories: `/memory [show <ref> \| rm <ref>]`, where `<ref>` is `workspace/<id>`, `user/<id>` or a bare id |
 
+## Logs
+
+Oven writes a rotating log to `~/.oven/logs/oven.log` (10 MiB per file, one backup). The TUI never prints logs to the terminal. Increase verbosity with `OVEN_LOG=debug` (or `RUST_LOG`).
+
 ## Build from source
 
 ```bash
@@ -202,4 +225,4 @@ cargo build -r
 
 ## License
 
-MIT
+[MIT](LICENSE).
