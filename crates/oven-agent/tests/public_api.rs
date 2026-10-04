@@ -15,7 +15,7 @@ use oven_agent::{
     StepCall, StepStop, StreamEvent, SubagentSpawner, TaskOutputTool, TaskTool, TodoItem, TodoList,
     TodoStatus, TodoWriteTool, Tool, ToolAccess, ToolCallId, ToolCaps, ToolEvent, ToolOutputStream,
     ToolPermission, ToolResult, ToolView, TurnContext, TurnEvent, TurnId, TurnOutput, UserRequest,
-    UserRequestId, UserResponse, VecEventSink, present_tool,
+    UserRequestId, UserResponse, VecEventSink, WebFetchTool, present_tool,
 };
 
 #[test]
@@ -63,4 +63,10 @@ fn public_paths_resolve() {
 
     assert!(!BUILTIN_TOOLS.is_empty());
     assert_eq!(BUILTIN_TOOLS[0].name, FileReadTool::NAME);
+    assert_eq!(WebFetchTool::NAME, "web_fetch");
+    assert!(
+        BUILTIN_TOOLS
+            .iter()
+            .any(|tool| tool.name == WebFetchTool::NAME)
+    );
 }

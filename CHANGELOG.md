@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `web_fetch` fetches an `http` or `https` URL and returns the page to the model as markdown. A failed fetch returns an error and writes nothing
+
 ## [0.0.10] - 2026-10-03
 
 ### Added

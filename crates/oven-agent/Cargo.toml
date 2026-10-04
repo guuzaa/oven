@@ -13,6 +13,8 @@ futures = { workspace = true }
 
 regex = { workspace = true }
 globset = { workspace = true }
+htmd = { workspace = true }
+reqwest = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -25,3 +27,4 @@ tracing = { workspace = true }
 [dev-dependencies]
 mockall = { workspace = true }
 tempdir = { workspace = true }
+wiremock = { workspace = true }

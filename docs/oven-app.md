@@ -296,7 +296,7 @@ with a short timeout; an auth error surfaces as `API key rejected: …`.
 ## Tools, MCP and skills
 
 `tools.rs` mounts a named set of tools per workspace: `file_read`,
-`file_write`, `file_edit`, `bash`, `glob`, `grep`, `todo_write` and `answer`,
+`file_write`, `file_edit`, `bash`, `glob`, `grep`, `web_fetch`, `todo_write` and `answer`,
 plus `read_skill` added by the builder. After `AppBuilder::load_memory` (the
 CLI calls it unless `--amnesia` is passed), the builder also mounts
 `memory_read`, `memory_write` and `memory_forget` and appends the memory

@@ -11,6 +11,7 @@ mod skill_read;
 mod task;
 mod todo_write;
 mod view;
+mod web_fetch;
 
 use std::path::{Path, PathBuf};
 
@@ -36,6 +37,7 @@ pub use task::{TaskOutputTool, TaskTool};
 pub use todo_write::TodoWriteTool;
 pub(crate) use view::labeled;
 pub use view::present_tool;
+pub use web_fetch::WebFetchTool;
 
 /// One capability the model can call. `run` receives the whole
 /// [`TurnContext`] rather than a bag of options, so a tool that starts work
