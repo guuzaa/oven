@@ -1,3 +1,4 @@
+mod activity;
 mod collapsible;
 mod kinds;
 mod selection;

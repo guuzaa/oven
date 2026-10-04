@@ -14,6 +14,8 @@ pub(crate) enum LineKind {
     User,
     Shell,
     Thinking,
+    /// One collapsed run of thinking and tool calls between visible text.
+    Activity,
     Text,
     Tool,
     Diff,
@@ -29,7 +31,7 @@ impl LineKind {
         match self {
             LineKind::User => theme::user(),
             LineKind::Shell => theme::shell(),
-            LineKind::Thinking => theme::thinking(),
+            LineKind::Thinking | LineKind::Activity => theme::thinking(),
             LineKind::Text => theme::assistant(),
             LineKind::Tool | LineKind::Diff => theme::tool(),
             LineKind::ToolResult(true) | LineKind::ShellResult(true) => theme::ok(),
@@ -56,6 +58,7 @@ impl LineKind {
             LineKind::Shell => "$ ",
             LineKind::Text => "∙ ",
             LineKind::Thinking
+            | LineKind::Activity
             | LineKind::Tool
             | LineKind::ToolResult(_)
             | LineKind::ShellResult(_)

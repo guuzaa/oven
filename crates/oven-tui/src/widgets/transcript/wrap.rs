@@ -78,14 +78,6 @@ pub(super) fn format_thought(ms: Option<u64>) -> String {
     }
 }
 
-pub(super) fn thinking_display_label(text: &str) -> &str {
-    if text == THINKING_LABEL || text.starts_with(THOUGHT_FOR) {
-        text
-    } else {
-        THOUGHT_LABEL
-    }
-}
-
 pub(crate) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
     f.render_widget(Paragraph::new(lines), area);
     // Wide CJK glyphs leave a stale trailing cell on Windows; force a full paint.
@@ -455,13 +447,6 @@ fn wrap_sections_into(
 }
 
 pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
-    if kind == LineKind::Thinking {
-        let style = kind.style();
-        return vec![Line::from(vec![
-            Span::styled(line_prefix(kind), style),
-            Span::styled(thinking_display_label(text).to_string(), style),
-        ])];
-    }
     let first_prefix = line_prefix(kind);
     let rest_prefix = continuation_prefix(kind, &first_prefix);
     let style = kind.style();

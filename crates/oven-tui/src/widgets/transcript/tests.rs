@@ -61,24 +61,6 @@ fn row_texts(t: &Transcript) -> Vec<&str> {
     t.rows.iter().map(|r| r.text.as_str()).collect()
 }
 
-fn line_body(kind: LineKind, text: &str) -> String {
-    format_lines(kind, text)[0]
-        .spans
-        .iter()
-        .skip(1)
-        .map(|s| s.content.as_ref())
-        .collect()
-}
-
-#[test]
-fn thinking_format_hides_content() {
-    assert_eq!(line_body(LineKind::Thinking, "secret plan"), THOUGHT_LABEL);
-    assert_eq!(
-        line_body(LineKind::Thinking, THINKING_LABEL),
-        THINKING_LABEL
-    );
-}
-
 #[test]
 fn thinking_header_has_no_gutter() {
     let mut t = Transcript::new();
@@ -88,19 +70,6 @@ fn thinking_header_has_no_gutter() {
     let header = line_text(&t.wrapped[0]);
     let marker = format!("{MESSAGE_INDENT}{COLLAPSED_MARKER}");
     assert!(header.starts_with(&marker), "{header:?}");
-}
-
-#[test]
-fn thinking_shimmer_preserves_label_and_shifts() {
-    let line = format_lines(LineKind::Thinking, THINKING_LABEL)
-        .pop()
-        .unwrap();
-    let a = apply_shimmer(&line, 0.0);
-    let b = apply_shimmer(&line, 0.5);
-    let body: String = a.spans.iter().skip(1).map(|s| s.content.as_ref()).collect();
-    assert_eq!(body, THINKING_LABEL);
-    assert_eq!(a.spans.len(), 1 + THINKING_LABEL.chars().count());
-    assert_ne!(a.spans[1].style.fg, b.spans[1].style.fg);
 }
 
 #[test]
@@ -120,6 +89,7 @@ fn all_gutters_are_two_wide() {
         LineKind::User,
         LineKind::Shell,
         LineKind::Thinking,
+        LineKind::Activity,
         LineKind::Text,
         LineKind::Tool,
         LineKind::Diff,
@@ -201,7 +171,6 @@ fn non_prompt_rows_share_one_message_indent() {
         (LineKind::Error, "failure note"),
         (LineKind::Tool, "tool summary"),
         (LineKind::ToolResult(false), "tool output"),
-        (LineKind::Thinking, THOUGHT_LABEL),
     ] {
         t.push_row(kind, text);
     }
@@ -322,7 +291,7 @@ fn tool_end_updates_summary_without_result_row() {
     ));
     t.on_event(&tool_end(1, false, "boom\n"));
     let row = t.rows.last().unwrap();
-    assert_eq!(row.kind, LineKind::Tool);
+    assert_eq!(row.kind, LineKind::Activity);
     assert_eq!(row.text, "Ran 1 command, 1 failed");
     assert_eq!(t.rows.len(), 1);
 }
@@ -348,7 +317,7 @@ fn seed_unknown_tool_failure_matches_the_live_burst() {
         }]),
         Message::tool_result("c1", REASON, true),
     ]);
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "write, 1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
@@ -362,7 +331,7 @@ fn refused_tool_lands_on_its_burst_row() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(1, "write", serde_json::json!({})));
     t.on_event(&tool_end(1, false, REASON));
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "write, 1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
@@ -386,7 +355,7 @@ fn rejected_tool_lands_on_its_burst_row() {
         },
         None,
     ));
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "Ran 1 command, 1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
@@ -432,9 +401,9 @@ fn seed_renders_persisted_messages() {
         kinds,
         vec![
             LineKind::User,
-            LineKind::Thinking,
+            LineKind::Activity,
             LineKind::Text,
-            LineKind::Tool,
+            LineKind::Activity,
             LineKind::User,
         ]
     );
@@ -566,7 +535,7 @@ fn all_details_collapsed(t: &Transcript) -> bool {
     t.rows
         .iter()
         .filter_map(|row| row.collapsible.as_ref())
-        .all(|detail| !detail.is_expanded())
+        .all(|detail| detail.is_fully_collapsed())
 }
 
 #[test]
@@ -579,7 +548,7 @@ fn tool_end_adds_no_extra_row() {
         serde_json::json!({ "command": "ls" }),
     ));
     t.on_event(&tool_end(1, true, "done"));
-    assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::Tool,]);
+    assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::Activity]);
     assert_eq!(t.rows[1].text, "Ran 1 command");
 }
 
@@ -612,7 +581,7 @@ fn separator_comes_after_tool_followup_not_between() {
         kinds_of(&t),
         vec![
             LineKind::User,
-            LineKind::Tool,
+            LineKind::Activity,
             LineKind::Text,
             LineKind::Separator,
         ]
@@ -643,6 +612,155 @@ fn cancelled_appends_system_line() {
 }
 
 #[test]
+fn an_error_seals_the_activity_before_the_next_tool() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&tool_end(1, true, "ok"));
+    t.on_event(&AppEvent::error("boom"));
+    t.on_event(&tool_start(
+        2,
+        "bash",
+        serde_json::json!({ "command": "pwd" }),
+    ));
+
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::Activity,
+            LineKind::Error,
+            LineKind::Separator,
+            LineKind::Activity,
+        ]
+    );
+    assert_eq!(
+        row_texts(&t),
+        vec!["Ran 1 command", "boom", "", "Ran 1 command"]
+    );
+}
+
+#[test]
+fn a_collapsed_diff_stays_collapsed_when_thinking_continues() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    ready(&mut t, Rect::new(0, 0, 80, 16));
+    toggle_row(&mut t, 0);
+
+    let has = |t: &Transcript, needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(has(&t, "- old"));
+    let diff_row = wrapped_row_of(&t, "Edit src/main.rs");
+    double_click(&mut t, 2, diff_row);
+    assert!(!has(&t, "- old"));
+
+    t.on_event(&thinking("more"));
+    assert!(!has(&t, "- old"), "a folded diff stays folded");
+    assert!(has(&t, "Edit src/main.rs"));
+}
+
+#[test]
+fn edits_across_steps_sum_in_the_activity_title() {
+    let mut t = Transcript::new();
+    t.on_event(&thinking("first"));
+    t.on_event(&thinking_done(1_000));
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    t.on_event(&thinking("second"));
+    t.on_event(&thinking_done(500));
+    t.on_event(&tool_start(
+        2,
+        "file_edit",
+        file_edit_input_at("src/lib.rs"),
+    ));
+    t.on_event(&tool_end(2, true, EDIT_SUCCESS));
+
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
+    assert_eq!(t.rows[0].text, "Edited 2 files");
+    assert_eq!(
+        item_titles(&t, 0),
+        vec![
+            "Thought for 1s".to_string(),
+            "Edit src/main.rs".to_string(),
+            "Thought for 0.5s".to_string(),
+            "Edit src/lib.rs".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn interleaved_work_stays_behind_one_collapse() {
+    let mut t = Transcript::new();
+    t.push_prompt(LineKind::User, "fix it");
+    t.on_event(&thinking("look around"));
+    t.on_event(&thinking_done(1_500));
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&tool_end(1, true, "src"));
+    t.on_event(&thinking("now edit"));
+    t.on_event(&thinking_done(300));
+    t.on_event(&tool_start(2, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(2, true, EDIT_SUCCESS));
+    t.on_event(&text_delta("done"));
+    t.on_event(&completed());
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Activity,
+            LineKind::Text,
+            LineKind::Separator
+        ]
+    );
+    assert!(
+        !t.rows[1].collapsible.as_ref().unwrap().is_expanded(),
+        "thinking and tools share one folded row"
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains("fix it"))
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains("done"))
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .all(|line| !line_text(line).contains("look around")
+                && !line_text(line).contains("Ran ls")
+                && !line_text(line).contains("- old"))
+    );
+
+    toggle_row(&mut t, 1);
+    assert!(item_titles(&t, 1).len() >= 3);
+    assert!(
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(THOUGHT_1_5S))
+    );
+    assert!(
+        t.wrapped
+            .iter()
+            .all(|line| !line_text(line).contains("look around")),
+        "opening the activity shows the inner headers, not every body"
+    );
+}
+
+#[test]
 fn thinking_delta_shows_label_not_content() {
     let mut t = Transcript::new();
     t.on_event(&thinking("secret chain of thought"));
@@ -651,7 +769,7 @@ fn thinking_delta_shows_label_not_content() {
     t.on_event(&completed());
     assert_eq!(
         kinds_of(&t),
-        vec![LineKind::Thinking, LineKind::Text, LineKind::Separator]
+        vec![LineKind::Activity, LineKind::Text, LineKind::Separator]
     );
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
     assert_eq!(t.rows[1].text, "answer");
@@ -694,7 +812,7 @@ fn reported_thinking_duration_survives_the_answer() {
         kinds_of(&t),
         vec![
             LineKind::User,
-            LineKind::Thinking,
+            LineKind::Activity,
             LineKind::Text,
             LineKind::Separator
         ]
@@ -713,8 +831,15 @@ fn reported_thinking_duration_survives_the_tool_it_led_to() {
         serde_json::json!({ "command": "ls" }),
     ));
 
-    assert_eq!(t.rows[0].text, THOUGHT_1_5S);
-    assert_eq!(t.rows[1].kind, LineKind::Tool);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
+    assert_eq!(t.rows[0].text, BURST_SUMMARY);
+    let Section::Item { title, detail, .. } =
+        &t.rows[0].collapsible.as_ref().unwrap().sections()[0]
+    else {
+        panic!("thinking stays a nested item");
+    };
+    assert_eq!(title, THOUGHT_1_5S);
+    assert_eq!(detail.body(), "planning");
 }
 
 #[test]
@@ -740,7 +865,7 @@ fn seeded_reasoning_renders_before_the_answer_it_precedes() {
         kinds_of(&t),
         vec![
             LineKind::User,
-            LineKind::Thinking,
+            LineKind::Activity,
             LineKind::Text,
             LineKind::Separator
         ]
@@ -759,9 +884,17 @@ fn tool_result_double_click_toggles_detail() {
     t.on_event(&tool_end(10, true, OUTPUT));
     ready(&mut t, Rect::new(0, 0, 80, 10));
 
-    let detail = t.rows[1].collapsible.as_ref().expect("tool result detail");
+    let detail = result_detail(&t, 0);
     assert_eq!(detail.body(), OUTPUT);
     assert!(detail.is_expanded());
+    assert!(
+        t.wrapped
+            .iter()
+            .all(|line| !line_text(line).contains("more lines of output")),
+        "the activity header hides the result until it is opened"
+    );
+
+    double_click(&mut t, 2, 0);
     assert!(
         t.wrapped
             .iter()
@@ -775,13 +908,7 @@ fn tool_result_double_click_toggles_detail() {
         .expect("result header") as u16;
     double_click(&mut t, 2, header_y);
 
-    assert!(
-        !t.rows[1]
-            .collapsible
-            .as_ref()
-            .expect("tool result detail")
-            .is_expanded()
-    );
+    assert!(!result_detail(&t, 0).is_expanded());
     assert!(
         t.wrapped
             .iter()
@@ -793,13 +920,7 @@ fn tool_result_double_click_toggles_detail() {
         &State::new(),
     );
     double_click(&mut t, 2, header_y);
-    assert!(
-        t.rows[1]
-            .collapsible
-            .as_ref()
-            .expect("tool result detail")
-            .is_expanded()
-    );
+    assert!(result_detail(&t, 0).is_expanded());
 }
 
 #[test]
@@ -899,15 +1020,18 @@ fn expanding_a_block_grows_downward_and_keeps_its_header() {
 fn next_message_collapses_previous_details() {
     let mut t = Transcript::new();
     t.on_event(&thinking("plan"));
-    assert!(t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
 
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, true, "edited"));
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
-    assert!(t.rows[1].collapsible.as_ref().unwrap().is_expanded());
+    assert_eq!(t.rows[0].text, "Edited 1 file");
 
     t.on_event(&text_delta("done"));
-    assert!(!t.rows[1].collapsible.as_ref().unwrap().is_expanded());
+    t.on_event(&completed());
+    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+    assert_eq!(t.rows[1].text, "done");
 }
 
 #[test]
@@ -1046,7 +1170,7 @@ fn seed_collapses_consecutive_thinking() {
     ])]);
     assert_eq!(
         kinds_of(&t),
-        vec![LineKind::Thinking, LineKind::Text, LineKind::Separator]
+        vec![LineKind::Activity, LineKind::Text, LineKind::Separator]
     );
     assert_eq!(t.rows[0].text, THOUGHT_LABEL);
     assert_eq!(
@@ -1090,7 +1214,7 @@ fn seed_timed_shows_thought_duration() {
         2_500,
         Some(1_500),
     )]);
-    assert_eq!(t.rows[0].kind, LineKind::Thinking);
+    assert_eq!(t.rows[0].kind, LineKind::Activity);
     assert_eq!(t.rows[0].text, THOUGHT_1_5S);
 }
 
@@ -1115,7 +1239,7 @@ fn live_tools_aggregate_counts_and_failures() {
         serde_json::json!({ "path": "a" }),
     ));
     t.on_event(&tool_end(3, true, "hi"));
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "Ran 2 commands, Read 1 file, 1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
@@ -1135,7 +1259,7 @@ fn live_tool_end_rewrites_same_summary_row() {
     assert_eq!(t.rows[0].text, "Ran 1 command");
     t.on_event(&tool_end(1, false, "boom"));
     assert_eq!(t.rows.len(), 1);
-    assert_eq!(t.rows[0].kind, LineKind::Tool);
+    assert_eq!(t.rows[0].kind, LineKind::Activity);
     assert_eq!(t.rows[0].text, "Ran 1 command, 1 failed");
 }
 
@@ -1161,7 +1285,7 @@ fn burst_keeps_its_own_row_when_another_row_interleaves() {
     ));
     t.on_event(&tool_end(2, true, "ok"));
 
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool, LineKind::System]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity, LineKind::System]);
     assert_eq!(t.rows[0].text, "Ran 2 commands");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
@@ -1180,11 +1304,12 @@ fn burst_collapses_once_the_next_row_arrives() {
     ));
     t.on_event(&tool_end(1, true, "src/main.rs:1:todo"));
     assert!(
-        t.rows[0]
+        !t.rows[0]
             .collapsible
             .as_ref()
             .expect("burst detail")
-            .is_expanded()
+            .is_expanded(),
+        "a tool run starts folded"
     );
 
     t.on_event(&text_delta("done"));
@@ -1238,26 +1363,27 @@ fn live_thinking_body_windows_to_the_newest_lines() {
     let mut t = Transcript::new();
     stream_thinking(&mut t, MAX_LIVE_BODY_ROWS + 4);
     ready(&mut t, Rect::new(0, 0, 80, 24));
-    let has = |needle: &str| {
+    let has = |t: &Transcript, needle: &str| {
         t.wrapped
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(EARLIER_5_LINES), "{:?}", t.wrapped);
-    assert!(has("t12"));
-    assert!(!has("t04"));
+    assert!(
+        !has(&t, "t12"),
+        "the chain stays behind the activity header"
+    );
+    toggle_row(&mut t, 0);
+    assert!(has(&t, EARLIER_5_LINES), "{:?}", t.wrapped);
+    assert!(has(&t, "t12"));
+    assert!(!has(&t, "t04"));
 
+    toggle_row(&mut t, 0);
     t.on_event(&thinking_done(1_500));
-    let has = |needle: &str| {
-        t.wrapped
-            .iter()
-            .any(|line| line_text(line).contains(needle))
-    };
-    assert!(!has(EARLIER_5_LINES));
-    assert!(!has("t12"), "no gap is left before the next row");
+    assert!(!has(&t, EARLIER_5_LINES));
+    assert!(!has(&t, "t12"), "no gap is left before the next row");
 
-    double_click(&mut t, 2, 0);
+    toggle_row(&mut t, 0);
     let has = |needle: &str| {
         t.wrapped
             .iter()
@@ -1279,16 +1405,19 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
         ));
     }
     ready(&mut t, Rect::new(0, 0, 80, 24));
-    let has = |needle: &str| {
+    let has = |t: &Transcript, needle: &str| {
         t.wrapped
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(EARLIER_3_LINES), "{:?}", t.wrapped);
-    assert!(has("c10"));
-    assert!(!has("c01"));
+    assert!(!has(&t, "c10"), "calls stay behind the activity header");
+    toggle_row(&mut t, 0);
+    assert!(has(&t, EARLIER_3_LINES), "{:?}", t.wrapped);
+    assert!(has(&t, "c10"));
+    assert!(!has(&t, "c01"));
 
+    toggle_row(&mut t, 0);
     t.on_event(&completed());
     let has = |needle: &str| {
         t.wrapped
@@ -1329,17 +1458,23 @@ fn live_diff_burst_windows_to_the_newest_calls() {
         ));
     }
     ready(&mut t, Rect::new(0, 0, 80, 40));
-    let has = |needle: &str| {
+    let has = |t: &Transcript, needle: &str| {
         t.wrapped
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(EARLIER_23_LINES), "{:?}", t.wrapped);
-    assert!(has("Edit src/f10.rs"));
-    assert!(!has("Edit src/f01.rs"));
-    assert!(has("- old"), "a visible item still shows its diff");
+    assert!(
+        !has(&t, "Edit src/f10.rs"),
+        "edits stay behind the activity header"
+    );
+    toggle_row(&mut t, 0);
+    assert!(has(&t, EARLIER_23_LINES), "{:?}", t.wrapped);
+    assert!(has(&t, "Edit src/f10.rs"));
+    assert!(!has(&t, "Edit src/f01.rs"));
+    assert!(has(&t, "- old"), "a visible item still shows its diff");
 
+    toggle_row(&mut t, 0);
     t.on_event(&completed());
     let has = |needle: &str| {
         t.wrapped
@@ -1372,6 +1507,8 @@ fn live_body_window_counts_wrapped_rows() {
     let long = "z".repeat(WRAP_COLUMNS * MAX_LIVE_BODY_ROWS + TAIL_COLUMNS);
     t.on_event(&thinking(&format!("{long}\n")));
     ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert_eq!(t.wrapped.len(), 1, "the chain stays on one header");
+    toggle_row(&mut t, 0);
 
     assert_eq!(
         t.wrapped.len(),
@@ -1386,11 +1523,12 @@ fn live_body_window_counts_wrapped_rows() {
     let zs = |line: &Line<'_>| line_text(line).matches('z').count();
     assert_eq!(zs(t.wrapped.last().unwrap()), TAIL_COLUMNS);
 
+    toggle_row(&mut t, 0);
     t.on_event(&thinking_done(1_500));
     ready(&mut t, Rect::new(0, 0, 80, 24));
     assert_eq!(t.wrapped.len(), 1, "a retired row collapses at once");
 
-    double_click(&mut t, 2, 0);
+    toggle_row(&mut t, 0);
     assert_eq!(
         t.wrapped.len(),
         2 + MAX_LIVE_BODY_ROWS,
@@ -1427,6 +1565,38 @@ fn file_write_input() -> serde_json::Value {
     })
 }
 
+fn item_titles(t: &Transcript, row: usize) -> Vec<String> {
+    t.rows[row]
+        .collapsible
+        .as_ref()
+        .expect("activity body")
+        .sections()
+        .iter()
+        .filter_map(|section| match section {
+            Section::Item { title, .. } => Some(title.clone()),
+            Section::Text(_) => None,
+        })
+        .collect()
+}
+
+fn result_detail(t: &Transcript, row: usize) -> &super::collapsible::Collapsible {
+    t.rows[row]
+        .collapsible
+        .as_ref()
+        .expect("activity body")
+        .sections()
+        .iter()
+        .find_map(|section| match section {
+            Section::Item {
+                kind: LineKind::ToolResult(_),
+                detail,
+                ..
+            } => Some(detail),
+            _ => None,
+        })
+        .expect("result detail")
+}
+
 /// Diff calls of a burst row as `(item title, item body)` pairs.
 fn diff_items(t: &Transcript) -> Vec<(String, String)> {
     t.rows[0]
@@ -1459,10 +1629,13 @@ fn file_edit_aggregates_with_a_nested_diff() {
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
 
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "Edited 1 file");
     let burst = t.rows[0].collapsible.as_ref().expect("burst detail");
-    assert!(burst.is_expanded());
+    assert!(
+        !burst.is_expanded(),
+        "the edit stays behind the activity header"
+    );
     assert_eq!(burst.body(), "");
     assert_eq!(
         diff_items(&t),
@@ -1481,7 +1654,7 @@ fn file_write_aggregates_with_a_nested_diff() {
     t.on_event(&tool_start(2, "file_write", file_write_input()));
     t.on_event(&tool_end(2, true, "wrote 17 bytes to out.txt"));
 
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "Wrote 1 file");
     assert_eq!(
         diff_items(&t),
@@ -1521,7 +1694,7 @@ fn failed_edit_counts_and_explains_itself() {
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, false, EDIT_ERROR));
 
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "Edited 1 file, 1 failed");
     assert_eq!(
         diff_items(&t),
@@ -1544,7 +1717,7 @@ fn seed_file_edit_aggregates_with_a_nested_diff() {
         }]),
         Message::tool_result("e1", EDIT_SUCCESS, false),
     ]);
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "Edited 1 file");
     assert_eq!(
         diff_items(&t),
@@ -1659,6 +1832,7 @@ fn nested_diff_lines_are_indented_past_their_item_title() {
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
     ready(&mut t, Rect::new(0, 0, 80, 10));
+    toggle_row(&mut t, 0);
 
     let removed = t
         .wrapped
@@ -1684,16 +1858,9 @@ fn todo_write_keeps_detail_and_result() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(10, "todo_write", todo_input()));
     t.on_event(&tool_end(10, true, "updated"));
-    assert_eq!(
-        kinds_of(&t),
-        vec![LineKind::Tool, LineKind::ToolResult(true)]
-    );
-    assert_eq!(
-        t.rows[0].text,
-        "todo_write · 1 todos (0 in_progress, 0 completed)"
-    );
-    assert_eq!(t.rows[1].text, RESULT_LABEL);
-    let result = t.rows[1].collapsible.as_ref().expect("tool result detail");
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
+    assert_eq!(t.rows[0].text, TODO_SUMMARY);
+    let result = result_detail(&t, 0);
     assert_eq!(result.body(), "updated");
     assert!(result.is_expanded());
 }
@@ -1764,21 +1931,16 @@ fn todo_write_splits_tool_bursts() {
         serde_json::json!({ "command": "pwd" }),
     ));
     t.on_event(&tool_end(2, true, "ok"));
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
+    assert_eq!(t.rows[0].text, format!("Ran 2 commands, {TODO_SUMMARY}"));
     assert_eq!(
-        kinds_of(&t),
-        vec![
-            LineKind::Tool,
-            LineKind::Tool,
-            LineKind::ToolResult(true),
-            LineKind::Tool,
-        ]
+        t.rows[0].collapsible.as_ref().unwrap().body(),
+        "Ran ls\nRan pwd"
     );
-    assert_eq!(t.rows[0].text, "Ran 1 command");
     assert_eq!(
-        t.rows[1].text,
-        "todo_write · 1 todos (0 in_progress, 0 completed)"
+        item_titles(&t, 0),
+        vec![TODO_SUMMARY.to_string(), RESULT_LABEL.to_string()]
     );
-    assert_eq!(t.rows[3].text, "Ran 1 command");
 }
 
 #[test]
@@ -1847,24 +2009,11 @@ fn seed_todo_write_keeps_result() {
         }]),
         Message::tool_result("t1", "updated", false),
     ]);
-    assert_eq!(
-        kinds_of(&t),
-        vec![LineKind::Tool, LineKind::ToolResult(true)]
-    );
-    assert_eq!(
-        t.rows[0].text,
-        "todo_write · 1 todos (0 in_progress, 0 completed)"
-    );
-    assert_eq!(t.rows[1].text, RESULT_LABEL);
-    assert_eq!(
-        t.rows[1]
-            .collapsible
-            .as_ref()
-            .expect("tool result detail")
-            .body(),
-        "updated"
-    );
-    assert!(!t.rows[1].collapsible.as_ref().unwrap().is_expanded());
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
+    assert_eq!(t.rows[0].text, TODO_SUMMARY);
+    let result = result_detail(&t, 0);
+    assert_eq!(result.body(), "updated");
+    assert!(!result.is_expanded());
 }
 
 #[test]
@@ -1895,7 +2044,7 @@ fn seed_failed_tool_counts_without_result() {
         Message::tool_result("c2", "boom", true),
         Message::tool_result("c3", "hi", false),
     ]);
-    assert_eq!(kinds_of(&t), vec![LineKind::Tool]);
+    assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "Ran 2 commands, Read 1 file, 1 failed");
 }
 
@@ -1960,7 +2109,7 @@ fn seed_separates_complete_turns_not_tool_followup() {
             LineKind::Separator,
             LineKind::User,
             LineKind::Text,
-            LineKind::Tool,
+            LineKind::Activity,
             LineKind::Text,
             LineKind::Separator,
         ]
@@ -2226,8 +2375,14 @@ fn wheel_up_with_nothing_above_the_turn_keeps_following_the_tail() {
     assert!(
         screen(&terminal)
             .iter()
-            .any(|row| row.contains("still going")),
-        "later thinking stays on screen"
+            .any(|row| row.contains(THINKING_LABEL)),
+        "the folded header stays on screen"
+    );
+    assert!(
+        screen(&terminal)
+            .iter()
+            .all(|row| !row.contains("still going")),
+        "later thinking stays inside the activity"
     );
 }
 
@@ -2356,6 +2511,11 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
 
 fn line_text(line: &Line<'_>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+fn toggle_row(t: &mut Transcript, row: usize) {
+    let line = u16::try_from(t.rows[row].headers[0].line).expect("header line");
+    double_click(t, 2, line);
 }
 
 fn double_click(t: &mut Transcript, column: u16, row: u16) {
@@ -3194,6 +3354,7 @@ fn a_streaming_body_keeps_its_window_without_a_full_rewrap() {
     let long = "z".repeat(WRAP_COLUMNS * MAX_LIVE_BODY_ROWS + TAIL_COLUMNS);
     t.on_event(&thinking(&format!("{long}\n")));
     ready(&mut t, Rect::new(0, 0, 80, 24));
+    toggle_row(&mut t, 0);
     assert_eq!(t.wrapped.len(), 1 + MAX_LIVE_BODY_ROWS);
 
     t.on_event(&thinking("a delta arrives\n"));
@@ -3213,6 +3374,7 @@ fn a_retitled_burst_keeps_its_windowed_body() {
         ));
     }
     ready(&mut t, Rect::new(0, 0, 80, 24));
+    toggle_row(&mut t, 0);
 
     t.on_event(&tool_end(1, false, "boom"));
 

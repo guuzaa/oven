@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::collapsible::{Collapsible, Section};
 use super::kinds::LineKind;
 
-const TITLE_SEPARATOR: &str = ", ";
+pub(super) const TITLE_SEPARATOR: &str = ", ";
 const FAILED_LABEL: &str = "failed";
 const SINGLE_CALL: usize = 1;
 
@@ -70,7 +70,7 @@ pub(super) struct ToolBurst {
 }
 
 impl ToolBurst {
-    pub(super) fn start(&mut self, call_id: String, summary: &str, detail: Option<&str>) {
+    pub(super) fn start(&mut self, call_id: String, summary: &str, detail: Option<&str>) -> usize {
         let label = normalize(summary);
         let kind = action_of(&label).into();
         if let Some(group) = self.groups.iter_mut().find(|group| group.kind == kind) {
@@ -81,12 +81,18 @@ impl ToolBurst {
                 count: SINGLE_CALL,
             });
         }
-        self.pending.insert(call_id, self.calls.len());
+        let idx = self.calls.len();
+        self.pending.insert(call_id, idx);
         self.calls.push(Call {
             label,
             diff: detail.map(str::to_string),
             error: None,
         });
+        idx
+    }
+
+    pub(super) fn section_at(&self, idx: usize) -> Option<Section> {
+        self.calls.get(idx).map(section_of)
     }
 
     /// Marks a call done: counts the failure, replaces its body with the one
@@ -148,27 +154,29 @@ impl ToolBurst {
 
     /// Calls in invocation order: plain calls as body lines, diff calls as
     /// nested items that each expand to their own diff.
+    #[cfg(test)]
     pub(super) fn sections(&self) -> Vec<Section> {
-        self.calls
-            .iter()
-            .map(|call| match &call.diff {
-                None => Section::Text(match &call.error {
-                    Some(error) => format!("{}\n{error}", call.label),
-                    None => call.label.clone(),
-                }),
-                Some(diff) => {
-                    let mut detail = Collapsible::new(diff.clone());
-                    if let Some(error) = &call.error {
-                        detail.append(&format!("\n{error}"));
-                    }
-                    Section::Item {
-                        kind: LineKind::Diff,
-                        title: call.label.clone(),
-                        detail,
-                    }
-                }
-            })
-            .collect()
+        self.calls.iter().map(section_of).collect()
+    }
+}
+
+fn section_of(call: &Call) -> Section {
+    match &call.diff {
+        None => Section::Text(match &call.error {
+            Some(error) => format!("{}\n{error}", call.label),
+            None => call.label.clone(),
+        }),
+        Some(diff) => {
+            let mut detail = Collapsible::new(diff.clone());
+            if let Some(error) = &call.error {
+                detail.append(&format!("\n{error}"));
+            }
+            Section::Item {
+                kind: LineKind::Diff,
+                title: call.label.clone(),
+                detail,
+            }
+        }
     }
 }
 

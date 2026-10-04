@@ -30,6 +30,11 @@ impl Collapsible {
         }
     }
 
+    pub(super) fn collapsed(mut self) -> Self {
+        self.expanded = false;
+        self
+    }
+
     pub(super) fn append(&mut self, text: &str) {
         match self.sections.last_mut() {
             Some(Section::Text(last)) => last.push_str(text),
@@ -37,8 +42,56 @@ impl Collapsible {
         }
     }
 
-    pub(super) fn replace_sections(&mut self, sections: Vec<Section>) {
-        self.sections = sections;
+    pub(super) fn open_state(&self) -> OpenState {
+        OpenState {
+            expanded: self.expanded,
+            pinned: self.pinned,
+        }
+    }
+
+    pub(super) fn restore_open_state(&mut self, state: OpenState) {
+        self.expanded = state.expanded;
+        self.pinned = state.pinned;
+    }
+
+    pub(super) fn with_open_state(mut self, state: OpenState) -> Self {
+        self.restore_open_state(state);
+        self
+    }
+}
+
+impl Section {
+    pub(super) fn with_open(self, open: OpenState) -> Self {
+        match self {
+            Self::Item {
+                kind,
+                title,
+                detail,
+            } => Self::Item {
+                kind,
+                title,
+                detail: detail.with_open_state(open),
+            },
+            other => other,
+        }
+    }
+}
+
+impl Collapsible {
+    /// Appends `text` to the nested item at `idx` and sets its title.
+    pub(super) fn append_item_text(&mut self, idx: usize, title: &str, text: &str) -> bool {
+        match self.sections.get_mut(idx) {
+            Some(Section::Item {
+                title: current,
+                detail,
+                ..
+            }) => {
+                *current = title.to_string();
+                detail.append(text);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The nested collapsible at `idx`, for a header that points into one.
@@ -81,12 +134,58 @@ impl Collapsible {
             return false;
         }
         self.expanded = false;
+        self.collapse_children();
+        true
+    }
+
+    /// Closes every nested item. A pinned item stays as the user left it.
+    pub(super) fn collapse_children(&mut self) {
         for section in &mut self.sections {
             if let Section::Item { detail, .. } = section {
-                detail.collapse();
+                detail.collapse_tree();
             }
         }
-        true
+    }
+
+    /// Closes this block and every unpinned descendant. A pinned block stays
+    /// open, children included, until the user closes it.
+    pub(super) fn collapse_tree(&mut self) {
+        if self.pinned {
+            return;
+        }
+        self.expanded = false;
+        self.collapse_children();
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_fully_collapsed(&self) -> bool {
+        !self.expanded
+            && self.sections.iter().all(|section| match section {
+                Section::Text(_) => true,
+                Section::Item { detail, .. } => detail.is_fully_collapsed(),
+            })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct OpenState {
+    pub expanded: bool,
+    pub pinned: bool,
+}
+
+impl OpenState {
+    pub(super) fn expanded() -> Self {
+        Self {
+            expanded: true,
+            pinned: false,
+        }
+    }
+
+    pub(super) fn collapsed() -> Self {
+        Self {
+            expanded: false,
+            pinned: false,
+        }
     }
 }
 

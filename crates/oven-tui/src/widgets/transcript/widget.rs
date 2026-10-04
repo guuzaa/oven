@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::activity::Activity;
 use super::collapsible::Collapsible;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -20,7 +20,6 @@ use crate::platform::clipboard;
 
 use super::kinds::{Header, LineKind, Row};
 use super::selection::{SelPos, extract_line_range, highlight_line};
-use super::tools::ToolBurst;
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
     apply_hover, apply_shimmer, collect_lines, format_elapsed, format_lines, format_thought,
@@ -54,12 +53,10 @@ pub struct Transcript {
     pub(super) dragging: bool,
     hovered_collapsible: Option<Header>,
     last_collapsible_click: Option<(Header, Instant)>,
-    tool_burst: ToolBurst,
-    burst_row: Option<usize>,
-    /// Rows of calls rendered on their own, keyed by call id: a row stays in
-    /// flight until its result lands.
-    detail_rows: HashMap<String, usize>,
-    thinking_row: Option<usize>,
+    /// Thinking and tool calls since the last visible text. One burst inside
+    /// it sums tool counts across steps.
+    activity: Activity,
+    activity_row: Option<usize>,
     /// Wrapped-line start and height of the prompt pinned at the top of the
     /// last draw. Scroll math uses it so a wheel step moves the body, not
     /// the header.
@@ -83,10 +80,8 @@ impl Transcript {
             dragging: false,
             hovered_collapsible: None,
             last_collapsible_click: None,
-            tool_burst: ToolBurst::default(),
-            burst_row: None,
-            detail_rows: HashMap::new(),
-            thinking_row: None,
+            activity: Activity::default(),
+            activity_row: None,
             sticky_prompt: None,
             render_start: 0,
         }
@@ -94,7 +89,8 @@ impl Transcript {
 
     /// Appends a row the user submitted: their prompt or a shell command.
     pub(super) fn push_prompt(&mut self, kind: LineKind, text: &str) {
-        self.close_tool_burst();
+        self.stop_live_thinking();
+        self.seal_activity();
         self.push_row(kind, text);
     }
 
@@ -115,7 +111,7 @@ impl Transcript {
     }
 
     pub fn push_shell_output(&mut self, output: &str, ok: bool) {
-        self.close_tool_burst();
+        self.seal_activity();
         let body = trim_message(output);
         self.push_row(LineKind::ShellResult(ok), result_body(&body));
     }
@@ -140,9 +136,9 @@ impl Transcript {
     /// Closes the current response the way a completed turn does. The prompt
     /// row stays where it is, so the turn keeps its header after it ends.
     pub(crate) fn finish_response(&mut self) {
-        self.close_tool_burst();
         self.stop_live_thinking();
         self.flush_streaming();
+        self.seal_activity();
     }
 
     /// Rebuilds the rows from a history without promoting the last user
@@ -170,7 +166,7 @@ impl Transcript {
                     for block in &m.content {
                         match block {
                             ContentBlock::Text { text } => {
-                                self.close_tool_burst();
+                                self.seal_activity();
                                 if let Some(sh) = LocalShell::try_parse(text) {
                                     self.push_prompt(LineKind::Shell, &sh.command);
                                     self.push_shell_output(&sh.output, sh.ok());
@@ -217,14 +213,14 @@ impl Transcript {
                     for block in blocks {
                         match block {
                             ContentBlock::Thinking { thinking } => {
-                                self.close_tool_burst();
-                                self.push_thinking(&format_thought(*thinking_ms), thinking);
+                                self.push_thinking(&format_thought(*thinking_ms), thinking, false);
                                 emitted = true;
                             }
                             ContentBlock::Text { text } => {
                                 let body = trim_message(text);
                                 if !body.is_empty() {
-                                    self.close_tool_burst();
+                                    self.stop_live_thinking();
+                                    self.seal_activity();
                                     self.push_row(LineKind::Text, &body);
                                     emitted = true;
                                 }
@@ -248,26 +244,7 @@ impl Transcript {
                 Role::System => {}
             }
         }
-        self.close_tool_burst();
-        // Seeded rows carry their durations already, so none of them is still
-        // awaiting the live clock that would keep its body windowed.
-        self.thinking_row = None;
-        // A seeded call whose result never landed is settled all the same:
-        // nothing arrives to stop its shimmer.
-        self.detail_rows.clear();
-        self.collapse_open();
-    }
-
-    fn push_tool_result(&mut self, is_error: bool, content: &[ContentBlock]) {
-        self.push_result_row(!is_error, &result_text(content));
-    }
-
-    fn push_result_row(&mut self, ok: bool, output: &str) {
-        let body = trim_message(output);
-        if ok && body.is_empty() {
-            return;
-        }
-        self.push_row(LineKind::ToolResult(ok), result_body(&body));
+        self.seal_activity();
     }
 
     pub(super) fn total_lines(&self) -> usize {
@@ -386,92 +363,111 @@ impl Transcript {
         origin
     }
 
-    fn close_tool_burst(&mut self) {
-        self.tool_burst = ToolBurst::default();
-        if let Some(row) = self.burst_row.take() {
-            if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
-                collapsible.collapse();
-            }
-            self.rewrap_row(row);
-        }
-    }
-
     fn note_tool_start(&mut self, call_id: &str, view: &ToolView) {
+        self.stop_live_thinking();
         if !view.collapse {
-            self.close_tool_burst();
             let kind = if view.detail.is_some() {
                 LineKind::Diff
             } else {
                 LineKind::Tool
             };
-            let detail = view.detail.as_deref().map(Collapsible::new);
-            self.push_row_with_detail(kind, view.summary.clone(), detail);
-            self.detail_rows
-                .insert(call_id.to_string(), self.rows.len() - 1);
-            return;
+            let body = view.detail.clone().unwrap_or_default();
+            self.activity
+                .start_standalone(call_id.to_string(), kind, view.summary.clone(), body);
+        } else {
+            self.activity
+                .start_call(call_id.to_string(), &view.summary, view.detail.as_deref());
         }
-        self.tool_burst
-            .start(call_id.to_string(), &view.summary, view.detail.as_deref());
-        self.upsert_tool_summary();
+        self.sync_activity();
     }
 
     fn note_tool_end(&mut self, call_id: &str, ok: bool, output: &str, detail: Option<&str>) {
         let landed = detail.filter(|text| !text.is_empty());
         if self
-            .tool_burst
-            .finish(call_id, landed, !ok, (!ok).then_some(output))
+            .activity
+            .finish_call(call_id, landed, !ok, (!ok).then_some(output))
         {
             if !ok || landed.is_some() {
-                self.upsert_tool_summary();
+                self.sync_activity();
             }
             return;
         }
-        let Some(row) = self.detail_rows.remove(call_id) else {
-            return;
-        };
-        if !self.has_detail(row) || !ok {
-            self.push_result_row(ok, output);
+        let shown = standalone_output(ok, output);
+        if self
+            .activity
+            .finish_standalone(call_id, ok, shown.as_deref())
+        {
+            self.sync_activity();
         }
     }
 
     fn note_seed_result(&mut self, tool_use_id: &str, is_error: bool, content: &[ContentBlock]) {
-        let Some(row) = self.detail_rows.remove(tool_use_id) else {
-            let error = is_error.then(|| result_text(content));
-            if self
-                .tool_burst
-                .finish(tool_use_id, None, is_error, error.as_deref())
-                && is_error
-            {
-                self.upsert_tool_summary();
+        let output = result_text(content);
+        let error = is_error.then_some(output.as_str());
+        if self
+            .activity
+            .finish_call(tool_use_id, None, is_error, error)
+        {
+            if is_error {
+                self.sync_activity();
             }
             return;
-        };
-        if !self.has_detail(row) || is_error {
-            self.push_tool_result(is_error, content);
+        }
+        let shown = standalone_output(!is_error, &output);
+        if self
+            .activity
+            .finish_standalone(tool_use_id, !is_error, shown.as_deref())
+        {
+            self.sync_activity();
         }
     }
 
-    /// Whether a call's own row carries a nested body, whose success output
-    /// stays hidden behind it.
-    fn has_detail(&self, row: usize) -> bool {
-        self.rows[row].collapsible.is_some()
+    fn sync_activity(&mut self) {
+        if self.activity.is_empty() {
+            return;
+        }
+        if self.activity_row.is_none() {
+            self.push_row_with_detail(
+                LineKind::Activity,
+                String::new(),
+                Some(Collapsible::from_sections(Vec::new()).collapsed()),
+            );
+            self.activity_row = Some(self.rows.len() - 1);
+        }
+        self.paint_activity();
     }
 
-    fn upsert_tool_summary(&mut self) {
-        let title = self.tool_burst.title();
-        let sections = self.tool_burst.sections();
-        let Some(row) = self.burst_row.filter(|idx| self.rows.get(*idx).is_some()) else {
-            self.push_row_with_detail(
-                LineKind::Tool,
-                title,
-                Some(Collapsible::from_sections(sections)),
-            );
-            self.burst_row = Some(self.rows.len() - 1);
+    fn paint_activity(&mut self) {
+        let Some(row) = self.activity_row else {
             return;
         };
+        if let Some(body) = self.rows[row].collapsible.as_ref() {
+            self.activity.absorb(body.sections());
+        }
+        self.activity.apply_pending_fold();
+        let Some(open) = self.rows[row]
+            .collapsible
+            .as_ref()
+            .map(Collapsible::open_state)
+        else {
+            return;
+        };
+        let (title, sections) = self.activity.project();
+        let body = Collapsible::from_sections(sections).with_open_state(open);
         self.rows[row].text = title;
-        if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
-            collapsible.replace_sections(sections);
+        self.rows[row].collapsible = Some(body);
+        self.rewrap_row(row);
+    }
+
+    /// Stops appending to the open activity. The row stays, folded unless the
+    /// user pinned it open.
+    fn seal_activity(&mut self) {
+        self.activity = Activity::default();
+        let Some(row) = self.activity_row.take() else {
+            return;
+        };
+        if let Some(body) = self.rows[row].collapsible.as_mut() {
+            body.collapse_tree();
         }
         self.rewrap_row(row);
     }
@@ -479,31 +475,50 @@ impl Transcript {
     pub(super) fn push_row(&mut self, kind: LineKind, text: &str) {
         let (text, collapsible) = match kind {
             LineKind::ToolResult(_) => (RESULT_LABEL.to_string(), Some(Collapsible::new(text))),
-            LineKind::Thinking => (THOUGHT_LABEL.to_string(), None),
             LineKind::ShellResult(_) => (tail_lines(text, MAX_SHELL_DISPLAY_LINES), None),
             _ => (text.to_string(), None),
         };
         self.push_row_with_detail(kind, text, collapsible);
     }
 
-    fn push_thinking(&mut self, title: &str, text: &str) {
-        if let Some(Row {
-            kind: LineKind::Thinking,
-            text: current_title,
-            collapsible: Some(collapsible),
-            ..
-        }) = self.rows.last_mut()
-        {
-            *current_title = title.to_string();
-            collapsible.append(text);
-            self.rewrap_row(self.rows.len() - 1);
+    /// `live` is a thinking window still receiving deltas. Seeded thoughts are
+    /// already finished, so they must not be retitled when the next tool starts.
+    fn push_thinking(&mut self, title: &str, text: &str, live: bool) {
+        if self.activity.push_thinking(title, text, live) {
+            self.patch_live_thought(title, text);
             return;
         }
-        self.push_row_with_detail(
-            LineKind::Thinking,
-            title.to_string(),
-            Some(Collapsible::new(text)),
-        );
+        self.sync_activity();
+    }
+
+    /// A delta on the thought already at the end of the row. The tool sections
+    /// stay as they are; only that thought's text is extended.
+    fn patch_live_thought(&mut self, title: &str, delta: &str) {
+        let Some(row) = self.activity_row else {
+            self.sync_activity();
+            return;
+        };
+        if self.activity.is_flat_thinking() {
+            self.rows[row].text = title.to_string();
+            if let Some(body) = self.rows[row].collapsible.as_mut() {
+                body.append(delta);
+            }
+            self.rewrap_row(row);
+            return;
+        }
+        let Some(idx) = self.activity.live_thinking_index() else {
+            self.sync_activity();
+            return;
+        };
+        let patched = self.rows[row]
+            .collapsible
+            .as_mut()
+            .is_some_and(|body| body.append_item_text(idx, title, delta));
+        if patched {
+            self.rewrap_row(row);
+        } else {
+            self.sync_activity();
+        }
     }
 
     fn push_row_with_detail(
@@ -516,7 +531,6 @@ impl Transcript {
         self.append_row(kind, text, collapsible);
     }
 
-    /// Appends the row and tracks it as the thinking row awaiting a duration.
     fn append_row(&mut self, kind: LineKind, text: String, collapsible: Option<Collapsible>) {
         self.rows.push(Row {
             kind,
@@ -526,9 +540,6 @@ impl Transcript {
         });
         self.row_offsets.push(self.wrapped.len());
         self.wrap_row(self.rows.len() - 1);
-        if kind == LineKind::Thinking {
-            self.thinking_row = Some(self.rows.len() - 1);
-        }
     }
 
     /// Closes every body a new row opens, and rewraps just those rows: a row
@@ -682,10 +693,12 @@ impl Transcript {
         }
     }
 
-    /// A body that is still growing — live thinking deltas or an open tool burst
-    /// — renders only its newest screen rows, so it cannot scroll the view up.
+    /// A body that is still growing — live thinking or tool calls still in
+    /// flight — renders only its newest screen rows, so it cannot scroll the
+    /// view up.
     fn live_body_rows(&self, idx: usize) -> Option<usize> {
-        let live = Some(idx) == self.thinking_row || Some(idx) == self.burst_row;
+        let live = self.activity_row == Some(idx)
+            && (self.activity.thinking_live() || self.activity.tools_running());
         live.then_some(MAX_LIVE_BODY_ROWS)
     }
 
@@ -1005,38 +1018,54 @@ impl Transcript {
         self.retire_thinking(format_thought(Some(duration_ms)));
     }
 
-    /// Streaming is over for the row, so it collapses: its windowed body stops
-    /// here and an expanded row would blank the screen until the next row.
+    /// Streaming is over for the block, so it collapses: its windowed body stops
+    /// here and an expanded block would blank the screen until the next row.
     fn retire_thinking(&mut self, title: String) {
-        if let Some(row) = self.thinking_row.take() {
-            self.rows[row].text = title;
-            if let Some(collapsible) = self.rows[row].collapsible.as_mut() {
-                collapsible.collapse();
-            }
+        if !self.activity.retire_thinking(&title) {
+            return;
+        }
+        let fold = self.activity.is_flat_thinking();
+        self.sync_activity();
+        if fold
+            && let Some(row) = self.activity_row
+            && let Some(body) = self.rows[row].collapsible.as_mut()
+        {
+            body.collapse_tree();
             self.rewrap_row(row);
         }
     }
 
-    fn live_thinking_header(&self) -> Option<usize> {
-        let row = self.thinking_row?;
-        (self.rows[row].text == THINKING_LABEL)
-            .then(|| self.rows[row].headers.first().map(|header| header.line))
-            .flatten()
+    /// Header lines that should shimmer: the activity header while it is
+    /// folded, or the live thought once the user opens the timeline.
+    fn shimmer_lines(&self) -> Vec<usize> {
+        let Some(row) = self.activity_row else {
+            return Vec::new();
+        };
+        if self.activity.thinking_live() || self.activity.tools_running() {
+            self.activity_shimmer(row)
+        } else {
+            Vec::new()
+        }
     }
 
-    /// First content line of every tool call still in flight: the burst while
-    /// a call has yet to answer, and each call rendered as its own row.
-    fn live_tool_lines(&self) -> Vec<usize> {
-        let running = self
-            .detail_rows
-            .values()
-            .copied()
-            .chain(self.burst_row.filter(|_| self.tool_burst.is_running()));
-        let mut lines: Vec<usize> = running
-            .filter_map(|row| self.row_wrapped_range(row).map(|(start, _)| start))
-            .collect();
-        lines.sort_unstable();
-        lines
+    fn activity_shimmer(&self, row: usize) -> Vec<usize> {
+        let expanded = self.rows[row]
+            .collapsible
+            .as_ref()
+            .is_some_and(Collapsible::is_expanded);
+        if expanded && let Some(idx) = self.activity.live_thinking_index() {
+            return self.header_line(row, &[idx]).into_iter().collect();
+        }
+        self.header_line(row, &[]).into_iter().collect()
+    }
+
+    fn header_line(&self, row: usize, path: &[usize]) -> Option<usize> {
+        self.rows.get(row).and_then(|row| {
+            row.headers
+                .iter()
+                .find(|header| header.path == path)
+                .map(|header| header.line)
+        })
     }
 
     fn is_live_text(&self) -> bool {
@@ -1154,15 +1183,14 @@ impl Component for Transcript {
         match &ev.kind {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Stream(StreamEvent::ThinkingDelta { text }) => {
-                    self.close_tool_burst();
-                    self.push_thinking(THINKING_LABEL, text);
+                    self.push_thinking(THINKING_LABEL, text, true);
                 }
                 AgentEvent::Stream(StreamEvent::ThinkingDone { duration_ms }) => {
                     self.report_thinking_done(*duration_ms);
                 }
                 AgentEvent::Stream(StreamEvent::TextDelta { text }) => {
-                    self.close_tool_burst();
                     self.stop_live_thinking();
+                    self.seal_activity();
                     self.push_stream(LineKind::Text, text);
                 }
                 AgentEvent::Tool(ToolEvent::ApprovalRequested { view, .. }) => {
@@ -1216,7 +1244,6 @@ impl Component for Transcript {
                     self.end_turn(*duration_ms);
                 }
                 AgentEvent::Turn(TurnEvent::Cancelled { duration_ms, .. }) => {
-                    self.close_tool_burst();
                     self.stop_live_thinking();
                     if !self.streaming.is_empty() {
                         let (kind, partial) = self.take_stream();
@@ -1231,7 +1258,6 @@ impl Component for Transcript {
                 AgentEvent::Turn(TurnEvent::Failed {
                     error, duration_ms, ..
                 }) => {
-                    self.close_tool_burst();
                     self.stop_live_thinking();
                     self.flush_streaming();
                     self.push_row(LineKind::Error, &error.message);
@@ -1260,8 +1286,9 @@ impl Component for Transcript {
             | AppEventKind::Notification { .. }
             | AppEventKind::RequestResolved { .. } => {}
             AppEventKind::Error { message } => {
-                self.close_tool_burst();
+                self.stop_live_thinking();
                 self.flush_streaming();
+                self.seal_activity();
                 self.push_row(LineKind::Error, message);
                 self.push_separator();
             }
@@ -1304,13 +1331,7 @@ impl Component for Transcript {
         let end = start.saturating_add(height).min(total);
         let mut visible = collect_lines(&self.wrapped, &self.wrapped_stream, start, end);
         let phase = shimmer_phase();
-        if let Some(header) = self.live_thinking_header()
-            && header >= start
-            && let Some(line) = visible.get_mut(header - start)
-        {
-            *line = apply_shimmer(line, phase);
-        }
-        for header in self.live_tool_lines() {
+        for header in self.shimmer_lines() {
             if header >= start
                 && let Some(line) = visible.get_mut(header - start)
             {
@@ -1367,6 +1388,16 @@ fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)>
 /// A result body, or the placeholder the transcript shows for no output.
 fn result_body(body: &str) -> &str {
     if body.is_empty() { NO_OUTPUT } else { body }
+}
+
+/// What a standalone call should append. A success with no output adds nothing.
+fn standalone_output(ok: bool, output: &str) -> Option<String> {
+    let body = trim_message(output);
+    if ok && body.is_empty() {
+        None
+    } else {
+        Some(result_body(&body).to_string())
+    }
 }
 
 /// How far a wrapped line count moved, signed: lengths are bounded by memory,
