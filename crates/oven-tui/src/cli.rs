@@ -11,7 +11,7 @@ use crate::runtime::ui::Ui;
 #[derive(Debug, Parser)]
 #[command(name = "oven", about = "A toy coding agent for joy only.")]
 #[command(version = concat!(env!("CARGO_PKG_VERSION"), " (",
-        env!("GIT_HASH"), " ", env!("GIT_COMMIT_DATE"), ")"))]
+        env!("GIT_HASH"), " ", env!("GIT_COMMIT_DATE"), " ", env!("BUILD_TARGET"), ")"))]
 pub struct Cli {
     /// Tell oven to use the specified directory as its workspace root
     #[arg(long = "cd", short = 'C', default_value = ".", global = true)]

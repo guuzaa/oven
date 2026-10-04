@@ -11,6 +11,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      BUILD_TARGET: ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
