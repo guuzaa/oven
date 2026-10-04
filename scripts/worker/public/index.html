@@ -12,7 +12,7 @@
   <body>
     <header class="topbar">
       <a class="brand" href="#" data-link aria-label="oven home">
-        <img class="brand-mark" src="./icon.svg" alt="" width="32" height="32" /><span class="brand-name">oven</span>
+        <img class="brand-mark" src="./icon.svg" alt="" width="32" height="32" /><span class="brand-name">Oven</span>
       </a>
       <nav class="nav" aria-label="Main">
         <a href="#features" data-link>Features</a>
@@ -30,10 +30,6 @@
           <div class="hero-copy">
             <p class="chip"><span class="chip-dot" aria-hidden="true"></span>early &amp; experimental · not production-ready</p>
             <h1>A toy <span class="hl">coding agent</span> for joy only.</h1>
-            <p class="lede">
-              oven reads and edits your files, runs shell commands, delegates to subagents and remembers
-              your project between sessions. Bring any OpenAI-compatible model. Written in Rust.
-            </p>
 
             <div class="install" id="install">
               <div class="tabs" role="tablist" aria-label="Platform">
@@ -59,11 +55,9 @@
           <div class="hero-art">
             <img class="mascot" src="./icon.svg" alt="oven mascot: a smiling little oven" width="168" height="168" />
             <div class="window" aria-label="Example one-shot run">
-              <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>~/my-project</span></div>
+              <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>~/oven</span></div>
               <pre><span class="t-prompt">$</span> oven -Q "what does this project do?"
-<span class="t-out">A Rust CLI that parses Markdown and renders
-it to HTML. Entry point is src/main.rs; the
-parser lives in src/parse/.</span>
+<span class="t-out">Oven reads and edits your files, runs shell commands, delegates to subagents and remembers your project between sessions.</span>
 <span class="t-prompt">$</span> oven <span class="t-dim"># opens the interactive TUI</span>
 <span class="t-prompt">$</span> <span class="caret" aria-hidden="true"></span></pre>
             </div>

@@ -616,6 +616,7 @@ kbd {
 .release {
   margin-top: 1.5rem;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.65rem;
 }
 
@@ -639,6 +640,7 @@ kbd {
   display: flex;
   align-items: center;
   gap: 0.75rem 1rem;
+  min-width: 0;
   padding: 0.65rem 0.7rem 0.65rem 1.1rem;
   border: 2px solid var(--line);
   border-radius: 1rem;
@@ -983,6 +985,9 @@ a.release-empty {
 
   .release-row .name {
     flex-basis: 100%;
+    overflow-x: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .release-row .button {
