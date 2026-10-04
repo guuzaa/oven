@@ -3,8 +3,20 @@ name: Rust CI
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - "docs/**"
+      - "scripts/**"
+      - "*.md"
   pull_request:
     branches: [master]
+    paths-ignore:
+      - "docs/**"
+      - "scripts/**"
+      - "*.md"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
