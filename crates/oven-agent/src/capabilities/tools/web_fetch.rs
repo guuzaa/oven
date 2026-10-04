@@ -1,10 +1,8 @@
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use htmd::HtmlToMarkdown;
-use regex::{Captures, Regex};
 use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, StatusCode, Url};
 use serde_json::{Value, json};
@@ -13,8 +11,6 @@ use super::{Tool, ToolView, labeled, require_str};
 use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
 
-const FORMAT_TEXT: &str = "text";
-const FORMAT_MARKDOWN: &str = "markdown";
 const SCHEME_HTTP: &str = "http";
 const SCHEME_HTTPS: &str = "https";
 const USER_AGENT: &str = "oven";
@@ -24,11 +20,6 @@ const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const HTML_SNIFF_CHARS: usize = 64;
 const MEDIA_HTML: &str = "text/html";
 const MEDIA_XHTML: &str = "application/xhtml+xml";
-const RAW_BLOCK_TAGS: [&str; 4] = ["script", "style", "noscript", "head"];
-const ANCHOR_PATTERN: &str =
-    r#"(?is)<a\b[^>]*?\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))[^>]*>(.*?)</a>"#;
-const BLOCK_TAG_PATTERN: &str = r"(?i)<(?:br|/?(?:p|div|h[1-6]|li|tr|table|section|article|header|footer|pre|blockquote|ul|ol|hr|main|figure|figcaption))\b[^>]*>";
-const TAG_PATTERN: &str = r"(?is)<[^>]+>";
 
 pub struct WebFetchTool {
     client: Client,
@@ -75,9 +66,8 @@ impl Tool for WebFetchTool {
         Self::view_input(input)
     }
     fn description(&self) -> &'static str {
-        "Fetch an http(s) URL and return the page for you to read. HTML comes back as \
-         markdown by default, keeping headings, lists, and links; set format to \"text\" \
-         for plain text. Non-HTML responses are returned unchanged. Nothing is written to disk."
+        "Fetch an http(s) URL and return the page as markdown. Non-HTML responses are \
+         returned unchanged. Nothing is written to disk."
     }
     fn schema(&self) -> Value {
         json!({
@@ -86,11 +76,6 @@ impl Tool for WebFetchTool {
                 "url": {
                     "type": "string",
                     "description": "Absolute http or https URL to fetch."
-                },
-                "format": {
-                    "type": "string",
-                    "enum": [FORMAT_TEXT, FORMAT_MARKDOWN],
-                    "description": "How to return an HTML page. `markdown` (default) keeps structure. `text` is plain text."
                 }
             },
             "required": ["url"]
@@ -98,16 +83,9 @@ impl Tool for WebFetchTool {
     }
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
         let url = parse_url(require_str(args, "url", Self::NAME)?)?;
-        let format = page_format(args)?;
         let (content_type, body) = self.fetch(&url, cx).await?;
-        render(&body, &content_type, format)
+        render(&body, &content_type)
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PageFormat {
-    Text,
-    Markdown,
 }
 
 impl Default for WebFetchTool {
@@ -125,22 +103,6 @@ fn http_client() -> Client {
         .user_agent(USER_AGENT)
         .build()
         .expect("web_fetch http client")
-}
-
-fn page_format(args: &Value) -> Result<PageFormat, AgentError> {
-    let Some(value) = args.get("format") else {
-        return Ok(PageFormat::Markdown);
-    };
-    let Some(raw) = value.as_str() else {
-        return Err(AgentError::from("web_fetch: 'format' must be a string"));
-    };
-    match raw.trim() {
-        FORMAT_TEXT => Ok(PageFormat::Text),
-        FORMAT_MARKDOWN => Ok(PageFormat::Markdown),
-        other => Err(AgentError::from(format!(
-            "web_fetch: format must be '{FORMAT_TEXT}' or '{FORMAT_MARKDOWN}', got '{other}'"
-        ))),
-    }
 }
 
 fn parse_url(raw: &str) -> Result<Url, AgentError> {
@@ -198,14 +160,11 @@ async fn read_body(url: &Url, response: reqwest::Response) -> Result<String, Age
     })
 }
 
-fn render(body: &str, content_type: &str, format: PageFormat) -> Result<String, AgentError> {
+fn render(body: &str, content_type: &str) -> Result<String, AgentError> {
     if !should_convert(content_type, body) {
         return Ok(body.to_string());
     }
-    match format {
-        PageFormat::Text => Ok(html_to_text(body)),
-        PageFormat::Markdown => html_to_markdown(body).map(finish),
-    }
+    html_to_markdown(body).map(finish)
 }
 
 fn should_convert(content_type: &str, body: &str) -> bool {
@@ -241,114 +200,6 @@ fn html_to_markdown(html: &str) -> Result<String, AgentError> {
         .map_err(|err| AgentError::from(format!("web_fetch: html to markdown: {err}")))
 }
 
-fn html_to_text(html: &str) -> String {
-    let mut without_hidden = html.to_string();
-    for block in raw_blocks() {
-        without_hidden = block.replace_all(&without_hidden, "").into_owned();
-    }
-    let with_links = anchors().replace_all(&without_hidden, |caps: &Captures| anchor_text(caps));
-    let with_breaks = block_tags().replace_all(&with_links, "\n");
-    let stripped = tags().replace_all(&with_breaks, "");
-    normalize_text(&decode_entities(&stripped))
-}
-
-fn anchor_text(caps: &Captures) -> String {
-    let href = caps
-        .get(1)
-        .or_else(|| caps.get(2))
-        .or_else(|| caps.get(3))
-        .map(|value| value.as_str().trim())
-        .unwrap_or("");
-    let text = collapse_inline(&tags().replace_all(&caps[4], ""));
-    if href.is_empty()
-        || href.starts_with('#')
-        || href.to_ascii_lowercase().starts_with("javascript:")
-        || text.is_empty()
-        || text == href
-    {
-        return text;
-    }
-    format!("{text} ({href})")
-}
-
-fn collapse_inline(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn normalize_text(text: &str) -> String {
-    let mut lines = Vec::new();
-    let mut blank = false;
-    for line in text.lines() {
-        let line = collapse_inline(line);
-        if line.is_empty() {
-            if !lines.is_empty() && !blank {
-                lines.push(String::new());
-                blank = true;
-            }
-            continue;
-        }
-        blank = false;
-        lines.push(line);
-    }
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
-    }
-    if lines.is_empty() {
-        String::new()
-    } else {
-        let mut out = lines.join("\n");
-        out.push('\n');
-        out
-    }
-}
-
-fn decode_entities(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find('&') {
-        out.push_str(&rest[..start]);
-        rest = &rest[start..];
-        let Some(end) = rest.find(';') else {
-            out.push_str(rest);
-            return out;
-        };
-        if let Some(ch) = decode_entity(&rest[1..end]) {
-            out.push(ch);
-            rest = &rest[end + 1..];
-        } else {
-            out.push('&');
-            rest = &rest[1..];
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-fn decode_entity(entity: &str) -> Option<char> {
-    match entity.to_ascii_lowercase().as_str() {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "nbsp" => Some(' '),
-        _ => decode_numeric(entity),
-    }
-}
-
-fn decode_numeric(entity: &str) -> Option<char> {
-    let (digits, radix) = if let Some(hex) = entity
-        .strip_prefix("#x")
-        .or_else(|| entity.strip_prefix("#X"))
-    {
-        (hex, 16)
-    } else {
-        (entity.strip_prefix('#')?, 10)
-    };
-    let code = u32::from_str_radix(digits, radix).ok()?;
-    char::from_u32(code).filter(|ch| !ch.is_control() || *ch == '\n' || *ch == '\t')
-}
-
 fn finish(text: String) -> String {
     let trimmed = text.trim_end();
     if trimmed.is_empty() {
@@ -356,33 +207,6 @@ fn finish(text: String) -> String {
     } else {
         format!("{trimmed}\n")
     }
-}
-
-fn raw_blocks() -> &'static [Regex; 4] {
-    static RE: LazyLock<[Regex; 4]> = LazyLock::new(|| {
-        RAW_BLOCK_TAGS.map(|tag| {
-            Regex::new(&format!(r"(?is)<{tag}\b[^>]*>.*?(?:</{tag}>|$)"))
-                .expect("raw block pattern")
-        })
-    });
-    &RE
-}
-
-fn anchors() -> &'static Regex {
-    static RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(ANCHOR_PATTERN).expect("anchor pattern"));
-    &RE
-}
-
-fn block_tags() -> &'static Regex {
-    static RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(BLOCK_TAG_PATTERN).expect("block tag pattern"));
-    &RE
-}
-
-fn tags() -> &'static Regex {
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(TAG_PATTERN).expect("tag pattern"));
-    &RE
 }
 
 #[cfg(test)]
@@ -398,7 +222,6 @@ mod tests {
     const SCRIPT_BODY: &str = "secret()";
     const UNSUPPORTED_SCHEME: &str = "web_fetch: unsupported url scheme 'file'";
     const MARKDOWN_PAGE: &str = "# Title\n\nHello [docs](https://example.com/docs)\n";
-    const TEXT_PAGE: &str = "Title\n\nHello docs (https://example.com/docs)\n";
 
     fn turn() -> TurnContext {
         TurnContext::for_test()
@@ -419,11 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn markdown_is_the_default_format() {
-        assert_eq!(page_format(&json!({})).unwrap(), PageFormat::Markdown);
-    }
-
-    #[test]
     fn view_names_the_url() {
         let view = WebFetchTool::view_input(&json!({
             "url": "https://example.com/docs",
@@ -441,13 +259,7 @@ mod tests {
         let server = serve(200, CONTENT_TYPE_HTML, PAGE_HTML).await;
         let tool = WebFetchTool::new();
         let out = tool
-            .run(
-                &json!({
-                    "url": page_url(&server),
-                    "format": FORMAT_MARKDOWN,
-                }),
-                &turn(),
-            )
+            .run(&json!({ "url": page_url(&server) }), &turn())
             .await
             .unwrap();
         assert_eq!(out, MARKDOWN_PAGE);
@@ -456,34 +268,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_html_as_plaintext() {
-        let server = serve(200, CONTENT_TYPE_HTML, PAGE_HTML).await;
-        let tool = WebFetchTool::new();
-        let out = tool
-            .run(
-                &json!({
-                    "url": page_url(&server),
-                    "format": FORMAT_TEXT,
-                }),
-                &turn(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(out, TEXT_PAGE);
-        assert!(!out.contains(SCRIPT_BODY));
-        assert!(!out.contains("<h1>"));
-        assert_ne!(out, MARKDOWN_PAGE);
-    }
-
-    #[tokio::test]
     async fn fetch_failure_returns_an_error() {
         let server = serve(404, CONTENT_TYPE_HTML, "missing").await;
         let tool = WebFetchTool::new();
         let url = page_url(&server);
-        let err = tool
-            .run(&json!({ "url": url, "format": FORMAT_TEXT }), &turn())
-            .await
-            .unwrap_err();
+        let err = tool.run(&json!({ "url": url }), &turn()).await.unwrap_err();
         assert_eq!(
             err.message,
             format!("web_fetch: {url} returned {NOT_FOUND}")
