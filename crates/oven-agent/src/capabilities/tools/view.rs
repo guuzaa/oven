@@ -105,10 +105,10 @@ mod tests {
         assert_eq!(
             present_tool(
                 WebFetchTool::NAME,
-                &json!({ "url": "https://example.com/docs", "path": "docs/page.md" })
+                &json!({ "url": "https://example.com/docs" })
             )
             .summary,
-            "Fetch https://example.com/docs into docs/page.md"
+            "Fetch https://example.com/docs"
         );
         assert_eq!(
             present_tool(WebFetchTool::NAME, &json!({})).summary,

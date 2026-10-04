@@ -37,7 +37,7 @@ pub const BUILTIN_TOOLS: &[BuiltinTool] = &[
     },
     BuiltinTool {
         name: WebFetchTool::NAME,
-        make: |r| Box::new(WebFetchTool::new(r)),
+        make: |_| Box::new(WebFetchTool::new()),
     },
     BuiltinTool {
         name: TodoWriteTool::NAME,

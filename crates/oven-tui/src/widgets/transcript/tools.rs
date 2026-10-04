@@ -267,13 +267,9 @@ mod tests {
     #[test]
     fn fetches_are_counted_in_the_burst_title() {
         let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Fetch https://example.com into page.md", None);
+        burst.start("1".into(), "Fetch https://example.com", None);
         assert_eq!(burst.title(), "Fetched 1 page");
-        burst.start(
-            "2".into(),
-            "Fetch https://example.com/docs into docs.md",
-            None,
-        );
+        burst.start("2".into(), "Fetch https://example.com/docs", None);
         assert_eq!(burst.title(), "Fetched 2 pages");
     }
 

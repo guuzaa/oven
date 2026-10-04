@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, StatusCode, Url};
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
+use super::{Tool, ToolView, labeled, require_str};
 use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
 
@@ -32,7 +31,6 @@ const BLOCK_TAG_PATTERN: &str = r"(?i)<(?:br|/?(?:p|div|h[1-6]|li|tr|table|secti
 const TAG_PATTERN: &str = r"(?is)<[^>]+>";
 
 pub struct WebFetchTool {
-    root: PathBuf,
     client: Client,
 }
 
@@ -40,25 +38,11 @@ impl WebFetchTool {
     pub const NAME: &'static str = "web_fetch";
 
     pub fn view_input(input: &Value) -> ToolView {
-        let Some(url) = input_str(input, "url") else {
-            return ToolView::named(Self::NAME);
-        };
-        let summary = match input_str(input, "path") {
-            Some(path) => format!("Fetch {url} into {path}"),
-            None => format!("Fetch {url}"),
-        };
-        ToolView {
-            summary,
-            collapse: true,
-            detail: None,
-        }
+        labeled(Self::NAME, "Fetch", input, "url")
     }
 
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            client: http_client(),
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     async fn fetch(&self, url: &Url, cx: &TurnContext) -> Result<(String, String), AgentError> {
@@ -90,16 +74,10 @@ impl Tool for WebFetchTool {
     fn view(&self, input: &Value) -> ToolView {
         Self::view_input(input)
     }
-    fn caps(&self) -> ToolCaps {
-        ToolCaps {
-            permission: ToolPermission::Write,
-            ..Default::default()
-        }
-    }
     fn description(&self) -> &'static str {
-        "Fetch an http(s) URL and write the page to a workspace file. HTML is stored as \
+        "Fetch an http(s) URL and return the page for you to read. HTML comes back as \
          markdown by default, keeping headings, lists, and links; set format to \"text\" \
-         for plain text. Non-HTML responses are written unchanged. A failed fetch writes nothing."
+         for plain text. Non-HTML responses are returned unchanged. Nothing is written to disk."
     }
     fn schema(&self) -> Value {
         json!({
@@ -109,49 +87,33 @@ impl Tool for WebFetchTool {
                     "type": "string",
                     "description": "Absolute http or https URL to fetch."
                 },
-                "path": {
-                    "type": "string",
-                    "description": "File path relative to the workspace root. Parent directories are created."
-                },
                 "format": {
                     "type": "string",
                     "enum": [FORMAT_TEXT, FORMAT_MARKDOWN],
-                    "description": "How to store an HTML page. `markdown` (default) keeps structure. `text` is plain text."
+                    "description": "How to return an HTML page. `markdown` (default) keeps structure. `text` is plain text."
                 }
             },
-            "required": ["url", "path"]
+            "required": ["url"]
         })
     }
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
         let url = parse_url(require_str(args, "url", Self::NAME)?)?;
-        let path_str = require_str(args, "path", Self::NAME)?;
         let format = page_format(args)?;
-        let path = resolve_within(&self.root, path_str)?;
         let (content_type, body) = self.fetch(&url, cx).await?;
-        let content = render(&body, &content_type, format)?;
-        oven_host::write(&path, &content).await.map_err(|err| {
-            AgentError::from(format!("web_fetch: write {}: {err}", path.display()))
-        })?;
-        Ok(format!(
-            "wrote {} bytes to {} as {}",
-            content.len(),
-            path.display(),
-            format.as_str()
-        ))
+        render(&body, &content_type, format)
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PageFormat {
     Text,
     Markdown,
 }
 
-impl PageFormat {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Text => FORMAT_TEXT,
-            Self::Markdown => FORMAT_MARKDOWN,
+impl Default for WebFetchTool {
+    fn default() -> Self {
+        Self {
+            client: http_client(),
         }
     }
 }
@@ -163,14 +125,6 @@ fn http_client() -> Client {
         .user_agent(USER_AGENT)
         .build()
         .expect("web_fetch http client")
-}
-
-fn input_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
 }
 
 fn page_format(args: &Value) -> Result<PageFormat, AgentError> {
@@ -441,20 +395,13 @@ mod tests {
     const PAGE_HTML: &str = "<!DOCTYPE html><html><body><h1>Title</h1><p>Hello <a href=\"https://example.com/docs\">docs</a></p><script>secret()</script></body></html>";
     const CONTENT_TYPE_HTML: &str = "text/html; charset=utf-8";
     const NOT_FOUND: &str = "404 Not Found";
-    const PAGE_PATH_MD: &str = "pages/page.md";
-    const PAGE_PATH_TXT: &str = "pages/page.txt";
     const SCRIPT_BODY: &str = "secret()";
-    const ESCAPES_ROOT: &str = "escapes root";
     const UNSUPPORTED_SCHEME: &str = "web_fetch: unsupported url scheme 'file'";
     const MARKDOWN_PAGE: &str = "# Title\n\nHello [docs](https://example.com/docs)\n";
     const TEXT_PAGE: &str = "Title\n\nHello docs (https://example.com/docs)\n";
 
     fn turn() -> TurnContext {
         TurnContext::for_test()
-    }
-
-    fn tmp_dir() -> tempdir::TempDir {
-        tempdir::TempDir::new("oven-web-fetch").unwrap()
     }
 
     async fn serve(status: u16, content_type: &str, body: &str) -> MockServer {
@@ -473,19 +420,15 @@ mod tests {
 
     #[test]
     fn markdown_is_the_default_format() {
-        assert_eq!(page_format(&json!({})).unwrap().as_str(), FORMAT_MARKDOWN);
+        assert_eq!(page_format(&json!({})).unwrap(), PageFormat::Markdown);
     }
 
     #[test]
-    fn view_names_the_url_and_path() {
+    fn view_names_the_url() {
         let view = WebFetchTool::view_input(&json!({
             "url": "https://example.com/docs",
-            "path": "docs/page.md",
         }));
-        assert_eq!(
-            view.summary,
-            "Fetch https://example.com/docs into docs/page.md"
-        );
+        assert_eq!(view.summary, "Fetch https://example.com/docs");
         assert!(view.collapse);
         assert_eq!(
             WebFetchTool::view_input(&json!({})).summary,
@@ -494,127 +437,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stores_html_as_markdown() {
+    async fn returns_html_as_markdown() {
         let server = serve(200, CONTENT_TYPE_HTML, PAGE_HTML).await;
-        let tmp = tmp_dir();
-        let tool = WebFetchTool::new(tmp.path());
-        let url = page_url(&server);
+        let tool = WebFetchTool::new();
         let out = tool
             .run(
                 &json!({
-                    "url": url,
-                    "path": PAGE_PATH_MD,
+                    "url": page_url(&server),
                     "format": FORMAT_MARKDOWN,
                 }),
                 &turn(),
             )
             .await
             .unwrap();
-        let dest = tmp.path().join(PAGE_PATH_MD);
-        let stored = std::fs::read_to_string(&dest).unwrap();
-        assert_eq!(
-            out,
-            format!(
-                "wrote {} bytes to {} as {FORMAT_MARKDOWN}",
-                stored.len(),
-                dest.display()
-            )
-        );
-        assert_eq!(stored, MARKDOWN_PAGE);
-        assert!(!stored.contains(SCRIPT_BODY));
-        assert!(!stored.contains("<h1>"));
+        assert_eq!(out, MARKDOWN_PAGE);
+        assert!(!out.contains(SCRIPT_BODY));
+        assert!(!out.contains("<h1>"));
     }
 
     #[tokio::test]
-    async fn stores_html_as_plaintext() {
+    async fn returns_html_as_plaintext() {
         let server = serve(200, CONTENT_TYPE_HTML, PAGE_HTML).await;
-        let tmp = tmp_dir();
-        let tool = WebFetchTool::new(tmp.path());
-        let url = page_url(&server);
+        let tool = WebFetchTool::new();
         let out = tool
             .run(
                 &json!({
-                    "url": url,
-                    "path": PAGE_PATH_TXT,
+                    "url": page_url(&server),
                     "format": FORMAT_TEXT,
                 }),
                 &turn(),
             )
             .await
             .unwrap();
-        let dest = tmp.path().join(PAGE_PATH_TXT);
-        let stored = std::fs::read_to_string(&dest).unwrap();
-        assert_eq!(
-            out,
-            format!(
-                "wrote {} bytes to {} as {FORMAT_TEXT}",
-                stored.len(),
-                dest.display()
-            )
-        );
-        assert_eq!(stored, TEXT_PAGE);
-        assert!(!stored.contains(SCRIPT_BODY));
-        assert!(!stored.contains("<h1>"));
-        assert_ne!(stored, MARKDOWN_PAGE);
+        assert_eq!(out, TEXT_PAGE);
+        assert!(!out.contains(SCRIPT_BODY));
+        assert!(!out.contains("<h1>"));
+        assert_ne!(out, MARKDOWN_PAGE);
     }
 
     #[tokio::test]
-    async fn fetch_failure_writes_nothing() {
+    async fn fetch_failure_returns_an_error() {
         let server = serve(404, CONTENT_TYPE_HTML, "missing").await;
-        let tmp = tmp_dir();
-        let tool = WebFetchTool::new(tmp.path());
+        let tool = WebFetchTool::new();
         let url = page_url(&server);
         let err = tool
-            .run(
-                &json!({
-                    "url": url,
-                    "path": PAGE_PATH_TXT,
-                    "format": FORMAT_TEXT,
-                }),
-                &turn(),
-            )
+            .run(&json!({ "url": url, "format": FORMAT_TEXT }), &turn())
             .await
             .unwrap_err();
         assert_eq!(
             err.message,
             format!("web_fetch: {url} returned {NOT_FOUND}")
         );
-        assert!(!tmp.path().join(PAGE_PATH_TXT).exists());
-        assert!(!tmp.path().join("pages").exists());
-    }
-
-    #[tokio::test]
-    async fn rejects_path_escape_without_fetching() {
-        let tmp = tmp_dir();
-        let tool = WebFetchTool::new(tmp.path());
-        let err = tool
-            .run(
-                &json!({
-                    "url": "https://example.com",
-                    "path": "../secret.txt",
-                }),
-                &turn(),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.message.contains(ESCAPES_ROOT));
     }
 
     #[tokio::test]
     async fn rejects_non_http_url() {
-        let tmp = tmp_dir();
-        let tool = WebFetchTool::new(tmp.path());
+        let tool = WebFetchTool::new();
         let err = tool
-            .run(
-                &json!({
-                    "url": "file:///etc/passwd",
-                    "path": PAGE_PATH_TXT,
-                }),
-                &turn(),
-            )
+            .run(&json!({ "url": "file:///etc/passwd" }), &turn())
             .await
             .unwrap_err();
         assert_eq!(err.message, UNSUPPORTED_SCHEME);
-        assert!(!tmp.path().join(PAGE_PATH_TXT).exists());
     }
 }
