@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use oven_llm::{
-    Delta, ReasoningEffort, Request, Response, Role, Router, StreamCollector,
+    Client, Delta, Provider, ReasoningEffort, Request, Response, Role, StreamCollector,
     StreamEvent as LlmStreamEvent, ThinkingMode,
 };
 
@@ -149,7 +149,7 @@ impl Agent {
 
 async fn complete_unstreamed(
     req: &Request,
-    router: &Router,
+    router: &Client,
     sink: &mut impl EventSink,
 ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
     let started = Instant::now();

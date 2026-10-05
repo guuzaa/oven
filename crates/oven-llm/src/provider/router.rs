@@ -1,4 +1,5 @@
-//! `Router`：按 `Request.model` 把请求派发到已注册 provider。
+//! `Router`：哪家 provider 拥有哪个模型。调用走 [`Client`]，重试走
+//! [`crate::RetryingProvider`]。
 //!
 //! 派发顺序：
 //! 1. slug 的 vendor 段匹配已注册 provider（再按 `:variant` / 目录默认协议选实现）；
@@ -7,8 +8,9 @@
 //!
 //! 裸 id 在只注册了一家 vendor 时会先补成 `vendor/wire-id`。
 
+use std::collections::HashSet;
+use std::ops::Deref;
 use std::sync::{Arc, PoisonError, RwLock};
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -17,10 +19,9 @@ use thiserror::Error;
 use crate::domain::{ModelId, Request, Response, StreamEvent};
 use crate::provider::catalog;
 use crate::provider::model::ModelInfo;
-use crate::provider::retry::{self, RetryPolicy};
 use crate::provider::{Provider, ProviderError, ProviderKind, ProviderName};
 
-/// `Router` 派发失败或转发 provider 失败时的错误类型。
+/// `Router` 派发失败。调用失败是 [`ProviderError`]，由 [`Client`] 返回。
 #[derive(Debug, Error)]
 pub enum RouterError {
     /// 未注册任何 provider。
@@ -29,9 +30,6 @@ pub enum RouterError {
     /// 没有任何已注册 provider 或规则匹配该模型。
     #[error("no registered provider or route matches model {0}")]
     UnknownModel(ModelId),
-    /// 目标 provider 调用失败（`complete` / `stream` 启动阶段）。
-    #[error("provider error: {0}")]
-    Provider(#[from] ProviderError),
 }
 
 impl From<RouterError> for ProviderError {
@@ -39,20 +37,15 @@ impl From<RouterError> for ProviderError {
         match err {
             RouterError::NoProviderRegistered => ProviderError::NoProviderRegistered,
             RouterError::UnknownModel(model) => ProviderError::UnknownModel(model),
-            RouterError::Provider(err) => err,
         }
     }
 }
 
-/// 按 `Request.model` 自动派发的多 provider 路由层。
-///
-/// 重试和超时默认关闭。打开后只包住 [`complete`](Self::complete) 和
-/// [`stream`](Self::stream) 的连接建立；`list_models` 不重试。
+/// 厂商表：哪个 provider 拥有哪个模型。不发起调用，也不重试。
 #[derive(Default)]
 pub struct Router {
     /// 按注册顺序保存的 provider。
     providers: Vec<Box<dyn Provider>>,
-    policy: RetryPolicy,
 }
 
 impl Router {
@@ -91,22 +84,20 @@ impl Router {
         self
     }
 
-    /// 单次 `complete` 的超时。超时记为 HTTP 408，因此也会被重试。
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.policy.timeout = Some(timeout);
-        self
-    }
-
-    /// 失败后的额外尝试次数。`0`（默认）表示不重试。
-    pub fn with_retries(mut self, max_retries: u32) -> Self {
-        self.policy.max_retries = max_retries;
-        self
-    }
-
-    /// 指数退避的基数。默认 500ms。限流响应里的 `retry_after` 优先于它。
-    pub fn with_base_backoff(mut self, base_backoff: Duration) -> Self {
-        self.policy.base_backoff = base_backoff;
-        self
+    /// 各 provider 静态目录的并集。同一 slug 只保留先注册的那条。
+    pub fn known_models(&self) -> Vec<ModelInfo> {
+        let mut models = Vec::new();
+        let mut seen = HashSet::new();
+        for provider in &self.providers {
+            for mut model in provider.known_models() {
+                let slug = model.slug();
+                if seen.insert(slug.clone()) {
+                    model.id = slug;
+                    models.push(model);
+                }
+            }
+        }
+        models
     }
 
     /// 静态目录里该模型的元数据。未命中表示没有声明，不代表不能派发。
@@ -153,43 +144,6 @@ impl Router {
         }
 
         Err(RouterError::UnknownModel(model))
-    }
-
-    /// 非流式调用：解析 `req.model` 后转发给目标 provider。
-    ///
-    /// 派发失败和 provider 失败都是 [`ProviderError`]。
-    pub async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        retry::run(&self.policy, || self.attempt_complete(req)).await
-    }
-
-    /// 流式调用：解析 `req.model` 后转发给目标 provider。
-    ///
-    /// 流启动前的派发失败以 `Err` 返回；流启动后的事件错误保持在流里。
-    /// 重试只覆盖启动，不覆盖已经开始的事件，也不套超时。
-    pub async fn stream(
-        &self,
-        req: &Request,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        retry::run(&self.policy, || self.attempt_stream(req)).await
-    }
-
-    async fn attempt_stream(
-        &self,
-        req: &Request,
-    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        let provider = self.provider(&req.model)?;
-        provider.stream(req).await
-    }
-
-    async fn attempt_complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        let provider = self.provider(&req.model)?;
-        match self.policy.timeout {
-            Some(limit) => match tokio::time::timeout(limit, provider.complete(req)).await {
-                Ok(result) => result,
-                Err(_) => Err(retry::timeout_error(limit)),
-            },
-            None => provider.complete(req).await,
-        }
     }
 
     fn single_vendor_slug(&self) -> Option<String> {
@@ -265,65 +219,53 @@ fn pick_protocol(matches: Vec<&dyn Provider>, protocol: ProviderKind) -> Option<
         .or_else(|| matches.first().copied())
 }
 
-/// 一份可替换的 [`Router`] 快照。
+/// 厂商表上的调用入口。[`Provider`] 的 `complete` / `stream` 是唯一的调用方法。
 ///
-/// [`load`](Self::load) 克隆出 `Arc<Router>`，拿着它跨 `.await` 不会挡住下一次
-/// [`replace`](Self::replace)。正在进行的请求继续用旧快照。
-#[derive(Clone)]
-pub struct RouterHandle {
-    inner: Arc<RwLock<Arc<Router>>>,
+/// 表操作（[`Router::provider`]、[`Router::qualify`]、[`Router::resolve_model`]、
+/// [`Router::known_models`]）透过 [`Deref`] 使用。
+pub struct Client {
+    router: Router,
 }
 
-impl RouterHandle {
-    pub fn new(router: Router) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(Arc::new(router))),
-        }
+impl From<Router> for Client {
+    fn from(router: Router) -> Self {
+        Self { router }
     }
+}
 
-    pub fn load(&self) -> Arc<Router> {
-        Arc::clone(&self.inner.read().unwrap_or_else(PoisonError::into_inner))
-    }
+impl Deref for Client {
+    type Target = Router;
 
-    pub fn replace(&self, router: Router) {
-        *self.inner.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(router);
+    fn deref(&self) -> &Self::Target {
+        &self.router
     }
 }
 
 #[async_trait]
-impl Provider for Router {
+impl Provider for Client {
     async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        Router::complete(self, req).await
+        let provider = self.router.provider(&req.model)?;
+        provider.complete(req).await
     }
 
     async fn stream(
         &self,
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        Router::stream(self, req).await
+        let provider = self.router.provider(&req.model)?;
+        provider.stream(req).await
     }
 
     fn known_models(&self) -> Vec<ModelInfo> {
-        let mut models = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for provider in &self.providers {
-            for mut model in provider.known_models() {
-                let slug = model.slug();
-                if seen.insert(slug.clone()) {
-                    model.id = slug;
-                    models.push(model);
-                }
-            }
-        }
-        models
+        self.router.known_models()
     }
 
     fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        Router::resolve_model(self, id)
+        self.router.resolve_model(id)
     }
 
     fn provider_name(&self) -> ProviderName {
-        match self.single_vendor_slug() {
+        match self.router.single_vendor_slug() {
             Some(slug) => ProviderName::from(slug.as_str()),
             None => ProviderName::Custom("router".into()),
         }
@@ -331,8 +273,8 @@ impl Provider for Router {
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let mut models = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for provider in &self.providers {
+        let mut seen = HashSet::new();
+        for provider in &self.router.providers {
             for mut model in provider.list_models().await? {
                 let slug = model.slug();
                 if seen.insert(slug.clone()) {
@@ -345,12 +287,37 @@ impl Provider for Router {
     }
 }
 
+/// 一份可替换的 [`Client`] 快照。
+///
+/// [`load`](Self::load) 克隆出 `Arc<Client>`，拿着它跨 `.await` 不会挡住下一次
+/// [`replace`](Self::replace)。正在进行的请求继续用旧 provider；下一次读取看到新表。
+#[derive(Clone)]
+pub struct RouterHandle {
+    inner: Arc<RwLock<Arc<Client>>>,
+}
+
+impl RouterHandle {
+    pub fn new(router: Router) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Arc::new(Client::from(router)))),
+        }
+    }
+
+    pub fn load(&self) -> Arc<Client> {
+        Arc::clone(&self.inner.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    pub fn replace(&self, router: Router) {
+        *self.inner.write().unwrap_or_else(PoisonError::into_inner) =
+            Arc::new(Client::from(router));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     use async_trait::async_trait;
     use futures::StreamExt;
@@ -516,7 +483,7 @@ mod tests {
         let calls = deepseek.calls();
         router.register(deepseek);
 
-        let response = router
+        let response = Client::from(router)
             .complete(&request("deepseek-v4-flash"))
             .await
             .unwrap();
@@ -531,7 +498,10 @@ mod tests {
         let calls = zhipu.calls();
         router.register(zhipu);
 
-        let stream = router.stream(&request("glm-5.2")).await.unwrap();
+        let stream = Client::from(router)
+            .stream(&request("glm-5.2"))
+            .await
+            .unwrap();
         let events: Vec<_> = stream.collect().await;
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], Ok(StreamEvent::MessageStop)));
@@ -546,7 +516,7 @@ mod tests {
             &["deepseek-v4-flash"],
         ));
 
-        let err = router
+        let err = Client::from(router)
             .complete(&request("deepseek-v4-flash"))
             .await
             .unwrap_err();
@@ -561,7 +531,9 @@ mod tests {
             &["deepseek-v4-flash"],
         ));
 
-        let result = router.stream(&request("deepseek-v4-flash")).await;
+        let result = Client::from(router)
+            .stream(&request("deepseek-v4-flash"))
+            .await;
         assert!(matches!(result, Err(ProviderError::Auth(_))));
     }
 
@@ -573,7 +545,7 @@ mod tests {
             &["deepseek-v4-flash"],
         ));
 
-        let result = router.stream(&request("xai/grok-4.6")).await;
+        let result = Client::from(router).stream(&request("xai/grok-4.6")).await;
         assert!(matches!(result, Err(ProviderError::UnknownModel(_))));
     }
 
@@ -714,190 +686,6 @@ mod tests {
                 .unwrap()
                 .provider_name(),
             ProviderName::Zhipu
-        );
-    }
-
-    struct Flaky {
-        fails_before_success: u32,
-        calls: Arc<Mutex<u32>>,
-        stream_calls: Arc<Mutex<u32>>,
-        list_calls: Arc<Mutex<u32>>,
-    }
-
-    impl Flaky {
-        fn new(fails_before_success: u32) -> Self {
-            Self {
-                fails_before_success,
-                calls: Arc::new(Mutex::new(0)),
-                stream_calls: Arc::new(Mutex::new(0)),
-                list_calls: Arc::new(Mutex::new(0)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Provider for Flaky {
-        async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-            let mut calls = self.calls.lock().unwrap();
-            *calls += 1;
-            if *calls <= self.fails_before_success {
-                return Err(ProviderError::Api {
-                    status: 500,
-                    body: "flaky".into(),
-                });
-            }
-            Ok(Response {
-                id: "1".into(),
-                model: req.model.as_str().to_owned(),
-                role: Role::Assistant,
-                content: Vec::new(),
-                stop_reason: None,
-                usage: None,
-            })
-        }
-
-        async fn stream(
-            &self,
-            _req: &Request,
-        ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-            let mut calls = self.stream_calls.lock().unwrap();
-            *calls += 1;
-            if *calls <= self.fails_before_success {
-                return Err(ProviderError::Api {
-                    status: 500,
-                    body: "flaky stream".into(),
-                });
-            }
-            Ok(Box::pin(futures::stream::iter(vec![Ok(
-                StreamEvent::MessageStop,
-            )])))
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-            *self.list_calls.lock().unwrap() += 1;
-            Err(ProviderError::Api {
-                status: 500,
-                body: "no list".into(),
-            })
-        }
-
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
-        }
-
-        fn provider_name(&self) -> ProviderName {
-            ProviderName::Custom("flaky".into())
-        }
-    }
-
-    fn retrying(provider: Flaky) -> (Router, Flaky) {
-        let calls = provider.calls.clone();
-        let stream_calls = provider.stream_calls.clone();
-        let list_calls = provider.list_calls.clone();
-        let fails = provider.fails_before_success;
-        let router = Router::new()
-            .with_retries(3)
-            .with_base_backoff(Duration::from_millis(1));
-        let mut router = router;
-        router.register(provider);
-        (
-            router,
-            Flaky {
-                fails_before_success: fails,
-                calls,
-                stream_calls,
-                list_calls,
-            },
-        )
-    }
-
-    #[tokio::test]
-    async fn retries_complete_until_success() {
-        let (router, flaky) = retrying(Flaky::new(2));
-        router.complete(&request("flaky/mock")).await.unwrap();
-        assert_eq!(*flaky.calls.lock().unwrap(), 3);
-    }
-
-    #[tokio::test]
-    async fn does_not_retry_auth_errors() {
-        struct AuthFail;
-        #[async_trait]
-        impl Provider for AuthFail {
-            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
-                Err(ProviderError::Auth("bad key".into()))
-            }
-            async fn stream(
-                &self,
-                _req: &Request,
-            ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
-            {
-                Err(ProviderError::Auth("bad key".into()))
-            }
-            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-                None
-            }
-            fn provider_name(&self) -> ProviderName {
-                ProviderName::Custom("auth".into())
-            }
-        }
-
-        let router = Router::new()
-            .with_retries(5)
-            .with_base_backoff(Duration::from_millis(1));
-        let mut router = router;
-        router.register(AuthFail);
-        let err = router.complete(&request("auth/mock")).await.unwrap_err();
-        assert!(matches!(err, ProviderError::Auth(_)));
-    }
-
-    #[tokio::test]
-    async fn retries_stream_start_not_list_models() {
-        let (router, flaky) = retrying(Flaky::new(1));
-        let stream = router.stream(&request("flaky/mock")).await.unwrap();
-        let events: Vec<_> = stream.collect().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(*flaky.stream_calls.lock().unwrap(), 2);
-
-        let err = router.list_models().await.unwrap_err();
-        assert!(matches!(err, ProviderError::Api { status: 500, .. }));
-        assert_eq!(*flaky.list_calls.lock().unwrap(), 1);
-    }
-
-    #[tokio::test]
-    async fn complete_timeout_is_a_retryable_408() {
-        struct Slow;
-        #[async_trait]
-        impl Provider for Slow {
-            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                Err(ProviderError::Api {
-                    status: 500,
-                    body: "late".into(),
-                })
-            }
-            async fn stream(
-                &self,
-                _req: &Request,
-            ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
-            {
-                unimplemented!()
-            }
-            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-                None
-            }
-            fn provider_name(&self) -> ProviderName {
-                ProviderName::Custom("slow".into())
-            }
-        }
-
-        let mut router = Router::new()
-            .with_timeout(Duration::from_millis(10))
-            .with_retries(0);
-        router.register(Slow);
-        let err = router.complete(&request("slow/mock")).await.unwrap_err();
-        assert!(
-            matches!(err, ProviderError::Api { status: 408, .. }),
-            "{err}"
         );
     }
 }

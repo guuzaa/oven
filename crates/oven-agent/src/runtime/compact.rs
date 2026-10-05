@@ -1,7 +1,7 @@
 //! History compaction: replace the conversation with an LLM-written summary
 //! so a long session can continue in a fresh, small context.
 
-use oven_llm::{Message, ThinkingMode, ToolChoice};
+use oven_llm::{Message, Provider, ThinkingMode, ToolChoice};
 
 use crate::core::error::AgentError;
 use crate::runtime::agent::Agent;

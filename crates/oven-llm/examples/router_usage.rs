@@ -4,7 +4,7 @@
 //! - 用 `ProviderBuilder` 构造已知厂商（DeepSeek / Zhipu）
 //! - 再挂一个自定义网关：`name` + `base_url` + key，协议默认 completions
 //! - 注册进 `Router`；slug 的 vendor 段决定派发（`my-proxy/...` → 自定义）
-//! - 通过 `router.complete` / `router.stream` 自动派发
+//! - 通过 `Client` 的 `complete` / `stream` 自动派发
 //! - 未注册模型：`provider()` 返回 `RouterError::UnknownModel`，
 //!   `complete` / `stream` 返回 `ProviderError::UnknownModel`
 //!
@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use oven_llm::{
-    Delta, ModelId, ModelInfo, ProviderBuilder, ProviderName, Request, Router, RouterError,
-    StreamEvent, ThinkingMode,
+    Client, Delta, ModelId, ModelInfo, Provider, ProviderBuilder, ProviderName, Request, Router,
+    RouterError, StreamEvent, ThinkingMode,
 };
 
 fn api_key(env: &str) -> String {
@@ -46,9 +46,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_model(ModelInfo::minimal("local-llama", my_proxy))
         .build()?;
 
-    // 2. 注册进 Router。slug 的 vendor 段决定派发。
+    // 2. 注册进 Router。slug 的 vendor 段决定派发。调用走 Client。
     let mut router = Router::new();
     router.register(deepseek).register(zhipu).register(gateway);
+    let client = Client::from(router);
 
     // 3. 展示派发解析与未命中错误。
     for id in [
@@ -57,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "my-proxy/local-llama",
         "xai/grok-4.6",
     ] {
-        match router.provider(&ModelId::from(id)) {
+        match client.provider(&ModelId::from(id)) {
             Ok(provider) => println!("{id} -> {}", provider.provider_name()),
             Err(RouterError::UnknownModel(model)) => println!("{id} -> unknown: {model}"),
             Err(err) => println!("{id} -> error: {err}"),
@@ -71,14 +72,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .temperature(0.01)
         .thinking(ThinkingMode::Disabled)
         .build()?;
-    match router.complete(&request).await {
+    match client.complete(&request).await {
         Ok(response) => println!("complete() -> {}", response.text()),
         Err(err) => eprintln!("complete() failed (expected without a real API key): {err}"),
     }
 
     // 5. 流式调用。
     tokio::time::sleep(Duration::from_secs(1)).await;
-    match router.stream(&request).await {
+    match client.stream(&request).await {
         Ok(mut stream) => {
             print!("stream(): ");
             while let Some(event) = stream.next().await {

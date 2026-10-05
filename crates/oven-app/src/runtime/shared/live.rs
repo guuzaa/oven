@@ -5,7 +5,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, MutexGuard, PoisonError};
 
-use oven_llm::{ModelId, ReasoningEffort, Router};
+use oven_llm::{Client, ModelId, ReasoningEffort, Router};
 use tokio::sync::watch;
 
 use crate::commands::{CommandOutcome, Model, ModelDirective, SlashRegistry};
@@ -29,7 +29,7 @@ impl Shared {
         self.state.borrow().phase.is_active()
     }
 
-    fn router_snapshot(&self) -> Arc<Router> {
+    fn router_snapshot(&self) -> Arc<Client> {
         self.router.load()
     }
 

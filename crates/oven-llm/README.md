@@ -70,7 +70,7 @@ Register each vendor once. `Request.model` decides where the call goes — mixin
 configuration, not a `match` in application code.
 
 ```rust
-use oven_llm::{ProviderBuilder, ProviderName, Request, Router};
+use oven_llm::{Client, Provider, ProviderBuilder, ProviderName, Request, Router};
 
 let deepseek = ProviderBuilder::provider()
     .provider_name(ProviderName::DeepSeek)
@@ -83,46 +83,50 @@ let zhipu = ProviderBuilder::provider()
 
 let mut router = Router::new();
 router.register(deepseek).register(zhipu);
+let client = Client::from(router);
 
 let request = Request::builder()
     .model("zhipu/glm-5.3")
     .prompt("hello")
     .build()?;
 
-// `complete` and `stream` return `ProviderError` (dispatch errors included).
-let response = router.complete(&request).await?;
-let mut stream = router.stream(&request).await?;
+// `Client` implements `Provider`. `complete` and `stream` are the trait methods.
+let response = client.complete(&request).await?;
+let mut stream = client.stream(&request).await?;
 ```
+
+`Router` only answers which provider owns a model (`provider`, `qualify`). It does not call
+providers and it does not retry. `Client` is that table as a `Provider`.
 
 `register` takes `impl Provider + 'static`, so a concrete client does not need to be boxed first.
 `ProviderBuilder::build` still returns `Box<dyn Provider>`, and that box registers as-is.
 
-Retry and timeout are off until set. When on, transport errors, rate limits, and HTTP 408/429/5xx
-are retried. Streaming retries the connection start, not events already in flight. `list_models`
-is not retried. Opting in uses a Tokio timer.
+Retry and timeout are off until you wrap a provider with `RetryingProvider`. When on, transport
+errors, rate limits, and HTTP 408/429/5xx are retried. Streaming retries the connection start,
+not events already in flight. `list_models` is not retried. Opting in uses a Tokio timer.
 
 ```rust
-let router = Router::new()
+let deepseek = oven_llm::RetryingProvider::new(deepseek)
     .with_timeout(std::time::Duration::from_secs(60))
     .with_retries(2);
 ```
 
-`RouterHandle` shares one snapshot: `load` clones an `Arc<Router>` that stays stable across
-`.await`, and `replace` swaps the whole router. In-flight loads keep the previous snapshot.
+`RouterHandle` shares one `Client` snapshot: `load` clones an `Arc<Client>` that stays stable
+across `.await`, and `replace` swaps the whole table. In-flight loads keep the previous providers.
 
 Dispatch:
 
 1. The vendor segment of the slug (`deepseek/...` → the DeepSeek registration).
 2. Each provider's static catalog (first registration wins).
-3. No match → `RouterError::UnknownModel` from `provider()`. `complete` / `stream` surface that
-   as `ProviderError::UnknownModel`.
+3. No match → `RouterError::UnknownModel` from `Router::provider`. `Client`'s `complete` / `stream`
+   surface that as `ProviderError::UnknownModel`.
 
 Prefer `vendor/wire-id` (`deepseek/deepseek-v4-flash`). A bare id is qualified when the router
 only has one vendor. Protocol comes from the catalog, or from an optional `:responses` suffix —
 callers do not pick `ProviderKind` per request.
 
-`Router` itself implements `Provider`, so an agent can hold one object for both a single vendor
-and a mix.
+`Client` implements `Provider`, so an agent holds one object for both a single vendor and a mix.
+The trait methods are the call. `Router` stays the vendor table behind that client.
 
 ## Vendors
 

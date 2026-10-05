@@ -1,7 +1,9 @@
 use std::time::{Duration, Instant};
 
 use oven_agent::{ModelCatalog, RouterHandle};
-use oven_llm::{ModelInfo, Provider, ProviderBuilder, ProviderName, Request, Router};
+use oven_llm::{
+    ModelInfo, Provider, ProviderBuilder, ProviderName, Request, RetryingProvider, Router,
+};
 
 use crate::core::config::{AppConfig, ModelMetadata, ProviderConfig};
 use crate::core::error::AppError;
@@ -34,16 +36,18 @@ fn declared_model_info(
 }
 
 pub(crate) fn build_router(config: &AppConfig) -> Result<Router, AppError> {
-    let mut router = Router::new()
-        .with_timeout(config.request_timeout())
-        .with_retries(config.max_retries)
-        .with_base_backoff(config.base_backoff());
+    let mut router = Router::new();
     let mut last_err = None;
     let mut registered = 0usize;
     for provider in config.registerable_providers() {
         match build_client(provider) {
             Ok(client) => {
-                router.register(client);
+                router.register(
+                    RetryingProvider::new(client)
+                        .with_timeout(config.request_timeout())
+                        .with_retries(config.max_retries)
+                        .with_base_backoff(config.base_backoff()),
+                );
                 registered += 1;
             }
             Err(e) => last_err = Some(e),

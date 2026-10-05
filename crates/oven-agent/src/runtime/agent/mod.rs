@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use oven_llm::{Message, ModelId, ReasoningEffort, Router, RouterHandle};
+use oven_llm::{Client, Message, ModelId, ReasoningEffort, Router, RouterHandle};
 
 use crate::capabilities::tools::Tool;
 use crate::core::event::AgentEvent;
@@ -99,9 +99,9 @@ impl Agent {
         self.selection.clone()
     }
 
-    /// A snapshot of the current router. Cheap to clone and safe to hold
-    /// across `.await` points, unlike a lock guard.
-    pub fn router(&self) -> Arc<Router> {
+    /// The current client snapshot. Cheap to clone and safe to hold across
+    /// `.await`. Replacing the handle does not change a snapshot already loaded.
+    pub fn router(&self) -> Arc<Client> {
         self.router.load()
     }
 
