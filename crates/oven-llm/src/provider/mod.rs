@@ -3,6 +3,7 @@
 mod builder;
 pub(crate) mod catalog;
 mod completions;
+pub(crate) mod endpoint;
 mod error;
 pub(crate) mod http;
 pub mod model;
@@ -63,73 +64,48 @@ pub trait Provider: Send + Sync {
     fn provider_name(&self) -> ProviderName;
 }
 
-/// A boxed concrete provider registers without the caller unsizing it first.
-#[async_trait]
-impl<P> Provider for Box<P>
-where
-    P: Provider + Sized + 'static,
-{
-    async fn complete(&self, req: &Request) -> Result<Response> {
-        Provider::complete(&**self, req).await
-    }
+macro_rules! impl_boxed_provider {
+    ($($impl_head:tt)*) => {
+        #[async_trait]
+        impl $($impl_head)* {
+            async fn complete(&self, req: &Request) -> Result<Response> {
+                Provider::complete(&**self, req).await
+            }
 
-    async fn stream(&self, req: &Request) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-        Provider::stream(&**self, req).await
-    }
+            async fn stream(
+                &self,
+                req: &Request,
+            ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
+                Provider::stream(&**self, req).await
+            }
 
-    fn known_models(&self) -> Vec<ModelInfo> {
-        Provider::known_models(&**self)
-    }
+            fn known_models(&self) -> Vec<ModelInfo> {
+                Provider::known_models(&**self)
+            }
 
-    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        Provider::resolve_model(&**self, id)
-    }
+            fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+                Provider::resolve_model(&**self, id)
+            }
 
-    fn protocol(&self) -> Option<ProviderKind> {
-        Provider::protocol(&**self)
-    }
+            fn protocol(&self) -> Option<ProviderKind> {
+                Provider::protocol(&**self)
+            }
 
-    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        Provider::list_models(&**self).await
-    }
+            async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+                Provider::list_models(&**self).await
+            }
 
-    fn provider_name(&self) -> ProviderName {
-        Provider::provider_name(&**self)
-    }
+            fn provider_name(&self) -> ProviderName {
+                Provider::provider_name(&**self)
+            }
+        }
+    };
 }
 
-/// `Box<dyn Provider>` is itself a provider, so [`Router::register`] can take
-/// either a concrete client or one already boxed by [`ProviderBuilder::build`].
-#[async_trait]
-impl Provider for Box<dyn Provider> {
-    async fn complete(&self, req: &Request) -> Result<Response> {
-        Provider::complete(&**self, req).await
-    }
-
-    async fn stream(&self, req: &Request) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-        Provider::stream(&**self, req).await
-    }
-
-    fn known_models(&self) -> Vec<ModelInfo> {
-        Provider::known_models(&**self)
-    }
-
-    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        Provider::resolve_model(&**self, id)
-    }
-
-    fn protocol(&self) -> Option<ProviderKind> {
-        Provider::protocol(&**self)
-    }
-
-    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        Provider::list_models(&**self).await
-    }
-
-    fn provider_name(&self) -> ProviderName {
-        Provider::provider_name(&**self)
-    }
-}
+// A boxed concrete provider, and `Box<dyn Provider>` from `ProviderBuilder`,
+// both register through the same delegation.
+impl_boxed_provider!(<P> Provider for Box<P> where P: Provider + Sized + 'static);
+impl_boxed_provider!(Provider for Box<dyn Provider>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProviderName {
@@ -183,15 +159,8 @@ impl ProviderName {
     }
 
     /// 该厂商建议的默认模型 wire id。没有预设时返回 `None`。
-    pub fn default_model(&self) -> Option<&'static str> {
-        match self {
-            ProviderName::OpenAI => Some("gpt-5.6-terra"),
-            ProviderName::DeepSeek => Some("deepseek-v4-flash"),
-            ProviderName::Moonshot => Some("kimi-k3"),
-            ProviderName::Zhipu => Some("glm-5.3"),
-            ProviderName::Grok => Some("grok-4.6"),
-            ProviderName::Anthropic | ProviderName::Custom(_) => None,
-        }
+    pub const fn default_model(&self) -> Option<&'static str> {
+        catalog::default_model_id(self)
     }
 
     /// 默认协议下的静态目录。不构造客户端，也不需要 API key。

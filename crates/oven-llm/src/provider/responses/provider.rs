@@ -10,8 +10,6 @@
 //!   基于 `eventsource-stream` 的 SSE 流式解码
 //! - `Provider::known_models` / `Provider::list_models`：模型元数据查询
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -22,26 +20,23 @@ use secrecy::SecretString;
 
 use super::decoder::{self, StreamDecoder};
 use super::encoder;
-use super::models::{deepseek_models, grok_models};
 use super::types::{ResponseEvent, ResponseObject};
 use crate::ProviderName;
 use crate::domain::{ModelId, Request, Response, StreamEvent};
+use crate::provider::catalog;
+use crate::provider::endpoint::Endpoint;
 use crate::provider::http;
 use crate::provider::model::ModelInfo;
-use crate::provider::validate::validate_request;
-use crate::provider::{DEEPSEEK_BASE_URL, GROK_BASE_URL, OPENAI_BASE_URL, Provider, ProviderError};
+use crate::provider::{
+    DEEPSEEK_BASE_URL, GROK_BASE_URL, OPENAI_BASE_URL, Provider, ProviderError, ProviderKind,
+};
 
 /// OpenAI Responses API 协议的通用 `Provider` 实现。
 ///
 /// 通过 `base_url` 区分具体服务商（DeepSeek / Grok / OpenAI 官方等），wire
 /// 格式（`types.rs`/`encoder.rs`/`decoder.rs`）在这些服务商之间完全共享。
 pub struct ResponsesProvider {
-    base_url: String,
-    provider_name: ProviderName,
-    api_key: SecretString,
-    extra_headers: HeaderMap,
-    model_catalog: HashMap<ModelId, ModelInfo>,
-    client: isahc::HttpClient,
+    endpoint: Endpoint,
 }
 
 impl ResponsesProvider {
@@ -101,18 +96,14 @@ impl ResponsesProvider {
         known_models: Vec<ModelInfo>,
         extra_headers: HeaderMap,
     ) -> Self {
-        let model_catalog = known_models
-            .into_iter()
-            .map(|model| (ModelId::from(model.id.as_str()), model))
-            .collect();
-
         Self {
-            base_url: base_url.into(),
-            provider_name,
-            api_key: api_key.into(),
-            extra_headers,
-            model_catalog,
-            client: isahc::HttpClient::new().expect("isahc HttpClient::new() should succeed"),
+            endpoint: Endpoint::new(
+                base_url,
+                provider_name,
+                api_key,
+                known_models,
+                extra_headers,
+            ),
         }
     }
 
@@ -124,7 +115,7 @@ impl ResponsesProvider {
             DEEPSEEK_BASE_URL,
             ProviderName::DeepSeek,
             api_key,
-            deepseek_models(),
+            catalog::models_for(&ProviderName::DeepSeek, ProviderKind::Responses),
             HeaderMap::new(),
         )
     }
@@ -136,7 +127,7 @@ impl ResponsesProvider {
             GROK_BASE_URL,
             ProviderName::Grok,
             api_key,
-            grok_models(),
+            catalog::models_for(&ProviderName::Grok, ProviderKind::Responses),
             HeaderMap::new(),
         )
     }
@@ -159,45 +150,24 @@ impl ResponsesProvider {
     /// 去。`provider_options` 的键与标准字段重名时会覆盖标准字段。
     fn build_body(&self, req: &Request, stream: bool) -> Result<serde_json::Value, ProviderError> {
         let wire = encoder::encode_request(req, stream)?;
-
-        let mut body = serde_json::to_value(wire).map_err(|err| {
+        let body = serde_json::to_value(wire).map_err(|err| {
             ProviderError::ResponsesEncode(encoder::EncodeError::InvalidContent(err.to_string()))
         })?;
-
-        if !req.provider_options.is_empty() {
-            let object = body
-                .as_object_mut()
-                .expect("CreateResponseRequest always serializes to a JSON object");
-            for (key, value) in req.provider_options.iter() {
-                object.insert(key.clone(), value.clone());
-            }
-        }
-
-        Ok(body)
+        Ok(Endpoint::merge_provider_options(
+            body,
+            &req.provider_options,
+        ))
     }
 
-    /// 对静态目录命中的模型执行调用模式相关校验；未命中时按宽松策略透传，
-    /// 交由上游服务决定其可用性与能力约束。
-    fn validate_known_model(&self, req: &Request, stream: bool) -> Result<(), ProviderError> {
-        if let Some(model) = self.resolve_model(&req.model) {
-            validate_request(req, model, stream)?;
-        }
-        Ok(())
-    }
-
-    /// POST `body` 到 `{base_url}/responses`，返回响应的原始 body；非 2xx
-    /// 状态码映射为具体的 `ProviderError`。
     async fn post_responses(
         &self,
         body: &serde_json::Value,
     ) -> Result<isahc::Response<isahc::AsyncBody>, ProviderError> {
-        let body_bytes = serde_json::to_vec(body).map_err(|e| {
-            ProviderError::ResponsesEncode(encoder::EncodeError::InvalidContent(e.to_string()))
-        })?;
-
-        let headers = http::build_headers(&self.api_key, &self.extra_headers);
-        let url = http::endpoint(&self.base_url, "responses");
-        http::post_json(&self.client, &headers, url, body_bytes).await
+        self.endpoint
+            .post("responses", body, |reason| {
+                ProviderError::ResponsesEncode(encoder::EncodeError::InvalidContent(reason))
+            })
+            .await
     }
 }
 
@@ -205,7 +175,7 @@ impl ResponsesProvider {
 impl Provider for ResponsesProvider {
     /// 发送一次非流式请求（强制 `stream = false`）。
     async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        self.validate_known_model(req, false)?;
+        self.endpoint.validate_known_model(req, false)?;
         let body = self.build_body(req, false)?;
         let mut response = self.post_responses(&body).await?;
 
@@ -225,7 +195,7 @@ impl Provider for ResponsesProvider {
         &self,
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        self.validate_known_model(req, true)?;
+        self.endpoint.validate_known_model(req, true)?;
         let body = self.build_body(req, true)?;
         let response = self.post_responses(&body).await?;
 
@@ -298,16 +268,12 @@ impl Provider for ResponsesProvider {
         Ok(stream.boxed())
     }
 
-    /// 该 provider 静态已知的模型列表（构造时传入，不涉及网络）。
     fn known_models(&self) -> Vec<ModelInfo> {
-        self.model_catalog.values().cloned().collect()
+        self.endpoint.known_models()
     }
 
-    /// 通过构造时建立的哈希索引查找静态模型元数据。
     fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        self.model_catalog
-            .get(id)
-            .or_else(|| self.model_catalog.get(&ModelId::from(id.wire_id())))
+        self.endpoint.resolve_model(id)
     }
 
     fn protocol(&self) -> Option<crate::ProviderKind> {
@@ -315,20 +281,13 @@ impl Provider for ResponsesProvider {
     }
 
     fn provider_name(&self) -> ProviderName {
-        self.provider_name.clone()
+        self.endpoint.provider_name.clone()
     }
 
-    /// GET `{base_url}/models`，仅填充 `id` 与 `provider` 字段。
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let headers = http::build_headers(&self.api_key, &self.extra_headers);
-        http::list_models(
-            &self.client,
-            &headers,
-            &self.base_url,
-            &self.provider_name,
-            |e| ProviderError::ResponsesDecode(decoder::DecodeError::Json(e)),
-        )
-        .await
+        self.endpoint
+            .list_models(|err| ProviderError::ResponsesDecode(decoder::DecodeError::Json(err)))
+            .await
     }
 }
 
@@ -336,6 +295,14 @@ impl Provider for ResponsesProvider {
 mod tests {
     use super::super::testdata::deepseek_sse;
     use super::*;
+
+    fn deepseek_models() -> Vec<ModelInfo> {
+        catalog::models_for(&ProviderName::DeepSeek, ProviderKind::Responses)
+    }
+
+    fn grok_models() -> Vec<ModelInfo> {
+        catalog::models_for(&ProviderName::Grok, ProviderKind::Responses)
+    }
     use crate::domain::message::{ContentBlock, Message};
     use crate::domain::stream::StreamCollector;
     use isahc::http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
@@ -360,24 +327,24 @@ mod tests {
     #[test]
     fn new_dispatches_openai() {
         let provider = ResponsesProvider::new(ProviderName::OpenAI, api_key("k"));
-        assert_eq!(provider.base_url, "https://api.openai.com/v1");
-        assert_eq!(provider.provider_name, ProviderName::OpenAI);
+        assert_eq!(provider.endpoint.base_url, "https://api.openai.com/v1");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::OpenAI);
         assert!(provider.known_models().is_empty());
     }
 
     #[test]
     fn new_dispatches_deepseek() {
         let provider = ResponsesProvider::new(ProviderName::DeepSeek, api_key("k"));
-        assert_eq!(provider.base_url, "https://api.deepseek.com");
-        assert_eq!(provider.provider_name, ProviderName::DeepSeek);
+        assert_eq!(provider.endpoint.base_url, "https://api.deepseek.com");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::DeepSeek);
         assert_eq!(provider.known_models().len(), deepseek_models().len());
     }
 
     #[test]
     fn new_dispatches_grok() {
         let provider = ResponsesProvider::new(ProviderName::Grok, api_key("k"));
-        assert_eq!(provider.base_url, "https://api.x.ai/v1");
-        assert_eq!(provider.provider_name, ProviderName::Grok);
+        assert_eq!(provider.endpoint.base_url, "https://api.x.ai/v1");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::Grok);
         assert_eq!(provider.known_models().len(), grok_models().len());
     }
 
@@ -400,9 +367,9 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        assert_eq!(provider.base_url, "https://example.com");
+        assert_eq!(provider.endpoint.base_url, "https://example.com");
         assert_eq!(
-            provider.provider_name,
+            provider.endpoint.provider_name,
             ProviderName::Custom("example".into())
         );
         assert!(provider.known_models().is_empty());
@@ -417,7 +384,8 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("secret-token"),
         );
-        let headers = http::build_headers(&provider.api_key, &provider.extra_headers);
+        let headers =
+            http::build_headers(&provider.endpoint.api_key, &provider.endpoint.extra_headers);
         assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer secret-token");
         assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
     }
@@ -436,7 +404,8 @@ mod tests {
             Vec::new(),
             extra,
         );
-        let headers = http::build_headers(&provider.api_key, &provider.extra_headers);
+        let headers =
+            http::build_headers(&provider.endpoint.api_key, &provider.endpoint.extra_headers);
         assert_eq!(headers.get("x-custom").unwrap(), "value");
     }
 
@@ -448,7 +417,7 @@ mod tests {
             api_key("k"),
         );
         assert_eq!(
-            http::endpoint(&provider.base_url, "responses"),
+            http::endpoint(&provider.endpoint.base_url, "responses"),
             "https://example.com/responses"
         );
     }
@@ -461,7 +430,7 @@ mod tests {
             api_key("k"),
         );
         assert_eq!(
-            http::endpoint(&provider.base_url, "/responses"),
+            http::endpoint(&provider.endpoint.base_url, "/responses"),
             "https://example.com/responses"
         );
     }

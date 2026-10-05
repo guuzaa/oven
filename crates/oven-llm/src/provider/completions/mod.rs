@@ -3,7 +3,6 @@
 
 pub mod decoder;
 pub mod encoder;
-pub mod models;
 pub mod provider;
 pub mod types;
 

@@ -159,22 +159,7 @@ impl Router {
     ///
     /// 派发失败和 provider 失败都是 [`ProviderError`]。
     pub async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        let mut last_err = None;
-        for attempt in 0..=self.policy.max_retries {
-            if let Some(err) = last_err.as_ref() {
-                let backoff = retry::backoff_for(&self.policy, attempt, err);
-                retry::log_retry(attempt, backoff, err);
-                tokio::time::sleep(backoff).await;
-            }
-            match self.attempt_complete(req).await {
-                Ok(response) => return Ok(response),
-                Err(err) if attempt < self.policy.max_retries && retry::is_retryable(&err) => {
-                    last_err = Some(err);
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(retry::exhausted(last_err))
+        retry::run(&self.policy, || self.attempt_complete(req)).await
     }
 
     /// 流式调用：解析 `req.model` 后转发给目标 provider。
@@ -185,23 +170,15 @@ impl Router {
         &self,
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        let mut last_err = None;
-        for attempt in 0..=self.policy.max_retries {
-            if let Some(err) = last_err.as_ref() {
-                let backoff = retry::backoff_for(&self.policy, attempt, err);
-                retry::log_retry(attempt, backoff, err);
-                tokio::time::sleep(backoff).await;
-            }
-            let provider = self.provider(&req.model)?;
-            match provider.stream(req).await {
-                Ok(stream) => return Ok(stream),
-                Err(err) if attempt < self.policy.max_retries && retry::is_retryable(&err) => {
-                    last_err = Some(err);
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Err(retry::exhausted(last_err))
+        retry::run(&self.policy, || self.attempt_stream(req)).await
+    }
+
+    async fn attempt_stream(
+        &self,
+        req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        let provider = self.provider(&req.model)?;
+        provider.stream(req).await
     }
 
     async fn attempt_complete(&self, req: &Request) -> Result<Response, ProviderError> {
@@ -252,22 +229,18 @@ impl Router {
     }
 
     fn lookup_catalog(&self, model: &ModelId) -> Option<ModelInfo> {
-        for provider in &self.providers {
-            if let Some(info) = provider.resolve_model(model) {
-                return Some(info.clone());
-            }
+        if let Some(info) = self.resolve_model(model) {
+            return Some(info.clone());
         }
-        catalog::all_models()
-            .into_iter()
+        let models = catalog::all_models();
+        models
+            .iter()
             .find(|info| {
                 info.id == model.wire_id()
                     && info.provider.matches_vendor(model.vendor().unwrap_or(""))
             })
-            .or_else(|| {
-                catalog::all_models()
-                    .into_iter()
-                    .find(|info| info.id == model.wire_id())
-            })
+            .or_else(|| models.iter().find(|info| info.id == model.wire_id()))
+            .cloned()
     }
 }
 

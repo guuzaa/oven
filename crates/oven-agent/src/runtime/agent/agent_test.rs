@@ -34,17 +34,6 @@ use crate::core::interaction::{AnswerResponse, PendingRequest, Question, UserReq
 const APPROVED_FILE: &str = "approved.txt";
 const APPROVED_CONTENT: &str = "approved";
 
-fn non_streaming(name: &ProviderName, id: &ModelId) -> Option<&'static ModelInfo> {
-    static MODEL: std::sync::OnceLock<ModelInfo> = std::sync::OnceLock::new();
-    match id.vendor() {
-        Some(vendor) if !name.matches_vendor(vendor) => None,
-        _ => Some(
-            MODEL
-                .get_or_init(|| ModelInfo::minimal("default", ProviderName::Custom("mock".into()))),
-        ),
-    }
-}
-
 fn write_approved_command() -> &'static str {
     #[cfg(windows)]
     {
@@ -239,7 +228,7 @@ impl Provider for MockProvider {
     }
 
     fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        non_streaming(&self.provider_name(), id)
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -276,7 +265,7 @@ impl Provider for SlowComplete {
     }
 
     fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        non_streaming(&self.provider_name(), id)
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -1355,7 +1344,7 @@ impl Provider for CaptureSystem {
     }
 
     fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        non_streaming(&self.provider_name(), id)
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -1425,7 +1414,7 @@ impl Provider for CaptureTools {
     }
 
     fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        non_streaming(&self.provider_name(), id)
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -1623,7 +1612,7 @@ impl Provider for CaptureRequests {
     }
 
     fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        non_streaming(&self.provider_name(), id)
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {

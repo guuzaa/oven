@@ -1,9 +1,5 @@
-//! Optional per-attempt timeout and bounded retries for [`crate::Router`].
-//!
-//! Off unless the caller opts in. Transport failures, rate limits, and HTTP
-//! 408/429/5xx are retried. A timeout is reported as 408 so the same rule
-//! covers it. Streaming retries the connection start only; `list_models` is
-//! never passed through here.
+//! Retry and timeout helpers for [`crate::Router`]. The policy itself is documented
+//! on `Router`: off by default, and never applied to `list_models`.
 
 use std::time::Duration;
 
@@ -72,6 +68,27 @@ pub(crate) fn log_retry(attempt: u32, backoff: Duration, err: &ProviderError) {
         status = status_of(err),
         "retrying provider request"
     );
+}
+
+pub(crate) async fn run<T, F, Fut>(policy: &RetryPolicy, mut op: F) -> Result<T, ProviderError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ProviderError>>,
+{
+    let mut last_err = None;
+    for attempt in 0..=policy.max_retries {
+        if let Some(err) = last_err.as_ref() {
+            let backoff = backoff_for(policy, attempt, err);
+            log_retry(attempt, backoff, err);
+            tokio::time::sleep(backoff).await;
+        }
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < policy.max_retries && is_retryable(&err) => last_err = Some(err),
+            Err(err) => return Err(err),
+        }
+    }
+    Err(exhausted(last_err))
 }
 
 pub(crate) fn exhausted(err: Option<ProviderError>) -> ProviderError {

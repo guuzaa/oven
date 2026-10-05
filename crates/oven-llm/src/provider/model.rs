@@ -1,5 +1,8 @@
 //! `ModelInfo` / `ModelCapabilities` / `Pricing`：模型能力身份证。
 
+use std::sync::OnceLock;
+
+use crate::domain::ModelId;
 use crate::{ProviderKind, ProviderName};
 
 /// 描述单个模型的元数据（所属 provider、上下文窗口、最大输出 token、能力集合、定价）。
@@ -29,6 +32,29 @@ impl ModelCapabilities {
             supports_system_prompt: true,
             max_concurrent_tools: None,
         }
+    }
+
+    /// Replace a flag only when the caller set it. `None` keeps [`supported`](Self::supported).
+    pub const fn with_overrides(
+        mut self,
+        vision: Option<bool>,
+        tools: Option<bool>,
+        streaming: Option<bool>,
+        system_prompt: Option<bool>,
+    ) -> Self {
+        if let Some(value) = vision {
+            self.supports_vision = value;
+        }
+        if let Some(value) = tools {
+            self.supports_tools = value;
+        }
+        if let Some(value) = streaming {
+            self.supports_streaming = value;
+        }
+        if let Some(value) = system_prompt {
+            self.supports_system_prompt = value;
+        }
+        self
     }
 }
 
@@ -73,6 +99,19 @@ impl ModelInfo {
             kind == ProviderKind::Completions
         } else {
             self.protocols.contains(&kind)
+        }
+    }
+
+    /// A process-wide [`minimal`](Self::minimal) model for stub `resolve_model`
+    /// implementations. `None` when `id` names a vendor other than `provider`,
+    /// so a router can still report an unknown model.
+    pub fn non_streaming(provider: &ProviderName, id: &ModelId) -> Option<&'static Self> {
+        static MODEL: OnceLock<ModelInfo> = OnceLock::new();
+        match id.vendor() {
+            Some(vendor) if !provider.matches_vendor(vendor) => None,
+            _ => Some(
+                MODEL.get_or_init(|| Self::minimal("default", ProviderName::Custom("mock".into()))),
+            ),
         }
     }
 
@@ -137,5 +176,14 @@ mod tests {
         assert!(info.capabilities.supports_parallel_tool_calls);
         assert!(info.capabilities.supports_system_prompt);
         assert_eq!(info.capabilities.max_concurrent_tools, None);
+    }
+
+    #[test]
+    fn non_streaming_stub_rejects_a_different_vendor() {
+        let provider = ProviderName::Custom("mock".into());
+        assert!(ModelInfo::non_streaming(&provider, &ModelId::from("local")).is_some());
+        assert!(ModelInfo::non_streaming(&provider, &ModelId::from("openai/gpt")).is_none());
+        let info = ModelInfo::non_streaming(&provider, &ModelId::from("local")).unwrap();
+        assert!(!info.capabilities.supports_streaming);
     }
 }

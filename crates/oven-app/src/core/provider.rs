@@ -24,18 +24,12 @@ fn declared_model_info(
     if let Some(tokens) = params.max_output_tokens {
         info.max_output_tokens = tokens;
     }
-    if let Some(enabled) = params.supports_vision {
-        info.capabilities.supports_vision = enabled;
-    }
-    if let Some(enabled) = params.supports_tools {
-        info.capabilities.supports_tools = enabled;
-    }
-    if let Some(enabled) = params.supports_streaming {
-        info.capabilities.supports_streaming = enabled;
-    }
-    if let Some(enabled) = params.supports_system_prompt {
-        info.capabilities.supports_system_prompt = enabled;
-    }
+    info.capabilities = info.capabilities.with_overrides(
+        params.supports_vision,
+        params.supports_tools,
+        params.supports_streaming,
+        params.supports_system_prompt,
+    );
     info
 }
 

@@ -10,8 +10,6 @@
 //!   基于 `eventsource-stream` 的 SSE 流式解码
 //! - `Provider::known_models` / `Provider::list_models`：模型元数据查询
 
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
@@ -22,15 +20,16 @@ use secrecy::SecretString;
 
 use super::decoder::{self, StreamDecoder};
 use super::encoder;
-use super::models::{deepseek_models, moonshot_models, zhipu_models};
 use super::types::{ChatCompletionChunk, ChatCompletionResponse};
 use crate::ProviderName;
 use crate::domain::{ModelId, Request, Response, StreamEvent};
+use crate::provider::catalog;
+use crate::provider::endpoint::Endpoint;
 use crate::provider::http;
 use crate::provider::model::ModelInfo;
-use crate::provider::validate::validate_request;
 use crate::provider::{
-    DEEPSEEK_BASE_URL, MOONSHOT_BASE_URL, OPENAI_BASE_URL, Provider, ProviderError, ZHIPU_BASE_URL,
+    DEEPSEEK_BASE_URL, MOONSHOT_BASE_URL, OPENAI_BASE_URL, Provider, ProviderError, ProviderKind,
+    ZHIPU_BASE_URL,
 };
 
 /// OpenAI Chat Completions 兼容协议的通用 `Provider` 实现。
@@ -38,12 +37,7 @@ use crate::provider::{
 /// 通过 `base_url` 区分具体服务商（DeepSeek / Moonshot / 智谱 / OpenAI 官方
 /// 等）。
 pub struct CompletionsProvider {
-    base_url: String,
-    provider_name: ProviderName,
-    api_key: SecretString,
-    extra_headers: HeaderMap,
-    model_catalog: HashMap<ModelId, ModelInfo>,
-    client: isahc::HttpClient,
+    endpoint: Endpoint,
 }
 
 impl CompletionsProvider {
@@ -104,18 +98,14 @@ impl CompletionsProvider {
         known_models: Vec<ModelInfo>,
         extra_headers: HeaderMap,
     ) -> Self {
-        let model_catalog = known_models
-            .into_iter()
-            .map(|model| (ModelId::from(model.id.as_str()), model))
-            .collect();
-
         Self {
-            base_url: base_url.into(),
-            provider_name,
-            api_key: api_key.into(),
-            extra_headers,
-            model_catalog,
-            client: isahc::HttpClient::new().expect("isahc HttpClient::new() should succeed"),
+            endpoint: Endpoint::new(
+                base_url,
+                provider_name,
+                api_key,
+                known_models,
+                extra_headers,
+            ),
         }
     }
 
@@ -125,7 +115,7 @@ impl CompletionsProvider {
             DEEPSEEK_BASE_URL,
             ProviderName::DeepSeek,
             api_key,
-            deepseek_models(),
+            catalog::models_for(&ProviderName::DeepSeek, ProviderKind::Completions),
             HeaderMap::new(),
         )
     }
@@ -136,7 +126,7 @@ impl CompletionsProvider {
             MOONSHOT_BASE_URL,
             ProviderName::Moonshot,
             api_key,
-            moonshot_models(),
+            catalog::models_for(&ProviderName::Moonshot, ProviderKind::Completions),
             HeaderMap::new(),
         )
     }
@@ -147,7 +137,7 @@ impl CompletionsProvider {
             ZHIPU_BASE_URL,
             ProviderName::Zhipu,
             api_key,
-            zhipu_models(),
+            catalog::models_for(&ProviderName::Zhipu, ProviderKind::Completions),
             HeaderMap::new(),
         )
     }
@@ -176,49 +166,28 @@ impl CompletionsProvider {
     /// `provider_options` 为空时不会产生任何额外字段（Requirement 7.3）。
     fn build_body(&self, req: &Request, stream: bool) -> Result<serde_json::Value, ProviderError> {
         let wire = encoder::encode_request(req, stream)?;
-
-        let mut body = serde_json::to_value(wire).map_err(|err| {
+        let body = serde_json::to_value(wire).map_err(|err| {
             ProviderError::CompletionsEncode(
                 super::encoder::CompletionsEncodeError::InvalidContent(err.to_string()),
             )
         })?;
-
-        if !req.provider_options.is_empty() {
-            let object = body
-                .as_object_mut()
-                .expect("ChatCompletionRequest always serializes to a JSON object");
-            for (key, value) in req.provider_options.iter() {
-                object.insert(key.clone(), value.clone());
-            }
-        }
-
-        Ok(body)
+        Ok(Endpoint::merge_provider_options(
+            body,
+            &req.provider_options,
+        ))
     }
 
-    /// 对静态目录命中的模型执行调用模式相关校验；未命中时按宽松策略透传，
-    /// 交由上游服务决定其可用性与能力约束。
-    fn validate_known_model(&self, req: &Request, stream: bool) -> Result<(), ProviderError> {
-        if let Some(model) = self.resolve_model(&req.model) {
-            validate_request(req, model, stream)?;
-        }
-        Ok(())
-    }
-
-    /// POST `body` 到 `{base_url}/chat/completions`，返回响应的原始文本；
-    /// 非 2xx 状态码按 Requirement 6.3/6.4/6.5 映射为具体的 `ProviderError`。
     async fn post_chat_completions(
         &self,
         body: &serde_json::Value,
     ) -> Result<isahc::Response<isahc::AsyncBody>, ProviderError> {
-        let body_bytes = serde_json::to_vec(body).map_err(|e| {
-            ProviderError::CompletionsEncode(
-                super::encoder::CompletionsEncodeError::InvalidContent(e.to_string()),
-            )
-        })?;
-
-        let headers = http::build_headers(&self.api_key, &self.extra_headers);
-        let url = http::endpoint(&self.base_url, "chat/completions");
-        http::post_json(&self.client, &headers, url, body_bytes).await
+        self.endpoint
+            .post("chat/completions", body, |reason| {
+                ProviderError::CompletionsEncode(
+                    super::encoder::CompletionsEncodeError::InvalidContent(reason),
+                )
+            })
+            .await
     }
 }
 
@@ -226,7 +195,7 @@ impl CompletionsProvider {
 impl Provider for CompletionsProvider {
     /// 发送一次非流式请求（Requirement 6.1：强制 `stream = false`）。
     async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        self.validate_known_model(req, false)?;
+        self.endpoint.validate_known_model(req, false)?;
         let body = self.build_body(req, false)?;
         let mut response = self.post_chat_completions(&body).await?;
 
@@ -246,7 +215,7 @@ impl Provider for CompletionsProvider {
         &self,
         req: &Request,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        self.validate_known_model(req, true)?;
+        self.endpoint.validate_known_model(req, true)?;
         let body = self.build_body(req, true)?;
         let response = self.post_chat_completions(&body).await?;
 
@@ -314,16 +283,12 @@ impl Provider for CompletionsProvider {
         Ok(stream.boxed())
     }
 
-    /// 该 provider 静态已知的模型列表（构造时传入，不涉及网络）。
     fn known_models(&self) -> Vec<ModelInfo> {
-        self.model_catalog.values().cloned().collect()
+        self.endpoint.known_models()
     }
 
-    /// 通过构造时建立的哈希索引查找静态模型元数据。
     fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        self.model_catalog
-            .get(id)
-            .or_else(|| self.model_catalog.get(&ModelId::from(id.wire_id())))
+        self.endpoint.resolve_model(id)
     }
 
     fn protocol(&self) -> Option<crate::ProviderKind> {
@@ -331,21 +296,15 @@ impl Provider for CompletionsProvider {
     }
 
     fn provider_name(&self) -> ProviderName {
-        self.provider_name.clone()
+        self.endpoint.provider_name.clone()
     }
 
-    /// GET `{base_url}/models`，仅填充 `id` 与 `provider` 字段
-    /// （Requirement 6.6）。
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        let headers = http::build_headers(&self.api_key, &self.extra_headers);
-        http::list_models(
-            &self.client,
-            &headers,
-            &self.base_url,
-            &self.provider_name,
-            |e| ProviderError::CompletionsDecode(super::decoder::CompletionsDecodeError::Json(e)),
-        )
-        .await
+        self.endpoint
+            .list_models(|err| {
+                ProviderError::CompletionsDecode(super::decoder::CompletionsDecodeError::Json(err))
+            })
+            .await
     }
 }
 
@@ -353,6 +312,18 @@ impl Provider for CompletionsProvider {
 mod tests {
     use super::*;
     use crate::domain::message::{ContentBlock, Message};
+
+    fn deepseek_models() -> Vec<ModelInfo> {
+        catalog::models_for(&ProviderName::DeepSeek, ProviderKind::Completions)
+    }
+
+    fn moonshot_models() -> Vec<ModelInfo> {
+        catalog::models_for(&ProviderName::Moonshot, ProviderKind::Completions)
+    }
+
+    fn zhipu_models() -> Vec<ModelInfo> {
+        catalog::models_for(&ProviderName::Zhipu, ProviderKind::Completions)
+    }
     use isahc::http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
@@ -379,9 +350,9 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        assert_eq!(provider.base_url, "https://example.com");
+        assert_eq!(provider.endpoint.base_url, "https://example.com");
         assert_eq!(
-            provider.provider_name,
+            provider.endpoint.provider_name,
             ProviderName::Custom("example".into())
         );
         assert!(provider.known_models().is_empty());
@@ -390,32 +361,35 @@ mod tests {
     #[test]
     fn deepseek_preset_has_correct_base_url_and_models() {
         let provider = CompletionsProvider::deepseek(api_key("k"));
-        assert_eq!(provider.base_url, "https://api.deepseek.com");
-        assert_eq!(provider.provider_name, ProviderName::DeepSeek);
+        assert_eq!(provider.endpoint.base_url, "https://api.deepseek.com");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::DeepSeek);
         assert_eq!(provider.known_models().len(), deepseek_models().len());
     }
 
     #[test]
     fn moonshot_preset_has_correct_base_url_and_models() {
         let provider = CompletionsProvider::moonshot(api_key("k"));
-        assert_eq!(provider.base_url, "https://api.moonshot.cn/v1");
-        assert_eq!(provider.provider_name, ProviderName::Moonshot);
+        assert_eq!(provider.endpoint.base_url, "https://api.moonshot.cn/v1");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::Moonshot);
         assert_eq!(provider.known_models().len(), moonshot_models().len());
     }
 
     #[test]
     fn zhipu_preset_has_correct_base_url_and_models() {
         let provider = CompletionsProvider::zhipu(api_key("k"));
-        assert_eq!(provider.base_url, "https://open.bigmodel.cn/api/paas/v4");
-        assert_eq!(provider.provider_name, ProviderName::Zhipu);
+        assert_eq!(
+            provider.endpoint.base_url,
+            "https://open.bigmodel.cn/api/paas/v4"
+        );
+        assert_eq!(provider.endpoint.provider_name, ProviderName::Zhipu);
         assert_eq!(provider.known_models().len(), zhipu_models().len());
     }
 
     #[test]
     fn openai_preset_has_correct_base_url_and_empty_models() {
         let provider = CompletionsProvider::openai(api_key("k"));
-        assert_eq!(provider.base_url, "https://api.openai.com/v1");
-        assert_eq!(provider.provider_name, ProviderName::OpenAI);
+        assert_eq!(provider.endpoint.base_url, "https://api.openai.com/v1");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::OpenAI);
         assert!(provider.known_models().is_empty());
     }
 
@@ -424,31 +398,34 @@ mod tests {
     #[test]
     fn new_dispatches_openai() {
         let provider = CompletionsProvider::new(ProviderName::OpenAI, api_key("k"));
-        assert_eq!(provider.base_url, "https://api.openai.com/v1");
-        assert_eq!(provider.provider_name, ProviderName::OpenAI);
+        assert_eq!(provider.endpoint.base_url, "https://api.openai.com/v1");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::OpenAI);
     }
 
     #[test]
     fn new_dispatches_deepseek() {
         let provider = CompletionsProvider::new(ProviderName::DeepSeek, api_key("k"));
-        assert_eq!(provider.base_url, "https://api.deepseek.com");
-        assert_eq!(provider.provider_name, ProviderName::DeepSeek);
+        assert_eq!(provider.endpoint.base_url, "https://api.deepseek.com");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::DeepSeek);
         assert_eq!(provider.known_models().len(), deepseek_models().len());
     }
 
     #[test]
     fn new_dispatches_moonshot() {
         let provider = CompletionsProvider::new(ProviderName::Moonshot, api_key("k"));
-        assert_eq!(provider.base_url, "https://api.moonshot.cn/v1");
-        assert_eq!(provider.provider_name, ProviderName::Moonshot);
+        assert_eq!(provider.endpoint.base_url, "https://api.moonshot.cn/v1");
+        assert_eq!(provider.endpoint.provider_name, ProviderName::Moonshot);
         assert_eq!(provider.known_models().len(), moonshot_models().len());
     }
 
     #[test]
     fn new_dispatches_zhipu() {
         let provider = CompletionsProvider::new(ProviderName::Zhipu, api_key("k"));
-        assert_eq!(provider.base_url, "https://open.bigmodel.cn/api/paas/v4");
-        assert_eq!(provider.provider_name, ProviderName::Zhipu);
+        assert_eq!(
+            provider.endpoint.base_url,
+            "https://open.bigmodel.cn/api/paas/v4"
+        );
+        assert_eq!(provider.endpoint.provider_name, ProviderName::Zhipu);
         assert_eq!(provider.known_models().len(), zhipu_models().len());
     }
 
@@ -479,7 +456,8 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("secret-token"),
         );
-        let headers = http::build_headers(&provider.api_key, &provider.extra_headers);
+        let headers =
+            http::build_headers(&provider.endpoint.api_key, &provider.endpoint.extra_headers);
         assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer secret-token");
         assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
     }
@@ -498,7 +476,8 @@ mod tests {
             Vec::new(),
             extra,
         );
-        let headers = http::build_headers(&provider.api_key, &provider.extra_headers);
+        let headers =
+            http::build_headers(&provider.endpoint.api_key, &provider.endpoint.extra_headers);
         assert_eq!(headers.get("x-custom").unwrap(), "value");
     }
 
@@ -512,7 +491,7 @@ mod tests {
             api_key("k"),
         );
         assert_eq!(
-            http::endpoint(&provider.base_url, "chat/completions"),
+            http::endpoint(&provider.endpoint.base_url, "chat/completions"),
             "https://example.com/chat/completions"
         );
     }
@@ -525,7 +504,7 @@ mod tests {
             api_key("k"),
         );
         assert_eq!(
-            http::endpoint(&provider.base_url, "/chat/completions"),
+            http::endpoint(&provider.endpoint.base_url, "/chat/completions"),
             "https://example.com/chat/completions"
         );
     }

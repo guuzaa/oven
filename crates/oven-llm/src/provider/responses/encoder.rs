@@ -340,17 +340,12 @@ fn encode_reasoning(
     thinking: Option<ThinkingMode>,
 ) -> Option<WireReasoning> {
     let effort = match reasoning_effort {
-        Some(ReasoningEffort::None) => Some("none"),
-        Some(ReasoningEffort::Low) => Some("low"),
-        Some(ReasoningEffort::Medium) => Some("medium"),
-        Some(ReasoningEffort::High) => Some("high"),
-        None if thinking == Some(ThinkingMode::Disabled) => Some("none"),
+        Some(effort) => Some(effort.to_string()),
+        None if thinking == Some(ThinkingMode::Disabled) => Some(ReasoningEffort::None.to_string()),
         None => None,
     };
 
-    effort.map(|effort| WireReasoning {
-        effort: effort.to_string(),
-    })
+    effort.map(|effort| WireReasoning { effort })
 }
 
 #[cfg(test)]
