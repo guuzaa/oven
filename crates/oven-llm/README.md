@@ -103,7 +103,8 @@ providers and it does not retry. `Client` is that table as a `Provider`.
 
 Retry and timeout are off until you wrap a provider with `RetryingProvider`. When on, transport
 errors, rate limits, and HTTP 408/429/5xx are retried. Streaming retries the connection start,
-not events already in flight. `list_models` is not retried. Opting in uses a Tokio timer.
+not events already in flight. `list_models` is not retried. The wait is a future, so whichever
+executor polls the provider drives the backoff and the timeout.
 
 ```rust
 let deepseek = oven_llm::RetryingProvider::new(deepseek)

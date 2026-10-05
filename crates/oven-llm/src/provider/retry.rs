@@ -88,7 +88,7 @@ where
         if let Some(err) = last_err.as_ref() {
             let backoff = backoff_for(policy, attempt, err);
             log_retry(attempt, backoff, err);
-            tokio::time::sleep(backoff).await;
+            sleep(backoff).await;
         }
         match op().await {
             Ok(value) => return Ok(value),
@@ -97,6 +97,28 @@ where
         }
     }
     Err(exhausted(last_err))
+}
+
+async fn sleep(duration: Duration) {
+    futures_timer::Delay::new(duration).await;
+}
+
+async fn with_timeout<Fut, T>(limit: Duration, fut: Fut) -> Result<T, ()>
+where
+    Fut: Future<Output = T>,
+{
+    futures_lite::pin!(fut);
+    futures_lite::future::or(
+        async {
+            let value = fut.await;
+            Ok(value)
+        },
+        async {
+            sleep(limit).await;
+            Err(())
+        },
+    )
+    .await
 }
 
 fn exhausted(err: Option<ProviderError>) -> ProviderError {
@@ -147,9 +169,9 @@ impl RetryingProvider {
 
     async fn attempt_complete(&self, req: &Request) -> Result<Response, ProviderError> {
         match self.policy.timeout {
-            Some(limit) => match tokio::time::timeout(limit, self.inner.complete(req)).await {
+            Some(limit) => match with_timeout(limit, self.inner.complete(req)).await {
                 Ok(result) => result,
-                Err(_) => Err(timeout_error(limit)),
+                Err(()) => Err(timeout_error(limit)),
             },
             None => self.inner.complete(req).await,
         }
@@ -336,7 +358,7 @@ mod tests {
         #[async_trait]
         impl Provider for Slow {
             async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                sleep(Duration::from_millis(50)).await;
                 Err(ProviderError::Api {
                     status: 500,
                     body: "late".into(),
