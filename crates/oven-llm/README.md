@@ -192,6 +192,11 @@ cargo test
 Keep the public API provider-agnostic: wire types stay in encoder/decoder modules. Add tests
 with every behavior change. Examples must stay runnable without a real API key.
 
+Publish by pushing a tag `oven-llm-vX.Y.Z` that matches `version` in this crate's
+`Cargo.toml`. That tag runs the oven-llm release workflow, which publishes the crate to
+crates.io. The oven repository needs a `CRATES_IO_TOKEN` secret. Oven's own `v*` tags still
+only ship the binary.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
