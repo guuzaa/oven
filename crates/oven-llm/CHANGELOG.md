@@ -50,6 +50,27 @@
   `UnknownModel`. A provider failure is a `ProviderError` returned by
   `Client`.
 
+### Fixed
+- Completions streaming: the trailing usage chunk that providers send after
+  `finish_reason` (`stream_options.include_usage`) is no longer dropped, so
+  `Response.usage` is populated for streamed turns.
+- Responses streaming: `response.completed` with `status: "failed"` now fails the
+  turn with the wire error message instead of being recorded as a successful
+  empty answer, matching the non-streaming path.
+- Responses wire types: a known event whose body fails to deserialize is now an
+  error instead of falling into the unknown-event variant and being dropped.
+- `ResponsesProvider::new` and `CompletionsProvider::new` return
+  `ProviderError::UnsupportedProvider` for a `ProviderName` that has no preset
+  for that protocol (`Anthropic`, `Moonshot`, `Zhipu`, `Grok`, `Custom`) instead
+  of panicking, so a caller building providers from a list can handle each
+  failure.
+- `post_json` and `list_models` return `ProviderError::InvalidProviderConfig`
+  when the configured `base_url` cannot be built into a valid request URL,
+  instead of panicking on request construction.
+- Exponential backoff is capped at `2^16` times the base delay and uses
+  `saturating_mul`, so a large `with_retries` value can no longer overflow
+  (a panic in debug builds) or grow without bound.
+
 ## [0.4.2] - 2026-09-19
 ### Added
 - `ContentBlock::ToolUse.raw_arguments`: the `arguments` JSON text exactly as it
