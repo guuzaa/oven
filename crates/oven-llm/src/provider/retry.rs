@@ -18,6 +18,10 @@ const TOO_MANY_REQUESTS: u16 = 429;
 const SERVER_ERROR: u16 = 500;
 const DEFAULT_BACKOFF: Duration = Duration::from_millis(500);
 
+/// 指数退避的上限档位：`1 << 16`。base 500ms 时约 9 小时，足够覆盖任何合理的
+/// 重试次数，同时保证 `2^shift` 与 `Duration` 乘法都不会溢出。
+const MAX_BACKOFF_SHIFT: u32 = 16;
+
 #[derive(Debug, Clone)]
 struct RetryPolicy {
     timeout: Option<Duration>,
@@ -52,6 +56,10 @@ fn status_of(err: &ProviderError) -> Option<u16> {
     }
 }
 
+/// 第 `attempt` 次重试前的等待时间。`attempt` 从 1 开始计数（`0` 不在调用
+/// 路径上）：1 → 1 倍，2 → 2 倍，3 → 4 倍……档位超过
+/// [`MAX_BACKOFF_SHIFT`] 后不再增长，并用 `saturating_mul` 兜底，因此
+/// `with_retries(u32::MAX)` 也不会 panic 或变成无限等待。
 fn backoff_for(policy: &RetryPolicy, attempt: u32, err: &ProviderError) -> Duration {
     if let ProviderError::RateLimit {
         retry_after_ms: Some(ms),
@@ -59,7 +67,8 @@ fn backoff_for(policy: &RetryPolicy, attempt: u32, err: &ProviderError) -> Durat
     {
         return Duration::from_millis(*ms);
     }
-    policy.base_backoff * 2u32.pow(attempt.saturating_sub(1))
+    let shift = attempt.saturating_sub(1).min(MAX_BACKOFF_SHIFT);
+    policy.base_backoff.saturating_mul(1 << shift)
 }
 
 fn timeout_error(limit: Duration) -> ProviderError {
@@ -401,5 +410,26 @@ mod tests {
         let err = provider.complete(&request()).await.unwrap_err();
         assert!(matches!(err, ProviderError::Api { status: 500, .. }));
         assert_eq!(*calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn backoff_doubles_per_attempt_and_caps_without_overflow() {
+        let policy = RetryPolicy {
+            timeout: None,
+            max_retries: 0,
+            base_backoff: DEFAULT_BACKOFF,
+        };
+        let err = ProviderError::Api {
+            status: 500,
+            body: "boom".into(),
+        };
+
+        assert_eq!(backoff_for(&policy, 1, &err), DEFAULT_BACKOFF);
+        assert_eq!(backoff_for(&policy, 2, &err), DEFAULT_BACKOFF * 2);
+        assert_eq!(backoff_for(&policy, 3, &err), DEFAULT_BACKOFF * 4);
+
+        let capped = backoff_for(&policy, MAX_BACKOFF_SHIFT + 1, &err);
+        assert_eq!(backoff_for(&policy, MAX_BACKOFF_SHIFT + 2, &err), capped);
+        assert_eq!(backoff_for(&policy, u32::MAX, &err), capped);
     }
 }

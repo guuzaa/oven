@@ -43,29 +43,25 @@ impl ResponsesProvider {
     /// 通过 `ProviderName` 派发构造。已知的 Responses API 服务商会自动填入
     /// 对应的 `base_url` 与模型元数据；对其他服务商，请改用 [`with_base_url`]
     /// 或 [`with_models`]。
-    pub fn new(provider_name: ProviderName, api_key: impl Into<SecretString>) -> Self {
+    ///
+    /// 没有 Responses API 预设的服务商（`Anthropic` / `Moonshot` / `Zhipu` /
+    /// `Custom`）返回 [`ProviderError::UnsupportedProvider`] 而不是 panic：
+    /// 调用方按 `ProviderName` 批量建厂时必须能逐个处理失败。
+    pub fn new(
+        provider_name: ProviderName,
+        api_key: impl Into<SecretString>,
+    ) -> Result<Self, ProviderError> {
         match &provider_name {
-            ProviderName::OpenAI => Self::openai(api_key),
-            ProviderName::DeepSeek => Self::deepseek(api_key),
-            ProviderName::Grok => Self::grok(api_key),
-            ProviderName::Anthropic => {
-                panic!(
-                    "Anthropic ({provider_name:?}) does not provide a Responses API; \
-                     use the Anthropic-specific provider instead of OpenAIResponsesProvider"
-                )
-            }
-            ProviderName::Moonshot | ProviderName::Zhipu => {
-                panic!(
-                    "{provider_name:?} has no Responses API preset yet; \
-                     use OpenAIResponsesProvider::with_base_url or ::with_models instead"
-                )
-            }
-            ProviderName::Custom(name) => {
-                panic!(
-                    "cannot dispatch to custom provider '{name}'; \
-                     use OpenAIResponsesProvider::with_base_url or ::with_models instead"
-                )
-            }
+            ProviderName::OpenAI => Ok(Self::openai(api_key)),
+            ProviderName::DeepSeek => Ok(Self::deepseek(api_key)),
+            ProviderName::Grok => Ok(Self::grok(api_key)),
+            ProviderName::Anthropic
+            | ProviderName::Moonshot
+            | ProviderName::Zhipu
+            | ProviderName::Custom(_) => Err(ProviderError::UnsupportedProvider {
+                kind: ProviderKind::Responses,
+                name: provider_name,
+            }),
         }
     }
 
@@ -326,7 +322,7 @@ mod tests {
 
     #[test]
     fn new_dispatches_openai() {
-        let provider = ResponsesProvider::new(ProviderName::OpenAI, api_key("k"));
+        let provider = ResponsesProvider::new(ProviderName::OpenAI, api_key("k")).unwrap();
         assert_eq!(provider.endpoint.base_url, "https://api.openai.com/v1");
         assert_eq!(provider.endpoint.provider_name, ProviderName::OpenAI);
         assert!(provider.known_models().is_empty());
@@ -334,7 +330,7 @@ mod tests {
 
     #[test]
     fn new_dispatches_deepseek() {
-        let provider = ResponsesProvider::new(ProviderName::DeepSeek, api_key("k"));
+        let provider = ResponsesProvider::new(ProviderName::DeepSeek, api_key("k")).unwrap();
         assert_eq!(provider.endpoint.base_url, "https://api.deepseek.com");
         assert_eq!(provider.endpoint.provider_name, ProviderName::DeepSeek);
         assert_eq!(provider.known_models().len(), deepseek_models().len());
@@ -342,22 +338,46 @@ mod tests {
 
     #[test]
     fn new_dispatches_grok() {
-        let provider = ResponsesProvider::new(ProviderName::Grok, api_key("k"));
+        let provider = ResponsesProvider::new(ProviderName::Grok, api_key("k")).unwrap();
         assert_eq!(provider.endpoint.base_url, "https://api.x.ai/v1");
         assert_eq!(provider.endpoint.provider_name, ProviderName::Grok);
         assert_eq!(provider.known_models().len(), grok_models().len());
     }
 
     #[test]
-    #[should_panic(expected = "Anthropic")]
-    fn new_panics_on_anthropic() {
-        let _ = ResponsesProvider::new(ProviderName::Anthropic, api_key("k"));
+    fn new_rejects_anthropic_without_panicking() {
+        let err = ResponsesProvider::new(ProviderName::Anthropic, api_key("k"))
+            .err()
+            .expect("Anthropic has no Responses API preset");
+        assert!(matches!(
+            err,
+            ProviderError::UnsupportedProvider {
+                kind: ProviderKind::Responses,
+                ..
+            }
+        ));
+        assert!(
+            err.to_string().contains("Anthropic"),
+            "{err} should name the provider"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "cannot dispatch")]
-    fn new_panics_on_custom() {
-        let _ = ResponsesProvider::new(ProviderName::Custom("example".into()), api_key("k"));
+    fn new_rejects_custom_without_panicking() {
+        let err = ResponsesProvider::new(ProviderName::Custom("example".into()), api_key("k"))
+            .err()
+            .expect("Custom has no Responses API preset");
+        assert!(matches!(
+            err,
+            ProviderError::UnsupportedProvider {
+                kind: ProviderKind::Responses,
+                ..
+            }
+        ));
+        assert!(
+            err.to_string().contains("example"),
+            "{err} should name the provider"
+        );
     }
 
     #[test]

@@ -28,8 +28,8 @@ use serde_json::{Value, json};
 
 #[tokio::main]
 async fn main() {
-    // 1. 创建 provider（DeepSeek 预设；也可用 `::new(ProviderName::DeepSeek, key)`
-    //    或 `with_base_url` / `with_models` 自定义服务商）。
+    // 1. 创建 provider（DeepSeek 预设；`ResponsesProvider::new` 对无预设的厂商返回
+    //    `Err`，`with_base_url` / `with_models` 可自定义服务商）。
     let api_key =
         std::env::var("DEEPSEEK_API_KEY").unwrap_or_else(|_| "sk-placeholder".to_string());
     let provider = ProviderBuilder::responses()

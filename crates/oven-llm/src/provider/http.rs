@@ -6,6 +6,7 @@
 //! 避免重复；协议相关的 encode/decode 错误映射仍留在各 provider 内。
 
 use futures_lite::io::AsyncReadExt;
+use isahc::http::Error as HttpRequestError;
 use isahc::http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use isahc::prelude::*;
 use secrecy::{ExposeSecret, SecretString};
@@ -13,6 +14,12 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::ProviderName;
 use crate::provider::ProviderError;
 use crate::provider::model::ModelInfo;
+
+/// `base_url` 拼出的端点不是合法 URL 时（`Builder::body` 失败）返回配置错误。
+/// 宿主可能从用户配置拿到任意 `base_url`，这里不能 panic。
+fn invalid_endpoint(url: &str, err: HttpRequestError) -> ProviderError {
+    ProviderError::InvalidProviderConfig(format!("invalid endpoint url {url}: {err}"))
+}
 
 /// 将 `isahc::AsyncBody` 转换为 `Stream<Item = Result<Vec<u8>, io::Error>>`。
 ///
@@ -92,19 +99,22 @@ pub(crate) async fn check_status(
 /// 入参是序列化后的字节而非 `serde_json::Value`：`ProviderError` 的编码错误
 /// 变体是协议相关的（`Encode` vs `ResponsesEncode`），序列化失败的错误映射
 /// 应留在各 provider 内。
+///
+/// `url` 不是合法的绝对 HTTP URL（`base_url` 写错）时返回
+/// [`ProviderError::InvalidProviderConfig`]，而不是 panic。
 pub(crate) async fn post_json(
     client: &isahc::HttpClient,
     headers: &HeaderMap,
     url: String,
     body_bytes: Vec<u8>,
 ) -> Result<isahc::Response<isahc::AsyncBody>, ProviderError> {
-    let mut builder = isahc::http::Request::post(url);
+    let mut builder = isahc::http::Request::post(url.as_str());
     for (name, value) in headers.iter() {
         builder = builder.header(name, value);
     }
     let request = builder
         .body(body_bytes)
-        .expect("valid HTTP request construction");
+        .map_err(|err| invalid_endpoint(&url, err))?;
 
     let response = client.send_async(request).await?;
 
@@ -122,11 +132,14 @@ pub(crate) async fn list_models(
     provider_name: &ProviderName,
     map_json_err: impl FnOnce(serde_json::Error) -> ProviderError,
 ) -> Result<Vec<ModelInfo>, ProviderError> {
-    let mut builder = isahc::http::Request::get(endpoint(base_url, "models"));
+    let url = endpoint(base_url, "models");
+    let mut builder = isahc::http::Request::get(url.as_str());
     for (name, value) in headers.iter() {
         builder = builder.header(name, value);
     }
-    let request = builder.body(()).expect("valid HTTP request construction");
+    let request = builder
+        .body(())
+        .map_err(|err| invalid_endpoint(&url, err))?;
 
     let response = client.send_async(request).await?;
     let mut response = check_status(response).await?;
@@ -151,4 +164,64 @@ struct ModelsListResponse {
 #[derive(Debug, serde::Deserialize)]
 struct ModelsListEntry {
     id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MALFORMED_BASE_URL: &str = "http://[::1";
+    const PROVIDER: &str = "example";
+
+    fn client() -> isahc::HttpClient {
+        isahc::HttpClient::new().unwrap()
+    }
+
+    fn map_json_err(err: serde_json::Error) -> ProviderError {
+        ProviderError::InvalidProviderConfig(err.to_string())
+    }
+
+    #[tokio::test]
+    async fn post_json_reports_malformed_url_instead_of_panicking() {
+        let err = post_json(
+            &client(),
+            &HeaderMap::new(),
+            MALFORMED_BASE_URL.to_string(),
+            b"{}".to_vec(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ProviderError::InvalidProviderConfig(_)),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains(MALFORMED_BASE_URL),
+            "{err} should quote the url"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_models_reports_malformed_base_url_instead_of_panicking() {
+        let provider_name = ProviderName::Custom(PROVIDER.into());
+        let err = list_models(
+            &client(),
+            &HeaderMap::new(),
+            MALFORMED_BASE_URL,
+            &provider_name,
+            map_json_err,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ProviderError::InvalidProviderConfig(_)),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains(MALFORMED_BASE_URL),
+            "{err} should quote the base url"
+        );
+    }
 }

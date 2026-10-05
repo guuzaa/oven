@@ -55,7 +55,8 @@ pub enum ProviderError {
         kind: ProviderKind,
         name: ProviderName,
     },
-    /// 统一构造入口（`ProviderBuilder`）配置缺失或相互冲突。
+    /// 统一构造入口（`ProviderBuilder`）配置缺失或相互冲突；`base_url` 不是
+    /// 合法 URL 时也用它（请求无法构造）。
     #[error("invalid provider config: {0}")]
     InvalidProviderConfig(String),
     /// Router 尚未注册任何 provider。
