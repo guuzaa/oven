@@ -192,6 +192,10 @@ pub(crate) struct StreamDecoder {
     text_block_index: Option<usize>,
     /// 思维块（若已开启）对应的内容块索引；思维块全局只会开启一次。
     thinking_block_index: Option<usize>,
+    /// `finish_reason` 映射出的 `StopReason`。`include_usage` 的用量在
+    /// 其后的空 `choices` chunk 才到达，那时要再发一条 `MessageDelta`，
+    /// 并带上同一个 `stop_reason`（collector 会整段覆盖）。
+    stop_reason: Option<StopReason>,
 }
 
 impl StreamDecoder {
@@ -204,8 +208,11 @@ impl StreamDecoder {
     ///
     /// - `Stopped` 阶段调用 → `DecodeError::DataAfterStop`
     /// - `AwaitingDone` 阶段收到非空 `choices` → `DecodeError::DataAfterFinish`
-    /// - `AwaitingDone` 阶段收到空 `choices`（例如仅携带 `usage` 的收尾
-    ///   chunk）→ 视为无操作，返回空事件列表
+    /// - `AwaitingDone` 阶段收到空 `choices` 且带 `usage` → 再产出一条
+    ///   `MessageDelta`（`stop_reason` 与 `finish_reason` chunk 相同）。
+    ///   `stream_options.include_usage` 的用量在 `finish_reason` 之后单独到达，
+    ///   各 provider 都不把它填进 `finish_reason` chunk
+    /// - `AwaitingDone` 阶段收到空 `choices` 且无 `usage` → 无操作
     /// - `Initial` 阶段的首个 chunk 会先产出 `MessageStart`，再转入
     ///   `Streaming`
     pub(crate) fn decode_chunk(
@@ -217,11 +224,16 @@ impl StreamDecoder {
         }
 
         if self.phase == StreamPhase::AwaitingDone {
-            if chunk.choices.is_empty() {
-                // 仅携带 usage 的收尾 chunk，容忍并忽略。
-                return Ok(Vec::new());
+            if !chunk.choices.is_empty() {
+                return Err(CompletionsDecodeError::DataAfterFinish);
             }
-            return Err(CompletionsDecodeError::DataAfterFinish);
+            return Ok(match chunk.usage.map(decode_usage) {
+                Some(usage) => vec![StreamEvent::MessageDelta {
+                    stop_reason: self.stop_reason,
+                    usage: Some(usage),
+                }],
+                None => Vec::new(),
+            });
         }
 
         let mut events = Vec::new();
@@ -243,8 +255,10 @@ impl StreamDecoder {
 
         if let Some(finish_reason) = choice.finish_reason {
             self.close_open_blocks(&mut events);
+            let stop_reason = map_stop_reason(&finish_reason);
+            self.stop_reason = stop_reason;
             events.push(StreamEvent::MessageDelta {
-                stop_reason: map_stop_reason(&finish_reason),
+                stop_reason,
                 usage: chunk.usage.map(decode_usage),
             });
             self.phase = StreamPhase::AwaitingDone;
@@ -871,6 +885,7 @@ mod tests {
     // StreamDecoder（任务 11，Requirement 5）
     // -----------------------------------------------------------------------
 
+    use crate::domain::stream::StreamCollector;
     use crate::provider::completions::types::{WireStreamChoice, WireStreamToolCallFunction};
 
     fn stream_chunk(
@@ -1107,7 +1122,7 @@ mod tests {
     }
 
     #[test]
-    fn awaiting_done_with_empty_choices_usage_only_chunk_is_ok() {
+    fn awaiting_done_with_empty_choices_and_no_usage_is_noop() {
         let mut decoder = StreamDecoder::new();
         decoder
             .decode_chunk(stream_chunk(
@@ -1116,18 +1131,50 @@ mod tests {
             ))
             .unwrap();
 
-        let events = decoder
-            .decode_chunk(stream_chunk(
+        let events = decoder.decode_chunk(stream_chunk(vec![], None)).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn trailing_usage_chunk_reaches_response_usage() {
+        let mut decoder = StreamDecoder::new();
+        let mut collector = StreamCollector::new();
+        for chunk in [
+            stream_chunk(vec![text_delta_choice("hi", None)], None),
+            stream_chunk(vec![empty_choice(Some("stop"))], None),
+            stream_chunk(
                 vec![],
                 Some(WireUsage {
-                    prompt_tokens: 1,
-                    completion_tokens: 2,
-                    total_tokens: 3,
+                    prompt_tokens: 7,
+                    completion_tokens: 11,
+                    total_tokens: 18,
                     ..Default::default()
                 }),
-            ))
-            .unwrap();
-        assert!(events.is_empty());
+            ),
+        ] {
+            for event in decoder.decode_chunk(chunk).unwrap() {
+                collector.push(&event);
+            }
+        }
+        for event in decoder.finish().unwrap() {
+            collector.push(&event);
+        }
+
+        let response = collector.finish().unwrap();
+        assert_eq!(response.stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(
+            response.usage,
+            Some(Usage {
+                input_tokens: 7,
+                output_tokens: 11,
+                cache_read_tokens: 0,
+                reasoning_tokens: 0,
+            })
+        );
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text } if text == "hi"
+        ));
     }
 
     // --- finish() (Requirement 5.6) ---

@@ -149,45 +149,54 @@ pub(crate) struct WireIncompleteDetails {
 }
 
 /// 响应侧的一个输出项。已知类型为 message / reasoning / function_call /
-/// web_search_call；其余输出项类型由 `Other` 变体原样兜底（decoder 跳过）。
+/// web_search_call。`#[serde(other)]` 只接住未知 `type`；已知类型字段不合法
+/// 时反序列化失败，而不会被静默吞掉。`id` / `call_id` / `name` 缺省为空串。
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ResponseOutputItem {
     Message {
+        #[serde(default)]
         id: String,
         role: String,
         #[serde(default)]
         content: Vec<WireOutputContentPart>,
     },
     Reasoning {
+        #[serde(default)]
         id: String,
         #[serde(default)]
         summary: Vec<WireSummaryText>,
     },
     FunctionCall {
+        #[serde(default)]
         id: String,
+        #[serde(default)]
         call_id: String,
+        #[serde(default)]
         name: String,
         /// JSON 编码后的参数字符串。
         #[serde(default)]
         arguments: String,
     },
     WebSearchCall {
+        #[serde(default)]
         id: String,
     },
-    #[serde(untagged)]
-    Other(serde_json::Value),
+    #[serde(other)]
+    Other,
 }
 
-/// message 输出项的内容部分：`output_text`（其他类型如 `refusal` 忽略）。
+/// message 输出项的内容部分：`output_text`（`refusal` 等未知类型忽略）。
+/// 未知 `type` 走 `Other`；`output_text` 的 `text` 类型不对则报错。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum WireOutputContentPart {
     OutputText {
+        #[serde(default)]
         text: String,
     },
-    #[serde(untagged)]
-    Other(serde_json::Value),
+    #[serde(other)]
+    Other,
 }
 
 /// reasoning 输出项中的一条摘要文本。
@@ -201,7 +210,9 @@ pub(crate) struct WireSummaryText {
 /// 响应侧 token 用量统计（Responses API 形态）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub(crate) struct WireUsage {
+    #[serde(default)]
     pub input_tokens: u32,
+    #[serde(default)]
     pub output_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens_details: Option<WireInputTokensDetails>,
@@ -231,8 +242,9 @@ pub(crate) struct WireOutputTokensDetails {
 /// Responses API SSE 流式事件。
 ///
 /// 所有已知事件变体均带显式 `type` 重命名（`response.created` 等）；
-/// `sequence_number` 字段反序列化但被忽略。未知事件类型由 `Other` 兜底，
-/// decoder 对 `Other` 不做任何处理。
+/// `sequence_number` 等未知字段被忽略。`#[serde(other)]` 只接住未知 `type`：
+/// 已知 `type` 的 body 反序列化失败时返回错误，而不会掉进 `Other` 被 decoder
+/// 丢掉。
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub(crate) enum ResponseEvent {
@@ -284,8 +296,8 @@ pub(crate) enum ResponseEvent {
     ResponseIncomplete { response: ResponseObject },
     #[serde(rename = "response.failed")]
     ResponseFailed { response: ResponseObject },
-    #[serde(untagged)]
-    Other(serde_json::Value),
+    #[serde(other)]
+    Other,
 }
 
 #[cfg(test)]
@@ -430,7 +442,7 @@ mod tests {
         let item: ResponseOutputItem =
             serde_json::from_value(serde_json::json!({"type": "local_search_call", "id": "l1"}))
                 .unwrap();
-        assert!(matches!(item, ResponseOutputItem::Other(_)));
+        assert!(matches!(item, ResponseOutputItem::Other));
 
         let item: ResponseOutputItem = serde_json::from_value(serde_json::json!({
             "type": "message",
@@ -495,7 +507,7 @@ mod tests {
         let event: ResponseEvent =
             serde_json::from_value(serde_json::json!({"type": "response.future_event", "x": 1}))
                 .unwrap();
-        assert!(matches!(event, ResponseEvent::Other(_)));
+        assert!(matches!(event, ResponseEvent::Other));
     }
 
     #[test]
@@ -508,6 +520,69 @@ mod tests {
             "sequence_number": 42
         }))
         .unwrap();
-        assert!(matches!(event, ResponseEvent::Other(_)));
+        assert!(matches!(event, ResponseEvent::Other));
+    }
+
+    #[test]
+    fn known_event_with_incomplete_body_errors_instead_of_other() {
+        let event = serde_json::from_value::<ResponseEvent>(serde_json::json!({
+            "type": "response.output_text.delta",
+            "output_index": 0
+        }));
+        assert!(event.is_err());
+    }
+
+    #[test]
+    fn completed_event_defaults_missing_usage_counters() {
+        let event: ResponseEvent = serde_json::from_value(serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "r1",
+                "model": "m1",
+                "status": "completed",
+                "output": [],
+                "usage": {"output_tokens": 5}
+            }
+        }))
+        .unwrap();
+        match event {
+            ResponseEvent::ResponseCompleted { response } => {
+                let usage = response.usage.unwrap();
+                assert_eq!(usage.input_tokens, 0);
+                assert_eq!(usage.output_tokens, 5);
+            }
+            other => panic!("expected ResponseCompleted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_item_defaults_missing_ids_and_known_type_still_errors() {
+        let item: ResponseOutputItem = serde_json::from_value(serde_json::json!({
+            "type": "function_call",
+            "name": "get_weather",
+            "arguments": "{}"
+        }))
+        .unwrap();
+        match item {
+            ResponseOutputItem::FunctionCall {
+                id,
+                call_id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id, "");
+                assert_eq!(call_id, "");
+                assert_eq!(name, "get_weather");
+                assert_eq!(arguments, "{}");
+            }
+            other => panic!("expected FunctionCall, got {other:?}"),
+        }
+
+        let item = serde_json::from_value::<ResponseOutputItem>(serde_json::json!({
+            "type": "message",
+            "id": "msg_1",
+            "content": [{"type": "output_text", "text": "hi"}]
+        }));
+        assert!(item.is_err());
     }
 }

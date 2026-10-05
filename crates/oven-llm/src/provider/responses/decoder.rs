@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 use super::types::{
-    ResponseEvent, ResponseObject, ResponseOutputItem, WireOutputContentPart, WireUsage,
+    ResponseEvent, ResponseObject, ResponseOutputItem, WireError, WireOutputContentPart, WireUsage,
 };
 use crate::domain::message::{ContentBlock, Role};
 use crate::domain::response::{Response, StopReason, Usage};
@@ -62,6 +62,12 @@ pub(crate) fn decode_usage(usage: WireUsage) -> Usage {
     }
 }
 
+fn error_message(error: Option<&WireError>) -> String {
+    error
+        .and_then(|error| error.message.clone())
+        .unwrap_or_default()
+}
+
 /// 计算 domain 层的 `StopReason`：
 ///
 /// - 输出中出现任意 function_call → `ToolUse`；
@@ -96,12 +102,9 @@ fn map_stop_reason(
 /// - `stop_reason` 按 `map_stop_reason` 计算
 pub(crate) fn decode_response(wire: ResponseObject) -> Result<Response, DecodeError> {
     if wire.status.as_deref() == Some("failed") {
-        let message = wire
-            .error
-            .as_ref()
-            .and_then(|error| error.message.clone())
-            .unwrap_or_default();
-        return Err(DecodeError::Failed { message });
+        return Err(DecodeError::Failed {
+            message: error_message(wire.error.as_ref()),
+        });
     }
 
     let mut content = Vec::new();
@@ -147,7 +150,7 @@ pub(crate) fn decode_response(wire: ResponseObject) -> Result<Response, DecodeEr
                 });
                 saw_function_call = true;
             }
-            ResponseOutputItem::WebSearchCall { .. } | ResponseOutputItem::Other(_) => {}
+            ResponseOutputItem::WebSearchCall { .. } | ResponseOutputItem::Other => {}
         }
     }
 
@@ -210,8 +213,10 @@ impl StreamDecoder {
     /// - `AwaitingDone` 阶段收到内容事件 → `DecodeError::DataAfterFinish`
     /// - `response.created`（仅 `Initial`）→ 产出 `MessageStart`
     /// - `response.completed` / `response.incomplete` → 关闭剩余块 +
-    ///   `MessageDelta`，转入 `AwaitingDone`
-    /// - `response.failed` → `DecodeError::Failed`
+    ///   `MessageDelta`（`stop_reason` 按响应体的 `status` 计算），转入
+    ///   `AwaitingDone`
+    /// - `response.failed`，以及 `response.completed` 且 `status == "failed"`
+    ///   → `DecodeError::Failed`
     pub(crate) fn decode_event(
         &mut self,
         event: ResponseEvent,
@@ -295,35 +300,24 @@ impl StreamDecoder {
                 }
             }
             ResponseEvent::ResponseCompleted { response } => {
-                self.close_open_blocks(&mut events);
-                events.push(StreamEvent::MessageDelta {
-                    stop_reason: map_stop_reason(Some("completed"), None, self.saw_tool_call),
-                    usage: response.usage.map(decode_usage),
-                });
-                self.phase = StreamPhase::AwaitingDone;
+                if response.status.as_deref() == Some("failed") {
+                    self.phase = StreamPhase::Stopped;
+                    return Err(DecodeError::Failed {
+                        message: error_message(response.error.as_ref()),
+                    });
+                }
+                self.push_terminal(response, "completed", &mut events);
             }
             ResponseEvent::ResponseIncomplete { response } => {
-                self.close_open_blocks(&mut events);
-                let reason = response
-                    .incomplete_details
-                    .as_ref()
-                    .and_then(|details| details.reason.as_deref());
-                events.push(StreamEvent::MessageDelta {
-                    stop_reason: map_stop_reason(Some("incomplete"), reason, self.saw_tool_call),
-                    usage: response.usage.map(decode_usage),
-                });
-                self.phase = StreamPhase::AwaitingDone;
+                self.push_terminal(response, "incomplete", &mut events);
             }
             ResponseEvent::ResponseFailed { response } => {
-                let message = response
-                    .error
-                    .as_ref()
-                    .and_then(|error| error.message.clone())
-                    .unwrap_or_default();
                 self.phase = StreamPhase::Stopped;
-                return Err(DecodeError::Failed { message });
+                return Err(DecodeError::Failed {
+                    message: error_message(response.error.as_ref()),
+                });
             }
-            ResponseEvent::Other(_) => {}
+            ResponseEvent::Other => {}
         }
 
         Ok(events)
@@ -361,6 +355,27 @@ impl StreamDecoder {
         }
     }
 
+    /// 关闭剩余块并产出终止 `MessageDelta`。`status` 缺省时用
+    /// `fallback_status`（事件名本身：`completed` / `incomplete`）。
+    fn push_terminal(
+        &mut self,
+        response: ResponseObject,
+        fallback_status: &str,
+        events: &mut Vec<StreamEvent>,
+    ) {
+        self.close_open_blocks(events);
+        let status = response.status.as_deref().unwrap_or(fallback_status);
+        let reason = response
+            .incomplete_details
+            .as_ref()
+            .and_then(|details| details.reason.as_deref());
+        events.push(StreamEvent::MessageDelta {
+            stop_reason: map_stop_reason(Some(status), reason, self.saw_tool_call),
+            usage: response.usage.map(decode_usage),
+        });
+        self.phase = StreamPhase::AwaitingDone;
+    }
+
     /// 分派 `response.output_item.added`：按输出项类型开启对应内容块。
     ///
     /// message → `Text`、reasoning → `Thinking`、function_call → `ToolUse`
@@ -383,7 +398,7 @@ impl StreamDecoder {
                 self.ensure_tool_block(output_index, Some(&call_id), Some(&name), events);
                 self.saw_tool_call = true;
             }
-            ResponseOutputItem::WebSearchCall { .. } | ResponseOutputItem::Other(_) => {}
+            ResponseOutputItem::WebSearchCall { .. } | ResponseOutputItem::Other => {}
         }
     }
 
@@ -1045,5 +1060,92 @@ mod tests {
         let mut decoder = StreamDecoder::new();
         let err = decoder.finish().unwrap_err();
         assert!(matches!(err, DecodeError::MissingStart));
+    }
+
+    #[test]
+    fn completed_with_partial_usage_still_terminates() {
+        let mut decoder = StreamDecoder::new();
+        let mut collector = StreamCollector::new();
+        for value in [
+            serde_json::json!({
+                "type": "response.created",
+                "response": {"id": "r1", "model": "m1", "output": []}
+            }),
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "delta": "hi"
+            }),
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "r1",
+                    "model": "m1",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {"output_tokens": 5}
+                }
+            }),
+        ] {
+            let event: ResponseEvent = serde_json::from_value(value).unwrap();
+            for stream_event in decoder.decode_event(event).unwrap() {
+                collector.push(&stream_event);
+            }
+        }
+        for stream_event in decoder.finish().unwrap() {
+            collector.push(&stream_event);
+        }
+
+        let response = collector.finish().unwrap();
+        assert_eq!(response.stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(
+            response.usage,
+            Some(Usage {
+                input_tokens: 0,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                reasoning_tokens: 0,
+            })
+        );
+        assert!(matches!(
+            &response.content[0],
+            ContentBlock::Text { text } if text == "hi"
+        ));
+    }
+
+    #[test]
+    fn completed_with_failed_status_returns_failed_error() {
+        let mut decoder = StreamDecoder::new();
+        decoder
+            .decode_event(
+                serde_json::from_value(serde_json::json!({
+                    "type": "response.created",
+                    "response": {"id": "r1", "model": "m1", "output": []}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let err = decoder
+            .decode_event(
+                serde_json::from_value(serde_json::json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "r1",
+                        "model": "m1",
+                        "status": "failed",
+                        "error": {"message": "boom"},
+                        "output": [],
+                        "usage": {"input_tokens": 3, "output_tokens": 1}
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap_err();
+        match err {
+            DecodeError::Failed { message } => assert_eq!(message, "boom"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        let err = decoder.finish().unwrap_err();
+        assert!(matches!(err, DecodeError::DataAfterStop));
     }
 }

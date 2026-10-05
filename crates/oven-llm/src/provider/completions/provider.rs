@@ -312,6 +312,7 @@ impl Provider for CompletionsProvider {
 mod tests {
     use super::*;
     use crate::domain::message::{ContentBlock, Message};
+    use crate::domain::{StopReason, StreamCollector, Usage};
 
     fn deepseek_models() -> Vec<ModelInfo> {
         catalog::models_for(&ProviderName::DeepSeek, ProviderKind::Completions)
@@ -782,6 +783,49 @@ mod tests {
         let requests = mock_server.received_requests().await.unwrap();
         let sent_body: serde_json::Value = requests[0].body_json().unwrap();
         assert_eq!(sent_body["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn stream_collects_usage_from_trailing_chunk() {
+        let mock_server = MockServer::start().await;
+        let sse_body = concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4\",\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":11,\"total_tokens\":18}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let provider = CompletionsProvider::with_base_url(
+            mock_server.uri(),
+            ProviderName::Custom("example".into()),
+            api_key("k"),
+        );
+        let mut event_stream = provider.stream(&sample_request()).await.unwrap();
+        let mut collector = StreamCollector::new();
+        while let Some(event) = event_stream.next().await {
+            collector.push(&event.unwrap());
+        }
+
+        let response = collector.finish().unwrap();
+        assert_eq!(response.stop_reason, Some(StopReason::EndTurn));
+        assert_eq!(
+            response.usage,
+            Some(Usage {
+                input_tokens: 7,
+                output_tokens: 11,
+                cache_read_tokens: 0,
+                reasoning_tokens: 0,
+            })
+        );
     }
 
     #[tokio::test]
