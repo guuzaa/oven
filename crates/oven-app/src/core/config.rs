@@ -249,7 +249,10 @@ impl Serialize for ProviderConfig {
 
 impl ProviderConfig {
     /// Model used when neither `model` nor `OVEN_MODEL` is set.
-    pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
+    pub const DEFAULT_MODEL: &str = match ProviderName::DeepSeek.default_model() {
+        Some(model) => model,
+        None => panic!("deepseek has a default model"),
+    };
 
     /// Canonicalize `name` aliases and store `model` as a wire id (no vendor).
     pub fn normalize(&mut self) {
@@ -298,14 +301,7 @@ impl ProviderConfig {
     }
 
     pub fn suggested_model(name: &str) -> Option<&'static str> {
-        match canonical_vendor(name).as_str() {
-            "openai" => Some("gpt-5.6-terra"),
-            "deepseek" => Some(Self::DEFAULT_MODEL),
-            "moonshot" => Some("kimi-k3"),
-            "zhipu" => Some("glm-5.3"),
-            "xai" => Some("grok-4.6"),
-            _ => None,
-        }
+        ProviderName::from(name).default_model()
     }
 
     /// Fill `base_url` and `model` from [`name`](Self::name) presets.

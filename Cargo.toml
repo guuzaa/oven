@@ -3,6 +3,7 @@ members = [
     "crates/oven-agent",
     "crates/oven-app",
     "crates/oven-host",
+    "crates/oven-llm",
     "crates/oven-mem",
     "crates/oven-tui",
 ]
@@ -20,10 +21,17 @@ oven-agent = { path = "./crates/oven-agent" }
 oven-host = { path = "./crates/oven-host" }
 oven-mem = { path = "./crates/oven-mem" }
 oven-tui = { path = "./crates/oven-tui" }
-oven-llm = { version = "0.4.2" }
+oven-llm = { version = "0.5.0", path = "./crates/oven-llm" }
 
 # External dependencies
+anyhow = "1"
 async-trait = "0.1"
+eventsource-stream = "=0.2.3"
+futures-lite = "2"
+futures-timer = "3"
+isahc = "2.0"
+proptest = "1"
+secrecy = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 arboard = { version = "3", default-features = false }
 base64 = "0.23"

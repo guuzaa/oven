@@ -1,0 +1,47 @@
+name: oven-llm Release
+
+on:
+  push:
+    tags:
+      - "oven-llm-v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92.0"
+
+      - name: Cargo cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check tag matches crate version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#oven-llm-v}"
+          version=$(awk -F '"' '/^version = / { print $2; exit }' crates/oven-llm/Cargo.toml)
+          if [ "$tag" != "$version" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match oven-llm ${version}" >&2
+            exit 1
+          fi
+
+      - name: Package
+        run: cargo publish -p oven-llm --locked --dry-run
+
+      - name: Publish
+        run: cargo publish -p oven-llm --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

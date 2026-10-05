@@ -169,8 +169,8 @@ impl Provider for MockProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -210,8 +210,8 @@ impl Provider for RecordingProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -1565,8 +1565,8 @@ async fn cancel_during_turn_returns_idle() {
             })
         }
 
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
 
         fn provider_name(&self) -> ProviderName {
@@ -1640,8 +1640,8 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
             })
         }
 
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
 
         fn provider_name(&self) -> ProviderName {
@@ -1724,8 +1724,8 @@ async fn a_steered_chat_is_appended_when_tool_results_are_uploaded() {
             })
         }
 
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
 
         fn provider_name(&self) -> ProviderName {
@@ -2041,8 +2041,8 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
             })
         }
 
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
 
         fn provider_name(&self) -> ProviderName {
@@ -2130,8 +2130,8 @@ async fn model_slash_switches_immediately_during_turn() {
             })
         }
 
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
 
         fn provider_name(&self) -> ProviderName {
@@ -2379,8 +2379,8 @@ async fn set_mode_applies_during_in_flight_turn() {
             })
         }
 
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
 
         fn provider_name(&self) -> ProviderName {
@@ -2769,8 +2769,8 @@ async fn cancel_does_not_roll_back_todos() {
             })
         }
 
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
 
         fn provider_name(&self) -> ProviderName {
@@ -3121,8 +3121,8 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
             })
         }
 
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
 
         fn provider_name(&self) -> ProviderName {
@@ -3347,8 +3347,8 @@ async fn bang_shell_queues_behind_agent_turn() {
                 body: "unused".into(),
             })
         }
-        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-            None
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
         }
         fn provider_name(&self) -> ProviderName {
             ProviderName::Custom("block-shell-queue".into())
@@ -3576,8 +3576,8 @@ impl Provider for RendezvousProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -3712,8 +3712,8 @@ impl Provider for SlowSubagentProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -3876,8 +3876,8 @@ impl Provider for UnsentProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {

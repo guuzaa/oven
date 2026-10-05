@@ -44,7 +44,7 @@ impl Agent {
         req.reasoning_effort = None;
 
         let router = self.router();
-        let response = Provider::complete(&*router, &req).await?;
+        let response = router.complete(&req).await?;
         let summary = response.text();
         if summary.trim().is_empty() {
             return Err(AgentError::from(EMPTY_SUMMARY));
@@ -76,8 +76,8 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_llm::{
-        ContentBlock, ModelId, ModelInfo, ProviderError, ProviderName, Request, Response, Role,
-        Router, StopReason, StreamEvent, Usage,
+        ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
+        Role, Router, StopReason, StreamEvent, Usage,
     };
 
     struct SummaryProvider {

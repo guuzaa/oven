@@ -1,0 +1,32 @@
+[package]
+name = "oven-llm"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "A Rust library for calling LLM providers with a unified API."
+repository = "https://github.com/guuzaa/oven"
+homepage = "https://github.com/guuzaa/oven/tree/master/crates/oven-llm"
+authors = ["Jowell Young <guza@duck.com>"]
+readme = "README.md"
+include = ["README.md", "Cargo.toml", "LICENSE", "src/**/*.rs", "examples/**/*.rs"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+isahc = { workspace = true }
+futures-lite = { workspace = true }
+futures-timer = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+secrecy = { workspace = true }
+async-stream = { workspace = true }
+eventsource-stream = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread"] }
+anyhow = { workspace = true }
+proptest = { workspace = true }
+wiremock = { workspace = true }

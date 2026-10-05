@@ -8,7 +8,7 @@ use clap::Args as ClapArgs;
 use oven_app::AppError;
 use oven_app::config::{ModelMetadata, ProviderConfig};
 use oven_app::{provider_catalog, provider_models};
-use oven_llm::{ModelInfo, ProviderName, canonical_vendor};
+use oven_llm::{ModelCapabilities, ModelInfo, ProviderName, canonical_vendor};
 use unicode_width::UnicodeWidthStr;
 
 use super::Context;
@@ -353,12 +353,18 @@ struct Facts {
 
 impl Facts {
     fn declared(metadata: &ModelMetadata) -> Self {
+        let caps = ModelCapabilities::supported().with_overrides(
+            metadata.supports_vision,
+            metadata.supports_tools,
+            metadata.supports_streaming,
+            metadata.supports_system_prompt,
+        );
         Self {
             context_window: metadata.context_window,
             max_output_tokens: metadata.max_output_tokens,
-            tools: metadata.supports_tools.unwrap_or(true),
-            vision: metadata.supports_vision.unwrap_or(true),
-            streaming: metadata.supports_streaming.unwrap_or(true),
+            tools: caps.supports_tools,
+            vision: caps.supports_vision,
+            streaming: caps.supports_streaming,
         }
     }
 

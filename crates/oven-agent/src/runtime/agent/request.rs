@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use oven_llm::{
-    Delta, Provider, ReasoningEffort, Request, Response, Role, SamplingParams, StreamCollector,
-    StreamEvent as LlmStreamEvent, ThinkingMode, ToolChoice,
+    Client, Delta, Provider, ReasoningEffort, Request, Response, Role, StreamCollector,
+    StreamEvent as LlmStreamEvent, ThinkingMode,
 };
 
 use oven_host::as_ms;
@@ -56,32 +56,29 @@ impl Agent {
     pub(crate) fn build_request(&self) -> Request {
         let mode = self.selection.mode();
         let (model, reasoning_effort) = self.selection.model();
-        Request {
-            model,
-            system: self.system_prompt(mode),
-            messages: self
-                .history
-                .messages()
-                .filter(|m| m.role != Role::System)
-                .cloned()
-                .collect(),
-            tools: self.llm_tools(mode),
-            tool_choice: ToolChoice::Auto,
-            sampling: SamplingParams {
-                temperature: Some(1.0),
-                max_tokens: None,
-                ..Default::default()
-            },
-            thinking: Some(
-                if reasoning_effort.is_some_and(|effort| effort != ReasoningEffort::None) {
-                    ThinkingMode::Enabled
-                } else {
-                    ThinkingMode::Disabled
-                },
-            ),
-            reasoning_effort,
-            provider_options: serde_json::Map::default(),
+        let thinking = if reasoning_effort.is_some_and(|effort| effort != ReasoningEffort::None) {
+            ThinkingMode::Enabled
+        } else {
+            ThinkingMode::Disabled
+        };
+        let mut builder = Request::builder()
+            .model(model)
+            .messages(
+                self.history
+                    .messages()
+                    .filter(|message| message.role != Role::System)
+                    .cloned()
+                    .collect(),
+            )
+            .tools(self.llm_tools(mode))
+            .thinking(thinking);
+        if let Some(system) = self.system_prompt(mode) {
+            builder = builder.system(system);
         }
+        if let Some(effort) = reasoning_effort {
+            builder = builder.reasoning_effort(effort);
+        }
+        builder.build().expect("model is set")
     }
 
     pub(super) async fn complete_response(
@@ -104,6 +101,12 @@ impl Agent {
     ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
         let req = self.build_request();
         let router = self.router();
+        if router
+            .resolve_model(&req.model)
+            .is_some_and(|info| !info.capabilities.supports_streaming)
+        {
+            return complete_unstreamed(&req, router.as_ref(), sink).await;
+        }
 
         match router.stream(&req).await {
             Ok(mut stream) => {
@@ -139,28 +142,33 @@ impl Agent {
                 let span = thinking.finish(sink);
                 Ok((collector.finish()?, span))
             }
-            Err(error) => {
-                tracing::warn!(error = %error, model = %self.model(), "stream start failed, falling back to complete");
-                let started = Instant::now();
-                let response = Provider::complete(&*router, &req).await?;
-                let reasoning = response.thinking();
-                let span = (!reasoning.is_empty()).then(|| thinking_span(started.elapsed()));
-                if !reasoning.is_empty() {
-                    sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
-                        text: reasoning,
-                    }));
-                    if let Some((_, duration_ms)) = span {
-                        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDone {
-                            duration_ms,
-                        }));
-                    }
-                }
-                let text = response.text();
-                if !text.is_empty() {
-                    sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
-                }
-                Ok((response, span))
-            }
+            Err(error) => Err(error.into()),
         }
     }
+}
+
+async fn complete_unstreamed(
+    req: &Request,
+    router: &Client,
+    sink: &mut impl EventSink,
+) -> Result<(Response, Option<(u64, u64)>), AgentError> {
+    let started = Instant::now();
+    let response = router.complete(req).await?;
+    let reasoning = response.thinking();
+    let span = (!reasoning.is_empty()).then(|| thinking_span(started.elapsed()));
+    if !reasoning.is_empty() {
+        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
+            text: reasoning,
+        }));
+        if let Some((_, duration_ms)) = span {
+            sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDone {
+                duration_ms,
+            }));
+        }
+    }
+    let text = response.text();
+    if !text.is_empty() {
+        sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
+    }
+    Ok((response, span))
 }

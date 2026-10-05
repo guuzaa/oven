@@ -234,7 +234,7 @@ impl Subagents {
     /// router that will serve it: a bad `model` fails here, naming `list_models`,
     /// instead of deep inside the subagent's first request.
     fn resolve_model(&self, model: &ModelId) -> Result<ModelId, AgentError> {
-        let router = self.router.read().unwrap_or_else(PoisonError::into_inner);
+        let router = self.router.load();
         let qualified = router.qualify(model);
         router.provider(&qualified).map_err(|_| {
             AgentError::from(format!(

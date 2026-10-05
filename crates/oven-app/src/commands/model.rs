@@ -40,7 +40,6 @@ impl Model {
                         "model '{qualified}' is not available; run /setup to configure that provider"
                     )))
                 }
-                Err(e) => Err(AppError::Provider(e.to_string())),
             }
         } else {
             Ok(qualified.to_string())
