@@ -6,9 +6,9 @@
 //! tools it asked for, and `notify` times the thinking window and logs every
 //! call.
 
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::Arc;
 
-use oven_llm::{Message, ModelId, ReasoningEffort, Router};
+use oven_llm::{Message, ModelId, ReasoningEffort, Router, RouterHandle};
 
 use crate::capabilities::tools::Tool;
 use crate::core::event::AgentEvent;
@@ -23,17 +23,10 @@ mod notify;
 mod request;
 mod step;
 
-/// A router shared between an `Agent` and callers that need to read it
-/// (e.g. to validate a model switch) without the exclusive `&mut Agent`
-/// access a running turn holds. Reading clones the inner `Arc<Router>`
-/// snapshot (cheap, safe to hold across `.await`); mutating goes through
-/// [`Agent::replace_router`].
-pub type RouterHandle = Arc<RwLock<Arc<Router>>>;
-
 /// A handle onto `router`, for callers that need the conversation driver and
 /// the agents it spawns to share one router from the start.
 pub fn router_handle(router: Router) -> RouterHandle {
-    Arc::new(RwLock::new(Arc::new(router)))
+    RouterHandle::new(router)
 }
 
 /// The conversation driver. Holds tools and dispatches tool calls returned by
@@ -109,17 +102,14 @@ impl Agent {
     /// A snapshot of the current router. Cheap to clone and safe to hold
     /// across `.await` points, unlike a lock guard.
     pub fn router(&self) -> Arc<Router> {
-        self.router
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.router.load()
     }
 
     /// A handle to the shared router, independent of `&Agent`/`&mut Agent`.
     /// Lets a caller validate or read the router while a turn holds the
     /// agent's exclusive `&mut` borrow.
     pub fn router_handle(&self) -> RouterHandle {
-        Arc::clone(&self.router)
+        self.router.clone()
     }
 
     /// Swaps in a freshly built router (e.g. `/setup` registering a new
@@ -128,8 +118,7 @@ impl Agent {
     /// reader that captured the old router finishes its request on it, and
     /// the next reader gets the new one.
     pub fn replace_router(&mut self, router: Router) {
-        let mut guard = self.router.write().unwrap_or_else(PoisonError::into_inner);
-        *guard = Arc::new(router);
+        self.router.replace(router);
     }
 
     pub fn set_model(&mut self, model: impl Into<ModelId>) {

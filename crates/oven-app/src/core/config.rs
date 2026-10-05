@@ -298,14 +298,7 @@ impl ProviderConfig {
     }
 
     pub fn suggested_model(name: &str) -> Option<&'static str> {
-        match canonical_vendor(name).as_str() {
-            "openai" => Some("gpt-5.6-terra"),
-            "deepseek" => Some(Self::DEFAULT_MODEL),
-            "moonshot" => Some("kimi-k3"),
-            "zhipu" => Some("glm-5.3"),
-            "xai" => Some("grok-4.6"),
-            _ => None,
-        }
+        ProviderName::from(name).default_model()
     }
 
     /// Fill `base_url` and `model` from [`name`](Self::name) presets.

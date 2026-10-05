@@ -11,7 +11,6 @@ pub mod matching;
 pub mod mode;
 pub mod models;
 pub mod prompt_template;
-pub mod retry;
 pub mod selection;
 pub mod sink;
 pub mod subagent;

@@ -30,10 +30,7 @@ impl Shared {
     }
 
     fn router_snapshot(&self) -> Arc<Router> {
-        self.router
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.router.load()
     }
 
     /// Applies `input` on the spot when it never asks for the driver,

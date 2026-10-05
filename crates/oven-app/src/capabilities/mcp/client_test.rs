@@ -14,6 +14,17 @@ use crate::core::config::AppConfig;
 use crate::core::event::AppId;
 use crate::runtime::spawn_runtime;
 
+fn non_streaming(name: &ProviderName, id: &ModelId) -> Option<&'static ModelInfo> {
+    static MODEL: std::sync::OnceLock<ModelInfo> = std::sync::OnceLock::new();
+    match id.vendor() {
+        Some(vendor) if !name.matches_vendor(vendor) => None,
+        _ => Some(
+            MODEL
+                .get_or_init(|| ModelInfo::minimal("default", ProviderName::Custom("mock".into()))),
+        ),
+    }
+}
+
 #[test]
 fn tool_name_sanitizes_server_id() {
     assert_eq!(
@@ -120,8 +131,8 @@ impl Provider for MockProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {

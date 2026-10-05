@@ -28,6 +28,17 @@ const SUBAGENT_MARK: &str = "You are a subagent";
 const EXPLORE_MARK: &str = "# Your role: explore";
 const GENERAL_MARK: &str = "# Your role: general";
 
+fn non_streaming(name: &ProviderName, id: &ModelId) -> Option<&'static ModelInfo> {
+    static MODEL: std::sync::OnceLock<ModelInfo> = std::sync::OnceLock::new();
+    match id.vendor() {
+        Some(vendor) if !name.matches_vendor(vendor) => None,
+        _ => Some(
+            MODEL
+                .get_or_init(|| ModelInfo::minimal("default", ProviderName::Custom("mock".into()))),
+        ),
+    }
+}
+
 fn memory_file() -> String {
     format!("---\nkind: fact\ndescription: {MEMORY_DESCRIPTION}\n---\n\nbody\n")
 }
@@ -89,8 +100,8 @@ impl Provider for CaptureProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -350,8 +361,8 @@ impl Provider for ScriptedProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {

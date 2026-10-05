@@ -11,7 +11,7 @@ use crate::core::turn::{PendingPrompts, TurnContext};
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt, iter};
 use oven_llm::{
-    Delta, ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason,
+    Delta, ModelId, ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason,
     StreamEvent as LlmStreamEvent,
 };
 use std::time::Duration;
@@ -33,6 +33,17 @@ use crate::core::interaction::{AnswerResponse, PendingRequest, Question, UserReq
 
 const APPROVED_FILE: &str = "approved.txt";
 const APPROVED_CONTENT: &str = "approved";
+
+fn non_streaming(name: &ProviderName, id: &ModelId) -> Option<&'static ModelInfo> {
+    static MODEL: std::sync::OnceLock<ModelInfo> = std::sync::OnceLock::new();
+    match id.vendor() {
+        Some(vendor) if !name.matches_vendor(vendor) => None,
+        _ => Some(
+            MODEL
+                .get_or_init(|| ModelInfo::minimal("default", ProviderName::Custom("mock".into()))),
+        ),
+    }
+}
 
 fn write_approved_command() -> &'static str {
     #[cfg(windows)]
@@ -227,8 +238,8 @@ impl Provider for MockProvider {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -264,8 +275,8 @@ impl Provider for SlowComplete {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -953,6 +964,51 @@ async fn completed_duration_ms_matches_history_timestamps() {
 }
 
 #[tokio::test]
+async fn stream_auth_failure_is_not_requested_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AuthOnStream {
+        completes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Provider for AuthOnStream {
+        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+            self.completes.fetch_add(1, Ordering::SeqCst);
+            Err(ProviderError::Auth("bad key".into()))
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
+            Err(ProviderError::Auth("bad key".into()))
+        }
+
+        fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+            None
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("auth".into())
+        }
+    }
+
+    let completes = Arc::new(AtomicUsize::new(0));
+    let mut agent = Agent::new(
+        router_with(Box::new(AuthOnStream {
+            completes: Arc::clone(&completes),
+        })),
+        Vec::new(),
+    );
+    let err = run_plain(&mut agent, "hi", &mut VecEventSink::default())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("bad key"), "{err}");
+    assert_eq!(completes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn fallback_complete_times_thinking_and_streams_it() {
     const THINKING: &str = "weighing options";
     const ANSWER: &str = "done";
@@ -1298,8 +1354,8 @@ impl Provider for CaptureSystem {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -1368,8 +1424,8 @@ impl Provider for CaptureTools {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {
@@ -1566,8 +1622,8 @@ impl Provider for CaptureRequests {
         })
     }
 
-    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-        None
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        non_streaming(&self.provider_name(), id)
     }
 
     fn provider_name(&self) -> ProviderName {

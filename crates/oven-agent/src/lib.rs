@@ -39,7 +39,6 @@ pub use core::prompt_template::{
     InstructionDoc, InstructionScope, MEMORY_PROMPT, load_instructions, subagent_preamble,
     system_prompt,
 };
-pub use core::retry::RetryingProvider;
 pub use core::selection::{ModelSelection, Selection};
 pub use core::sink::{EventSink, NullSink, VecEventSink};
 pub use core::subagent::{
@@ -51,6 +50,7 @@ pub use core::turn::{
     DEFAULT_MAX_ITERS, PendingPrompts, RunPolicy, Step, StepCall, TurnContext, TurnOutput,
 };
 pub use core::view::{ToolCaps, ToolPermission, ToolView};
-pub use runtime::agent::{Agent, RouterHandle, router_handle};
+pub use oven_llm::RouterHandle;
+pub use runtime::agent::{Agent, router_handle};
 pub use runtime::compact::{CompactStats, NOTHING_TO_COMPACT};
 pub use tokio_util::sync::CancellationToken;

@@ -1,23 +1,15 @@
-use std::sync::PoisonError;
 use std::time::{Duration, Instant};
 
-use oven_agent::{ModelCatalog, RetryingProvider, RouterHandle};
-use oven_llm::{
-    ModelCapabilities, ModelInfo, Provider, ProviderBuilder, ProviderKind, ProviderName, Request,
-    Router,
-};
+use oven_agent::{ModelCatalog, RouterHandle};
+use oven_llm::{ModelInfo, Provider, ProviderBuilder, ProviderName, Request, Router};
 
 use crate::core::config::{AppConfig, ModelMetadata, ProviderConfig};
 use crate::core::error::AppError;
 
-/// Key used to read a static catalog: no request is ever sent with it, so a
-/// listing works before the user has a credential.
-const CATALOG_KEY: &str = "oven-catalog";
-
 /// The one-token request [`verify`] sends.
 const VERIFY_PROMPT: &str = "ping";
 
-/// `ModelInfo` for a user-declared model. Capabilities default to supported
+/// `ModelInfo` for a user-declared model. Unset capabilities stay supported
 /// and unknown limits stay zeroed: validation must not reject a model for
 /// metadata the user chose not (or was unable) to spell out.
 fn declared_model_info(
@@ -25,42 +17,39 @@ fn declared_model_info(
     params: &ModelMetadata,
     provider_name: &ProviderName,
 ) -> ModelInfo {
-    ModelInfo {
-        id: id.to_owned(),
-        provider: provider_name.clone(),
-        context_window: params.context_window.unwrap_or_default(),
-        max_output_tokens: params.max_output_tokens.unwrap_or_default(),
-        capabilities: ModelCapabilities {
-            supports_vision: params.supports_vision.unwrap_or(true),
-            supports_tools: params.supports_tools.unwrap_or(true),
-            supports_streaming: params.supports_streaming.unwrap_or(true),
-            supports_json_mode: true,
-            supports_parallel_tool_calls: true,
-            supports_system_prompt: params.supports_system_prompt.unwrap_or(true),
-            max_concurrent_tools: None,
-        },
-        pricing: None,
-        protocols: Vec::new(),
+    let mut info = ModelInfo::declared(id, provider_name.clone());
+    if let Some(tokens) = params.context_window {
+        info.context_window = tokens;
     }
-}
-
-pub(crate) fn retrying(config: &AppConfig, client: Box<dyn Provider>) -> Box<dyn Provider> {
-    Box::new(
-        RetryingProvider::new(client)
-            .with_timeout(config.request_timeout())
-            .with_retries(config.max_retries)
-            .with_base_backoff(config.base_backoff()),
-    )
+    if let Some(tokens) = params.max_output_tokens {
+        info.max_output_tokens = tokens;
+    }
+    if let Some(enabled) = params.supports_vision {
+        info.capabilities.supports_vision = enabled;
+    }
+    if let Some(enabled) = params.supports_tools {
+        info.capabilities.supports_tools = enabled;
+    }
+    if let Some(enabled) = params.supports_streaming {
+        info.capabilities.supports_streaming = enabled;
+    }
+    if let Some(enabled) = params.supports_system_prompt {
+        info.capabilities.supports_system_prompt = enabled;
+    }
+    info
 }
 
 pub(crate) fn build_router(config: &AppConfig) -> Result<Router, AppError> {
-    let mut router = Router::new();
+    let mut router = Router::new()
+        .with_timeout(config.request_timeout())
+        .with_retries(config.max_retries)
+        .with_base_backoff(config.base_backoff());
     let mut last_err = None;
     let mut registered = 0usize;
     for provider in config.registerable_providers() {
         match build_client(provider) {
             Ok(client) => {
-                router.register(retrying(config, client));
+                router.register(client);
                 registered += 1;
             }
             Err(e) => last_err = Some(e),
@@ -87,13 +76,10 @@ pub(crate) fn build_client(provider: &ProviderConfig) -> Result<Box<dyn Provider
     build_client_with(provider, &provider.effective_api_key())
 }
 
-/// Models `oven-llm` ships for this provider's vendor and protocol. Reads the
-/// static catalog through a throwaway client, so it needs neither a working
-/// key nor the network.
+/// Models `oven-llm` ships for this provider's vendor. The static catalog
+/// needs neither a credential nor a client.
 pub fn provider_catalog(provider: &ProviderConfig) -> Vec<ModelInfo> {
-    build_client_with(provider, CATALOG_KEY)
-        .map(|client| client.known_models())
-        .unwrap_or_default()
+    provider.effective_provider_name().known_models()
 }
 
 /// The models the app's shared router can serve, read live so a `/setup`
@@ -108,10 +94,7 @@ impl RouterCatalog {
 
 impl ModelCatalog for RouterCatalog {
     fn models(&self) -> Vec<ModelInfo> {
-        self.0
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .known_models()
+        self.0.load().known_models()
     }
 }
 
@@ -172,13 +155,7 @@ fn build_client_with(
         )));
     }
 
-    let custom_protocol = match &provider_name {
-        ProviderName::Custom(_) | ProviderName::Anthropic => {
-            provider.protocol.or(Some(ProviderKind::Completions))
-        }
-        _ => None,
-    };
-    let mut builder = match custom_protocol {
+    let mut builder = match provider.protocol {
         Some(kind) => ProviderBuilder::new(kind),
         None => ProviderBuilder::provider(),
     };
