@@ -323,6 +323,7 @@ const TOOLS = [
   { name: "file_read", perm: "read" },
   { name: "glob", perm: "read" },
   { name: "grep", perm: "read" },
+  { name: "web_fetch", perm: "read" },
   { name: "skill_read", perm: "read" },
   { name: "memory_read", perm: "read" },
   { name: "task_output", perm: "read" },

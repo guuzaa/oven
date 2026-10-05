@@ -25,6 +25,23 @@ const LIST_ITEM = /^- (.+)$/;
 const TAGGED_VERSION = /^\d/;
 const INLINE_TOKEN = /`([^`]+)`|\*\*(.+?)\*\*|\*([^*\s][^*]*)\*/g;
 
+const ASSET_TARGET = /-([a-z0-9_]+)-[a-z]+-(darwin|linux|windows)(?:-([a-z]+))?\.(?:tar\.gz|zip)$/;
+const PLATFORMS = [
+  { os: "darwin", name: "macOS", icon: "🍎" },
+  { os: "linux", name: "Linux", icon: "🐧" },
+  { os: "windows", name: "Windows", icon: "🪟" },
+  { os: "", name: "Other files", icon: "📦" },
+];
+const OS_HINTS = [
+  ["darwin", /mac/i],
+  ["windows", /win/i],
+  ["linux", /linux|x11/i],
+];
+const ARCH_LABELS = { x86_64: "x86-64", aarch64: "ARM64", loongarch64: "LoongArch64" };
+const MAC_ARCH_LABELS = { x86_64: "Intel", aarch64: "Apple Silicon" };
+const LIBC_LABELS = { gnu: "glibc 2.28+", musl: "musl · static" };
+const CURRENT_PLATFORM_LABEL = "your system";
+
 const COPY_LABEL_RESET_MS = 1_200;
 const SIZE_UNITS = ["B", "KiB", "MiB", "GiB"];
 
@@ -175,17 +192,59 @@ function initLinks() {
   window.addEventListener("popstate", renderRoute);
 }
 
-function releaseRow(tag, asset) {
+function detectOs() {
+  const platform = navigator.userAgentData?.platform || navigator.userAgent;
+  return OS_HINTS.find(([, hint]) => hint.test(platform))?.[0];
+}
+
+function describeAsset(asset) {
   const name = String(asset.name ?? "");
-  const row = el("div", "release-row");
-  row.append(el("span", "name", name));
-  if (typeof asset.size === "number") {
-    row.append(el("span", "size", formatSize(asset.size)));
+  const [, arch = "", os = "", libc = ""] = ASSET_TARGET.exec(name) ?? [];
+  const archLabels = os === "darwin" ? MAC_ARCH_LABELS : ARCH_LABELS;
+  return {
+    name,
+    size: asset.size,
+    os,
+    arch: archLabels[arch] ?? arch,
+    variant: os === "linux" ? (LIBC_LABELS[libc] ?? libc) : "",
+  };
+}
+
+function byLabel(left, right) {
+  return left.arch.localeCompare(right.arch) || left.variant.localeCompare(right.variant) || left.name.localeCompare(right.name);
+}
+
+function assetRow(tag, { name, size, arch, variant }) {
+  const row = el("div", "asset");
+  if (arch) {
+    const label = el("div", "asset-label");
+    label.append(el("strong", undefined, arch));
+    if (variant) {
+      label.append(el("span", "asset-variant", variant));
+    }
+    row.append(label);
+  }
+  row.append(el("span", "asset-file", name));
+  if (typeof size === "number") {
+    row.append(el("span", "asset-size", formatSize(size)));
   }
   const download = el("a", "button", "Download");
   download.href = `${ASSET_PATH}/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`;
   row.append(download);
   return row;
+}
+
+function platformCard(tag, { name, icon }, assets, current) {
+  const card = el("section", "platform");
+  const head = el("h2", "platform-head");
+  const badge = el("span", "platform-icon", icon);
+  badge.setAttribute("aria-hidden", "true");
+  head.append(badge, name);
+  if (current) {
+    head.append(el("span", "platform-current", CURRENT_PLATFORM_LABEL));
+  }
+  card.append(head, ...assets.map((asset) => assetRow(tag, asset)));
+  return card;
 }
 
 async function renderRelease() {
@@ -216,13 +275,18 @@ async function renderRelease() {
     head.append(el("span", undefined, `released ${published}`));
   }
 
-  const assets = Array.isArray(release.assets) ? release.assets : [];
+  const assets = Array.isArray(release.assets) ? release.assets.map(describeAsset) : [];
   host.replaceChildren(head);
   if (assets.length === 0) {
     host.append(el("p", "release-empty", "No assets attached to this release."));
   }
-  for (const asset of assets) {
-    host.append(releaseRow(tag, asset));
+  const current = detectOs();
+  const platforms = PLATFORMS.toSorted((left, right) => Number(right.os === current) - Number(left.os === current));
+  for (const platform of platforms) {
+    const matching = assets.filter((asset) => asset.os === platform.os).sort(byLabel);
+    if (matching.length) {
+      host.append(platformCard(tag, platform, matching, platform.os === current));
+    }
   }
   appendReleasesLink(host);
 }
