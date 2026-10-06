@@ -2,8 +2,24 @@
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-10-06
+
 ### Added
 - `web_fetch` fetches an `http` or `https` URL and returns the page to the model as markdown. A failed fetch returns an error and writes nothing
+- `crates/oven-llm` is vendored into the workspace and released on its own `oven-llm-v*` tag: the domain types (`domain/message.rs`, `request.rs`, `response.rs`, `stream.rs`, `tool.rs`), the completions and Responses clients, the retry loop, the vendor catalog and request validation, with oven depending on it by path while it keeps the metadata for an independent crates.io release
+- `oven-llm` returns typed `ProviderError`s instead of panicking, stays runtime-agnostic (backoff and timeouts wait on `futures-timer`, tokio is only a dev-dependency), and ships `examples/agent_loop.rs`, `completions_usage.rs`, `responses_usage.rs` and `router_usage.rs`
+
+### Changed
+- **Breaking:** `Router::complete` and `Router::stream` return `ProviderError` and take optional retry and timeout; `RouterHandle` is shareable and registering a provider no longer needs a dummy API key. `Router` only records which provider owns a model — calls go through `Client`, which implements `Provider`, and retry lives on `RetryingProvider` applied when a provider is built
+- **Breaking:** the duplicated router, catalog and provider code is gone from `oven-agent`: `core/retry.rs` and the local copies of the retry loop, model defaults, capability overrides and completions/Responses client shell are dropped, and `oven_llm::{ModelCatalog, Provider, ProviderBuilder, ProviderName, Request, Response, Router, RouterHandle, RetryingProvider, …}` is the single copy
+- Thinking and tool calls fold into one activity row in the transcript (`widgets/transcript/activity.rs`): one run of thought and calls is a single collapsible row whose body is the timeline, and a later step's `file_edit` adds to the same burst's total instead of starting a new one
+- The subagent strip takes the keyboard while the composer is empty: `↑`/`↓` move a highlight through the driver (`◇ main`) and the subagents, `Enter` opens the highlighted one, `Esc` returns to the driver, and the strip stays after one has been opened so arrows can move on — a rewindable message still keeps its two-press confirm. Inside the viewer `↑`/`↓` switch to the previous or next agent while `Shift+↑` scrolls the transcript line by line, and the hint row reads `↑↓ select · enter view · esc undo` / `↑↓ switch · esc back · pgup/pgdn scroll · x stop`
+- The landing site adds a docs page, a releases page, release assets grouped by platform, and a Cloudflare worker deployment under `scripts/worker/`, and CI skips workflow runs for docs, scripts and markdown changes
+- `--version` also names the build's target triple, from the `BUILD_TARGET` release CI sets or Cargo's own `TARGET`
+
+### Fixed
+- Streamed token usage survives a Responses turn and a failed one fails closed instead of reporting zero usage
+- Invalid tool arguments no longer abort the turn: a truncated `{` keeps that call as a tool error, lets the others run, and replays `{}` so the next request stays valid
 
 ## [0.0.10] - 2026-10-03
 
