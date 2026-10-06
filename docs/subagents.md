@@ -211,19 +211,19 @@ This is a deliberate cost: no agent dimension on `Record`, no cross-process stab
 
 | Face | Content | Entry |
 |------|---------|-------|
-| Subagent bar | One row each `◆ explore#1 · running 12.0s · 3 tools · label`; active first, done newest-first, capped at 3 rows, overflow as `+N` | Always, when subagents exist |
+| Subagent bar | The driver first (`◇ main`, or `◆ main` while its turn runs), then one row each `◆ explore#1 · running 12.0s · 3 tools · label`; active first, done newest-first, subagents capped at 3 rows, overflow as `+N`. The reversed row is the keyboard highlight and starts on the driver. It is the only accented row: a running row is otherwise unstyled, and ◆/◇ marks running or settled. A finished row is dim, a failed one red | While any subagent is still working. After one has been opened or highlighted, the bar stays so Esc can return to the driver, until an Esc that has nothing else to do, or the next message |
 | Main transcript | A `task` call is an ordinary tool row; its report is the collapsed body | Always |
-| Viewer | That subagent's full transcript, replacing the driver's; the composer line becomes a hint bar | `/agents <n>` / `/agents explore#2`, or click a bar row |
+| Viewer | That subagent's full transcript, replacing the driver's; the composer line becomes a hint bar | `/agents <n>` / `/agents explore#2`, a click on a bar row, or ↑↓ then Enter while the composer is empty |
 
 The viewer is **created on demand**: a subagent that just spawned, is still queued, or has not said anything yet has no transcript, so opening one builds a fresh transcript seeded with its task label, and later events stream in live. So "open it the moment it's dispatched" works, without waiting for its first event.
 
-The viewer takes the keyboard when open: `↑↓` / `PgUp` / `PgDn` and mouse scroll, `x` stops that subagent, `Ctrl-C` exits as usual, `Esc` returns to the chat. This `Esc` is the project's **only single-press one** (`EscAction::acts_immediately`): it loses nothing (the transcript is still there and reopens anytime), whereas an interface that ignored the first `Esc` would read as "stuck"; every other `Esc` still needs the second press to confirm. The hint bar states the exits: `esc back to the chat · ↑↓ scroll · x stop`.
+The viewer takes the keyboard when open: `↑↓` switches to the previous or next agent in the bar, including the driver. An arrow with a modifier (`Shift+↑`) scrolls the transcript one line. `PgUp` / `PgDn` and the mouse scroll the transcript, `x` stops that subagent, `Ctrl-C` exits as usual, and `Esc` jumps straight back to the driver. This `Esc` is the project's **only single-press one** (`EscAction::acts_immediately`): it loses nothing (the transcript is still there and reopens anytime), whereas an interface that ignored the first `Esc` would read as "stuck"; every other `Esc` still needs the second press to confirm. The hint bar states the exits: `↑↓ switch · esc back · pgup/pgdn scroll · x stop`.
 
 TUI-side state keeps the frames ticking while work continues: `state.agents` is the count of still-working subagents, so subagent timers keep animating, while `state.busy` (the driver's own turn, i.e. `phase.is_active()`) stays false and the composer remains usable.
 
-The single place that routes by `agent_id` is `AppEventKind::Agent(env)`: events whose `env.agent_id != main_agent` feed only the `Transcript` in `Ui::views` — never the driver's transcript, status, or input. Ids the registry no longer lists get pruned.
+The single place that routes by `agent_id` is `AppEventKind::Agent(env)`: events whose `env.agent_id` is not the driver's feed only the `Transcript` in `Ui::views` — never the driver's transcript, status, or input. Ids the registry no longer lists get pruned.
 
-`Esc` priority: **pop the queued message → leave the viewer → cancel the driver's turn → rewind**.
+`Esc` priority: **pop the queued message → leave the viewer → cancel the driver's turn → rewind**. Hiding a finished bar is what an `Esc` that would otherwise do nothing does, so a rewindable message is not discarded to close the bar.
 
 ---
 

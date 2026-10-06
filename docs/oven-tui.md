@@ -34,7 +34,7 @@ platform    the OS the screens draw on
 | | `runtime/ui/event.rs` | app events onto the screen: routing, overlay prompts, a submitted prompt |
 | | `runtime/ui/keys.rs` | terminal input: paste bursts, mouse, the key router, the `Esc` decision |
 | | `runtime/ui/prompt.rs` | the overlay prompts: tool approval, loop limit, a question, and the answer the composer types |
-| | `runtime/ui/views.rs` | one transcript per subagent, the strip, and the viewer |
+| | `runtime/ui/views.rs` | one transcript per subagent, the strip's selection and hold, and the viewer |
 | | `runtime/ui/draw.rs` | the frame: layout, the bands, the composer hint |
 | `widgets` | `widgets/transcript/` | the scrolling conversation: rows, wrapping, selection, tool bursts |
 | | `widgets/input.rs` | the composer and its overlays |
@@ -163,7 +163,10 @@ The resolved action only fires when Esc is pressed twice inside
 transcript. The first press arms it and the status bar switches to the
 `EscArmed` hint; the arm expires on the next tick after the window closes, and
 any other key drops it. An action the key cannot perform (`Ignore`) never arms
-anything.
+anything. That `Ignore` is also what hides a finished strip that is only
+still up so a transcript can be reopened. A rewind is not that `Esc`: the
+first press arms, the composer says `esc again to confirm`, and the confirm
+puts the message back. The strip stays.
 
 ### Component contract
 
@@ -251,7 +254,7 @@ line kind, border state, and status segment.
 | `widgets/file_mention_popup.rs` | `@` file completion |
 | `widgets/choice_popup.rs` | the approve/reject and continue/exit modals |
 | `widgets/queue.rs` | the queued-message row |
-| `widgets/agents.rs` | the subagent strip and the viewer's hint row |
+| `widgets/agents.rs` | the agent strip — the driver row, the ↑↓ highlight and its selected style — and the viewer's hint row |
 | `widgets/todos.rs` | read-only checklist |
 | `widgets/list.rs` | shared list primitive (cycling, `▸` marker, titled header) |
 | `core/shell.rs` | `!` shell-mode detection and prompt styling |
@@ -429,9 +432,11 @@ Three surfaces, in increasing order of commitment:
 
 | Surface | Shows | Entered by |
 | --- | --- | --- |
-| the strip | one row per subagent — `◆ explore#1 · running 12.0s · 3 tools · label` — active ones first, newest finished next, `+N` when it is capped at three rows | while any subagent is still working; gone once every one has settled |
+| the strip | the driver (`◇ main`, or `◆ main` while its turn is running), then one row per subagent — `◆ explore#1 · running 12.0s · 3 tools · label` — active ones first, newest finished next, `+N` when the subagents are capped at three rows. The reversed row is the one ↑↓ has selected, and it starts on the driver. That row is the only accented one: a running row is otherwise unstyled, and ◆/◇ is what marks it running or settled. A finished row is dim, a failed one red | while any subagent is still working. After one has been opened or highlighted it stays, so Esc can return to the driver and arrows can move on, until an Esc that has nothing else to do, or the next message |
 | the driver's transcript | the `task` call as an ordinary tool row, its report as the collapsible body | always |
-| the viewer | one subagent's whole transcript, replacing the driver's, with the composer's row turned into a hint | `/agents <n>`, or clicking a strip row |
+| the viewer | one subagent's whole transcript, replacing the driver's, with the composer's row turned into a hint | `/agents <n>`, clicking a strip row, or ↑↓ then Enter while the composer is empty |
+
+While the composer is empty, `↑` and `↓` move a highlight through the driver and the subagents. The driver starts highlighted, which is the transcript on screen. `Enter` opens a highlighted subagent; on the driver it does nothing, and the border only offers select. `Esc` leaves the viewer and highlights the driver again, so arrows can move on. Once nothing is still running, `Esc` hides the strip only when it would otherwise do nothing. A message that can be rewound still takes the two-press confirm and comes back into the composer, and that `Esc` leaves the strip up. Text already in the composer, and an open completion popup, keep `↑↓` and `Enter`.
 
 Opening a view builds it if it does not exist yet, seeded with the label the
 task was spawned under, and fills in from the subagent's events as they arrive —
@@ -439,19 +444,24 @@ so a subagent that is still queued, or that has not spoken yet, still opens
 something. `/agents` applies mid-turn for the same reason: a view command that
 waited for the reply would be useless by the time it ran.
 
-While the viewer is open it owns the keyboard: `↑↓`/`PgUp`/`PgDn` and the
-mouse scroll it, `x` stops that subagent, `Ctrl-C` still quits, and `Esc` goes
-back to the chat. That `Esc` is the one that acts on a single press —
+While the viewer is open it owns the keyboard: `↑` and `↓` move to the
+previous or next strip row and show that agent, including the driver, so
+leaving does not depend on `Esc`. An arrow with a modifier (`Shift+↑`)
+scrolls the transcript one line. `PgUp`/`PgDn` and the mouse scroll the
+transcript, `x` stops that subagent, `Ctrl-C` still quits, and `Esc` still
+jumps straight back to the driver. That `Esc` is the one that acts on a single press —
 `EscAction::acts_immediately` — because it throws nothing away (the transcript
 is still there to reopen) and a screen that ignores the first `Esc` reads as one
 you are stuck on. Every other `Esc` still waits for a confirmation. The row that
-replaces the composer says so: `explore#1 · running · esc back to the chat ·
-↑↓ scroll · x stop`. `state.agents` counts the ones still working, which is what keeps
+replaces the composer says so: `explore#1 · running · ↑↓ switch · esc back ·
+pgup/pgdn scroll · x stop`. `state.agents` counts the ones still working, which is what keeps
 the frame ticking so their clocks move while the driver is idle — `state.busy`,
 the driver's own turn, stays false so the composer is still free to send.
 
 `Esc` priority is therefore: pop a queued message → leave the viewer → cancel
-the driver's turn → rewind. Cancelling a turn cancels the subagents it spawned;
+the driver's turn → rewind. Hiding a finished strip is what `Ignore` does,
+below rewind, so a rewindable message is never thrown away to close the strip.
+Cancelling a turn cancels the subagents it spawned;
 one that outlives its turn is stopped with `/agents stop <n>` or `x`.
 
 ### Scrolling and selection

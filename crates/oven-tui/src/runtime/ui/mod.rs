@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::EventStream;
 use futures::StreamExt;
-use oven_app::{AgentId, AnswerResponse, App, AppEvent, AppState, UserRequestId, UserResponse};
+use oven_app::{AnswerResponse, App, AppEvent, AppState, UserRequestId, UserResponse};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -40,11 +40,8 @@ pub struct Ui {
 
     transcript: Transcript,
     /// Every subagent, its own transcript, and the one on screen. The driver's
-    /// own conversation stays in `transcript`.
+    /// own conversation stays in `transcript`. The driver's id lives here too.
     views: Views,
-    /// The driver. Anything else is a subagent, and its events belong to
-    /// `views`.
-    main_agent: AgentId,
     /// Where the strip was drawn, so a click can be mapped back to a row.
     agents_area: Option<Rect>,
 
@@ -69,9 +66,10 @@ impl Ui {
         if snapshot.configured_providers.is_empty() && snapshot.provider.needs_setup() {
             input.open_setup();
         }
+        let mut views = Views::new(snapshot.agent_id);
         let state = State {
             busy: snapshot.phase.is_active(),
-            agents: Views::new().mirror(&snapshot.subagents),
+            agents: views.mirror(&snapshot.subagents),
             mode: snapshot.mode,
             ..State::new()
         };
@@ -86,8 +84,7 @@ impl Ui {
             esc_confirm_until: None,
 
             transcript: Transcript::new(),
-            views: Views::new(),
-            main_agent: snapshot.agent_id,
+            views,
             agents_area: None,
             status: StatusBar::new(snapshot.model.clone(), &root, snapshot.last_turn_usage)
                 .with_effort(snapshot.reasoning_effort)

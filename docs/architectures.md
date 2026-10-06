@@ -104,7 +104,7 @@ platform    the OS the screens draw on
 | | `runtime/ui/event.rs` | app events onto the screen |
 | | `runtime/ui/keys.rs` | terminal input, the key router, the `Esc` decision |
 | | `runtime/ui/prompt.rs` | the overlay prompts and the answers they take |
-| | `runtime/ui/views.rs` | one transcript per subagent, the strip, the viewer |
+| | `runtime/ui/views.rs` | one transcript per subagent, the strip's selection and hold, the viewer |
 | | `runtime/ui/draw.rs` | the frame and the composer hint |
 | `widgets` | `widgets/transcript/`, `widgets/input.rs`, the bands and modals | one component per screen region |
 | `core` | `core/component.rs`, `theme.rs`, `layout.rs` | the component contract, the styles, the screen geometry |

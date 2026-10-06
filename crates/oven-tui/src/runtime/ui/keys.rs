@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 
 use crate::core::component::{Action, Component, KeyResult};
 use crate::core::esc::{ESC_CONFIRM_WINDOW, EscAction};
+use crate::core::hint;
 use crate::core::keys::is_mode_toggle;
 use crate::core::paste::{self, Burst};
 use crate::widgets::input::Overlay;
@@ -17,7 +18,8 @@ use crate::widgets::input::Overlay;
 use super::prompt::PromptFlow;
 use super::{Queued, Ui};
 
-/// Lines an arrow key scrolls a subagent's transcript by.
+/// Lines a modified arrow scrolls a subagent's transcript by. A plain arrow
+/// switches agents instead.
 const VIEWER_SCROLL_LINES: u16 = 1;
 
 impl Ui {
@@ -106,10 +108,16 @@ impl Ui {
                 KeyCode::Esc if self.input.overlay() == Overlay::None => self.handle_esc(esc_armed),
                 // Plain Enter during rewind would submit before history is truncated.
                 KeyCode::Enter if self.rewinding && key.modifiers.is_empty() => KeyResult::Handled,
-                _ => match self.transcript.handle_key(key, &self.state) {
-                    KeyResult::Ignored => self.input.handle_key(key, &self.state),
-                    other => other,
-                },
+                _ => {
+                    if key.modifiers.is_empty() && self.try_pick_agent(key.code) {
+                        KeyResult::Handled
+                    } else {
+                        match self.transcript.handle_key(key, &self.state) {
+                            KeyResult::Ignored => self.input.handle_key(key, &self.state),
+                            other => other,
+                        }
+                    }
+                }
             },
         };
 
@@ -124,6 +132,7 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::Queue(text)) => {
+                self.views.release();
                 if !self.answer_question_with(&text) {
                     let steered = self.app.steer(&text);
                     self.pending.push(Queued { text, steered });
@@ -134,6 +143,7 @@ impl Ui {
                 if self.answer_question_with(&text) {
                     return false;
                 }
+                self.views.release();
                 self.status.clear_reply();
                 self.input.clear();
                 if let Ok(input) = self.app.submit(&text) {
@@ -154,10 +164,55 @@ impl Ui {
         }
     }
 
+    /// The strip can take ↑↓ and Enter: it is on screen, and the composer has
+    /// no draft those keys would edit or send. An open popup still owns them.
+    pub(super) fn strip_nav(&self) -> bool {
+        strip_takes_keys(
+            self.views.height() > 0,
+            self.input.overlay(),
+            self.input.is_blank(),
+        )
+    }
+
+    /// What the composer border should say about the strip. A settled strip
+    /// offers "esc close" only when Esc would actually hide it. A rewind,
+    /// a cancel, or a queued message still owns that key.
+    pub(super) fn strip_hint(&self) -> hint::Strip {
+        let strip = self.views.strip_band(self.strip_nav());
+        if matches!(strip, hint::Strip::Open { settled: true })
+            && !matches!(self.esc_action(), EscAction::Ignore)
+        {
+            return hint::Strip::Open { settled: false };
+        }
+        strip
+    }
+
+    /// Moves the strip highlight, or opens it on Enter. False when the key
+    /// is not one of those, the strip is not taking keys, or Enter has no
+    /// row to open — that Enter still belongs to the composer.
+    fn try_pick_agent(&mut self, code: KeyCode) -> bool {
+        if !matches!(code, KeyCode::Up | KeyCode::Down | KeyCode::Enter) || !self.strip_nav() {
+            return false;
+        }
+        match code {
+            KeyCode::Up => {
+                self.views.nudge(true);
+                true
+            }
+            KeyCode::Down => {
+                self.views.nudge(false);
+                true
+            }
+            KeyCode::Enter => self.views.confirm(),
+            _ => false,
+        }
+    }
+
     /// A subagent's transcript has the keyboard while it is open: the
     /// composer is not drawn, so nothing typed can leak into it. `Ctrl-C`
-    /// still quits — a modal must not be able to trap the user — and the
-    /// arrows scroll, because there is no composer cursor here to move.
+    /// still quits. A plain arrow moves to the next agent in the strip,
+    /// including the driver; an arrow with a modifier scrolls that
+    /// transcript one line. `PgUp`/`PgDn` and the wheel scroll it too.
     fn handle_viewer_key(&mut self, key: KeyEvent, esc_armed: bool) -> KeyResult {
         match key.code {
             KeyCode::Esc => return self.handle_esc(esc_armed),
@@ -168,6 +223,10 @@ impl Ui {
                 if let Some(id) = self.views.focused_id() {
                     self.app.stop_subagent(id);
                 }
+                return KeyResult::Handled;
+            }
+            KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
+                self.views.switch(key.code == KeyCode::Up);
                 return KeyResult::Handled;
             }
             KeyCode::Up | KeyCode::Down => {
@@ -210,7 +269,11 @@ impl Ui {
     /// second, inside the window, performs it.
     pub(super) fn handle_esc(&mut self, armed: bool) -> KeyResult {
         let action = self.esc_action();
+        // A finished strip stays up so its transcript can be reopened. Esc
+        // hides it only when the key has nothing else to do. A rewind still
+        // waits for the confirm and refills the composer.
         if matches!(action, EscAction::Ignore) {
+            self.views.dismiss_settled();
             return KeyResult::Handled;
         }
         if !armed && !action.acts_immediately() {
@@ -254,5 +317,32 @@ impl Ui {
             self.rewinding,
             self.transcript.rewind_text().as_deref(),
         )
+    }
+}
+
+fn strip_takes_keys(shown: bool, overlay: Overlay, blank: bool) -> bool {
+    shown && overlay == Overlay::None && blank
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_takes_keys;
+    use crate::widgets::input::Overlay;
+
+    #[test]
+    fn an_open_popup_keeps_the_arrows() {
+        assert!(
+            !strip_takes_keys(true, Overlay::Slash, true),
+            "a completion popup owns ↑↓ even when the composer text is blank"
+        );
+        assert!(!strip_takes_keys(true, Overlay::Mention, true));
+        assert!(!strip_takes_keys(true, Overlay::Model, true));
+        assert!(!strip_takes_keys(true, Overlay::Setup, true));
+        assert!(
+            !strip_takes_keys(true, Overlay::None, false),
+            "a draft keeps the arrows for the composer"
+        );
+        assert!(!strip_takes_keys(false, Overlay::None, true));
+        assert!(strip_takes_keys(true, Overlay::None, true));
     }
 }

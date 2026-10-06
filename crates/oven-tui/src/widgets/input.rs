@@ -218,6 +218,11 @@ impl InputView {
         self.textarea.lines().join("\n")
     }
 
+    /// True when Enter would not send: the composer has no draft.
+    pub(crate) fn is_blank(&self) -> bool {
+        self.text().trim().is_empty()
+    }
+
     /// Replaces the composer text, leaving the cursor at the end of
     /// `cursor_in` — the whole text when setting it, the spliced prefix when
     /// inserting a mention.

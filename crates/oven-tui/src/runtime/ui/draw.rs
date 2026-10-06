@@ -38,7 +38,7 @@ impl Ui {
             queue::draw(f, queue, &self.pending[0].text, self.pending.len() - 1);
         }
         if let Some(agents) = regions.agents {
-            self.views.draw_strip(f, agents);
+            self.views.draw_strip(f, agents, self.state.busy);
         }
         if let Some(todos) = regions.todos {
             self.todos.draw(f, todos);
@@ -54,9 +54,8 @@ impl Ui {
             &self.state,
             composer_hint(
                 &self.input,
-                self.state.busy,
                 self.prompt.as_ref(),
-                self.esc_armed(),
+                hint::Keys::resting(self.state.busy, self.esc_armed(), self.strip_hint()),
             ),
         );
         if let Some(overlay) = regions.overlay {
@@ -74,16 +73,16 @@ impl Ui {
 /// owns the keyboard states them, and the composer falls back to its own.
 pub(super) fn composer_hint(
     input: &InputView,
-    busy: bool,
     prompt: Option<&OverlayPrompt>,
-    esc_armed: bool,
+    mut keys: hint::Keys,
 ) -> Option<&'static str> {
-    let prompt = prompt.map(|prompt| {
+    keys.overlay = input.overlay_hint();
+    keys.prompt = prompt.map(|prompt| {
         if prompt.awaits_typed_answer() {
             Prompt::Answer
         } else {
             Prompt::Keys(prompt.hint())
         }
     });
-    hint::composer(input.overlay_hint(), prompt, busy, esc_armed)
+    hint::composer(keys)
 }

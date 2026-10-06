@@ -23,7 +23,7 @@ impl Ui {
             // A subagent's turn is not the driver's: its events feed its own
             // transcript and nothing else. Only the notification that it
             // finished reaches the composer and the status bar.
-            AppEventKind::Agent(env) if env.agent_id != self.main_agent => {
+            AppEventKind::Agent(env) if env.agent_id != self.views.main_id() => {
                 self.views.transcript(env.agent_id).on_event(ev);
                 return;
             }

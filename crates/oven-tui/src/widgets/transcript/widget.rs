@@ -264,9 +264,6 @@ impl Transcript {
             .unwrap_or_else(|| self.total_lines().saturating_sub(self.height()))
     }
 
-    /// Scrolls the view by `n` wrapped lines, the same step a wheel notch
-    /// takes. A view with no composer to move a cursor in — the subagent
-    /// viewer — binds the arrow keys to this.
     pub(crate) fn scroll_lines(&mut self, up: bool, n: u16) {
         match up {
             true => self.scroll_up(n),
