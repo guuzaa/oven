@@ -21,7 +21,7 @@ oven-agent = { path = "./crates/oven-agent" }
 oven-host = { path = "./crates/oven-host" }
 oven-mem = { path = "./crates/oven-mem" }
 oven-tui = { path = "./crates/oven-tui" }
-oven-llm = { version = "0.5.0", path = "./crates/oven-llm" }
+oven-llm = { path = "./crates/oven-llm" }
 
 # External dependencies
 anyhow = "1"

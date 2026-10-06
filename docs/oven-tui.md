@@ -429,7 +429,7 @@ Three surfaces, in increasing order of commitment:
 
 | Surface | Shows | Entered by |
 | --- | --- | --- |
-| the strip | one row per subagent — `◆ explore#1 · running 12.0s · 3 tools · label` — active ones first, newest finished next, `+N` when it is capped at three rows | always, while any subagent exists |
+| the strip | one row per subagent — `◆ explore#1 · running 12.0s · 3 tools · label` — active ones first, newest finished next, `+N` when it is capped at three rows | while any subagent is still working; gone once every one has settled |
 | the driver's transcript | the `task` call as an ordinary tool row, its report as the collapsible body | always |
 | the viewer | one subagent's whole transcript, replacing the driver's, with the composer's row turned into a hint | `/agents <n>`, or clicking a strip row |
 

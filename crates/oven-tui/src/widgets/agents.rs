@@ -54,9 +54,13 @@ pub fn row_at(area: Rect, agents: &[NodeInfo], y: u16) -> Option<AgentId> {
 
 /// Active subagents first — they are what the user is waiting on — then the
 /// finished ones, newest first, capped so the strip never crowds the
-/// transcript. Row order is stable between redraws, which is what makes
-/// clicking a row mean the same thing twice.
+/// transcript. Once every subagent has settled the strip goes away: there is
+/// nothing left to wait on. Row order is stable between redraws, which is
+/// what makes clicking a row mean the same thing twice.
 fn rows(agents: &[NodeInfo]) -> Vec<&NodeInfo> {
+    if !agents.iter().any(|agent| agent.status.is_active()) {
+        return Vec::new();
+    }
     let mut ordered: Vec<&NodeInfo> = agents.iter().filter(|a| a.status.is_active()).collect();
     ordered.extend(agents.iter().rev().filter(|a| !a.status.is_active()));
     ordered.truncate(MAX_ROWS);
@@ -143,6 +147,13 @@ mod tests {
     #[test]
     fn no_subagents_take_no_rows() {
         assert_eq!(height(&[]), 0);
+    }
+
+    #[test]
+    fn settled_subagents_take_no_rows() {
+        let agents = vec![done("done#1", 1), done("done#2", 2)];
+        assert_eq!(height(&agents), 0);
+        assert!(rows(&agents).is_empty());
     }
 
     #[test]
