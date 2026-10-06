@@ -198,25 +198,16 @@ mod tests {
     #[test]
     fn error_chain_preserves_source() {
         let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
-        let decode_inner = CompletionsDecodeError::InvalidToolArguments {
-            id: "call_1".to_string(),
-            source: json_err,
-        };
+        let decode_inner = CompletionsDecodeError::Json(json_err);
         let err = ProviderError::CompletionsDecode(decode_inner);
 
         let displayed = err.to_string();
         assert!(
-            displayed.starts_with(
-                "completions decoding error: invalid tool arguments JSON for tool call call_1: "
-            ),
+            displayed.starts_with("completions decoding error: JSON deserialization error: "),
             "{displayed}"
         );
         assert!(displayed.contains("expected"), "{displayed}");
         let source = err.source().unwrap();
-        assert!(
-            source
-                .to_string()
-                .contains("invalid tool arguments JSON for tool call call_1")
-        );
+        assert!(source.to_string().contains("JSON deserialization error"));
     }
 }

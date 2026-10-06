@@ -22,13 +22,6 @@ pub enum DecodeError {
     /// wire 响应的 `status == "failed"`（`response.error` 已填）。
     #[error("response failed: {message}")]
     Failed { message: String },
-    /// 某个 function_call 的 `arguments` 字段不是合法 JSON。
-    #[error("invalid tool arguments JSON for tool call {id}: {source}")]
-    InvalidToolArguments {
-        id: String,
-        #[source]
-        source: serde_json::Error,
-    },
     /// 通用 JSON 反序列化错误（例如 SSE 事件解析失败）。
     #[error("JSON deserialization error: {0}")]
     Json(#[source] serde_json::Error),
@@ -96,8 +89,8 @@ fn map_stop_reason(
 ///
 /// - `status == "failed"` → `DecodeError::Failed`
 /// - `output` 按顺序转换：message → `Text`、reasoning → `Thinking`、
-///   function_call → `ToolUse`（`arguments` 解析失败 →
-///   `DecodeError::InvalidToolArguments`）、web_search_call / 未知类型跳过
+///   function_call → `ToolUse`（`arguments` 不是合法 JSON 时仍产出，原文留在
+///   `raw_arguments`，`input` 为 `{}`）、web_search_call / 未知类型跳过
 /// - `usage`（若存在）转换为 `Usage`
 /// - `stop_reason` 按 `map_stop_reason` 计算
 pub(crate) fn decode_response(wire: ResponseObject) -> Result<Response, DecodeError> {
@@ -133,20 +126,15 @@ pub(crate) fn decode_response(wire: ResponseObject) -> Result<Response, DecodeEr
                 arguments,
                 ..
             } => {
-                let input: serde_json::Value =
-                    serde_json::from_str(&arguments).map_err(|source| {
-                        DecodeError::InvalidToolArguments {
-                            id: call_id.clone(),
-                            source,
-                        }
-                    })?;
+                // 原样保留 wire 上的 `arguments` 文本，供重放时逐字节回传
+                // （provider 隐式上下文缓存要求完整匹配缓存单元）。非法 JSON
+                // 同样留下，`input` 为 `{}`，由 agent 作为工具错误交回模型。
+                let (input, raw_arguments) = ContentBlock::parse_tool_arguments(arguments);
                 content.push(ContentBlock::ToolUse {
                     id: call_id,
                     name,
                     input,
-                    // 原样保留 wire 上的 `arguments` 文本，供重放时逐字节回传
-                    // （provider 隐式上下文缓存要求完整匹配缓存单元）。
-                    raw_arguments: Some(arguments),
+                    raw_arguments,
                 });
                 saw_function_call = true;
             }
@@ -661,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_response_invalid_arguments_errors() {
+    fn decode_response_invalid_arguments_keeps_the_tool_call() {
         let wire = wire_response(
             "completed",
             serde_json::json!([{
@@ -669,15 +657,24 @@ mod tests {
                 "id": "fc_1",
                 "call_id": "call_1",
                 "name": "get_weather",
-                "arguments": "not json"
+                "arguments": "{"
             }]),
             None,
             None,
         );
-        let err = decode_response(wire).unwrap_err();
-        match err {
-            DecodeError::InvalidToolArguments { id, .. } => assert_eq!(id, "call_1"),
-            other => panic!("expected InvalidToolArguments, got {other:?}"),
+        let response = decode_response(wire).unwrap();
+        match &response.content[0] {
+            ContentBlock::ToolUse {
+                id,
+                input,
+                raw_arguments,
+                ..
+            } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(input, &serde_json::json!({}));
+                assert_eq!(raw_arguments.as_deref(), Some("{"));
+            }
+            other => panic!("expected ToolUse block, got {other:?}"),
         }
     }
 

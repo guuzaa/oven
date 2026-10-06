@@ -9,6 +9,7 @@ use std::time::Instant;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use oven_llm::{ContentBlock, Message, Response, Usage};
+use serde_json::Value;
 
 use super::Agent;
 use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
@@ -21,6 +22,12 @@ use crate::core::mode::ToolAccess;
 use crate::core::sink::EventSink;
 use crate::core::todo::TodoList;
 use crate::core::turn::{Step, StepCall, TurnContext, TurnOutput};
+
+/// Prefix of the tool error returned when a call's arguments are not JSON.
+pub(super) const INVALID_JSON_ARGUMENTS: &str = "invalid JSON arguments";
+
+/// How much of a broken `arguments` string to quote back to the model.
+const RECEIVED_ARGUMENTS_CHARS: usize = 200;
 
 impl Agent {
     /// One provider round trip: ask, commit the reply, run the tools it asked
@@ -84,11 +91,15 @@ impl Agent {
             .tool_uses()
             .filter_map(|block| {
                 let ContentBlock::ToolUse {
-                    id, name, input, ..
+                    id,
+                    name,
+                    input,
+                    raw_arguments,
                 } = block
                 else {
                     return None;
                 };
+                let argument_error = raw_arguments.as_deref().and_then(invalid_json_arguments);
                 let tool = self.tools.iter().find(|tool| tool.name() == name).cloned();
                 let caps = tool.as_ref().map(|tool| tool.caps());
                 let todos = if name == TodoWriteTool::NAME {
@@ -106,6 +117,7 @@ impl Agent {
                         .map_or_else(|| present_tool(name, input), |tool| tool.view(input)),
                     todos,
                     exclusive: caps.is_some_and(|caps| caps.exclusive),
+                    argument_error,
                     tool,
                 })
             })
@@ -267,7 +279,20 @@ struct PlannedCall {
     /// from what it read would otherwise lose one of two edits to the same
     /// file, and a tool that asks the user something would lose the question.
     exclusive: bool,
+    /// Set when `raw_arguments` is not JSON. The call is reported as a tool
+    /// error and never runs, so a truncated argument object does not end the turn.
+    argument_error: Option<String>,
     tool: Option<Arc<dyn Tool>>,
+}
+
+/// `Some` when `raw` is not JSON. The message quotes the serde error and a
+/// prefix of the text the model actually emitted.
+pub(super) fn invalid_json_arguments(raw: &str) -> Option<String> {
+    let error = serde_json::from_str::<Value>(raw).err()?;
+    let received = truncate(raw, RECEIVED_ARGUMENTS_CHARS);
+    Some(format!(
+        "{INVALID_JSON_ARGUMENTS}: {error}; received: {received}"
+    ))
 }
 
 /// What a call may do: run with the tool it resolved to, or report without
@@ -302,6 +327,14 @@ impl CallRecord {
 async fn gate_calls(planned: &[PlannedCall], ctx: &TurnContext) -> Result<Vec<Gate>, AgentError> {
     let mut gates = Vec::with_capacity(planned.len());
     for call in planned {
+        if let Some(error) = call.argument_error.clone() {
+            tracing::warn!(tool = %call.name, %error, "tool arguments were not valid JSON");
+            gates.push(Gate::Refused(ToolResult::Failed {
+                output: Some(truncate(&format!("error: {error}"), MAX_TOOL_OUTPUT_BYTES)),
+                error,
+            }));
+            continue;
+        }
         // A gate that runs carries the tool it runs, so no later stage has to
         // go looking for one again — and an unmounted tool cannot run.
         let Some(tool) = call.tool.clone() else {

@@ -6,7 +6,6 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use thiserror::Error;
 
 use super::message::{ContentBlock, Role};
@@ -186,19 +185,10 @@ impl StreamCollector {
         let mut blocks = self.blocks;
 
         for (index, raw_arguments) in self.tool_arguments {
-            // 空串（模型没有吐出任何参数）没有可回传的原始文本：`input` 用 `{}`，
-            // 由 encoder 退回紧凑序列化。其余情况把原始文本逐字节存进内容块，
-            // 让重放路径与模型当时生成的 token 完全一致。
-            let (input, raw) = if raw_arguments.trim().is_empty() {
-                (json!({}), None)
-            } else {
-                let input = serde_json::from_str(&raw_arguments).map_err(|error| {
-                    StreamCollectorError::Stream(format!(
-                        "invalid JSON arguments for tool block {index}: {error}"
-                    ))
-                })?;
-                (input, Some(raw_arguments))
-            };
+            // 空串没有可回传的原文。合法 JSON 逐字节保留，供缓存命中。非法
+            // JSON（模型把参数截断在 `{` 之类）不让整轮失败：原文留下，由
+            // agent 把它作为这次工具调用的错误交回模型。
+            let (input, raw) = ContentBlock::parse_tool_arguments(raw_arguments);
             let Some(ContentBlock::ToolUse {
                 input: target,
                 raw_arguments: target_raw,
@@ -655,8 +645,10 @@ mod tests {
         assert!(err.to_string().contains("missing MessageStart"));
     }
 
+    /// 参数被截断成 `{` 时（serde：EOF while parsing an object at line 1 column 1）
+    /// 不能让整条响应失败，否则这一轮里其它已经拼好的工具调用也会被丢掉。
     #[test]
-    fn collector_invalid_tool_json_errors() {
+    fn collector_invalid_tool_json_keeps_the_call() {
         let mut c = StreamCollector::new();
         c.push(&StreamEvent::MessageStart {
             id: "msg_4".into(),
@@ -665,15 +657,29 @@ mod tests {
         c.push(&StreamEvent::ContentBlockStart {
             index: 0,
             block: ContentBlock::tool_use(
-                "tool_1",
-                "test",
+                "tool_ok",
+                "read_file",
                 serde_json::Value::String(String::new()),
             ),
         });
         c.push(&StreamEvent::ContentBlockDelta {
             index: 0,
             delta: Delta::InputJsonDelta {
-                partial_json: "not json".into(),
+                partial_json: r#"{"path":"a.rs"}"#.into(),
+            },
+        });
+        c.push(&StreamEvent::ContentBlockStart {
+            index: 3,
+            block: ContentBlock::tool_use(
+                "tool_bad",
+                "read_file",
+                serde_json::Value::String(String::new()),
+            ),
+        });
+        c.push(&StreamEvent::ContentBlockDelta {
+            index: 3,
+            delta: Delta::InputJsonDelta {
+                partial_json: "{".into(),
             },
         });
         c.push(&StreamEvent::MessageDelta {
@@ -681,8 +687,28 @@ mod tests {
             usage: None,
         });
 
-        let err = c.finish().unwrap_err();
-        assert!(err.to_string().contains("invalid JSON arguments"));
+        let resp = c.finish().unwrap();
+        assert_eq!(resp.content.len(), 2);
+        match &resp.content[0] {
+            ContentBlock::ToolUse { id, input, .. } => {
+                assert_eq!(id, "tool_ok");
+                assert_eq!(input["path"], "a.rs");
+            }
+            other => panic!("expected ToolUse block, got {other:?}"),
+        }
+        match &resp.content[1] {
+            ContentBlock::ToolUse {
+                id,
+                input,
+                raw_arguments,
+                ..
+            } => {
+                assert_eq!(id, "tool_bad");
+                assert_eq!(input, &serde_json::json!({}));
+                assert_eq!(raw_arguments.as_deref(), Some("{"));
+            }
+            other => panic!("expected ToolUse block, got {other:?}"),
+        }
     }
 
     #[test]

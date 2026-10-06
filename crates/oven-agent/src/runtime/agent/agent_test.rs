@@ -321,6 +321,53 @@ impl Provider for ScriptedStream {
     }
 }
 
+/// Each `stream` call replays the next scripted round and then drops it.
+struct QueuedStreams {
+    rounds: Mutex<VecDeque<Vec<LlmStreamEvent>>>,
+}
+
+impl QueuedStreams {
+    fn new(rounds: Vec<Vec<LlmStreamEvent>>) -> Self {
+        Self {
+            rounds: Mutex::new(rounds.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for QueuedStreams {
+    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "complete disabled in mock".into(),
+        })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
+        let events = self
+            .rounds
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more scripted streams".into(),
+            })?;
+        Ok(Box::pin(iter(events.into_iter().map(Ok))))
+    }
+
+    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+        None
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("queued".into())
+    }
+}
+
 fn delta_block(delta: &Delta) -> ContentBlock {
     const ACCUMULATED_LATER: &str = "";
     match delta {
@@ -887,6 +934,130 @@ async fn an_unmounted_tool_still_gets_a_result() {
         results,
         ["known first", "unknown tool: invented"],
         "one result per call, in the order the model asked"
+    );
+}
+
+/// A truncated tool-call argument (`{`) used to fail the whole turn. The call
+/// is reported as a tool error instead, and any sibling call still runs.
+#[tokio::test]
+async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
+    const NOTE_NAME: &str = "note.txt";
+    const NOTE_BODY: &str = "hello from note";
+    const RECOVERED: &str = "recovered";
+    const BROKEN_ARGUMENTS: &str = "{";
+
+    let broken = super::step::invalid_json_arguments(BROKEN_ARGUMENTS).unwrap();
+    assert!(broken.starts_with(super::step::INVALID_JSON_ARGUMENTS));
+
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join(NOTE_NAME), NOTE_BODY).unwrap();
+
+    let valid_arguments = format!(r#"{{"path":"{NOTE_NAME}"}}"#);
+    let provider = QueuedStreams::new(vec![
+        vec![
+            message_start(),
+            LlmStreamEvent::ContentBlockStart {
+                index: 0,
+                block: ContentBlock::ToolUse {
+                    id: "call_ok".into(),
+                    name: FileReadTool::NAME.into(),
+                    input: serde_json::Value::String(String::new()),
+                    raw_arguments: None,
+                },
+            },
+            LlmStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::InputJsonDelta {
+                    partial_json: valid_arguments,
+                },
+            },
+            LlmStreamEvent::ContentBlockStart {
+                index: 3,
+                block: ContentBlock::ToolUse {
+                    id: "call_bad".into(),
+                    name: FileReadTool::NAME.into(),
+                    input: serde_json::Value::String(String::new()),
+                    raw_arguments: None,
+                },
+            },
+            LlmStreamEvent::ContentBlockDelta {
+                index: 3,
+                delta: Delta::InputJsonDelta {
+                    partial_json: BROKEN_ARGUMENTS.into(),
+                },
+            },
+            LlmStreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage: None,
+            },
+            LlmStreamEvent::MessageStop,
+        ],
+        vec![
+            message_start(),
+            LlmStreamEvent::ContentBlockStart {
+                index: 0,
+                block: ContentBlock::text(""),
+            },
+            LlmStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta {
+                    text: RECOVERED.into(),
+                },
+            },
+            LlmStreamEvent::MessageStop,
+        ],
+    ]);
+
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(tmp.path()))];
+    let mut agent = Agent::new(router_with(Box::new(provider)), tools);
+    let mut sink = VecEventSink::default();
+    let result = run_plain(&mut agent, "read the note", &mut sink)
+        .await
+        .unwrap();
+    assert_eq!(result.text(), RECOVERED);
+    assert_valid_event_sequence(&sink.events);
+    assert!(
+        sink.events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Tool(ToolEvent::Finished {
+                result: ToolResult::Failed { error, .. },
+                ..
+            }) if error == &broken
+        )),
+        "broken arguments are a tool error, not a failed turn"
+    );
+
+    let results: Vec<(bool, String)> = agent
+        .history()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => Some((
+                *is_error,
+                content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "both calls get a result: {results:?}");
+    assert!(!results[0].0, "the valid call is not an error");
+    assert!(
+        results[0].1.contains(NOTE_BODY),
+        "the valid call still ran: {}",
+        results[0].1
+    );
+    assert!(results[1].0, "the broken call is a tool error");
+    assert!(
+        results[1].1.contains(&broken),
+        "the model is told why the arguments failed: {}",
+        results[1].1
     );
 }
 

@@ -87,14 +87,30 @@ impl ContentBlock {
     /// 重放 `ToolUse` 时 wire 上应该发出的 `arguments` 文本。
     ///
     /// 优先逐字节回传 `raw_arguments`（decoder / `StreamCollector` 从 wire 上
-    /// 原样收下的那串文本，等同于模型当时生成的 JSON）；只有没有原始文本时才
-    /// 退回 `input` 的紧凑序列化。重新序列化会去掉 `": "` 的空格并按字典序重排
-    /// key，使 provider 的缓存单元失配，因此重放路径必须保持字节一致。
+    /// 原样收下的那串文本，等同于模型当时生成的 JSON）；只有没有原始文本，或
+    /// 原文不是合法 JSON 时，才退回 `input` 的紧凑序列化。重新序列化会去掉
+    /// `": "` 的空格并按字典序重排 key，使 provider 的缓存单元失配，因此合法
+    /// 原文必须保持字节一致。残缺原文不能原样回放，否则下一次请求会被
+    /// provider 拒绝。
     pub fn tool_arguments(input: &serde_json::Value, raw_arguments: Option<&str>) -> String {
         match raw_arguments {
-            Some(raw) => raw.to_owned(),
-            None => input.to_string(),
+            Some(raw) if serde_json::from_str::<serde_json::Value>(raw).is_ok() => raw.to_owned(),
+            _ => input.to_string(),
         }
+    }
+
+    /// 把 wire 上的 `arguments` 文本拆成工具要跑的值和需要回放的原文。
+    ///
+    /// 空白文本没有可回放的原文：`input` 为 `{}`，`raw` 为 `None`。合法 JSON
+    /// 逐字节保留原文。非法 JSON 同样保留原文，调用方据此把这次调用作为工具
+    /// 错误交回模型；`input` 用 `{}`，重放时 [`tool_arguments`](Self::tool_arguments)
+    /// 会退回它，而不是把残缺文本再发给 provider。
+    pub fn parse_tool_arguments(raw: String) -> (serde_json::Value, Option<String>) {
+        if raw.trim().is_empty() {
+            return (serde_json::json!({}), None);
+        }
+        let input = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+        (input, Some(raw))
     }
 }
 
@@ -309,6 +325,27 @@ mod tests {
             ContentBlock::tool_arguments(&input, None),
             r#"{"limit":10,"path":"src/main.rs"}"#
         );
+    }
+
+    /// 残缺的 `arguments` 不能原样回放，否则下一次 provider 请求会因非法 JSON 失败。
+    #[test]
+    fn tool_arguments_falls_back_when_raw_is_not_json() {
+        let input = serde_json::json!({});
+        assert_eq!(ContentBlock::tool_arguments(&input, Some("{")), "{}");
+    }
+
+    #[test]
+    fn parse_tool_arguments_keeps_invalid_text_and_empty_input() {
+        let (input, raw) = ContentBlock::parse_tool_arguments("{".to_string());
+        assert_eq!(input, serde_json::json!({}));
+        assert_eq!(raw.as_deref(), Some("{"));
+    }
+
+    #[test]
+    fn parse_tool_arguments_drops_blank_text() {
+        let (input, raw) = ContentBlock::parse_tool_arguments("  ".to_string());
+        assert_eq!(input, serde_json::json!({}));
+        assert_eq!(raw, None);
     }
 
     #[test]

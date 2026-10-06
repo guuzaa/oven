@@ -24,13 +24,6 @@ pub enum CompletionsDecodeError {
     /// wire 响应中 choice 的消息角色不是 `"assistant"`（Requirement 4.3）。
     #[error("unexpected message role: {role}")]
     UnexpectedRole { role: String },
-    /// 某个工具调用的 `arguments` 字段不是合法 JSON（Requirement 4.4）。
-    #[error("invalid tool arguments JSON for tool call {id}: {source}")]
-    InvalidToolArguments {
-        id: String,
-        #[source]
-        source: serde_json::Error,
-    },
     /// 通用 JSON 反序列化错误（例如 SSE chunk 解析失败）。
     #[error("JSON deserialization error: {0}")]
     Json(#[source] serde_json::Error),
@@ -63,8 +56,8 @@ pub(crate) fn map_stop_reason(finish_reason: &str) -> Option<StopReason> {
 /// - `choices` 为空 → `DecodeError::MissingChoice`
 /// - `choices` 多于一个时只取第一个，忽略多余的 choice（与流式行为一致）
 /// - 唯一 choice 的消息角色非 `"assistant"` → `DecodeError::UnexpectedRole`
-/// - 任意 `tool_calls[].function.arguments` 非合法 JSON →
-///   `DecodeError::InvalidToolArguments`
+/// - `tool_calls[].function.arguments` 不是合法 JSON 时仍产出 `ToolUse`：
+///   原文留在 `raw_arguments`，`input` 为 `{}`，由 agent 作为工具错误交回模型
 /// - `usage` 字段（若存在）转换为 `Usage { input_tokens, output_tokens }`
 /// - `finish_reason`（若存在）通过 `map_stop_reason` 映射为 `StopReason`
 pub(crate) fn decode_response(
@@ -101,7 +94,7 @@ pub(crate) fn decode_response(
 
     if let Some(tool_calls) = choice.message.tool_calls {
         for tool_call in tool_calls {
-            content.push(decode_tool_call(tool_call)?);
+            content.push(decode_tool_call(tool_call));
         }
     }
 
@@ -118,30 +111,20 @@ pub(crate) fn decode_response(
     })
 }
 
-/// 将一个响应侧的 `WireResponseToolCall` 解码为 `ContentBlock::ToolUse`，
-/// 解析 `arguments` JSON 字符串失败时返回
-/// `DecodeError::InvalidToolArguments`。
+/// 将一个响应侧的 `WireResponseToolCall` 解码为 `ContentBlock::ToolUse`。
 ///
 /// wire 上的 `arguments` 原文会逐字节存进 `raw_arguments`：重放该 assistant
 /// 消息时 encoder 原样回传，provider 的隐式上下文缓存（按完整匹配缓存单元
-/// 判定）才能命中模型输出边界的单元。
-fn decode_tool_call(
-    tool_call: WireResponseToolCall,
-) -> Result<ContentBlock, CompletionsDecodeError> {
-    let input: serde_json::Value =
-        serde_json::from_str(&tool_call.function.arguments).map_err(|source| {
-            CompletionsDecodeError::InvalidToolArguments {
-                id: tool_call.id.clone(),
-                source,
-            }
-        })?;
-
-    Ok(ContentBlock::ToolUse {
+/// 判定）才能命中模型输出边界的单元。原文不是合法 JSON 时同样留下，`input`
+/// 为 `{}`，重放走紧凑的空对象，调用方把这次调用作为工具错误交回模型。
+fn decode_tool_call(tool_call: WireResponseToolCall) -> ContentBlock {
+    let (input, raw_arguments) = ContentBlock::parse_tool_arguments(tool_call.function.arguments);
+    ContentBlock::ToolUse {
         id: tool_call.id,
         name: tool_call.function.name,
         input,
-        raw_arguments: Some(tool_call.function.arguments),
-    })
+        raw_arguments,
+    }
 }
 
 /// 将 `WireUsage` 转换为 domain 层的 `Usage`。
@@ -526,10 +509,10 @@ mod tests {
         }
     }
 
-    // --- invalid tool arguments (Requirement 4.4) ---
+    // --- invalid tool arguments ---
 
     #[test]
-    fn invalid_tool_arguments_json_returns_invalid_tool_arguments() {
+    fn invalid_tool_arguments_json_keeps_the_tool_call() {
         let message = WireResponseMessage {
             role: "assistant".to_string(),
             content: None,
@@ -538,16 +521,25 @@ mod tests {
                 kind: "function".to_string(),
                 function: WireResponseToolCallFunction {
                     name: "get_weather".to_string(),
-                    arguments: "not json".to_string(),
+                    arguments: "{".to_string(),
                 },
             }]),
             ..Default::default()
         };
         let wire = wire_response(vec![choice(message, Some("tool_calls"))], None);
-        let err = decode_response(wire).unwrap_err();
-        match err {
-            CompletionsDecodeError::InvalidToolArguments { id, .. } => assert_eq!(id, "call_1"),
-            other => panic!("expected InvalidToolArguments, got {other:?}"),
+        let response = decode_response(wire).unwrap();
+        match &response.content[0] {
+            ContentBlock::ToolUse {
+                id,
+                input,
+                raw_arguments,
+                ..
+            } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(input, &serde_json::json!({}));
+                assert_eq!(raw_arguments.as_deref(), Some("{"));
+            }
+            other => panic!("expected ToolUse block, got {other:?}"),
         }
     }
 
