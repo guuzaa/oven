@@ -46,7 +46,7 @@ impl Agent {
     /// `todo_write`. The note is appended to that request only.
     fn wants_plan_reminder(&self, mode: AgentMode) -> bool {
         mode == AgentMode::Plan
-            && self.todo_misses >= super::PLAN_REMINDER_AFTER_MISSES
+            && self.todo_misses >= prompt_template::PLAN_REMINDER_AFTER_MISSES
             && !self.todos.is_empty()
     }
 
@@ -64,11 +64,24 @@ impl Agent {
             .filter(|message| message.role != Role::System)
             .cloned()
             .collect();
-        if self.todo_notice && !self.todos.is_empty() {
+        let todo_notice = self.todo_notice && !self.todos.is_empty();
+        let plan_reminder = self.wants_plan_reminder(mode);
+        if todo_notice {
             messages.push(Message::user_text(self.todos.render_todo_block()));
+            tracing::debug!(
+                mode = mode.label(),
+                todo_items = self.todos.items.len(),
+                "todo notice appended"
+            );
         }
-        if self.wants_plan_reminder(mode) {
+        if plan_reminder {
             messages.push(Message::user_text(prompt_template::PLAN_REMINDER));
+            tracing::debug!(
+                mode = mode.label(),
+                todo_misses = self.todo_misses,
+                todo_items = self.todos.items.len(),
+                "plan reminder appended"
+            );
         }
         let mut builder = Request::builder()
             .model(model)

@@ -3,9 +3,12 @@ use crate::core::mode::AgentMode;
 pub const PLAN_MODE_PROMPT: &str = include_str!("plan.md");
 pub const ASK_MODE_PROMPT: &str = include_str!("ask.md");
 
+/// Plan-mode tool rounds without `todo_write` before [`PLAN_REMINDER`] is sent.
+pub const PLAN_REMINDER_AFTER_MISSES: u8 = 5;
+
 pub const PLAN_REMINDER: &str = "\
 <reminder>
-Five tool rounds have run without calling todo_write.
+Several tool rounds have run without calling todo_write.
 Update the list now if any item's status changed. At most one item may be in_progress.
 </reminder>";
 

@@ -15,12 +15,10 @@ use crate::core::event::AgentEvent;
 use crate::core::history::{History, Record};
 use crate::core::identity::AgentId;
 use crate::core::mode::AgentMode;
+use crate::core::prompt_template::PLAN_REMINDER_AFTER_MISSES;
 use crate::core::selection::Selection;
 use crate::core::sink::EventSink;
 use crate::core::todo::TodoList;
-
-/// Tool rounds in plan mode without `todo_write` before a reminder is sent.
-const PLAN_REMINDER_AFTER_MISSES: u8 = 5;
 
 mod notify;
 mod request;

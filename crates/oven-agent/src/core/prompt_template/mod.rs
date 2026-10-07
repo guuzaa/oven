@@ -7,4 +7,4 @@ pub use instructions::{InstructionDoc, InstructionScope, load_instructions};
 pub use subagent::subagent_preamble;
 pub use system::{MEMORY_PROMPT, system_prompt};
 
-pub(crate) use mode::{PLAN_REMINDER, compose_system};
+pub(crate) use mode::{PLAN_REMINDER, PLAN_REMINDER_AFTER_MISSES, compose_system};

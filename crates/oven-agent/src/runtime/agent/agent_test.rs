@@ -2256,10 +2256,11 @@ async fn todo_list_is_sent_only_after_it_changes() {
 }
 
 #[tokio::test]
-async fn reminder_waits_until_five_tool_rounds_without_todo_write() {
+async fn reminder_waits_for_the_miss_threshold() {
+    let misses = usize::from(PLAN_REMINDER_AFTER_MISSES);
     let tmp = tmp_dir();
     std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
-    let mut responses = file_read_rounds(6);
+    let mut responses = file_read_rounds(misses + 1);
     responses.push(text_response("done"));
     let (mock, seen) = CaptureRequests::new(responses);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
@@ -2270,22 +2271,23 @@ async fn reminder_waits_until_five_tool_rounds_without_todo_write() {
     run_text(&mut agent, "read it").await;
 
     let reqs = seen.lock().unwrap().clone();
-    assert_eq!(reqs.len(), 7);
-    for req in &reqs[..5] {
+    assert_eq!(reqs.len(), misses + 2);
+    for req in &reqs[..misses] {
         assert!(!has_plan_reminder(req));
     }
-    assert!(has_plan_reminder(&reqs[5]));
-    assert!(!has_plan_reminder(&reqs[6]));
-    assert!(!system_of(&reqs[5]).contains("<reminder>"));
+    assert!(has_plan_reminder(&reqs[misses]));
+    assert!(!has_plan_reminder(&reqs[misses + 1]));
+    assert!(!system_of(&reqs[misses]).contains("<reminder>"));
     assert!(!agent.history().any(|m| content_has(m, "<reminder>")));
 }
 
 #[tokio::test]
 async fn todo_write_resets_the_reminder_streak() {
+    let misses = usize::from(PLAN_REMINDER_AFTER_MISSES);
     let tmp = tmp_dir();
     std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
     let todos = json!({"todos":[{"id":"a","content":"one","status":"in_progress"}]});
-    let mut responses = file_read_rounds(4);
+    let mut responses = file_read_rounds(misses - 1);
     responses.push(tool_response("w", "todo_write", todos));
     responses.push(tool_response(
         "c-after",
@@ -2302,16 +2304,17 @@ async fn todo_write_resets_the_reminder_streak() {
     run_text(&mut agent, "read it").await;
 
     let reqs = seen.lock().unwrap().clone();
-    assert_eq!(reqs.len(), 7);
+    assert_eq!(reqs.len(), misses + 2);
     assert!(reqs.iter().all(|req| !has_plan_reminder(req)));
-    assert!(has_todo_list(&reqs[5]));
+    assert!(has_todo_list(&reqs[misses]));
 }
 
 #[tokio::test]
 async fn rewind_clears_a_reminder_streak() {
+    let misses = usize::from(PLAN_REMINDER_AFTER_MISSES);
     let tmp = tmp_dir();
     std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
-    let mut responses = file_read_rounds(4);
+    let mut responses = file_read_rounds(misses - 1);
     responses.push(text_response("done"));
     responses.push(tool_response(
         "c-again",
@@ -2330,6 +2333,6 @@ async fn rewind_clears_a_reminder_streak() {
     run_text(&mut agent, "again").await;
 
     let reqs = seen.lock().unwrap().clone();
-    assert_eq!(reqs.len(), 7);
+    assert_eq!(reqs.len(), misses + 2);
     assert!(reqs.iter().all(|req| !has_plan_reminder(req)));
 }
