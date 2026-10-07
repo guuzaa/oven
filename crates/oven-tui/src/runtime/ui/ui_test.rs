@@ -13,6 +13,7 @@ use oven_app::{
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier};
+use tokio::runtime::{Builder, Runtime};
 
 #[test]
 fn the_unsent_notice_counts_messages() {
@@ -104,6 +105,11 @@ const TEST_ANSWER: &str = "postgres";
 const POPUP_FIRST: &str = "▸ /clear";
 const POPUP_NEXT: &str = "▸ /compact";
 const SCROLL_TAIL: &str = "line-39";
+const HELD_FIRST: &str = "held first";
+const HELD_SECOND: &str = "held second";
+const SENT_FIRST: &str = "sent first";
+const SENT_LAST: &str = "sent last";
+const MODEL_SWITCH: &str = "/model gpt-4o high";
 
 fn test_config() -> oven_app::config::AppConfig {
     use oven_app::config::{AppConfig, ProviderConfig, ProviderSelection};
@@ -126,16 +132,23 @@ fn test_config() -> oven_app::config::AppConfig {
     }
 }
 
-/// A `Ui` over a live runtime. The keyboard paths under test only reach the
-/// command channel, so no provider ever answers.
-async fn test_ui(root: &tempdir::TempDir) -> Ui {
-    let app = oven_app::AppBuilder::new(root.path())
+async fn test_app(root: &tempdir::TempDir) -> App {
+    oven_app::AppBuilder::new(root.path())
         .with_config(test_config())
         .await
         .open()
         .await
-        .unwrap();
-    Ui::new(app)
+        .unwrap()
+}
+
+/// A `Ui` over a live runtime. The keyboard paths under test only reach the
+/// command channel, so no provider ever answers.
+async fn test_ui(root: &tempdir::TempDir) -> Ui {
+    Ui::new(test_app(root).await)
+}
+
+fn current_thread_runtime() -> Runtime {
+    Builder::new_current_thread().enable_all().build().unwrap()
 }
 
 /// The question prompt after the user chose "Other…", so the composer owns
@@ -662,6 +675,74 @@ async fn an_appended_prompt_leaves_the_queue_and_joins_the_transcript() {
     assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
 }
 
+fn pending_texts(ui: &Ui) -> Vec<&str> {
+    ui.pending
+        .iter()
+        .map(|queued| queued.text.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn an_immediate_item_skips_the_held_ones_while_busy() {
+    let root = tempdir::TempDir::new("oven-ui-immediate").unwrap();
+    let mut ui = test_ui(&root).await;
+    ui.state.busy = true;
+    ui.pending.extend([
+        Queued::held(HELD_FIRST.to_string(), false),
+        Queued::now(SENT_FIRST.to_string(), true),
+        Queued::held(HELD_SECOND.to_string(), false),
+        Queued::now(SENT_LAST.to_string(), true),
+    ]);
+
+    ui.maybe_flush().await;
+
+    assert_eq!(
+        pending_texts(&ui),
+        [HELD_FIRST, HELD_SECOND],
+        "held items wait for the turn, in the order they were typed"
+    );
+    assert_eq!(ui.transcript.rewind_text().as_deref(), Some(SENT_LAST));
+}
+
+#[tokio::test]
+async fn a_quiet_submit_is_sent_without_a_transcript_row() {
+    let root = tempdir::TempDir::new("oven-ui-quiet").unwrap();
+    let mut ui = test_ui(&root).await;
+    ui.pending.push(Queued::now(TEST_ANSWER.to_string(), false));
+
+    ui.maybe_flush().await;
+
+    assert!(ui.pending.is_empty(), "a quiet submit is still sent");
+    assert!(
+        ui.transcript.rewind_text().is_none(),
+        "a quiet submit is not drawn"
+    );
+
+    ui.pending.push(Queued::now(TEST_ANSWER.to_string(), true));
+    ui.maybe_flush().await;
+
+    assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
+}
+
+#[tokio::test]
+async fn a_model_switch_typed_mid_turn_jumps_the_queue() {
+    let root = tempdir::TempDir::new("oven-ui-model-busy").unwrap();
+    let mut ui = test_ui(&root).await;
+    ui.state.busy = true;
+    ui.pending
+        .push(Queued::held(TEST_ANSWER.to_string(), false));
+    ui.input.set_text(MODEL_SWITCH);
+
+    ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(pending_texts(&ui), [TEST_ANSWER, MODEL_SWITCH]);
+    assert!(ui.pending[1].immediate && !ui.pending[1].echo);
+
+    ui.maybe_flush().await;
+
+    assert_eq!(pending_texts(&ui), [TEST_ANSWER]);
+}
+
 fn esc() -> KeyEvent {
     key(KeyCode::Esc, KeyModifiers::NONE)
 }
@@ -805,6 +886,40 @@ async fn queued_text_waits_for_the_esc_confirm() {
     ui.handle_key(esc());
 
     assert!(ui.pending.is_empty(), "the confirm pops the queue");
+}
+
+#[tokio::test]
+async fn a_confirmed_rewind_is_sent_on_the_next_flush() {
+    let root = tempdir::TempDir::new("oven-ui-rewind-sent").unwrap();
+    let mut ui = finished_turn_ui(&root).await;
+    ui.handle_key(esc());
+    ui.handle_key(esc());
+    assert!(ui.pending_rewind);
+
+    ui.maybe_flush().await;
+
+    assert!(!ui.pending_rewind, "the rewind is sent once");
+    assert!(ui.rewinding, "Esc stays blocked until `Rewound` arrives");
+}
+
+#[test]
+fn a_rewind_the_runtime_never_receives_unblocks_esc() {
+    let root = tempdir::TempDir::new("oven-ui-rewind-closed").unwrap();
+    // Dropping the runtime that opened the app drops its inbox receiver.
+    let app = current_thread_runtime().block_on(test_app(&root));
+    current_thread_runtime().block_on(async {
+        let mut ui = Ui::new(app);
+        ui.rewinding = true;
+        ui.pending_rewind = true;
+
+        ui.maybe_flush().await;
+
+        assert!(!ui.pending_rewind);
+        assert!(
+            !ui.rewinding,
+            "no `Rewound` will arrive, so Esc must not stay blocked"
+        );
+    });
 }
 
 #[tokio::test]
