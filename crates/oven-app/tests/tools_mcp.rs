@@ -22,7 +22,7 @@ command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 "#,
     );
-    let cfg = AppConfig::load(None, Some(&cfg_path)).unwrap();
+    let cfg = AppConfig::load(None, Some(&cfg_path)).await.unwrap();
     assert!(cfg.tools.contains(&"file_read".to_string()));
     assert!(cfg.mcps.contains_key("filesystem"));
     assert_eq!(cfg.mcps.get("filesystem").unwrap().command, "npx");

@@ -39,12 +39,12 @@ impl Shared {
     /// the driver, so a turn in flight keeps the conversation to itself
     /// while a view command like `/agents` still works when the user needs
     /// it most.
-    pub(crate) fn apply_now(&self, input: &Input, slash: &SlashRegistry) -> bool {
+    pub(crate) async fn apply_now(&self, input: &Input, slash: &SlashRegistry) -> bool {
         let Input::Slash { name, args } = input else {
             return false;
         };
         if name == Model::NAME {
-            self.model_command(args);
+            self.model_command(args).await;
             return true;
         }
         match slash.run_shared(&self.subagents, name, args) {
@@ -85,7 +85,7 @@ impl Shared {
         self.events.emit(AppEventKind::Notification { text });
     }
 
-    pub(crate) fn model_command(&self, args: &str) {
+    pub(crate) async fn model_command(&self, args: &str) {
         let (model, current_effort) = self.selection.model();
         match Model::resolve(&self.router_snapshot(), current_effort, args) {
             Ok(ModelDirective::Query) => {
@@ -94,12 +94,16 @@ impl Shared {
             Ok(ModelDirective::Switch {
                 model,
                 reasoning_effort,
-            }) => self.switch_model(model, reasoning_effort),
+            }) => self.switch_model(model, reasoning_effort).await,
             Err(error) => self.events.emit_error(error.to_string()),
         }
     }
 
-    pub(crate) fn switch_model(&self, model: String, reasoning_effort: Option<ReasoningEffort>) {
+    pub(crate) async fn switch_model(
+        &self,
+        model: String,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) {
         let router = self.router_snapshot();
         let outcome = resolve_model_switch(&router, &mut self.config(), model, reasoning_effort);
         self.selection.switch_model(
@@ -115,7 +119,8 @@ impl Shared {
             self.user_config_path.as_deref(),
             &outcome.overlay,
             &self.events,
-        );
+        )
+        .await;
         let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
         if let Some(path) = saved {
             let _ = write!(text, "\nsaved to {}", path.display());
@@ -200,13 +205,13 @@ fn format_model_switched(model: &str, reasoning_effort: Option<ReasoningEffort>)
 }
 
 /// Persists `overlay` to the user config file, if one is configured.
-pub(crate) fn save_provider_overlay(
+pub(crate) async fn save_provider_overlay(
     user_config_path: Option<&Path>,
     overlay: &ProviderConfig,
     events: &EventBus,
 ) -> Option<PathBuf> {
     let path = user_config_path?;
-    match AppConfig::save_provider_at(path, overlay) {
+    match AppConfig::save_provider_at(path, overlay).await {
         Ok(()) => Some(path.to_path_buf()),
         Err(e) => {
             events.emit_error(e.to_string());

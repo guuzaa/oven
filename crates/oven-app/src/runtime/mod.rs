@@ -316,7 +316,7 @@ impl Runtime {
             CommandOutcome::ModelChanged {
                 model,
                 reasoning_effort,
-            } => self.shared.switch_model(model, reasoning_effort),
+            } => self.shared.switch_model(model, reasoning_effort).await,
             CommandOutcome::ProviderChanged { provider } => self.set_provider(provider).await,
             CommandOutcome::ModeChanged { mode } => {
                 self.shared.set_mode(mode);
@@ -421,7 +421,7 @@ impl Runtime {
             next.active_provider_config()
                 .and_then(|provider| provider.reasoning_effort),
         );
-        let saved = self.save_provider_overlay(&overlay);
+        let saved = self.save_provider_overlay(&overlay).await;
         let provider = public_provider(
             next.active_provider_config()
                 .expect("active provider exists after update"),
@@ -492,8 +492,8 @@ impl Runtime {
         }
     }
 
-    fn save_provider_overlay(&self, overlay: &ProviderConfig) -> Option<PathBuf> {
-        save_provider_overlay(self.shared.user_config_path(), overlay, &self.shared.events)
+    async fn save_provider_overlay(&self, overlay: &ProviderConfig) -> Option<PathBuf> {
+        save_provider_overlay(self.shared.user_config_path(), overlay, &self.shared.events).await
     }
 }
 

@@ -20,10 +20,10 @@ pub(crate) struct Context {
 }
 
 impl Context {
-    fn load(root: &Path) -> Result<Self, AppError> {
+    async fn load(root: &Path) -> Result<Self, AppError> {
         let user_path = AppConfig::default_user_config_path();
         let project_path = AppConfig::default_project_config_path(root);
-        let config = AppConfig::load(user_path.as_deref(), Some(&project_path))?;
+        let config = AppConfig::load(user_path.as_deref(), Some(&project_path)).await?;
         Ok(Self {
             user_path,
             project_path,
@@ -41,8 +41,9 @@ impl Context {
 
     /// Whether the project file declares `slug`. It takes precedence over the
     /// user file, so an edit there can be overridden without saying so.
-    pub(crate) fn project_declares(&self, slug: &str) -> bool {
+    pub(crate) async fn project_declares(&self, slug: &str) -> bool {
         AppConfig::load_file(&self.project_path)
+            .await
             .ok()
             .flatten()
             .is_some_and(|config| config.providers.contains_key(slug))
@@ -80,10 +81,10 @@ pub(crate) async fn run(args: &Args, root: &Path) -> ExitCode {
 
 /// `oven model` with no subcommand is `oven model ls`.
 async fn execute(args: &Args, root: &Path) -> Result<String, AppError> {
-    let ctx = Context::load(root)?;
+    let ctx = Context::load(root).await?;
     match args.command.as_ref() {
         Some(ModelCommand::Add(args)) => add::run(&ctx, args).await,
-        Some(ModelCommand::Rm(args)) => rm::run(&ctx, args),
+        Some(ModelCommand::Rm(args)) => rm::run(&ctx, args).await,
         Some(ModelCommand::Ls(args)) => ls::run(&ctx, args).await,
         None => ls::run(&ctx, &ls::Args::default()).await,
     }

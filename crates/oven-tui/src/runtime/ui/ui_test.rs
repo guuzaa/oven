@@ -20,34 +20,6 @@ fn the_unsent_notice_counts_messages() {
     assert_eq!(unsent_notice(3), "dropped 3 queued messages (never sent)");
 }
 
-#[test]
-fn send_each_sends_messages_separately_in_order() {
-    let mut sent = Vec::new();
-    let remaining = send_each(
-        vec!["one".to_string(), "two".to_string(), "three".to_string()],
-        |text| {
-            sent.push(text.to_string());
-            true
-        },
-    );
-    assert!(remaining.is_empty());
-    assert_eq!(sent, vec!["one", "two", "three"]);
-}
-
-#[test]
-fn send_each_stops_at_first_failure_and_returns_remainder() {
-    let mut calls = Vec::new();
-    let remaining = send_each(
-        vec!["one".to_string(), "two".to_string(), "three".to_string()],
-        |text| {
-            calls.push(text.to_string());
-            text != "two"
-        },
-    );
-    assert_eq!(calls, vec!["one", "two"]);
-    assert_eq!(remaining, vec!["two", "three"]);
-}
-
 #[tokio::test]
 async fn the_open_popup_states_its_keys_on_the_composer_border() {
     let root = tempdir::TempDir::new("oven-ui-hint").unwrap();
@@ -576,6 +548,7 @@ async fn a_draft_keeps_arrows_and_enter_for_the_composer() {
     );
 
     ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    ui.maybe_flush().await;
 
     assert!(ui.views.focused_id().is_none());
     assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
@@ -628,6 +601,7 @@ async fn ordinary_text_still_starts_a_turn() {
     ui.input.set_text(TEST_ANSWER);
 
     ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    ui.maybe_flush().await;
 
     assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
 }
@@ -637,12 +611,10 @@ async fn busy_follows_the_apps_phase_and_flushes_the_queue_when_it_ends() {
     let root = tempdir::TempDir::new("oven-ui-sync").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.push(Queued {
-        text: TEST_ANSWER.to_string(),
-        steered: false,
-    });
+    ui.pending
+        .push(Queued::held(TEST_ANSWER.to_string(), false));
 
-    ui.sync_state();
+    ui.sync_state().await;
 
     assert!(!ui.state.busy, "an idle app is not busy");
     assert!(
@@ -657,12 +629,9 @@ async fn a_prompt_already_appended_is_not_sent_again_when_idle() {
     let root = tempdir::TempDir::new("oven-ui-steer-flush").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.push(Queued {
-        text: TEST_ANSWER.to_string(),
-        steered: true,
-    });
+    ui.pending.push(Queued::held(TEST_ANSWER.to_string(), true));
 
-    ui.sync_state();
+    ui.sync_state().await;
 
     assert!(
         ui.pending.is_empty(),
@@ -679,10 +648,7 @@ async fn an_appended_prompt_leaves_the_queue_and_joins_the_transcript() {
     let root = tempdir::TempDir::new("oven-ui-steer-event").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.push(Queued {
-        text: TEST_ANSWER.to_string(),
-        steered: true,
-    });
+    ui.pending.push(Queued::held(TEST_ANSWER.to_string(), true));
 
     ui.apply_event(&AppEvent::agent_with(
         ui.views.main_id(),
@@ -705,6 +671,7 @@ async fn finished_turn_ui(root: &tempdir::TempDir) -> Ui {
     let mut ui = test_ui(root).await;
     ui.input.set_text(TEST_ANSWER);
     ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    ui.maybe_flush().await;
     ui.state.busy = false;
     ui
 }
@@ -827,10 +794,8 @@ async fn queued_text_waits_for_the_esc_confirm() {
     let root = tempdir::TempDir::new("oven-ui-esc-queue").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.push(Queued {
-        text: TEST_ANSWER.to_string(),
-        steered: false,
-    });
+    ui.pending
+        .push(Queued::held(TEST_ANSWER.to_string(), false));
 
     ui.handle_key(esc());
 

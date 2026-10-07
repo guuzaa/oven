@@ -34,7 +34,7 @@ impl Target {
     }
 }
 
-pub(crate) fn run(ctx: &Context, args: &Args) -> Result<String, AppError> {
+pub(crate) async fn run(ctx: &Context, args: &Args) -> Result<String, AppError> {
     let mut prompter = Stdin::new();
     let target = match &args.target {
         Some(raw) => parse_target(raw)?,
@@ -43,14 +43,16 @@ pub(crate) fn run(ctx: &Context, args: &Args) -> Result<String, AppError> {
     if !args.yes && !prompter.confirm(&format!("remove {}?", target.label()), false) {
         return Ok("aborted; nothing removed".into());
     }
-    remove(ctx, &target)
+    remove(ctx, &target).await
 }
 
-fn remove(ctx: &Context, target: &Target) -> Result<String, AppError> {
+async fn remove(ctx: &Context, target: &Target) -> Result<String, AppError> {
     let path = ctx.user_path()?;
-    let mut config = AppConfig::load_file(path)?.unwrap_or_else(AppConfig::empty);
+    let mut config = AppConfig::load_file(path)
+        .await?
+        .unwrap_or_else(AppConfig::empty);
     if !config.providers.contains_key(&target.provider) {
-        return Err(not_saved(ctx, &target.provider));
+        return Err(not_saved(ctx, &target.provider).await);
     }
     let was_active = config.active_provider.name == target.provider;
     let mut text = match &target.model {
@@ -80,7 +82,7 @@ fn remove(ctx: &Context, target: &Target) -> Result<String, AppError> {
             line
         }
     };
-    AppConfig::save_at(path, &config)?;
+    AppConfig::save_at(path, &config).await?;
 
     // A removed model already reported what its provider falls back to; only
     // a removed provider changes which one is selected.
@@ -117,8 +119,8 @@ fn describe(provider: &ProviderConfig) -> String {
     }
 }
 
-fn not_saved(ctx: &Context, slug: &str) -> AppError {
-    if ctx.project_declares(slug) {
+async fn not_saved(ctx: &Context, slug: &str) -> AppError {
+    if ctx.project_declares(slug).await {
         return AppError::Runtime(format!(
             "'{slug}' is declared in {}, which this command does not write",
             ctx.project_path.display()
@@ -206,51 +208,61 @@ mod tests {
         (tmp, ctx)
     }
 
-    #[test]
-    fn removing_a_provider_reselects_and_reports_the_new_active() {
+    #[tokio::test]
+    async fn removing_a_provider_reselects_and_reports_the_new_active() {
         let (_tmp, ctx) = setup(SAVED);
-        let text = remove(&ctx, &parse_target("xai").unwrap()).unwrap();
+        let text = remove(&ctx, &parse_target("xai").unwrap()).await.unwrap();
         assert!(text.contains("removed xai (api key, 1 model)"), "{text}");
         assert!(text.contains("active provider is now deepseek"), "{text}");
         let written = AppConfig::load_file(ctx.user_path().unwrap())
+            .await
             .unwrap()
             .unwrap();
         assert!(!written.providers.contains_key("xai"));
         assert_eq!(written.active_provider.name, "deepseek");
     }
 
-    #[test]
-    fn removing_a_declared_model_reports_the_fallback() {
+    #[tokio::test]
+    async fn removing_a_declared_model_reports_the_fallback() {
         let (_tmp, ctx) = setup(SAVED);
-        let text = remove(&ctx, &parse_target("xai/grok-4.6").unwrap()).unwrap();
+        let text = remove(&ctx, &parse_target("xai/grok-4.6").unwrap())
+            .await
+            .unwrap();
         assert!(text.contains("removed xai/grok-4.6"), "{text}");
         assert!(text.contains("now uses"), "{text}");
         let written = AppConfig::load_file(ctx.user_path().unwrap())
+            .await
             .unwrap()
             .unwrap();
         assert!(written.providers["xai"].model.is_none());
         assert!(written.providers["xai"].models.is_empty());
     }
 
-    #[test]
-    fn removing_a_model_that_is_not_declared_errors() {
+    #[tokio::test]
+    async fn removing_a_model_that_is_not_declared_errors() {
         let (_tmp, ctx) = setup(SAVED);
-        let error = remove(&ctx, &parse_target("xai/grok-4").unwrap()).unwrap_err();
+        let error = remove(&ctx, &parse_target("xai/grok-4").unwrap())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("not declared"), "{error}");
     }
 
-    #[test]
-    fn removing_an_unknown_provider_errors() {
+    #[tokio::test]
+    async fn removing_an_unknown_provider_errors() {
         let (_tmp, ctx) = setup(SAVED);
-        let error = remove(&ctx, &parse_target("moonshot").unwrap()).unwrap_err();
+        let error = remove(&ctx, &parse_target("moonshot").unwrap())
+            .await
+            .unwrap_err();
         assert!(error.to_string().contains("not configured"), "{error}");
     }
 
-    #[test]
-    fn a_project_only_provider_is_reported_rather_than_removed() {
+    #[tokio::test]
+    async fn a_project_only_provider_is_reported_rather_than_removed() {
         let (_tmp, ctx) = setup(SAVED);
         std::fs::write(&ctx.project_path, "[providers.moonshot]\napi_key = \"m\"\n").unwrap();
-        let error = remove(&ctx, &parse_target("moonshot").unwrap()).unwrap_err();
+        let error = remove(&ctx, &parse_target("moonshot").unwrap())
+            .await
+            .unwrap_err();
         let message = error.to_string();
         assert!(message.contains("declared in"), "{message}");
         assert!(message.contains("does not write"), "{message}");

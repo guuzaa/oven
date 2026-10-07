@@ -11,6 +11,7 @@ use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::SerializeMap as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
+use tokio::fs;
 
 pub mod mcp;
 
@@ -788,8 +789,8 @@ impl AppConfig {
 
     /// Read one file on its own: no default merged in, so a caller that means
     /// to rewrite the file does not write another file's values into it.
-    pub fn load_file(path: &Path) -> Result<Option<AppConfig>, ConfigError> {
-        match std::fs::read_to_string(path) {
+    pub async fn load_file(path: &Path) -> Result<Option<AppConfig>, ConfigError> {
+        match fs::read_to_string(path).await {
             Ok(text) => {
                 let cfg: AppConfig =
                     toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
@@ -802,13 +803,13 @@ impl AppConfig {
 
     /// Load configs from (user, project) files and merge them, with the
     /// project file taking precedence. Missing files are silently ignored.
-    pub fn load(
+    pub async fn load(
         user_config: Option<&Path>,
         project_config: Option<&Path>,
     ) -> Result<Self, ConfigError> {
         let mut cfg = AppConfig::default();
         for path in [user_config, project_config].into_iter().flatten() {
-            if let Some(loaded) = Self::load_file(path)? {
+            if let Some(loaded) = Self::load_file(path).await? {
                 cfg.merge(loaded);
             }
         }
@@ -827,29 +828,34 @@ impl AppConfig {
 
     /// Create a template user config at the default location if it does not
     /// exist yet. Existing configs are left untouched.
-    pub fn ensure_user_config() -> Result<(), ConfigError> {
+    pub async fn ensure_user_config() -> Result<(), ConfigError> {
         if let Some(path) = Self::default_user_config_path() {
-            Self::ensure_user_config_at(&path)?;
+            Self::ensure_user_config_at(&path).await?;
         }
         Ok(())
     }
 
-    fn ensure_user_config_at(path: &Path) -> Result<(), ConfigError> {
+    async fn ensure_user_config_at(path: &Path) -> Result<(), ConfigError> {
         if path.exists() {
             return Ok(());
         }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            fs::create_dir_all(parent)
+                .await
                 .map_err(|e| ConfigError::Write(path.to_path_buf(), e))?;
         }
-        std::fs::write(path, DEFAULT_USER_CONFIG)
+        fs::write(path, DEFAULT_USER_CONFIG)
+            .await
             .map_err(|e| ConfigError::Write(path.to_path_buf(), e))
     }
 
     /// Update one provider and rewrite the file in the canonical format. The
     /// provider is the overlay's `name`, or the active one when unset.
-    pub fn save_provider_at(path: &Path, overlay: &ProviderConfig) -> Result<(), ConfigError> {
-        let mut config = Self::load_file(path)?.unwrap_or_default();
+    pub async fn save_provider_at(
+        path: &Path,
+        overlay: &ProviderConfig,
+    ) -> Result<(), ConfigError> {
+        let mut config = Self::load_file(path).await?.unwrap_or_default();
         let name = overlay
             .name
             .as_deref()
@@ -863,19 +869,22 @@ impl AppConfig {
         provider.merge_fields(overlay);
         provider.name = Some(name.clone());
         config.active_provider.name = name;
-        Self::save_at(path, &config)
+        Self::save_at(path, &config).await
     }
 
     /// Write a whole config to `path` in the canonical format, creating the
     /// parent directory when it does not exist yet.
-    pub fn save_at(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
+    pub async fn save_at(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            fs::create_dir_all(parent)
+                .await
                 .map_err(|e| ConfigError::Write(path.to_path_buf(), e))?;
         }
         let text = toml::to_string_pretty(config)
             .map_err(|e| ConfigError::Serialize(path.to_path_buf(), e))?;
-        std::fs::write(path, text).map_err(|e| ConfigError::Write(path.to_path_buf(), e))
+        fs::write(path, text)
+            .await
+            .map_err(|e| ConfigError::Write(path.to_path_buf(), e))
     }
 
     /// One provider's `[providers.<slug>]` block exactly as it would be
@@ -940,13 +949,13 @@ const DEFAULT_USER_CONFIG: &str = include_str!("../../config.example.toml");
 mod tests {
     use super::*;
 
-    #[test]
-    fn ensure_user_config_creates_template_once() {
+    #[tokio::test]
+    async fn ensure_user_config_creates_template_once() {
         let tmp = tempdir::TempDir::new("oven-config").unwrap();
         let path = tmp.path().join("config.toml");
-        AppConfig::ensure_user_config_at(&path).unwrap();
+        AppConfig::ensure_user_config_at(&path).await.unwrap();
         assert!(path.exists());
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         let mut expected = AppConfig::default();
         expected.merge(toml::from_str(DEFAULT_USER_CONFIG).unwrap());
         assert_eq!(cfg, expected);
@@ -956,8 +965,8 @@ mod tests {
             "active = \"deepseek\"\n[providers.deepseek]\nmodel = \"edited\"\n",
         )
         .unwrap();
-        AppConfig::ensure_user_config_at(&path).unwrap();
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        AppConfig::ensure_user_config_at(&path).await.unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(
             cfg.active_provider_config().unwrap().model.as_deref(),
             Some("edited")
@@ -1153,8 +1162,8 @@ supports_vision = true
         assert!(cfg.active_provider_config().unwrap().protocol.is_none());
     }
 
-    #[test]
-    fn old_grok_config_canonicalizes_name_and_qualifies_model() {
+    #[tokio::test]
+    async fn old_grok_config_canonicalizes_name_and_qualifies_model() {
         let tmp = tempdir::TempDir::new("oven-old-grok").unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -1162,7 +1171,7 @@ supports_vision = true
             "[provider]\nname = \"grok\"\nmodel = \"xai/grok-4.6\"\nkind = \"responses\"\n",
         )
         .unwrap();
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(
             cfg.active_provider_config().unwrap().name.as_deref(),
             Some("xai")
@@ -1268,8 +1277,8 @@ supports_vision = true
         assert_eq!(grok.effective_model(), "xai/grok-4.6");
     }
 
-    #[test]
-    fn save_provider_at_merges_only_set_fields() {
+    #[tokio::test]
+    async fn save_provider_at_merges_only_set_fields() {
         let tmp = tempdir::TempDir::new("oven-save-provider").unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -1287,9 +1296,10 @@ supports_vision = true
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
 
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(cfg.max_retries, 9);
         assert_eq!(
             cfg.active_provider_config().unwrap().model.as_deref(),
@@ -1313,8 +1323,8 @@ supports_vision = true
         );
     }
 
-    #[test]
-    fn save_provider_at_rewrites_legacy_provider_block() {
+    #[tokio::test]
+    async fn save_provider_at_rewrites_legacy_provider_block() {
         let tmp = tempdir::TempDir::new("oven-save-provider-repair").unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(&path, "[provider]\nname = \"deepseek\"\nmodel = \"old\"\n").unwrap();
@@ -1326,10 +1336,11 @@ supports_vision = true
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(cfg.max_retries, 2);
         assert_eq!(cfg.request_timeout_secs, 60);
         assert_eq!(cfg.active_provider_config().unwrap().model.as_deref(), None);
@@ -1347,8 +1358,8 @@ supports_vision = true
         assert!(text.find("max_retries").unwrap() < text.find("[providers.").unwrap());
     }
 
-    #[test]
-    fn save_provider_at_writes_reasoning_effort() {
+    #[tokio::test]
+    async fn save_provider_at_writes_reasoning_effort() {
         let tmp = tempdir::TempDir::new("oven-save-effort").unwrap();
         let path = tmp.path().join("config.toml");
         AppConfig::save_provider_at(
@@ -1360,9 +1371,10 @@ supports_vision = true
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
 
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(
             cfg.active_provider_config().unwrap().model.as_deref(),
             Some("gpt-4o")
@@ -1373,8 +1385,8 @@ supports_vision = true
         );
     }
 
-    #[test]
-    fn load_migrates_legacy_provider_into_map() {
+    #[tokio::test]
+    async fn load_migrates_legacy_provider_into_map() {
         let tmp = tempdir::TempDir::new("oven-hydrate-legacy").unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -1382,7 +1394,7 @@ supports_vision = true
             "[provider]\nname = \"deepseek\"\napi_key = \"sk-old\"\nmodel = \"deepseek-v4-flash\"\n",
         )
         .unwrap();
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(
             cfg.active_provider_config().unwrap().name.as_deref(),
             Some("deepseek")
@@ -1398,8 +1410,8 @@ supports_vision = true
         assert!(!cfg.needs_setup());
     }
 
-    #[test]
-    fn save_second_vendor_keeps_first() {
+    #[tokio::test]
+    async fn save_second_vendor_keeps_first() {
         let tmp = tempdir::TempDir::new("oven-save-two").unwrap();
         let path = tmp.path().join("config.toml");
         AppConfig::save_provider_at(
@@ -1411,6 +1423,7 @@ supports_vision = true
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         AppConfig::save_provider_at(
             &path,
@@ -1421,9 +1434,10 @@ supports_vision = true
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
 
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(
             cfg.active_provider_config().unwrap().name.as_deref(),
             Some("xai")
@@ -1439,8 +1453,8 @@ supports_vision = true
         assert!(text.contains("[providers.xai]"));
     }
 
-    #[test]
-    fn save_model_updates_active_and_saved_model_not_api_key() {
+    #[tokio::test]
+    async fn save_model_updates_active_and_saved_model_not_api_key() {
         let tmp = tempdir::TempDir::new("oven-save-model").unwrap();
         let path = tmp.path().join("config.toml");
         AppConfig::save_provider_at(
@@ -1452,6 +1466,7 @@ supports_vision = true
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
         AppConfig::save_provider_at(
             &path,
@@ -1462,9 +1477,10 @@ supports_vision = true
                 ..Default::default()
             },
         )
+        .await
         .unwrap();
 
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(
             cfg.active_provider_config().unwrap().model.as_deref(),
             Some("deepseek-chat")
@@ -1484,8 +1500,8 @@ supports_vision = true
         );
     }
 
-    #[test]
-    fn load_selects_active_provider_from_map() {
+    #[tokio::test]
+    async fn load_selects_active_provider_from_map() {
         let tmp = tempdir::TempDir::new("oven-hydrate-map").unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -1493,7 +1509,7 @@ supports_vision = true
             "[provider]\nname = \"xai\"\nmodel = \"grok-4.6\"\n\n[providers.xai]\napi_key = \"xai-key\"\n[providers.deepseek]\napi_key = \"sk-ds\"\nmodel = \"deepseek-v4-flash\"\n",
         )
         .unwrap();
-        let cfg = AppConfig::load(None, Some(&path)).unwrap();
+        let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(
             cfg.active_provider_config().unwrap().api_key.as_deref(),
             Some("xai-key")
@@ -1502,8 +1518,8 @@ supports_vision = true
         assert_eq!(cfg.configured_providers(), vec!["deepseek", "xai"]);
     }
 
-    #[test]
-    fn save_at_writes_only_what_the_config_holds() {
+    #[tokio::test]
+    async fn save_at_writes_only_what_the_config_holds() {
         let tmp = tempdir::TempDir::new("oven-save-at").unwrap();
         let path = tmp.path().join("nested").join("config.toml");
         let mut config = AppConfig::empty();
@@ -1517,12 +1533,12 @@ supports_vision = true
             },
         );
         config.active_provider.name = "myproxy".into();
-        AppConfig::save_at(&path, &config).unwrap();
+        AppConfig::save_at(&path, &config).await.unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("active = \"myproxy\""), "{text}");
         assert!(text.contains("[providers.myproxy]"), "{text}");
-        assert_eq!(AppConfig::load_file(&path).unwrap().unwrap(), config);
+        assert_eq!(AppConfig::load_file(&path).await.unwrap().unwrap(), config);
     }
 
     #[test]

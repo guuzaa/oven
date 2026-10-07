@@ -154,10 +154,10 @@ impl AppBuilder {
     /// under `mcps:` are registered, and skills are discovered from the
     /// filesystem.
     pub async fn load_config(&mut self) -> Result<(), AppError> {
-        AppConfig::ensure_user_config()?;
+        AppConfig::ensure_user_config().await?;
         let user = AppConfig::default_user_config_path();
         let project = AppConfig::default_project_config_path(&self.root);
-        let cfg = AppConfig::load(user.as_deref(), Some(&project))?;
+        let cfg = AppConfig::load(user.as_deref(), Some(&project)).await?;
         self.apply_config(cfg).await;
         Ok(())
     }

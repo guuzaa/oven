@@ -81,15 +81,15 @@ impl App {
 
     /// Classifies `text` and hands it to the runtime, returning what it was
     /// taken for so a frontend can draw it the same way.
-    pub fn submit(&self, text: impl AsRef<str>) -> Result<Input, AppError> {
+    pub async fn submit(&self, text: impl AsRef<str>) -> Result<Input, AppError> {
         let input = input::classify(text.as_ref(), &self.slash);
-        self.dispatch(input.clone())?;
+        self.dispatch(input.clone()).await?;
         Ok(input)
     }
 
     /// Drops the last turn from the conversation once the driver is free.
-    pub fn rewind(&self) -> Result<(), AppError> {
-        self.dispatch(Input::Rewind)
+    pub async fn rewind(&self) -> Result<(), AppError> {
+        self.dispatch(Input::Rewind).await
     }
 
     /// Parks a chat typed while a turn is running, so the next tool-result
@@ -115,9 +115,9 @@ impl App {
     /// Applies an input on the spot if it needs no driver while one is busy;
     /// otherwise queues it for the driver, saying so when the user will
     /// have to wait.
-    fn dispatch(&self, input: Input) -> Result<(), AppError> {
+    async fn dispatch(&self, input: Input) -> Result<(), AppError> {
         if self.shared.is_busy() {
-            if self.shared.apply_now(&input, &self.slash) {
+            if self.shared.apply_now(&input, &self.slash).await {
                 return Ok(());
             }
             if let Some(text) = queued_notice(&input) {
@@ -205,7 +205,7 @@ impl App {
     pub async fn prompt(&self, input: impl Into<String>) -> Result<String, AppError> {
         let mut rx = self.subscribe();
         let main = self.state().agent_id;
-        self.submit(input.into())?;
+        self.submit(input.into()).await?;
 
         let mut text = String::new();
         let mut in_turn = false;

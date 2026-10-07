@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** `AppConfig::load`, `load_file`, `save_at`, `save_provider_at`, and `ensure_user_config` are async, and so are `App::submit` and `App::rewind`. A `/model` switch writes config without blocking a runtime thread. The file format is unchanged
+
 ## [0.0.11] - 2026-10-06
 
 ### Added

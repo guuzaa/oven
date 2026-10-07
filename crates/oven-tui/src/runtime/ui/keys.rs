@@ -135,7 +135,7 @@ impl Ui {
                 self.views.release();
                 if !self.answer_question_with(&text) {
                     let steered = self.app.steer(&text);
-                    self.pending.push(Queued { text, steered });
+                    self.pending.push(Queued::held(text, steered));
                 }
                 false
             }
@@ -146,14 +146,12 @@ impl Ui {
                 self.views.release();
                 self.status.clear_reply();
                 self.input.clear();
-                if let Ok(input) = self.app.submit(&text) {
-                    self.push_submitted(&input);
-                }
+                self.pending.push(Queued::now(text, true));
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
                 if !self.answer_question_with(&text) {
-                    let _ = self.app.submit(&text);
+                    self.pending.push(Queued::now(text, false));
                 }
                 false
             }
@@ -300,9 +298,7 @@ impl Ui {
                 };
                 self.input.set_text(&text);
                 self.rewinding = true;
-                if self.app.rewind().is_err() {
-                    self.rewinding = false;
-                }
+                self.pending_rewind = true;
                 KeyResult::Handled
             }
             EscAction::Ignore => KeyResult::Handled,

@@ -83,7 +83,7 @@ pub(crate) async fn run(ctx: &Context, args: &Args) -> Result<String, AppError> 
             return Ok("aborted; nothing written".into());
         }
     }
-    apply(ctx, &plan)
+    apply(ctx, &plan).await
 }
 
 async fn plan(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Plan, AppError> {
@@ -161,16 +161,18 @@ async fn verify_draft(
     }
 }
 
-fn apply(ctx: &Context, plan: &Plan) -> Result<String, AppError> {
+async fn apply(ctx: &Context, plan: &Plan) -> Result<String, AppError> {
     let path = ctx.user_path()?;
-    let mut config = AppConfig::load_file(path)?.unwrap_or_else(AppConfig::empty);
+    let mut config = AppConfig::load_file(path)
+        .await?
+        .unwrap_or_else(AppConfig::empty);
     config
         .providers
         .insert(plan.slug.clone(), plan.provider.clone());
     if plan.activate {
         config.active_provider.name.clone_from(&plan.slug);
     }
-    AppConfig::save_at(path, &config)?;
+    AppConfig::save_at(path, &config).await?;
 
     let mut text = format!("saved {}/{} to {}", plan.slug, plan.id, path.display());
     if plan.activate {
@@ -178,7 +180,7 @@ fn apply(ctx: &Context, plan: &Plan) -> Result<String, AppError> {
     } else {
         let _ = write!(text, "\nactive model unchanged: {}", active_model(&config));
     }
-    if ctx.project_declares(&plan.slug) {
+    if ctx.project_declares(&plan.slug).await {
         let _ = write!(
             text,
             "\nnote: {} also declares {} and takes precedence",
@@ -677,8 +679,8 @@ mod tests {
         assert!(check_url("https://example.com/v1").is_ok());
     }
 
-    #[test]
-    fn apply_writes_only_the_user_file() {
+    #[tokio::test]
+    async fn apply_writes_only_the_user_file() {
         let tmp = tempdir::TempDir::new("oven-add").unwrap();
         let user = tmp.path().join("config.toml");
         let ctx = Context {
@@ -698,12 +700,12 @@ mod tests {
             },
             activate: true,
         };
-        let text = apply(&ctx, &plan).unwrap();
+        let text = apply(&ctx, &plan).await.unwrap();
         assert!(
             text.contains("active model is now my-proxy/my-model"),
             "{text}"
         );
-        let written = AppConfig::load_file(&user).unwrap().unwrap();
+        let written = AppConfig::load_file(&user).await.unwrap().unwrap();
         assert_eq!(written.active_provider.name, "my-proxy");
         assert_eq!(
             written.providers["my-proxy"].model.as_deref(),

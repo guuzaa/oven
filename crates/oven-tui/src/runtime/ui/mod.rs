@@ -35,6 +35,8 @@ pub struct Ui {
     /// desync the transcript from the backend.
     rewinding: bool,
     pending: Vec<Queued>,
+    /// Esc confirmed a rewind. `handle_key` stays sync and the flush sends it.
+    pending_rewind: bool,
     /// Deadline for the Esc press that confirms a previous one.
     esc_confirm_until: Option<Instant>,
 
@@ -81,6 +83,7 @@ impl Ui {
             quit: false,
             rewinding: false,
             pending: Vec::new(),
+            pending_rewind: false,
             esc_confirm_until: None,
 
             transcript: Transcript::new(),
@@ -152,6 +155,7 @@ impl Ui {
                     if self.handle_term_event(ev?)? {
                         break;
                     }
+                    self.maybe_flush().await;
                     dirty = false;
                     self.draw_frame(terminal)?;
                 }
@@ -167,7 +171,7 @@ impl Ui {
                     dirty = true;
                 }
                 Ok(()) = self.state_rx.changed() => {
-                    self.sync_state();
+                    self.sync_state().await;
                     dirty = true;
                 }
             }
@@ -198,7 +202,7 @@ impl Ui {
 
     /// Follows the levels the app reports. What the driver is doing is read
     /// from its phase, so the composer is busy exactly while the app is.
-    fn sync_state(&mut self) {
+    async fn sync_state(&mut self) {
         let subagents = {
             let state = self.state_rx.borrow_and_update();
             self.state.busy = state.phase.is_active();
@@ -209,25 +213,47 @@ impl Ui {
             Arc::clone(&state.subagents)
         };
         self.state.agents = self.views.mirror(&subagents);
-        self.maybe_flush();
+        self.maybe_flush().await;
     }
 
-    fn maybe_flush(&mut self) {
-        if self.state.busy || self.pending.is_empty() {
+    async fn maybe_flush(&mut self) {
+        if self.pending_rewind {
+            self.pending_rewind = false;
+            if self.app.rewind().await.is_err() {
+                self.rewinding = false;
+            }
+        }
+        if self.pending.is_empty() {
+            return;
+        }
+        if self.state.busy && self.pending.iter().all(|queued| !queued.immediate) {
             return;
         }
         let queued = std::mem::take(&mut self.pending);
-        let remaining = send_each(queued, |queued| {
-            if queued.steered && !self.app.claim_steer(&queued.text) {
-                return true;
+        let mut rest = Vec::new();
+        let mut iter = queued.into_iter();
+        while let Some(queued) = iter.next() {
+            if self.state.busy && !queued.immediate {
+                rest.push(queued);
+                continue;
             }
-            self.app
-                .submit(&queued.text)
-                .inspect(|input| self.push_submitted(input))
-                .is_ok()
-        });
-        if !remaining.is_empty() {
-            let mut rest = remaining;
+            if queued.steered && !self.app.claim_steer(&queued.text) {
+                continue;
+            }
+            match self.app.submit(&queued.text).await {
+                Ok(input) => {
+                    if queued.echo {
+                        self.push_submitted(&input);
+                    }
+                }
+                Err(_) => {
+                    rest.push(queued);
+                    rest.extend(iter);
+                    break;
+                }
+            }
+        }
+        if !rest.is_empty() {
             rest.append(&mut self.pending);
             self.pending = rest;
         }
@@ -279,6 +305,30 @@ struct Queued {
     /// results. A slash command or shell line stays local until the driver
     /// is free.
     steered: bool,
+    /// Sent on the next flush even while a turn is running (`/model`, `/setup`).
+    immediate: bool,
+    /// Drawn into the transcript when sent. A quiet submit is not.
+    echo: bool,
+}
+
+impl Queued {
+    fn held(text: String, steered: bool) -> Self {
+        Self {
+            text,
+            steered,
+            immediate: false,
+            echo: true,
+        }
+    }
+
+    fn now(text: String, echo: bool) -> Self {
+        Self {
+            text,
+            steered: false,
+            immediate: true,
+            echo,
+        }
+    }
 }
 
 fn unsent_notice(count: usize) -> String {
@@ -287,19 +337,6 @@ fn unsent_notice(count: usize) -> String {
         _ => "messages",
     };
     format!("dropped {count} queued {noun} (never sent)")
-}
-
-fn send_each<T>(items: Vec<T>, mut send: impl FnMut(&T) -> bool) -> Vec<T> {
-    let mut iter = items.into_iter();
-    let mut remaining = Vec::new();
-    while let Some(text) = iter.next() {
-        if !send(&text) {
-            remaining.push(text);
-            remaining.extend(iter);
-            break;
-        }
-    }
-    remaining
 }
 
 #[cfg(test)]

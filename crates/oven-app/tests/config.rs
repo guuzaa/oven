@@ -57,16 +57,16 @@ reasoning_effort = "medium"
     );
 }
 
-#[test]
-fn missing_files_leave_defaults_untouched() {
+#[tokio::test]
+async fn missing_files_leave_defaults_untouched() {
     let tmp = tempdir::TempDir::new("oven-load").unwrap();
     let missing = tmp.path().join("nope.toml");
-    let cfg = AppConfig::load(None, Some(&missing)).unwrap();
+    let cfg = AppConfig::load(None, Some(&missing)).await.unwrap();
     assert_eq!(cfg, AppConfig::default());
 }
 
-#[test]
-fn load_user_then_project_merges_with_project_precedence() {
+#[tokio::test]
+async fn load_user_then_project_merges_with_project_precedence() {
     let tmp = tempdir::TempDir::new("oven-load-merge").unwrap();
     let user = tmp.path().join("user.toml");
     write(
@@ -79,7 +79,7 @@ fn load_user_then_project_merges_with_project_precedence() {
         "max_retries = 9\n\nactive = \"deepseek\"\n\n[providers.deepseek]\nbase_url = \"from-project\"\n",
     );
 
-    let cfg = AppConfig::load(Some(&user), Some(&project)).unwrap();
+    let cfg = AppConfig::load(Some(&user), Some(&project)).await.unwrap();
     assert_eq!(
         cfg.active_provider_config().unwrap().model.as_deref(),
         Some("from-user")
@@ -91,8 +91,8 @@ fn load_user_then_project_merges_with_project_precedence() {
     assert_eq!(cfg.max_retries, 9);
 }
 
-#[test]
-fn load_unions_provider_maps_and_keeps_user_keys() {
+#[tokio::test]
+async fn load_unions_provider_maps_and_keeps_user_keys() {
     let tmp = tempdir::TempDir::new("oven-load-providers").unwrap();
     let user = tmp.path().join("user.toml");
     write(
@@ -105,7 +105,7 @@ fn load_unions_provider_maps_and_keeps_user_keys() {
         "active = \"xai\"\n\n[providers.xai]\nmodel = \"grok-4.6\"\n",
     );
 
-    let cfg = AppConfig::load(Some(&user), Some(&project)).unwrap();
+    let cfg = AppConfig::load(Some(&user), Some(&project)).await.unwrap();
     assert_eq!(cfg.active_provider.name, "xai");
     assert_eq!(
         cfg.active_provider_config().unwrap().model.as_deref(),
@@ -115,8 +115,8 @@ fn load_unions_provider_maps_and_keeps_user_keys() {
     assert_eq!(cfg.providers["xai"].api_key.as_deref(), Some("xai-key"));
 }
 
-#[test]
-fn project_model_metadata_merges_field_by_field() {
+#[tokio::test]
+async fn project_model_metadata_merges_field_by_field() {
     let tmp = tempdir::TempDir::new("oven-load-model-merge").unwrap();
     let user = tmp.path().join("user.toml");
     write(
@@ -129,7 +129,7 @@ fn project_model_metadata_merges_field_by_field() {
         "[providers.myproxy.models.\"m\"]\ncontext_window = 100000\n",
     );
 
-    let cfg = AppConfig::load(Some(&user), Some(&project)).unwrap();
+    let cfg = AppConfig::load(Some(&user), Some(&project)).await.unwrap();
     let params = &cfg.active_provider_config().unwrap().models["m"];
     assert_eq!(params.context_window, Some(100_000));
     assert_eq!(params.max_output_tokens, Some(8192));
