@@ -31,7 +31,8 @@ pub struct CompactStats {
 impl Agent {
     /// Ask the provider to summarize the conversation, then replace the
     /// entire history with a single user message carrying the summary.
-    /// Todos are kept. The history is untouched when the request fails.
+    /// Todos are kept and re-shown on the next request. The history is
+    /// untouched when the request fails.
     pub async fn compact(&mut self) -> Result<CompactStats, AgentError> {
         if self.history.is_empty() {
             return Err(AgentError::from(NOTHING_TO_COMPACT));
@@ -49,12 +50,14 @@ impl Agent {
         if summary.trim().is_empty() {
             return Err(AgentError::from(EMPTY_SUMMARY));
         }
+        self.acknowledge_request_notes();
         let usage = response.usage.unwrap_or_default();
 
         self.history.clear();
         self.history.push(Message::user_text(format!(
             "{SUMMARY_PREAMBLE}\n\n{summary}"
         )));
+        self.todo_notice = !self.todos().is_empty();
         let stats = CompactStats {
             before_tokens: usage.input_tokens,
             after_tokens: usage.output_tokens,

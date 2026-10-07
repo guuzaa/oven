@@ -18,7 +18,7 @@ use crate::core::error::{AgentError, MAX_ITERS_EXCEEDED};
 use crate::core::event::{AgentEvent, CallOutcome, ToolEvent, ToolResult, TurnEvent};
 use crate::core::identity::ToolCallId;
 use crate::core::interaction::{ApprovalDecision, LoopLimitDecision};
-use crate::core::mode::ToolAccess;
+use crate::core::mode::{AgentMode, ToolAccess};
 use crate::core::sink::EventSink;
 use crate::core::todo::TodoList;
 use crate::core::turn::{Step, StepCall, TurnContext, TurnOutput};
@@ -45,6 +45,7 @@ impl Agent {
         ctx: &TurnContext,
     ) -> Result<Step, AgentError> {
         let (response, thinking) = self.complete_response(sink).await?;
+        self.acknowledge_request_notes();
 
         self.history
             .push(Message::assistant(response.content.clone()));
@@ -71,8 +72,19 @@ impl Agent {
         let records = run_calls(&planned, gates, ctx, sink).await;
         let (calls, wrote_todo) = self.commit_calls(&planned, records, sink);
         self.append_queued_prompts(ctx, sink);
-        self.todo_dirty = !wrote_todo;
+        self.note_todo_round(wrote_todo);
         Ok(Step { text, calls, usage })
+    }
+
+    /// Counts plan-mode tool rounds that skipped `todo_write`. A write clears it.
+    fn note_todo_round(&mut self, wrote_todo: bool) {
+        if wrote_todo {
+            self.todo_misses = 0;
+            return;
+        }
+        if self.mode() == AgentMode::Plan && !self.todos.is_empty() {
+            self.todo_misses = self.todo_misses.saturating_add(1);
+        }
     }
 
     /// Chats typed while tools were running ride along with the results the
@@ -157,6 +169,7 @@ impl Agent {
         };
         self.todos = list.clone();
         self.todo_written_this_turn = true;
+        self.todo_notice = true;
         sink.emit(AgentEvent::TodosChanged { todos: list });
         true
     }

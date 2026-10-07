@@ -143,7 +143,7 @@ const TRACE = [
   {
     chapter: "plan",
     title: "Step 4 · the plan reminder",
-    text: "The last step used tools but not todo_write, so this request's system prompt ends with a ## Plan reminder — it lives only in the request, never in the history. The model marks every item done and, in the same reply, saves something it learned.",
+    text: "Five tool rounds have used tools but not todo_write, so this request appends a user message wrapped in <reminder> — it lives only in the request, never in the history. The counter then starts over. The model marks every item done and, in the same reply, saves something it learned.",
     lanes: ["agent", "llm", "tui"],
     events: ["Turn(StepStarted { index: 4 })", "Tool(Started { todo_write })", "Tool(Started { memory_write })", "Tool(Finished { todo_write })", "Tool(Finished { memory_write: created })", "TodosChanged { all completed }"],
     where: ["crates/oven-agent/src/core/prompt_template/plan.rs"],
@@ -221,11 +221,11 @@ select! { _ = cancelled() => Err(cancelled()), res = turn => res }`,
     label: "build_request",
     tag: "step",
     title: "Build the request",
-    text: "Mode, model and reasoning effort come from the shared Selection, read again every step. The system prompt is the frozen base with the mode overlay, the checklist and the plan reminder composed on top. Tools the mode hides are not sent at all.",
+    text: "Mode, model and reasoning effort come from the shared Selection, read again every step. The system prompt is the frozen base plus the mode overlay. A checklist edit is a user message on the next request only. Five tool rounds without todo_write append a reminder on the following request, then the count restarts. Tools the mode hides are not sent at all.",
     code: `Request {
     model,
-    system: compose_todo_system(base, mode, &todos, remind),
-    messages: history_without_system,
+    system: compose_system(base, mode),
+    messages: [history_without_system, todo_list?, user_reminder?],
     tools: self.llm_tools(mode),
     ..
 }`,
@@ -295,7 +295,7 @@ while let Some(done) = running.next().await {
     self.commit_todo(call, sink);
     self.history.push(Message::tool_result(call.id, record.summary, record.is_error));
 }
-self.todo_dirty = !wrote_todo;`,
+self.note_todo_round(wrote_todo);`,
   },
   {
     label: "steered prompts",
@@ -359,8 +359,8 @@ const PROMPT_LAYERS = [
   { id: "skills", label: "## Available Skills", frozen: true },
   { id: "memory", label: "# Memory · catalog", frozen: true },
   { id: "plan", label: "# Plan Mode" },
-  { id: "todo", label: "## Current TODO list" },
-  { id: "remind", label: "## Plan reminder" },
+  { id: "todo", label: "user ## Current TODO list" },
+  { id: "remind", label: "user <reminder>" },
 ];
 const PLAN_STEPS = [
   {
@@ -377,14 +377,14 @@ const PLAN_STEPS = [
   },
   {
     label: "todo_write ×3",
-    text: "The model writes the whole list. The agent validates it, replaces its checklist and emits TodosChanged; the widget draws it straight away. From now on every request carries the list.",
+    text: "The model writes the whole list. The agent validates it, replaces its checklist and emits TodosChanged; the widget draws it straight away. The next request appends that list once as a user message. Later steps omit it until the list changes again.",
     layers: ["plan", "todo"],
     todos: [["~", "Find where ls renders output"], [" ", "Add the --json flag"], [" ", "Run the tests"]],
   },
   {
     label: "step skips todos",
-    text: "A step called grep but not todo_write. The next request gets a ## Plan reminder at the end of the system prompt. It is never stored in the history.",
-    layers: ["plan", "todo", "remind"],
+    text: "A step called grep but not todo_write. One miss does not remind. After five such tool rounds the next request appends a user message wrapped in <reminder>, then the count restarts. It is never stored in the history.",
+    layers: ["plan"],
     todos: [["~", "Find where ls renders output"], [" ", "Add the --json flag"], [" ", "Run the tests"]],
   },
   {
@@ -396,7 +396,7 @@ const PLAN_STEPS = [
   {
     label: "invalid list",
     text: "Two items in_progress at once: the call fails with the reason, the old list stays and no TodosChanged is sent. The model reads the error and retries.",
-    layers: ["plan", "todo", "remind"],
+    layers: ["plan", "remind"],
     todos: [["x", "Find where ls renders output"], ["~", "Add the --json flag"], [" ", "Run the tests"]],
     rejected: true,
   },

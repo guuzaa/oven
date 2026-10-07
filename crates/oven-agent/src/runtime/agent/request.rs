@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use oven_llm::{
-    Client, Delta, Provider, ReasoningEffort, Request, Response, Role, StreamCollector,
+    Client, Delta, Message, Provider, ReasoningEffort, Request, Response, Role, StreamCollector,
     StreamEvent as LlmStreamEvent, ThinkingMode,
 };
 
@@ -35,22 +35,19 @@ impl Agent {
 
     /// The system prompt of the next request: the configured one, or the
     /// first system message in the history when there is none, with the mode
-    /// and todo overlays composed on top of it.
+    /// overlay on top. The checklist stays off this prefix.
     fn system_prompt(&self, mode: AgentMode) -> Option<String> {
         let history_system = self.history.system_message();
         let base = self.system.as_deref().or(history_system.as_deref());
-        prompt_template::compose_todo_system(
-            base,
-            mode,
-            &self.todos,
-            self.wants_plan_reminder(mode),
-        )
+        prompt_template::compose_system(base, mode)
     }
 
-    /// Plan mode asks for a todo update when the previous step used tools
-    /// without writing to the list.
+    /// Plan mode asks for a todo update after several tool rounds skipped
+    /// `todo_write`. The note is appended to that request only.
     fn wants_plan_reminder(&self, mode: AgentMode) -> bool {
-        mode == AgentMode::Plan && self.todo_dirty && !self.todos.is_empty()
+        mode == AgentMode::Plan
+            && self.todo_misses >= super::PLAN_REMINDER_AFTER_MISSES
+            && !self.todos.is_empty()
     }
 
     pub(crate) fn build_request(&self) -> Request {
@@ -61,15 +58,21 @@ impl Agent {
         } else {
             ThinkingMode::Disabled
         };
+        let mut messages: Vec<Message> = self
+            .history
+            .messages()
+            .filter(|message| message.role != Role::System)
+            .cloned()
+            .collect();
+        if self.todo_notice && !self.todos.is_empty() {
+            messages.push(Message::user_text(self.todos.render_todo_block()));
+        }
+        if self.wants_plan_reminder(mode) {
+            messages.push(Message::user_text(prompt_template::PLAN_REMINDER));
+        }
         let mut builder = Request::builder()
             .model(model)
-            .messages(
-                self.history
-                    .messages()
-                    .filter(|message| message.role != Role::System)
-                    .cloned()
-                    .collect(),
-            )
+            .messages(messages)
             .tools(self.llm_tools(mode))
             .thinking(thinking);
         if let Some(system) = self.system_prompt(mode) {

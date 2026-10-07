@@ -174,6 +174,20 @@ mod tests {
     }
 
     #[test]
+    fn render_todo_block_lists_status_id_and_content() {
+        let list = TodoList {
+            items: vec![
+                item("impl-mode", "Add AgentMode", TodoStatus::InProgress),
+                item("tui-toggle", "Handle BackTab", TodoStatus::Pending),
+            ],
+        };
+        let block = list.render_todo_block();
+        assert!(block.starts_with("## Current TODO list\n"));
+        assert!(block.contains("- [in_progress] `impl-mode` Add AgentMode"));
+        assert!(block.contains("- [pending] `tui-toggle` Handle BackTab"));
+    }
+
+    #[test]
     fn parse_success() {
         let list = TodoList::parse(&json!({
             "todos": [

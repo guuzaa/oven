@@ -19,6 +19,9 @@ use crate::core::selection::Selection;
 use crate::core::sink::EventSink;
 use crate::core::todo::TodoList;
 
+/// Tool rounds in plan mode without `todo_write` before a reminder is sent.
+const PLAN_REMINDER_AFTER_MISSES: u8 = 5;
+
 mod notify;
 mod request;
 mod step;
@@ -40,7 +43,10 @@ pub struct Agent {
     system: Option<String>,
     todos: TodoList,
     todo_written_this_turn: bool,
-    todo_dirty: bool,
+    /// Plan-mode tool rounds since the last `todo_write` or reminder.
+    todo_misses: u8,
+    /// The checklist changed and the next request should show it once.
+    pub(crate) todo_notice: bool,
 }
 
 impl Agent {
@@ -61,7 +67,8 @@ impl Agent {
             system: None,
             todos: TodoList::default(),
             todo_written_this_turn: false,
-            todo_dirty: false,
+            todo_misses: 0,
+            todo_notice: false,
         }
     }
 
@@ -139,6 +146,7 @@ impl Agent {
 
     pub fn set_todos(&mut self, todos: TodoList) {
         self.todos = todos;
+        self.todo_notice = !self.todos.is_empty();
     }
 
     pub fn todos(&self) -> &TodoList {
@@ -155,6 +163,7 @@ impl Agent {
         }
         self.todos = TodoList::default();
         self.todo_written_this_turn = true;
+        self.todo_notice = false;
         sink.emit(AgentEvent::TodosChanged {
             todos: TodoList::default(),
         });
@@ -188,7 +197,18 @@ impl Agent {
 
     pub fn clear_history(&mut self) {
         self.history.clear();
-        self.todo_dirty = false;
+        self.todo_misses = 0;
+        self.todo_notice = false;
+    }
+
+    pub(crate) fn acknowledge_request_notes(&mut self) {
+        self.todo_notice = false;
+        if self.mode() == AgentMode::Plan
+            && !self.todos.is_empty()
+            && self.todo_misses >= PLAN_REMINDER_AFTER_MISSES
+        {
+            self.todo_misses = 0;
+        }
     }
 
     /// Replace the entire history with records loaded from a persisted
@@ -233,7 +253,8 @@ impl Agent {
     pub fn rewind_last_turn(&mut self) -> Option<Message> {
         let removed = self.history.rewind_last_turn();
         if removed.is_some() {
-            self.todo_dirty = false;
+            self.todo_misses = 0;
+            self.todo_notice = false;
         }
         removed
     }

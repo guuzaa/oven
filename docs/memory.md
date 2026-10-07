@@ -256,8 +256,10 @@ or two sessions writing at once, because `memory_write` refuses a write that
 would overflow the index it can see.
 
 Freezing is the cache decision. Provider caches match on a prefix, and the
-base system prompt is the front of every request; the todo block and the plan
-reminder are composed *after* it in `Agent::system_prompt`. A memory section
+base system prompt is the front of every request. A checklist is a user message
+on the single request after it changes. A reminder is a user message on the
+request after five tool rounds skip `todo_write`, then the count restarts.
+Neither is stored, and neither touches that prefix. A memory section
 inside the base is byte-identical for the whole session, so it costs one
 cached prefix and never a miss. Re-rendering it after every write would miss
 the entire history once per write, and buy nothing: the model already has

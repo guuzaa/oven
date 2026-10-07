@@ -48,6 +48,7 @@ fn write_approved_command() -> &'static str {
 /// Bounds a test turn so a provider script that runs short fails on the
 /// script rather than on an unbounded loop.
 const TEST_MAX_ITERS: usize = 8;
+const TODO_LIST_HEADING: &str = "## Current TODO list";
 
 fn turn_ctx(agent: &Agent) -> TurnContext {
     turn_ctx_with(agent, TEST_MAX_ITERS)
@@ -425,6 +426,12 @@ fn tool_response(id: &str, name: &str, input: serde_json::Value) -> Response {
             reasoning_tokens: 0,
         }),
     }
+}
+
+fn file_read_rounds(n: usize) -> Vec<Response> {
+    (0..n)
+        .map(|i| tool_response(&format!("c{i}"), "file_read", json!({"path": "note.txt"})))
+        .collect()
 }
 
 fn thinking_response(thinking: &str, text: &str) -> Response {
@@ -1795,6 +1802,18 @@ fn system_of(req: &Request) -> &str {
     req.system.as_deref().unwrap_or("")
 }
 
+fn has_plan_reminder(req: &Request) -> bool {
+    req.messages
+        .last()
+        .is_some_and(|message| message.role == Role::User && content_has(message, "<reminder>"))
+}
+
+fn has_todo_list(req: &Request) -> bool {
+    req.messages
+        .iter()
+        .any(|message| message.role == Role::User && content_has(message, TODO_LIST_HEADING))
+}
+
 fn tool_names(req: &Request) -> Vec<&str> {
     req.tools.iter().map(|t| t.name.as_str()).collect()
 }
@@ -1902,7 +1921,7 @@ async fn plan_first_request_has_plan_prompt_and_todo_write() {
     assert_eq!(reqs.len(), 1);
     assert!(system_of(&reqs[0]).contains("# Plan Mode"));
     assert!(system_of(&reqs[0]).contains("base"));
-    assert!(!system_of(&reqs[0]).contains("## Current TODO list"));
+    assert!(!system_of(&reqs[0]).contains(TODO_LIST_HEADING));
     assert!(tool_names(&reqs[0]).contains(&"todo_write"));
 }
 
@@ -1914,23 +1933,48 @@ async fn default_request_omits_plan_section_and_todo_write() {
     let reqs = seen.lock().unwrap().clone();
     assert_eq!(reqs.len(), 1);
     assert!(!system_of(&reqs[0]).contains("# Plan Mode"));
-    assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
+    assert!(!has_plan_reminder(&reqs[0]));
     assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
 }
 
-#[tokio::test]
-async fn default_still_injects_nonempty_list() {
-    let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
-    let mut agent = agent_with_todo_write(Box::new(mock));
+#[test]
+fn set_todos_shows_checklist_without_todo_write() {
+    let mut agent = Agent::new(
+        router_with(Box::new(MockProvider::new(Vec::new()))),
+        Vec::new(),
+    );
     agent.set_todos(crate::core::todo::TodoList {
         items: vec![pending_item()],
     });
-    run_text(&mut agent, "hi").await;
-    let reqs = seen.lock().unwrap().clone();
-    assert!(system_of(&reqs[0]).contains("## Current TODO list"));
-    assert!(!system_of(&reqs[0]).contains("# Plan Mode"));
-    assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
-    assert!(!tool_names(&reqs[0]).contains(&"todo_write"));
+    let req = agent.build_request();
+    let last = req.messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert!(content_has(last, TODO_LIST_HEADING));
+    assert!(!agent.history().any(|m| content_has(m, TODO_LIST_HEADING)));
+
+    agent.set_todos(crate::core::todo::TodoList::default());
+    let req = agent.build_request();
+    assert!(!has_todo_list(&req));
+}
+
+#[tokio::test]
+async fn compact_reshows_todo_list_on_the_next_request_only() {
+    let (mock, _) = CaptureRequests::new(vec![text_response("the summary"), text_response("ok")]);
+    let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+    agent.push_history(Message::user_text("do the thing"));
+    agent.set_todos(crate::core::todo::TodoList {
+        items: vec![pending_item()],
+    });
+    agent.compact().await.unwrap();
+
+    let req = agent.build_request();
+    let last = req.messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert!(content_has(last, TODO_LIST_HEADING));
+
+    let ctx = turn_ctx(&agent);
+    agent.step(&mut NullSink, &ctx).await.unwrap();
+    assert!(!has_todo_list(&agent.build_request()));
 }
 
 #[tokio::test]
@@ -1949,7 +1993,8 @@ async fn next_turn_clears_finished_todos() {
         AgentEvent::TodosChanged { todos } if todos.is_empty()
     )));
     let reqs = seen.lock().unwrap().clone();
-    assert!(!system_of(&reqs[0]).contains("## Current TODO list"));
+    assert!(!has_todo_list(&reqs[0]));
+    assert!(!system_of(&reqs[0]).contains(TODO_LIST_HEADING));
 }
 
 #[tokio::test]
@@ -1963,7 +2008,8 @@ async fn next_turn_keeps_open_todos() {
     assert_eq!(agent.todos().items[0].id, "a");
     assert!(!agent.todo_written_this_turn());
     let reqs = seen.lock().unwrap().clone();
-    assert!(system_of(&reqs[0]).contains("## Current TODO list"));
+    assert!(has_todo_list(&reqs[0]));
+    assert!(!system_of(&reqs[0]).contains(TODO_LIST_HEADING));
 }
 
 #[tokio::test]
@@ -2023,7 +2069,7 @@ async fn in_flight_set_mode_applies_to_next_step() {
 }
 
 #[tokio::test]
-async fn plan_tool_without_todo_write_injects_reminder() {
+async fn one_tool_round_without_todo_write_does_not_remind() {
     let tmp = tmp_dir();
     std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
 
@@ -2041,10 +2087,14 @@ async fn plan_tool_without_todo_write_injects_reminder() {
     let reqs = seen.lock().unwrap().clone();
     assert_eq!(reqs.len(), 2);
     assert!(system_of(&reqs[0]).contains("# Plan Mode"));
-    assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
-    assert!(system_of(&reqs[1]).contains("## Plan reminder"));
-    assert!(system_of(&reqs[1]).contains("## Current TODO list"));
-    assert!(!agent.history().any(|m| content_has(m, "## Plan reminder")));
+    assert!(!has_plan_reminder(&reqs[0]));
+    assert!(has_todo_list(&reqs[0]));
+    assert!(!has_plan_reminder(&reqs[1]));
+    assert!(!has_todo_list(&reqs[1]));
+    assert!(!system_of(&reqs[1]).contains("<reminder>"));
+    assert!(!system_of(&reqs[1]).contains(TODO_LIST_HEADING));
+    assert!(!agent.history().any(|m| content_has(m, "<reminder>")));
+    assert!(!agent.history().any(|m| content_has(m, TODO_LIST_HEADING)));
 }
 
 #[tokio::test]
@@ -2067,10 +2117,14 @@ async fn reminder_clears_after_successful_todo_write() {
 
     let reqs = seen.lock().unwrap().clone();
     assert_eq!(reqs.len(), 3);
-    assert!(!system_of(&reqs[0]).contains("## Plan reminder"));
-    assert!(system_of(&reqs[1]).contains("## Plan reminder"));
-    assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
-    assert!(system_of(&reqs[2]).contains("## Current TODO list"));
+    assert!(!has_plan_reminder(&reqs[0]));
+    assert!(has_todo_list(&reqs[0]));
+    assert!(!has_plan_reminder(&reqs[1]));
+    assert!(!has_todo_list(&reqs[1]));
+    assert!(!has_plan_reminder(&reqs[2]));
+    assert!(has_todo_list(&reqs[2]));
+    assert!(content_has(reqs[2].messages.last().unwrap(), "completed"));
+    assert!(!system_of(&reqs[2]).contains(TODO_LIST_HEADING));
 }
 
 #[tokio::test]
@@ -2108,15 +2162,16 @@ async fn leaving_plan_keeps_list_drops_prompt_and_reminder() {
 
     let reqs = seen.lock().unwrap().clone();
     assert_eq!(reqs.len(), 3);
-    assert!(system_of(&reqs[1]).contains("## Plan reminder"));
-    assert!(system_of(&reqs[2]).contains("## Current TODO list"));
+    assert!(!has_plan_reminder(&reqs[1]));
+    assert!(!has_todo_list(&reqs[2]));
+    assert_eq!(agent.todos().items[0].id, "a");
     assert!(!system_of(&reqs[2]).contains("# Plan Mode"));
-    assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
+    assert!(!has_plan_reminder(&reqs[2]));
     assert!(!tool_names(&reqs[2]).contains(&"todo_write"));
 }
 
 #[tokio::test]
-async fn rewind_clears_todo_dirty_reminder() {
+async fn rewind_clears_todo_notice() {
     let tmp = tmp_dir();
     std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
 
@@ -2136,14 +2191,14 @@ async fn rewind_clears_todo_dirty_reminder() {
 
     let reqs = seen.lock().unwrap().clone();
     assert_eq!(reqs.len(), 3);
-    assert!(system_of(&reqs[1]).contains("## Plan reminder"));
-    assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
-    assert!(system_of(&reqs[2]).contains("## Current TODO list"));
+    assert!(!has_plan_reminder(&reqs[1]));
+    assert!(!has_plan_reminder(&reqs[2]));
+    assert!(!has_todo_list(&reqs[2]));
     assert!(system_of(&reqs[2]).contains("# Plan Mode"));
 }
 
 #[tokio::test]
-async fn clear_history_clears_todo_dirty() {
+async fn clear_history_clears_todo_misses() {
     let tmp = tmp_dir();
     std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
 
@@ -2166,6 +2221,115 @@ async fn clear_history_clears_todo_dirty() {
 
     let reqs = seen.lock().unwrap().clone();
     assert_eq!(reqs.len(), 3);
-    assert!(system_of(&reqs[1]).contains("## Plan reminder"));
-    assert!(!system_of(&reqs[2]).contains("## Plan reminder"));
+    assert!(!has_plan_reminder(&reqs[1]));
+    assert!(!has_plan_reminder(&reqs[2]));
+}
+
+#[tokio::test]
+async fn todo_list_is_sent_only_after_it_changes() {
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let first = json!({"todos":[{"id":"a","content":"one","status":"pending"}]});
+    let second = json!({"todos":[{"id":"a","content":"one","status":"completed"}]});
+    let (mock, seen) = CaptureRequests::new(vec![
+        tool_response("c1", "todo_write", first),
+        tool_response("c2", "file_read", json!({"path": "note.txt"})),
+        tool_response("c3", "todo_write", second),
+        text_response("done"),
+    ]);
+    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    agent.set_mode(AgentMode::Plan);
+    run_text(&mut agent, "plan it").await;
+
+    let reqs = seen.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 4);
+    assert!(!has_todo_list(&reqs[0]));
+    assert!(has_todo_list(&reqs[1]));
+    assert!(content_has(reqs[1].messages.last().unwrap(), "[pending]"));
+    assert!(!has_plan_reminder(&reqs[1]));
+    assert!(!has_todo_list(&reqs[2]));
+    assert!(!has_plan_reminder(&reqs[2]));
+    assert!(has_todo_list(&reqs[3]));
+    assert!(content_has(reqs[3].messages.last().unwrap(), "[completed]"));
+    assert!(!has_plan_reminder(&reqs[3]));
+    assert!(!agent.history().any(|m| content_has(m, TODO_LIST_HEADING)));
+}
+
+#[tokio::test]
+async fn reminder_waits_until_five_tool_rounds_without_todo_write() {
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mut responses = file_read_rounds(6);
+    responses.push(text_response("done"));
+    let (mock, seen) = CaptureRequests::new(responses);
+    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    agent.set_mode(AgentMode::Plan);
+    agent.set_todos(crate::core::todo::TodoList {
+        items: vec![pending_item()],
+    });
+    run_text(&mut agent, "read it").await;
+
+    let reqs = seen.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 7);
+    for req in &reqs[..5] {
+        assert!(!has_plan_reminder(req));
+    }
+    assert!(has_plan_reminder(&reqs[5]));
+    assert!(!has_plan_reminder(&reqs[6]));
+    assert!(!system_of(&reqs[5]).contains("<reminder>"));
+    assert!(!agent.history().any(|m| content_has(m, "<reminder>")));
+}
+
+#[tokio::test]
+async fn todo_write_resets_the_reminder_streak() {
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let todos = json!({"todos":[{"id":"a","content":"one","status":"in_progress"}]});
+    let mut responses = file_read_rounds(4);
+    responses.push(tool_response("w", "todo_write", todos));
+    responses.push(tool_response(
+        "c-after",
+        "file_read",
+        json!({"path": "note.txt"}),
+    ));
+    responses.push(text_response("done"));
+    let (mock, seen) = CaptureRequests::new(responses);
+    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    agent.set_mode(AgentMode::Plan);
+    agent.set_todos(crate::core::todo::TodoList {
+        items: vec![pending_item()],
+    });
+    run_text(&mut agent, "read it").await;
+
+    let reqs = seen.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 7);
+    assert!(reqs.iter().all(|req| !has_plan_reminder(req)));
+    assert!(has_todo_list(&reqs[5]));
+}
+
+#[tokio::test]
+async fn rewind_clears_a_reminder_streak() {
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mut responses = file_read_rounds(4);
+    responses.push(text_response("done"));
+    responses.push(tool_response(
+        "c-again",
+        "file_read",
+        json!({"path": "note.txt"}),
+    ));
+    responses.push(text_response("again"));
+    let (mock, seen) = CaptureRequests::new(responses);
+    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    agent.set_mode(AgentMode::Plan);
+    agent.set_todos(crate::core::todo::TodoList {
+        items: vec![pending_item()],
+    });
+    run_text(&mut agent, "read it").await;
+    assert!(agent.rewind_last_turn().is_some());
+    run_text(&mut agent, "again").await;
+
+    let reqs = seen.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 7);
+    assert!(reqs.iter().all(|req| !has_plan_reminder(req)));
 }
