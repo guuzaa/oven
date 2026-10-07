@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
+use std::io::{self, ErrorKind};
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use oven_agent::DEFAULT_MAX_ITERS;
@@ -11,7 +14,8 @@ use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::SerializeMap as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
-use tokio::fs;
+use tokio::fs::{self, File, OpenOptions};
+use tokio::io::AsyncWriteExt;
 
 pub mod mcp;
 
@@ -19,18 +23,21 @@ pub use mcp::McpServerConfig;
 
 const DEFAULT_SUBAGENT_CONCURRENT: usize = 4;
 const DEFAULT_SUBAGENT_ITERS: usize = 60;
+const CONFIG_TMP_EXTENSION: &str = "tmp";
 
 /// Stands in for the API key of a printed config preview.
 const REDACTED_KEY: &str = "<redacted>";
 
+static CONFIG_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("read config {0}: {1}")]
-    Read(PathBuf, #[source] std::io::Error),
+    Read(PathBuf, #[source] io::Error),
     #[error("parse config {0}: {1}")]
     Parse(PathBuf, #[source] toml::de::Error),
     #[error("write config {0}: {1}")]
-    Write(PathBuf, #[source] std::io::Error),
+    Write(PathBuf, #[source] io::Error),
     #[error("serialize config {0}: {1}")]
     Serialize(PathBuf, #[source] toml::ser::Error),
     #[error("unknown provider {0}")]
@@ -796,7 +803,7 @@ impl AppConfig {
                     toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_path_buf(), e))?;
                 Ok(Some(cfg))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
             Err(e) => Err(ConfigError::Read(path.to_path_buf(), e)),
         }
     }
@@ -836,15 +843,22 @@ impl AppConfig {
     }
 
     async fn ensure_user_config_at(path: &Path) -> Result<(), ConfigError> {
-        if path.exists() {
-            return Ok(());
-        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .await
                 .map_err(|e| ConfigError::Write(path.to_path_buf(), e))?;
         }
-        fs::write(path, DEFAULT_USER_CONFIG)
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(()),
+            Err(e) => return Err(ConfigError::Write(path.to_path_buf(), e)),
+        };
+        file.write_all(DEFAULT_USER_CONFIG.as_bytes())
             .await
             .map_err(|e| ConfigError::Write(path.to_path_buf(), e))
     }
@@ -873,7 +887,8 @@ impl AppConfig {
     }
 
     /// Write a whole config to `path` in the canonical format, creating the
-    /// parent directory when it does not exist yet.
+    /// parent directory when it does not exist yet. The bytes land in a
+    /// temporary file in the same directory and are renamed into place.
     pub async fn save_at(path: &Path, config: &AppConfig) -> Result<(), ConfigError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
@@ -882,7 +897,7 @@ impl AppConfig {
         }
         let text = toml::to_string_pretty(config)
             .map_err(|e| ConfigError::Serialize(path.to_path_buf(), e))?;
-        fs::write(path, text)
+        write_atomic(path, &text)
             .await
             .map_err(|e| ConfigError::Write(path.to_path_buf(), e))
     }
@@ -945,9 +960,41 @@ impl AppConfig {
 /// `config.example.toml` so the example and the default template stay in sync.
 const DEFAULT_USER_CONFIG: &str = include_str!("../../config.example.toml");
 
+fn config_temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    let pid = process::id();
+    let seq = CONFIG_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    path.with_file_name(format!(".{name}.{pid}.{seq}.{CONFIG_TMP_EXTENSION}"))
+}
+
+async fn write_atomic(path: &Path, text: &str) -> Result<(), io::Error> {
+    let tmp = config_temp_path(path);
+    let write = async {
+        {
+            let mut file = File::create(&tmp).await?;
+            file.write_all(text.as_bytes()).await?;
+            file.sync_all().await?;
+        }
+        fs::rename(&tmp, path).await
+    };
+    if let Err(err) = write.await {
+        fs::remove_file(&tmp).await.ok();
+        return Err(err);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SAVED_CONFIG_FILE: &str = "config.toml";
+    const STALE_CONFIG_TAIL: &str = "stale-tail-must-not-remain";
+    const EXISTING_USER_CONFIG: &str =
+        "active = \"deepseek\"\n[providers.deepseek]\nmodel = \"kept\"\n";
 
     #[tokio::test]
     async fn ensure_user_config_creates_template_once() {
@@ -970,6 +1017,18 @@ mod tests {
         assert_eq!(
             cfg.active_provider_config().unwrap().model.as_deref(),
             Some("edited")
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_user_config_at_keeps_an_existing_file() {
+        let tmp = tempdir::TempDir::new("oven-ensure-exists").unwrap();
+        let path = tmp.path().join(SAVED_CONFIG_FILE);
+        std::fs::write(&path, EXISTING_USER_CONFIG).unwrap();
+        AppConfig::ensure_user_config_at(&path).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            EXISTING_USER_CONFIG
         );
     }
 
@@ -1539,6 +1598,34 @@ supports_vision = true
         assert!(text.starts_with("active = \"myproxy\""), "{text}");
         assert!(text.contains("[providers.myproxy]"), "{text}");
         assert_eq!(AppConfig::load_file(&path).await.unwrap().unwrap(), config);
+    }
+
+    #[tokio::test]
+    async fn save_at_leaves_no_temp_files() {
+        let tmp = tempdir::TempDir::new("oven-save-atomic").unwrap();
+        let path = tmp.path().join(SAVED_CONFIG_FILE);
+        AppConfig::save_at(&path, &AppConfig::empty())
+            .await
+            .unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec![SAVED_CONFIG_FILE.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn save_at_replaces_shorter_content() {
+        let tmp = tempdir::TempDir::new("oven-save-replace").unwrap();
+        let path = tmp.path().join(SAVED_CONFIG_FILE);
+        let stale = STALE_CONFIG_TAIL.repeat(64);
+        std::fs::write(&path, &stale).unwrap();
+        let config = AppConfig::empty();
+        let expected = toml::to_string_pretty(&config).unwrap();
+        assert!(stale.len() > expected.len());
+        AppConfig::save_at(&path, &config).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
     }
 
     #[test]

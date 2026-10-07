@@ -5,6 +5,9 @@
 ### Changed
 - **Breaking:** `AppConfig::load`, `load_file`, `save_at`, `save_provider_at`, and `ensure_user_config` are async, and so are `App::submit` and `App::rewind`. A `/model` switch writes config without blocking a runtime thread. The file format is unchanged
 
+### Fixed
+- Config saves write a temporary file and rename it into place, so a crash or a concurrent save no longer leaves a truncated `config.toml`. Creating the template user config no longer races with another process creating it
+
 ## [0.0.11] - 2026-10-06
 
 ### Added
