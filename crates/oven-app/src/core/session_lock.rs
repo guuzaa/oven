@@ -4,7 +4,9 @@
 //! rewind and compaction replace the transcript by renaming a new file into
 //! place, which would drop a lock held on the old inode. `flock` (Unix) and
 //! `LockFileEx` (Windows) both die with the process, so a crash cannot leave
-//! a resume blocked. The holder's pid is the first bytes of the lock file,
+//! a resume blocked. Drop also unlocks explicitly: on macOS, closing the
+//! descriptor does not release `flock` while the process is still alive.
+//! The holder's pid is the first bytes of the lock file,
 //! outside the locked range, so the contender can read it on Windows where a
 //! byte-range lock is mandatory.
 
@@ -21,9 +23,23 @@ pub(super) enum Acquire {
 
 #[derive(Debug)]
 pub(super) struct SessionLock {
-    /// Open for the life of the lock. Closing it is what releases the kernel lock.
-    #[allow(dead_code)]
+    /// Open for the life of the lock. Drop unlocks it; if the process dies
+    /// first, the kernel drops the lock on its own.
+    #[cfg_attr(windows, allow(dead_code))]
     file: File,
+}
+
+impl Drop for SessionLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+
+            // macOS does not release `flock` on close while this process is
+            // still alive. `LOCK_UN` does, and it is a no-op if we never locked.
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
 }
 
 pub(super) fn acquire(path: &Path) -> io::Result<Acquire> {
@@ -35,8 +51,9 @@ pub(super) fn acquire(path: &Path) -> io::Result<Acquire> {
         .open(path)?;
     match try_lock_exclusive(&file) {
         Ok(()) => {
-            write_pid(&mut file, std::process::id())?;
-            Ok(Acquire::Acquired(SessionLock { file }))
+            let mut lock = SessionLock { file };
+            write_pid(&mut lock.file, std::process::id())?;
+            Ok(Acquire::Acquired(lock))
         }
         Err(err) if is_contended(&err) => Ok(Acquire::Held {
             pid: read_pid(&mut file),
