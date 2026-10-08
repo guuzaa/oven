@@ -218,7 +218,7 @@ impl Transcript {
                             }
                             ContentBlock::Text { text } => {
                                 let body = trim_message(text);
-                                if !body.is_empty() {
+                                if has_visible_text(&body) {
                                     self.stop_live_thinking();
                                     self.seal_activity();
                                     self.push_row(LineKind::Text, &body);
@@ -617,7 +617,7 @@ impl Transcript {
 
     fn flush_streaming(&mut self) {
         let (kind, body) = self.take_stream();
-        if !body.is_empty() {
+        if has_visible_text(&body) {
             self.append_row(kind, body, None);
         }
     }
@@ -1187,7 +1187,12 @@ impl Component for Transcript {
                 }
                 AgentEvent::Stream(StreamEvent::TextDelta { text }) => {
                     self.stop_live_thinking();
-                    self.seal_activity();
+                    // A newline or a run of spaces is not a row: flushing it
+                    // later drops it. Sealing here would still close the
+                    // activity, so the next tool call starts a second row.
+                    if has_visible_text(&self.streaming) || has_visible_text(text) {
+                        self.seal_activity();
+                    }
                     self.push_stream(LineKind::Text, text);
                 }
                 AgentEvent::Tool(ToolEvent::ApprovalRequested { view, .. }) => {
@@ -1380,6 +1385,12 @@ fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)>
         .cloned()
         .map(|message| (Arc::new(message), 0, None))
         .collect()
+}
+
+/// Whether `text` survives as a transcript row. Newlines and other
+/// whitespace are dropped before a row is kept.
+fn has_visible_text(text: &str) -> bool {
+    text.chars().any(|c| !c.is_whitespace())
 }
 
 /// A result body, or the placeholder the transcript shows for no output.
