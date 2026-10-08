@@ -31,6 +31,7 @@ futures-lite = "2"
 futures-timer = "3"
 isahc = "2.0"
 proptest = "1"
+pulldown-cmark = "0.13"
 secrecy = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 arboard = { version = "3", default-features = false }

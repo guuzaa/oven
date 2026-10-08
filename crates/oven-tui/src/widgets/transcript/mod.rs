@@ -1,6 +1,7 @@
 mod activity;
 mod collapsible;
 mod kinds;
+mod markdown;
 mod selection;
 mod tools;
 mod widget;

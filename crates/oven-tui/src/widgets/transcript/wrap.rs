@@ -14,7 +14,52 @@ use super::collapsible::{Collapsible, Section};
 use super::kinds::{
     COLLAPSED_MARKER, EXPANDED_MARKER, Header, LINE_INDENT, LineKind, MESSAGE_INDENT,
 };
+use super::markdown::{LineCopy, MdLine, render_markdown};
 use crate::core::theme;
+
+pub(super) struct Buf<'a> {
+    pub lines: &'a mut Vec<Line<'static>>,
+    pub copies: &'a mut Vec<LineCopy>,
+}
+
+impl Buf<'_> {
+    pub(super) fn push_visual(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+        self.copies.push(LineCopy::Visual);
+    }
+
+    fn push_md(
+        &mut self,
+        line: Line<'static>,
+        md: &MdLine,
+        origin: usize,
+        from: usize,
+        to: usize,
+        break_before: bool,
+    ) {
+        self.lines.push(line);
+        self.copies.push(LineCopy::Markdown(md.copy_window(
+            origin,
+            from,
+            to,
+            break_before,
+        )));
+    }
+
+    fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn drain(&mut self, range: std::ops::Range<usize>) {
+        self.lines.drain(range.clone());
+        self.copies.drain(range);
+    }
+
+    fn insert_visual(&mut self, at: usize, line: Line<'static>) {
+        self.lines.insert(at, line);
+        self.copies.insert(at, LineCopy::Visual);
+    }
+}
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 /// Screen rows — counted after wrapping — a body still receiving content may
@@ -206,33 +251,39 @@ pub(super) fn tail_lines(text: &str, max: usize) -> String {
 }
 
 pub(super) fn wrap_row_into(
-    out: &mut Vec<Line<'static>>,
+    buf: &mut Buf<'_>,
     kind: LineKind,
     text: &str,
     width: usize,
     separator: bool,
 ) {
     if separator {
-        out.push(Line::from(""));
+        buf.push_visual(Line::from(""));
     }
     if let Some(frame) = PromptFrame::of(kind)
         && width > PROMPT_FRAME_COLS + frame.marker.width()
     {
-        wrap_prompt_frame_into(out, &frame, text, width);
+        wrap_prompt_frame_into(buf, &frame, text, width);
         return;
     }
     if kind == LineKind::Separator {
         if text.is_empty() {
-            out.push(Line::from(""));
+            buf.push_visual(Line::from(""));
         } else {
-            for line in format_lines(kind, text) {
-                wrap_line_into(out, &line, width, kind);
-            }
+            wrap_body_into(buf, kind, text, width);
         }
         return;
     }
+    wrap_body_into(buf, kind, text, width);
+}
+
+pub(super) fn wrap_body_into(buf: &mut Buf<'_>, kind: LineKind, text: &str, width: usize) {
+    if kind == LineKind::Text {
+        wrap_markdown_into(buf, text, width);
+        return;
+    }
     for line in format_lines(kind, text) {
-        wrap_line_into(out, &line, width, kind);
+        wrap_line_into(buf, &line, width, kind);
     }
 }
 
@@ -264,12 +315,7 @@ impl PromptFrame {
 /// Frames a submitted prompt like the composer, so it reads as input rather
 /// than an answer. Body lines are `[left edge, marker, text, padded right edge]`;
 /// the marker shows on the first line only.
-fn wrap_prompt_frame_into(
-    out: &mut Vec<Line<'static>>,
-    frame: &PromptFrame,
-    text: &str,
-    width: usize,
-) {
+fn wrap_prompt_frame_into(buf: &mut Buf<'_>, frame: &PromptFrame, text: &str, width: usize) {
     let style = frame.border;
     let set = theme::border_type().to_border_set();
     let rule = |left: &str, fill: &str, right: &str| {
@@ -281,13 +327,13 @@ fn wrap_prompt_frame_into(
     let left_edge = format!("{} ", set.vertical_left);
     let continuation = " ".repeat(marker_width);
     let mut marker: &str = frame.marker;
-    out.push(rule(set.top_left, set.horizontal_top, set.top_right));
+    buf.push_visual(rule(set.top_left, set.horizontal_top, set.top_right));
     for part in trim_message(text).split('\n') {
         let mut rest = part.strip_suffix('\r').unwrap_or(part);
         loop {
             let (chunk, next) = split_at_width(rest, body_width);
             let pad = " ".repeat(body_width.saturating_sub(chunk.width()));
-            out.push(Line::from(vec![
+            buf.push_visual(Line::from(vec![
                 Span::styled(left_edge.clone(), style),
                 Span::styled(
                     mem::replace(&mut marker, &continuation).to_string(),
@@ -302,7 +348,7 @@ fn wrap_prompt_frame_into(
             rest = next;
         }
     }
-    out.push(rule(
+    buf.push_visual(rule(
         set.bottom_left,
         set.horizontal_bottom,
         set.bottom_right,
@@ -336,7 +382,7 @@ pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {
 /// Wraps a collapsible row and returns its markers: the row's own header
 /// first, then one per nested item that is currently rendered.
 pub(super) fn wrap_collapsible_into(
-    out: &mut Vec<Line<'static>>,
+    buf: &mut Buf<'_>,
     kind: LineKind,
     title: &str,
     collapsible: &Collapsible,
@@ -345,7 +391,7 @@ pub(super) fn wrap_collapsible_into(
     separator: bool,
 ) -> Vec<Header> {
     if separator {
-        out.push(Line::from(""));
+        buf.push_visual(Line::from(""));
     }
     let style = kind.style();
     let header = Line::from(vec![
@@ -353,15 +399,15 @@ pub(super) fn wrap_collapsible_into(
         Span::styled(title.to_string(), style),
     ]);
     let mut headers = vec![Header {
-        line: out.len(),
+        line: buf.len(),
         path: Vec::new(),
     }];
-    wrap_line_into(out, &header, width, kind);
+    wrap_line_into(buf, &header, width, kind);
     if collapsible.is_expanded() {
-        let body = out.len();
-        let mut nested = wrap_sections_into(out, collapsible, kind, width, 0, &[]);
+        let body = buf.len();
+        let mut nested = wrap_sections_into(buf, collapsible, kind, width, 0, &[]);
         if let Some(rows) = live_rows {
-            window_live_body(out, &mut nested, body, rows);
+            window_live_body(buf, &mut nested, body, rows);
         }
         headers.extend(nested);
     }
@@ -371,20 +417,15 @@ pub(super) fn wrap_collapsible_into(
 /// Keeps a live body within `rows` screen rows, so deltas cannot push older
 /// rows out of the view. Rows dropped from the head — counted after wrapping,
 /// so a single long line may cost many of them — hide behind one marker row.
-fn window_live_body(
-    out: &mut Vec<Line<'static>>,
-    nested: &mut Vec<Header>,
-    body: usize,
-    rows: usize,
-) {
-    let total = out.len() - body;
+fn window_live_body(buf: &mut Buf<'_>, nested: &mut Vec<Header>, body: usize, rows: usize) {
+    let total = buf.len() - body;
     if total <= rows {
         return;
     }
     let skipped = total - rows + MARKER_ROWS;
     let cut = body + skipped;
-    out.drain(body..cut);
-    out.insert(body, earlier_lines_marker(skipped));
+    buf.drain(body..cut);
+    buf.insert_visual(body, earlier_lines_marker(skipped));
     nested.retain(|header| header.line >= cut);
     for header in nested {
         header.line -= skipped - MARKER_ROWS;
@@ -392,7 +433,7 @@ fn window_live_body(
 }
 
 fn wrap_sections_into(
-    out: &mut Vec<Line<'static>>,
+    buf: &mut Buf<'_>,
     collapsible: &Collapsible,
     kind: LineKind,
     width: usize,
@@ -411,7 +452,7 @@ fn wrap_sections_into(
                         Span::styled(body_prefix(depth), style),
                         Span::styled(part.to_string(), diff_line_style(part, style, kind)),
                     ]);
-                    wrap_line_into(out, &line, width, kind);
+                    wrap_line_into(buf, &line, width, kind);
                 }
             }
             Section::Item {
@@ -424,15 +465,15 @@ fn wrap_sections_into(
                     Span::styled(marker_prefix(detail, depth + 1), style),
                     Span::styled(title.clone(), style),
                 ]);
-                let line = out.len();
-                wrap_line_into(out, &marker, width, *item_kind);
+                let line = buf.len();
+                wrap_line_into(buf, &marker, width, *item_kind);
                 headers.push(Header {
                     line,
                     path: path.clone(),
                 });
                 if detail.is_expanded() {
                     headers.extend(wrap_sections_into(
-                        out,
+                        buf,
                         detail,
                         *item_kind,
                         width,
@@ -447,6 +488,9 @@ fn wrap_sections_into(
 }
 
 pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
+    if kind == LineKind::Text {
+        return format_markdown_lines(text);
+    }
     let first_prefix = line_prefix(kind);
     let rest_prefix = continuation_prefix(kind, &first_prefix);
     let style = kind.style();
@@ -508,23 +552,18 @@ fn gutter_and_body(line: &Line<'_>) -> Option<(String, Style, String, Option<Sty
     ))
 }
 
-pub(super) fn wrap_line_into(
-    out: &mut Vec<Line<'static>>,
-    line: &Line<'static>,
-    width: usize,
-    kind: LineKind,
-) {
+fn wrap_line_into(buf: &mut Buf<'_>, line: &Line<'static>, width: usize, kind: LineKind) {
     if width == 0 {
-        out.push(line.clone());
+        buf.push_visual(line.clone());
         return;
     }
     let Some((prefix, style, body, body_style)) = gutter_and_body(line) else {
-        out.push(line.clone());
+        buf.push_visual(line.clone());
         return;
     };
     let body_width = width.saturating_sub(prefix.width()).max(1);
     if body.is_empty() {
-        out.push(Line::from(vec![
+        buf.push_visual(Line::from(vec![
             Span::styled(prefix, style),
             body_span(String::new(), body_style),
         ]));
@@ -535,13 +574,176 @@ pub(super) fn wrap_line_into(
     let mut rest = body.as_str();
     while !rest.is_empty() {
         let (chunk, next) = split_at_width(rest, body_width);
-        out.push(Line::from(vec![
+        buf.push_visual(Line::from(vec![
             Span::styled(head.to_string(), style),
             body_span(chunk.to_string(), body_style),
         ]));
         head = continuation.as_str();
         rest = next;
     }
+}
+
+fn format_markdown_lines(text: &str) -> Vec<Line<'static>> {
+    let first = line_prefix(LineKind::Text);
+    let rest = continuation_prefix(LineKind::Text, &first);
+    let style = LineKind::Text.style();
+    render_markdown(text)
+        .into_iter()
+        .enumerate()
+        .map(|(i, md)| {
+            let gutter = if i == 0 { first.clone() } else { rest.clone() };
+            let mut spans = vec![Span::styled(gutter, style)];
+            spans.extend(md.spans);
+            Line::from(spans)
+        })
+        .collect()
+}
+
+struct Glyph {
+    ch: char,
+    style: Style,
+    width: usize,
+}
+
+fn wrap_markdown_into(buf: &mut Buf<'_>, text: &str, width: usize) {
+    let first = line_prefix(LineKind::Text);
+    let rest = continuation_prefix(LineKind::Text, &first);
+    let style = LineKind::Text.style();
+    for (i, md) in render_markdown(text).into_iter().enumerate() {
+        let gutter = if i == 0 {
+            first.as_str()
+        } else {
+            rest.as_str()
+        };
+        wrap_md_line(buf, gutter, style, &md, width);
+    }
+}
+
+fn wrap_md_line(buf: &mut Buf<'_>, gutter: &str, gutter_style: Style, md: &MdLine, width: usize) {
+    let gutter_w = gutter.width();
+    let glyphs = glyphs_of(&md.spans);
+    let body_cols = glyphs.iter().map(|glyph| glyph.width).sum::<usize>();
+    let avail = if width == 0 {
+        body_cols.max(1)
+    } else {
+        width.saturating_sub(gutter_w).max(1)
+    };
+    let hang = md.hang.min(avail.saturating_sub(1));
+    let continuation = " ".repeat(gutter_w);
+    if body_cols == 0 {
+        buf.push_md(
+            Line::from(vec![
+                Span::styled(gutter.to_string(), gutter_style),
+                Span::raw(""),
+            ]),
+            md,
+            gutter_w,
+            0,
+            0,
+            true,
+        );
+        return;
+    }
+    let mut from = 0;
+    let mut first = true;
+    while from < body_cols {
+        let room = if first { avail } else { avail - hang }.max(1);
+        let to = take_cols(&glyphs, from, room);
+        if to <= from {
+            break;
+        }
+        let origin = if first { gutter_w } else { gutter_w + hang };
+        let mut spans = vec![Span::styled(
+            if first {
+                gutter.to_string()
+            } else {
+                continuation.clone()
+            },
+            gutter_style,
+        )];
+        if !first && hang > 0 {
+            spans.push(Span::raw(" ".repeat(hang)));
+        }
+        spans.extend(spans_between(&glyphs, from, to));
+        buf.push_md(Line::from(spans), md, origin, from, to, first);
+        from = to;
+        first = false;
+    }
+}
+
+fn glyphs_of(spans: &[Span<'static>]) -> Vec<Glyph> {
+    spans
+        .iter()
+        .flat_map(|span| {
+            span.content.chars().map(|ch| Glyph {
+                ch,
+                style: span.style,
+                width: ch.width().unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+fn take_cols(glyphs: &[Glyph], from_col: usize, room: usize) -> usize {
+    let mut col = 0;
+    let mut end = from_col;
+    let mut taken = 0;
+    for glyph in glyphs {
+        let next = col + glyph.width;
+        if glyph.width > 0 && next <= from_col {
+            col = next;
+            continue;
+        }
+        if glyph.width == 0 {
+            continue;
+        }
+        if taken > 0 && taken + glyph.width > room {
+            break;
+        }
+        taken += glyph.width;
+        end = next;
+        col = next;
+        if taken >= room {
+            break;
+        }
+    }
+    end
+}
+
+fn spans_between(glyphs: &[Glyph], from: usize, to: usize) -> Vec<Span<'static>> {
+    let mut col = 0;
+    let mut spans = Vec::new();
+    let mut text = String::new();
+    let mut style = Style::default();
+    let mut open = false;
+    let flush = |spans: &mut Vec<Span<'static>>, text: &mut String, style: Style| {
+        if text.is_empty() {
+            return;
+        }
+        let taken = std::mem::take(text);
+        spans.push(if style == Style::default() {
+            Span::raw(taken)
+        } else {
+            Span::styled(taken, style)
+        });
+    };
+    for glyph in glyphs {
+        let next = col + glyph.width;
+        let inside = glyph.width > 0 && col < to && next > from;
+        if inside {
+            if open && style != glyph.style {
+                flush(&mut spans, &mut text, style);
+            }
+            text.push(glyph.ch);
+            style = glyph.style;
+            open = true;
+        }
+        if glyph.width > 0 {
+            col = next;
+        }
+    }
+    flush(&mut spans, &mut text, style);
+    spans
 }
 
 fn line_prefix(kind: LineKind) -> String {

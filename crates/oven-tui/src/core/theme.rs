@@ -51,6 +51,25 @@ pub fn accent() -> Style {
     Style::default().fg(Color::Cyan)
 }
 
+pub fn code() -> Style {
+    Style::default().fg(Color::Yellow)
+}
+
+pub fn link() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::UNDERLINED)
+}
+
+pub fn heading(level: usize) -> Style {
+    let style = Style::default().add_modifier(Modifier::BOLD);
+    match level {
+        1 => style.fg(Color::Cyan),
+        2 => style.fg(Color::LightCyan),
+        _ => style.fg(Color::Green),
+    }
+}
+
 pub fn model() -> Style {
     Style::default().fg(Color::LightYellow)
 }
