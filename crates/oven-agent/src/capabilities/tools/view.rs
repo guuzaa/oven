@@ -37,14 +37,19 @@ fn input_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-pub(crate) fn labeled(name: &str, verb: &str, input: &Value, key: &str) -> ToolView {
+/// Summary for a call keyed on one argument, e.g. `Edited src/main.rs`.
+///
+/// Falls back to the bare verb, not the tool name, so a model that emits
+/// malformed arguments still renders as an action — `Edited 1 file` — instead
+/// of a raw `file_edit` line the frontend cannot group.
+pub(crate) fn labeled(verb: &str, input: &Value, key: &str) -> ToolView {
     match input_str(input, key) {
         Some(v) => ToolView {
             summary: format!("{verb} {v}"),
             collapse: true,
             detail: None,
         },
-        None => ToolView::named(name),
+        None => ToolView::named(verb),
     }
 }
 
@@ -57,11 +62,11 @@ mod tests {
     fn present_tool_uses_command_and_path() {
         assert_eq!(
             present_tool(BashTool::NAME, &json!({ "command": "ls -la" })).summary,
-            "Ran ls -la"
+            format!("{} ls -la", BashTool::VERB)
         );
         assert_eq!(
             present_tool(FileReadTool::NAME, &json!({ "path": "src/main.rs" })).summary,
-            "Read src/main.rs"
+            format!("{} src/main.rs", FileReadTool::VERB)
         );
         let edit = present_tool(
             FileEditTool::NAME,
@@ -71,7 +76,7 @@ mod tests {
                 "new_string": "new"
             }),
         );
-        assert_eq!(edit.summary, "Edit src/main.rs");
+        assert_eq!(edit.summary, format!("{} src/main.rs", FileEditTool::VERB));
         assert_eq!(edit.detail.as_deref(), Some("- old\n+ new"));
         assert!(edit.collapse);
         assert_eq!(
@@ -80,7 +85,7 @@ mod tests {
                 &json!({ "path": "out.txt", "content": "new content" })
             )
             .summary,
-            "Write out.txt"
+            format!("{} out.txt", FileWriteTool::VERB)
         );
         assert_eq!(
             present_tool(
@@ -100,7 +105,7 @@ mod tests {
         );
         assert_eq!(
             present_tool(GrepTool::NAME, &json!({ "pattern": "foo" })).summary,
-            "Search foo"
+            format!("{} foo", GrepTool::VERB)
         );
         assert_eq!(
             present_tool(
@@ -108,11 +113,11 @@ mod tests {
                 &json!({ "url": "https://example.com/docs" })
             )
             .summary,
-            "Fetch https://example.com/docs"
+            format!("{} https://example.com/docs", WebFetchTool::VERB)
         );
         assert_eq!(
             present_tool(WebFetchTool::NAME, &json!({})).summary,
-            WebFetchTool::NAME
+            WebFetchTool::VERB
         );
         assert_eq!(
             present_tool(
@@ -120,11 +125,11 @@ mod tests {
                 &json!({ "pattern": "**/*.rs", "path": "src" })
             )
             .summary,
-            "Find **/*.rs in src"
+            format!("{} **/*.rs in src", GlobTool::VERB)
         );
         assert_eq!(
             present_tool(BashTool::NAME, &json!({})).summary,
-            BashTool::NAME
+            BashTool::VERB
         );
         let todo = present_tool(
             TodoWriteTool::NAME,
@@ -156,11 +161,11 @@ mod tests {
                 &json!({ "question": "which database?", "options": [{ "label": "postgres" }] })
             )
             .summary,
-            "Ask which database?"
+            format!("{} which database?", AnswerTool::VERB)
         );
         assert_eq!(
             present_tool(AnswerTool::NAME, &json!({})).summary,
-            AnswerTool::NAME
+            AnswerTool::VERB
         );
     }
 }

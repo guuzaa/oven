@@ -316,9 +316,9 @@ mod tests {
     fn later_edits_add_to_the_same_total() {
         let mut activity = Activity::default();
         activity.push_thinking("Thought for 1s", "look", false);
-        activity.start_call("1".into(), "Edit src/a.rs", Some("- old\n+ new"));
+        activity.start_call("1".into(), "Edited src/a.rs", Some("- old\n+ new"));
         activity.push_thinking("Thought for 1s", "again", false);
-        activity.start_call("2".into(), "Edit src/b.rs", Some("- x\n+ y"));
+        activity.start_call("2".into(), "Edited src/b.rs", Some("- x\n+ y"));
 
         assert_eq!(activity.project().0, "Edited 2 files");
     }

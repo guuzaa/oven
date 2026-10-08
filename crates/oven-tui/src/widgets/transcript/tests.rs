@@ -213,7 +213,7 @@ fn regular_text_keeps_default_body_style() {
 
 #[test]
 fn diff_lines_have_add_remove_backgrounds() {
-    let lines = format_lines(LineKind::Diff, "Edit file.txt\n- old\n+ new");
+    let lines = format_lines(LineKind::Diff, "Edited file.txt\n- old\n+ new");
     assert_eq!(lines[1].spans[1].style.bg, Some(Color::LightRed));
     assert_eq!(lines[2].spans[1].style.bg, Some(Color::LightGreen));
 }
@@ -656,13 +656,13 @@ fn a_collapsed_diff_stays_collapsed_when_thinking_continues() {
             .any(|line| line_text(line).contains(needle))
     };
     assert!(has(&t, "- old"));
-    let diff_row = wrapped_row_of(&t, "Edit src/main.rs");
+    let diff_row = wrapped_row_of(&t, "Edited src/main.rs");
     double_click(&mut t, 2, diff_row);
     assert!(!has(&t, "- old"));
 
     t.on_event(&thinking("more"));
     assert!(!has(&t, "- old"), "a folded diff stays folded");
-    assert!(has(&t, "Edit src/main.rs"));
+    assert!(has(&t, "Edited src/main.rs"));
 }
 
 #[test]
@@ -687,9 +687,9 @@ fn edits_across_steps_sum_in_the_activity_title() {
         item_titles(&t, 0),
         vec![
             "Thought for 1s".to_string(),
-            "Edit src/main.rs".to_string(),
+            "Edited src/main.rs".to_string(),
             "Thought for 0.5s".to_string(),
-            "Edit src/lib.rs".to_string(),
+            "Edited src/lib.rs".to_string(),
         ]
     );
 }
@@ -742,8 +742,8 @@ fn tool_steps_without_thinking_stay_one_activity() {
     assert_eq!(
         item_titles(&t, 1),
         vec![
-            "Edit src/main.rs".to_string(),
-            "Edit src\\lib.rs".to_string()
+            "Edited src/main.rs".to_string(),
+            "Edited src\\lib.rs".to_string()
         ]
     );
 }
@@ -1605,13 +1605,13 @@ fn live_diff_burst_windows_to_the_newest_calls() {
     };
 
     assert!(
-        !has(&t, "Edit src/f10.rs"),
+        !has(&t, "Edited src/f10.rs"),
         "edits stay behind the activity header"
     );
     toggle_row(&mut t, 0);
     assert!(has(&t, EARLIER_23_LINES), "{:?}", t.wrapped);
-    assert!(has(&t, "Edit src/f10.rs"));
-    assert!(!has(&t, "Edit src/f01.rs"));
+    assert!(has(&t, "Edited src/f10.rs"));
+    assert!(!has(&t, "Edited src/f01.rs"));
     assert!(has(&t, "- old"), "a visible item still shows its diff");
 
     toggle_row(&mut t, 0);
@@ -1623,7 +1623,7 @@ fn live_diff_burst_windows_to_the_newest_calls() {
     };
     assert!(!has(EARLIER_23_LINES));
     assert!(
-        !has("Edit src/f10.rs"),
+        !has("Edited src/f10.rs"),
         "the burst closes once the turn moves on"
     );
 
@@ -1634,7 +1634,7 @@ fn live_diff_burst_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(has("Edit src/f01.rs") && has("Edit src/f10.rs"));
+    assert!(has("Edited src/f01.rs") && has("Edited src/f10.rs"));
 }
 
 /// Columns an 80-wide body has under its 3-column prefix.
@@ -1779,12 +1779,39 @@ fn file_edit_aggregates_with_a_nested_diff() {
     assert_eq!(burst.body(), "");
     assert_eq!(
         diff_items(&t),
-        [("Edit src/main.rs".to_string(), "- old\n+ new".to_string())]
+        [("Edited src/main.rs".to_string(), "- old\n+ new".to_string())]
     );
     assert!(
         t.wrapped
             .iter()
             .all(|line| !line_text(line).contains("replaced 1 occurrence"))
+    );
+}
+
+#[test]
+fn file_edit_with_broken_arguments_still_reads_as_an_edit() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "file_edit",
+        serde_json::json!({ "path": "src/main.rs" }),
+    ));
+    t.on_event(&tool_start(
+        2,
+        "file_edit",
+        serde_json::json!({ "old_string": "old", "new_string": "new" }),
+    ));
+    t.on_event(&tool_end(1, false, EDIT_ERROR));
+    t.on_event(&tool_end(2, false, EDIT_ERROR));
+
+    assert_eq!(t.rows[0].text, "Edited 2 files, 2 failed");
+    assert_eq!(
+        t.rows[0].collapsible.as_ref().expect("burst detail").body(),
+        format!("Edited src/main.rs\n{EDIT_ERROR}")
+    );
+    assert_eq!(
+        diff_items(&t),
+        [("Edited".to_string(), format!("- old\n+ new\n{EDIT_ERROR}"))]
     );
 }
 
@@ -1799,7 +1826,7 @@ fn file_write_aggregates_with_a_nested_diff() {
     assert_eq!(
         diff_items(&t),
         [(
-            "Write out.txt".to_string(),
+            "Wrote out.txt".to_string(),
             "+ line one\n+ line two".to_string()
         )]
     );
@@ -1820,7 +1847,7 @@ fn mixed_burst_keeps_calls_in_invocation_order() {
     assert_eq!(t.rows[0].text, "Edited 1 file, Ran 1 command");
     assert_eq!(
         diff_items(&t),
-        [("Edit src/main.rs".to_string(), "- old\n+ new".to_string())]
+        [("Edited src/main.rs".to_string(), "- old\n+ new".to_string())]
     );
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
@@ -1839,7 +1866,7 @@ fn failed_edit_counts_and_explains_itself() {
     assert_eq!(
         diff_items(&t),
         [(
-            "Edit src/main.rs".to_string(),
+            "Edited src/main.rs".to_string(),
             format!("- old\n+ new\n{EDIT_ERROR}")
         )]
     );
@@ -1861,7 +1888,7 @@ fn seed_file_edit_aggregates_with_a_nested_diff() {
     assert_eq!(t.rows[0].text, "Edited 1 file");
     assert_eq!(
         diff_items(&t),
-        [("Edit src/main.rs".to_string(), "- old\n+ new".to_string())]
+        [("Edited src/main.rs".to_string(), "- old\n+ new".to_string())]
     );
     assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
 }
@@ -1896,14 +1923,14 @@ fn diff_double_click_toggles_burst_detail() {
     assert!(
         t.wrapped
             .iter()
-            .any(|line| line_text(line).contains("Edit src/main.rs"))
+            .any(|line| line_text(line).contains("Edited src/main.rs"))
     );
 
-    let row = wrapped_row_of(&t, "Edit src/main.rs");
+    let row = wrapped_row_of(&t, "Edited src/main.rs");
     double_click(&mut t, 2, row);
     assert!(has(&t));
 
-    let row = wrapped_row_of(&t, "Edit src/main.rs");
+    let row = wrapped_row_of(&t, "Edited src/main.rs");
     double_click(&mut t, 2, row);
     assert!(!has(&t));
     assert!(
@@ -1942,9 +1969,9 @@ fn nested_item_double_click_toggles_only_its_own_diff() {
         !has("- old", &t) && !has("- libold", &t),
         "items stay folded"
     );
-    assert!(has("Edit src/main.rs", &t) && has("Edit src/lib.rs", &t));
+    assert!(has("Edited src/main.rs", &t) && has("Edited src/lib.rs", &t));
 
-    let row = wrapped_row_of(&t, "Edit src/main.rs");
+    let row = wrapped_row_of(&t, "Edited src/main.rs");
     double_click(&mut t, 2, row);
     assert!(has("- old", &t), "the clicked item expands");
     assert!(!has("- libold", &t), "its sibling keeps its own state");
@@ -1957,13 +1984,13 @@ fn nested_item_double_click_toggles_only_its_own_diff() {
         "the burst itself stays expanded"
     );
 
-    let row = wrapped_row_of(&t, "Edit src/lib.rs");
+    let row = wrapped_row_of(&t, "Edited src/lib.rs");
     double_click(&mut t, 2, row);
     assert!(has("- old", &t) && has("- libold", &t));
 
     let row = wrapped_row_of(&t, "Edited 2 files");
     double_click(&mut t, 2, row);
-    assert!(!has("- old", &t) && !has("- libold", &t) && !has("Edit src/main.rs", &t));
+    assert!(!has("- old", &t) && !has("- libold", &t) && !has("Edited src/main.rs", &t));
 }
 
 #[test]
@@ -2027,7 +2054,7 @@ fn an_answer_row_ends_on_the_answer_the_user_picked() {
     assert_eq!(t.rows[0].text, "Asked 1 question");
     assert_eq!(
         diff_items(&t),
-        vec![("Ask which database?".to_string(), "postgres".to_string())],
+        vec![("Asked which database?".to_string(), "postgres".to_string())],
         "the row ends on the answer, not on the choices offered"
     );
 }

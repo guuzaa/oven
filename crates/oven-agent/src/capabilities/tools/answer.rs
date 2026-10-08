@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::core::turn::TurnContext;
 
-use super::{Tool, ToolCaps, ToolView};
+use super::{Tool, ToolCaps, ToolView, labeled};
 use crate::core::error::AgentError;
 use crate::core::event::ToolResult;
 use crate::core::interaction::{AnswerResponse, Question, QuestionOption};
@@ -34,9 +34,10 @@ pub struct AnswerTool;
 
 impl AnswerTool {
     pub const NAME: &'static str = "answer";
+    pub const VERB: &'static str = "Asked";
 
     pub fn view_input(input: &Value) -> ToolView {
-        super::labeled(Self::NAME, "Ask", input, "question")
+        labeled(Self::VERB, input, "question")
     }
 
     /// Text is clamped to the limits above rather than rejected: a verbose
@@ -316,7 +317,7 @@ mod tests {
             "question": QUESTION,
             "options": [{ "label": ANSWER }]
         }));
-        assert_eq!(view.summary, format!("Ask {QUESTION}"));
+        assert_eq!(view.summary, format!("{} {QUESTION}", AnswerTool::VERB));
         assert!(view.collapse);
         assert_eq!(view.detail, None);
     }
@@ -324,7 +325,7 @@ mod tests {
     #[test]
     fn view_falls_back_without_a_question() {
         let view = AnswerTool::view_input(&json!({ "options": [{ "label": ANSWER }] }));
-        assert_eq!(view.summary, AnswerTool::NAME);
+        assert_eq!(view.summary, AnswerTool::VERB);
     }
 
     #[test]

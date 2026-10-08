@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
+use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str, resolve_within};
 
 use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
@@ -14,23 +14,19 @@ pub struct FileEditTool {
 
 impl FileEditTool {
     pub const NAME: &'static str = "file_edit";
+    pub const VERB: &'static str = "Edited";
 
+    /// The path alone still reads as an edit; the diff only appears once both
+    /// strings parse, so a broken call shows the error where the diff would be.
     pub fn view_input(input: &Value) -> ToolView {
-        let Some(path) = input.get("path").and_then(Value::as_str) else {
-            return ToolView::named(Self::NAME);
-        };
-        let Some(old_string) = input.get("old_string").and_then(Value::as_str) else {
-            return ToolView::named(Self::NAME);
-        };
-        let Some(new_string) = input.get("new_string").and_then(Value::as_str) else {
-            return ToolView::named(Self::NAME);
-        };
-
-        ToolView {
-            summary: format!("Edit {}", path.trim()),
-            collapse: true,
-            detail: Some(diff_lines(old_string, new_string)),
+        let mut view = labeled(Self::VERB, input, "path");
+        if let (Some(old_string), Some(new_string)) = (
+            input.get("old_string").and_then(Value::as_str),
+            input.get("new_string").and_then(Value::as_str),
+        ) {
+            view.detail = Some(diff_lines(old_string, new_string));
         }
+        view
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -146,7 +142,7 @@ mod tests {
             "new_string": "let answer = 42;",
         }));
         assert!(view.collapse);
-        assert_eq!(view.summary, "Edit src/main.rs");
+        assert_eq!(view.summary, format!("{} src/main.rs", FileEditTool::VERB));
         assert_eq!(
             view.detail.as_deref(),
             Some("- let answer = 41;\n+ let answer = 42;")
@@ -154,10 +150,20 @@ mod tests {
     }
 
     #[test]
-    fn view_falls_back_without_edit_content() {
+    fn view_falls_back_to_the_verb() {
+        let path_only = FileEditTool::view_input(&json!({ "path": "src/main.rs" }));
         assert_eq!(
-            FileEditTool::view_input(&json!({ "path": "src/main.rs" })).summary,
-            FileEditTool::NAME
+            path_only.summary,
+            format!("{} src/main.rs", FileEditTool::VERB)
+        );
+        assert_eq!(path_only.detail, None);
+
+        let no_args = FileEditTool::view_input(&json!({}));
+        assert_eq!(no_args.summary, FileEditTool::VERB);
+        assert_eq!(no_args.detail, None);
+        assert_eq!(
+            FileEditTool::view_input(&json!({ "path": "src/main.rs", "old_string": 41 })).detail,
+            None
         );
     }
 

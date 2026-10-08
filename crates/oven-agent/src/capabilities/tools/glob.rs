@@ -18,19 +18,21 @@ pub struct GlobTool {
 
 impl GlobTool {
     pub const NAME: &'static str = "glob";
+    pub const VERB: &'static str = "Found";
 
     pub fn view_input(input: &Value) -> ToolView {
         let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
-            return ToolView::named(Self::NAME);
+            return ToolView::named(Self::VERB);
         };
         let path = input
             .get("path")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|path| !path.is_empty());
+        let verb = Self::VERB;
         let summary = match path {
-            Some(path) => format!("Find {pattern} in {path}"),
-            None => format!("Find {pattern}"),
+            Some(path) => format!("{verb} {pattern} in {path}"),
+            None => format!("{verb} {pattern}"),
         };
         ToolView {
             summary,

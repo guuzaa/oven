@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView, require_str, resolve_within};
+use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str, resolve_within};
 
 use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
@@ -14,31 +14,27 @@ pub struct FileWriteTool {
 
 impl FileWriteTool {
     pub const NAME: &'static str = "file_write";
+    pub const VERB: &'static str = "Wrote";
 
     pub fn view_input(input: &Value) -> ToolView {
-        let Some(path) = input.get("path").and_then(Value::as_str) else {
-            return ToolView::named(Self::NAME);
-        };
-        let Some(content) = input.get("content").and_then(Value::as_str) else {
-            return ToolView::named(Self::NAME);
-        };
-
-        ToolView {
-            summary: format!("Write {}", path.trim()),
-            collapse: true,
-            detail: Some(
-                content
-                    .lines()
-                    .map(|line| format!("+ {line}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ),
+        let mut view = labeled(Self::VERB, input, "path");
+        if let Some(content) = input.get("content").and_then(Value::as_str) {
+            view.detail = Some(added_lines(content));
         }
+        view
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
+}
+
+fn added_lines(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| format!("+ {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[async_trait]
@@ -104,15 +100,25 @@ mod tests {
             "content": "line one\nline two",
         }));
         assert!(view.collapse);
-        assert_eq!(view.summary, "Write hello.txt");
+        assert_eq!(view.summary, format!("{} hello.txt", FileWriteTool::VERB));
         assert_eq!(view.detail.as_deref(), Some("+ line one\n+ line two"));
     }
 
     #[test]
-    fn view_falls_back_without_content() {
+    fn view_falls_back_to_the_verb() {
+        let path_only = FileWriteTool::view_input(&json!({ "path": "hello.txt" }));
         assert_eq!(
-            FileWriteTool::view_input(&json!({ "path": "hello.txt" })).summary,
-            FileWriteTool::NAME
+            path_only.summary,
+            format!("{} hello.txt", FileWriteTool::VERB)
+        );
+        assert_eq!(path_only.detail, None);
+
+        let no_args = FileWriteTool::view_input(&json!({}));
+        assert_eq!(no_args.summary, FileWriteTool::VERB);
+        assert_eq!(no_args.detail, None);
+        assert_eq!(
+            FileWriteTool::view_input(&json!({ "path": "hello.txt", "content": 7 })).detail,
+            None
         );
     }
 

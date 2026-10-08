@@ -25,7 +25,7 @@ impl MemoryForgetTool {
     }
 
     pub fn view_input(input: &Value) -> ToolView {
-        memory_view(Self::NAME, Self::VERB, input)
+        memory_view(Self::VERB, input)
     }
 }
 

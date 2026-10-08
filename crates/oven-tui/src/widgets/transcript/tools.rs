@@ -22,13 +22,13 @@ enum ToolKind {
 impl From<&str> for ToolKind {
     fn from(value: &str) -> Self {
         match value {
-            "Search" | "Find" => Self::Searched,
+            "Searched" | "Found" => Self::Searched,
             "Read" => Self::Read,
             "Ran" => Self::Ran,
-            "Edit" => Self::Edited,
-            "Write" => Self::Wrote,
-            "Ask" => Self::Asked,
-            "Fetch" => Self::Fetched,
+            "Edited" => Self::Edited,
+            "Wrote" => Self::Wrote,
+            "Asked" => Self::Asked,
+            "Fetched" => Self::Fetched,
             _ => Self::Other(value.to_string()),
         }
     }
@@ -208,16 +208,16 @@ mod tests {
     #[test]
     fn groups_calls_by_kind_with_call_details_as_body() {
         let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Search todo in src", None);
-        burst.start("2".into(), "Search\n config in src", None);
-        burst.start("3".into(), "Find **/*.rs in src", None);
+        burst.start("1".into(), "Searched todo in src", None);
+        burst.start("2".into(), "Searched\n config in src", None);
+        burst.start("3".into(), "Found **/*.rs in src", None);
         burst.start("4".into(), "Read src/main.rs", None);
         assert!(burst.finish("2", None, true, None));
 
         assert_eq!(burst.title(), "Searched 3 patterns, Read 1 file, 1 failed");
         assert_eq!(
             burst.body(),
-            "Search todo in src\nSearch config in src\nFind **/*.rs in src\nRead src/main.rs"
+            "Searched todo in src\nSearched config in src\nFound **/*.rs in src\nRead src/main.rs"
         );
     }
 
@@ -240,13 +240,13 @@ mod tests {
     #[test]
     fn file_edits_read_as_edited_files() {
         let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Edit src/main.rs", Some("- old\n+ new"));
-        burst.start("2".into(), "Write out.txt", Some("+ hi"));
+        burst.start("1".into(), "Edited src/main.rs", Some("- old\n+ new"));
+        burst.start("2".into(), "Wrote out.txt", Some("+ hi"));
         assert!(burst.finish("1", None, false, None));
         assert_eq!(burst.title(), "Edited 1 file, Wrote 1 file");
         assert_eq!(
             titles(&burst.sections()),
-            ["item:Edit src/main.rs", "item:Write out.txt"]
+            ["item:Edited src/main.rs", "item:Wrote out.txt"]
         );
         assert_eq!(burst.body(), "");
     }
@@ -254,31 +254,31 @@ mod tests {
     #[test]
     fn a_landed_detail_replaces_what_the_call_ran_with() {
         let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Ask which database?", None);
+        burst.start("1".into(), "Asked which database?", None);
         assert!(burst.finish("1", Some("postgres"), false, None));
 
         let [Section::Item { title, detail, .. }] = &burst.sections()[..] else {
             panic!("expected one item with a detail");
         };
-        assert_eq!(title, "Ask which database?");
+        assert_eq!(title, "Asked which database?");
         assert_eq!(detail.body(), "postgres");
     }
 
     #[test]
     fn fetches_are_counted_in_the_burst_title() {
         let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Fetch https://example.com", None);
+        burst.start("1".into(), "Fetched https://example.com", None);
         assert_eq!(burst.title(), "Fetched 1 page");
-        burst.start("2".into(), "Fetch https://example.com/docs", None);
+        burst.start("2".into(), "Fetched https://example.com/docs", None);
         assert_eq!(burst.title(), "Fetched 2 pages");
     }
 
     #[test]
     fn questions_are_counted_in_the_burst_title() {
         let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Ask which database?", None);
+        burst.start("1".into(), "Asked which database?", None);
         assert_eq!(burst.title(), "Asked 1 question");
-        burst.start("2".into(), "Ask sqlite or postgres?", None);
+        burst.start("2".into(), "Asked sqlite or postgres?", None);
         assert_eq!(burst.title(), "Asked 2 questions");
     }
 
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn failed_diff_keeps_its_error_inside_the_item() {
         let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Edit src/main.rs", Some("- old\n+ new"));
+        burst.start("1".into(), "Edited src/main.rs", Some("- old\n+ new"));
         assert!(burst.finish("1", None, true, Some("old_string not found")));
 
         assert_eq!(burst.title(), "Edited 1 file, 1 failed");
@@ -312,10 +312,10 @@ mod tests {
     fn plain_calls_stay_body_lines_between_diff_items() {
         let mut burst = ToolBurst::default();
         burst.start("1".into(), "Ran cargo test", None);
-        burst.start("2".into(), "Edit src/main.rs", Some("- old"));
+        burst.start("2".into(), "Edited src/main.rs", Some("- old"));
         assert_eq!(
             titles(&burst.sections()),
-            ["text:Ran cargo test", "item:Edit src/main.rs"]
+            ["text:Ran cargo test", "item:Edited src/main.rs"]
         );
     }
 }

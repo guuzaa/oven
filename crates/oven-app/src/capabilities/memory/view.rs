@@ -12,7 +12,7 @@ pub(crate) fn present_memory_tool(name: &str, input: &Value) -> Option<ToolView>
     }
 }
 
-pub(super) fn memory_view(name: &str, verb: &str, input: &Value) -> ToolView {
+pub(super) fn memory_view(verb: &str, input: &Value) -> ToolView {
     let field = |key| {
         input
             .get(key)
@@ -26,7 +26,7 @@ pub(super) fn memory_view(name: &str, verb: &str, input: &Value) -> ToolView {
             collapse: true,
             detail: None,
         },
-        _ => ToolView::named(name),
+        _ => ToolView::named(verb),
     }
 }
 
@@ -61,9 +61,9 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_input_falls_back_to_the_tool_name() {
+    fn incomplete_input_falls_back_to_the_verb() {
         let view = present_memory_tool(MemoryWriteTool::NAME, &json!({ "id": INPUT_ID })).unwrap();
-        assert_eq!(view.summary, MemoryWriteTool::NAME);
+        assert_eq!(view.summary, MemoryWriteTool::VERB);
     }
 
     #[test]

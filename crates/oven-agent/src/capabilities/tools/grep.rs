@@ -19,10 +19,11 @@ pub struct GrepTool {
 
 impl GrepTool {
     pub const NAME: &'static str = "grep";
+    pub const VERB: &'static str = "Searched";
 
     pub fn view_input(input: &Value) -> ToolView {
         let Some(pattern) = input.get("pattern").and_then(Value::as_str) else {
-            return ToolView::named(Self::NAME);
+            return ToolView::named(Self::VERB);
         };
         let path = input
             .get("path")
@@ -34,7 +35,7 @@ impl GrepTool {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|include| !include.is_empty());
-        let mut summary = format!("Search {pattern}");
+        let mut summary = format!("{} {pattern}", Self::VERB);
         if let Some(path) = path {
             let _ = write!(summary, " in {path}");
         }

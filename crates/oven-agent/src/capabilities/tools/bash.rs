@@ -18,9 +18,10 @@ pub struct BashTool {
 
 impl BashTool {
     pub const NAME: &'static str = "bash";
+    pub const VERB: &'static str = "Ran";
 
     pub fn view_input(input: &Value) -> ToolView {
-        labeled(Self::NAME, "Ran", input, "command")
+        labeled(Self::VERB, input, "command")
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {

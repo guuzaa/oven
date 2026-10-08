@@ -27,9 +27,10 @@ pub struct WebFetchTool {
 
 impl WebFetchTool {
     pub const NAME: &'static str = "web_fetch";
+    pub const VERB: &'static str = "Fetched";
 
     pub fn view_input(input: &Value) -> ToolView {
-        labeled(Self::NAME, "Fetch", input, "url")
+        labeled(Self::VERB, input, "url")
     }
 
     pub fn new() -> Self {
@@ -246,11 +247,14 @@ mod tests {
         let view = WebFetchTool::view_input(&json!({
             "url": "https://example.com/docs",
         }));
-        assert_eq!(view.summary, "Fetch https://example.com/docs");
+        assert_eq!(
+            view.summary,
+            format!("{} https://example.com/docs", WebFetchTool::VERB)
+        );
         assert!(view.collapse);
         assert_eq!(
             WebFetchTool::view_input(&json!({})).summary,
-            WebFetchTool::NAME
+            WebFetchTool::VERB
         );
     }
 

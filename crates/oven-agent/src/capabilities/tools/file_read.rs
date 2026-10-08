@@ -15,9 +15,10 @@ pub struct FileReadTool {
 
 impl FileReadTool {
     pub const NAME: &'static str = "file_read";
+    pub const VERB: &'static str = "Read";
 
     pub fn view_input(input: &Value) -> ToolView {
-        labeled(Self::NAME, "Read", input, "path")
+        labeled(Self::VERB, input, "path")
     }
 
     pub fn new(root: impl Into<PathBuf>) -> Self {
