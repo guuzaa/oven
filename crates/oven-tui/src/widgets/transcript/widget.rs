@@ -19,12 +19,13 @@ use crate::core::theme;
 use crate::platform::clipboard;
 
 use super::kinds::{Header, LineKind, Row};
-use super::selection::{SelPos, extract_line_range, highlight_line};
+use super::markdown::{LineCopy, copied_text};
+use super::selection::{SelPos, highlight_line};
 use super::wrap::{
-    MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
-    apply_hover, apply_shimmer, collect_lines, format_elapsed, format_lines, format_thought,
-    line_display_width, paint_visible, shimmer_phase, sticky_prompt_lines, tail_lines,
-    trim_message, wrap_collapsible_into, wrap_line_into, wrap_row_into,
+    Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
+    apply_hover, apply_shimmer, collect_lines, format_elapsed, format_thought, line_display_width,
+    paint_visible, shimmer_phase, sticky_prompt_lines, tail_lines, trim_message, wrap_body_into,
+    wrap_collapsible_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -40,11 +41,14 @@ pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
 pub struct Transcript {
     pub(super) rows: Vec<Row>,
     pub(super) wrapped: Vec<Line<'static>>,
+    /// Parallel to `wrapped`: how a selection of that visual row copies.
+    copies: Vec<LineCopy>,
     /// Wrapped-line offset where each row starts, parallel to `rows`.
     row_offsets: Vec<usize>,
     streaming: String,
     stream_kind: LineKind,
     pub(super) wrapped_stream: Vec<Line<'static>>,
+    stream_copies: Vec<LineCopy>,
     /// None follows newest content; Some is an anchored wrapped-line index.
     pub(super) top: Option<usize>,
     pub(super) area: Rect,
@@ -69,10 +73,12 @@ impl Transcript {
         Self {
             rows: Vec::new(),
             wrapped: Vec::new(),
+            copies: Vec::new(),
             row_offsets: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
             wrapped_stream: Vec::new(),
+            stream_copies: Vec::new(),
             top: None,
             area: Rect::default(),
             select_anchor: None,
@@ -554,10 +560,10 @@ impl Transcript {
         }
     }
 
-    /// Wraps one row into `out`, asking for `separator`: the blank line that
+    /// Wraps one row into `buf`, asking for `separator`: the blank line that
     /// keeps rows apart, which every row after the first one leads with.
     fn wrap_row_into(
-        out: &mut Vec<Line<'static>>,
+        buf: &mut Buf<'_>,
         row: &Row,
         width: usize,
         live_rows: Option<usize>,
@@ -565,7 +571,7 @@ impl Transcript {
     ) -> Vec<Header> {
         if let Some(collapsible) = &row.collapsible {
             wrap_collapsible_into(
-                out,
+                buf,
                 row.kind,
                 &row.text,
                 collapsible,
@@ -574,7 +580,7 @@ impl Transcript {
                 separator,
             )
         } else {
-            wrap_row_into(out, row.kind, &row.text, width, separator);
+            wrap_row_into(buf, row.kind, &row.text, width, separator);
             Vec::new()
         }
     }
@@ -609,6 +615,7 @@ impl Transcript {
 
     fn take_stream(&mut self) -> (LineKind, String) {
         self.wrapped_stream.clear();
+        self.stream_copies.clear();
         (
             self.stream_kind,
             trim_message(&std::mem::take(&mut self.streaming)),
@@ -643,15 +650,14 @@ impl Transcript {
         } else {
             let separator = !self.wrapped.is_empty();
             let live_rows = self.live_body_rows(idx);
-            Self::wrap_row_into(
-                &mut self.wrapped,
-                &self.rows[idx],
-                width,
-                live_rows,
-                separator,
-            )
+            let mut buf = Buf {
+                lines: &mut self.wrapped,
+                copies: &mut self.copies,
+            };
+            Self::wrap_row_into(&mut buf, &self.rows[idx], width, live_rows, separator)
         };
         self.rows[idx].headers = headers;
+        debug_assert_eq!(self.wrapped.len(), self.copies.len());
     }
 
     /// Rewraps one row where it stands: the wrapped lines above it stay as they
@@ -666,12 +672,17 @@ impl Transcript {
             .copied()
             .unwrap_or(self.wrapped.len());
         let mut lines = Vec::new();
+        let mut copies = Vec::new();
         let mut headers = match self.width() {
             0 => Vec::new(),
             width => {
                 let separator = start > 0;
                 let live_rows = self.live_body_rows(idx);
-                Self::wrap_row_into(&mut lines, &self.rows[idx], width, live_rows, separator)
+                let mut buf = Buf {
+                    lines: &mut lines,
+                    copies: &mut copies,
+                };
+                Self::wrap_row_into(&mut buf, &self.rows[idx], width, live_rows, separator)
             }
         };
         // Wrapped into a buffer of its own, so a marker's line comes back
@@ -682,6 +693,8 @@ impl Transcript {
         self.rows[idx].headers = headers;
         let delta = shift_of(end - start, lines.len());
         self.wrapped.splice(start..end, lines);
+        self.copies.splice(start..end, copies);
+        debug_assert_eq!(self.wrapped.len(), self.copies.len());
         if delta != 0 {
             for offset in &mut self.row_offsets[idx + 1..] {
                 *offset = offset.saturating_add_signed(delta);
@@ -701,20 +714,25 @@ impl Transcript {
 
     pub(super) fn rewrap_stream(&mut self) {
         self.wrapped_stream.clear();
+        self.stream_copies.clear();
         let width = self.width();
         if width == 0 || self.streaming.is_empty() {
             return;
         }
+        let mut buf = Buf {
+            lines: &mut self.wrapped_stream,
+            copies: &mut self.stream_copies,
+        };
         if !self.wrapped.is_empty() {
-            self.wrapped_stream.push(Line::from(""));
+            buf.push_visual(Line::from(""));
         }
-        for line in format_lines(self.stream_kind, &self.streaming) {
-            wrap_line_into(&mut self.wrapped_stream, &line, width, self.stream_kind);
-        }
+        wrap_body_into(&mut buf, self.stream_kind, &self.streaming, width);
+        debug_assert_eq!(self.wrapped_stream.len(), self.stream_copies.len());
     }
 
     pub(super) fn rewrap_all(&mut self) {
         self.wrapped.clear();
+        self.copies.clear();
         self.row_offsets.clear();
         for idx in 0..self.rows.len() {
             self.row_offsets.push(self.wrapped.len());
@@ -1069,6 +1087,17 @@ impl Transcript {
         self.stream_kind == LineKind::Text && !self.streaming.is_empty()
     }
 
+    fn copy_at(&self, idx: usize) -> LineCopy {
+        if idx < self.wrapped.len() {
+            self.copies.get(idx).cloned().unwrap_or(LineCopy::Visual)
+        } else {
+            self.stream_copies
+                .get(idx - self.wrapped.len())
+                .cloned()
+                .unwrap_or(LineCopy::Visual)
+        }
+    }
+
     pub(super) fn selected_text(&self) -> Option<String> {
         let (start, end) = self.normalized_sel()?;
         let mut out = String::new();
@@ -1082,10 +1111,11 @@ impl Transcript {
             } else {
                 line_display_width(line)
             };
-            if idx > start.line {
+            let (break_before, text) = copied_text(&self.copy_at(idx), line, from, to);
+            if idx > start.line && break_before {
                 out.push('\n');
             }
-            out.push_str(&extract_line_range(line, from, to));
+            out.push_str(&text);
         }
         if out.is_empty() { None } else { Some(out) }
     }

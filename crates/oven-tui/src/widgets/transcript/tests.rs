@@ -12,7 +12,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -3055,7 +3055,7 @@ fn mouse_selects_wrapped_lines() {
         mouse(MouseEventKind::Drag(MouseButton::Left), 7, 1),
         &State::new(),
     );
-    assert_eq!(t.selected_text().as_deref(), Some("abcd\nefgh"));
+    assert_eq!(t.selected_text().as_deref(), Some("abcdefgh"));
 }
 
 #[test]
@@ -3614,5 +3614,217 @@ fn a_long_sticky_prompt_still_closes_its_frame() {
         row(bottom - 1).starts_with('│'),
         "the rows the cap drops are body lines: {:?}",
         row(bottom - 1)
+    );
+}
+
+const STREAMED_MARKDOWN: &str = "\
+# Title
+
+- **bold** item
+  - nested item
+
+```rust
+fn main() {}
+```
+
+1. ordered
+
+> quote
+
+[docs](https://example.com)
+";
+
+fn stream_markdown(chunks: &[&str], width: u16) -> Transcript {
+    let mut t = Transcript::new();
+    t.area = Rect::new(0, 0, width, 40);
+    for chunk in chunks {
+        t.push_stream(LineKind::Text, chunk);
+        t.rewrap_stream();
+    }
+    t
+}
+
+fn span_fingerprint(lines: &[Line<'_>]) -> Vec<Vec<(String, Style)>> {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| (span.content.to_string(), span.style))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn streamed_chunks_match_rendering_the_whole_message() {
+    const WIDTH: u16 = 48;
+    let whole = stream_markdown(&[STREAMED_MARKDOWN], WIDTH);
+    let mut points = Vec::new();
+    let fence = STREAMED_MARKDOWN.find("```").expect("fence");
+    points.push(fence + 1);
+    points.push(fence + 2);
+    let stars = STREAMED_MARKDOWN.find("**").expect("emphasis");
+    points.push(stars + 1);
+    let bullet = STREAMED_MARKDOWN.find("- **").expect("bullet");
+    points.push(bullet + 1);
+    let ordered = STREAMED_MARKDOWN.find("1. ").expect("ordered");
+    points.push(ordered + 1);
+    for point in points {
+        let streamed = stream_markdown(
+            &[&STREAMED_MARKDOWN[..point], &STREAMED_MARKDOWN[point..]],
+            WIDTH,
+        );
+        assert_eq!(
+            span_fingerprint(&streamed.wrapped_stream),
+            span_fingerprint(&whole.wrapped_stream),
+            "split at byte {point}"
+        );
+    }
+    let chars: Vec<String> = STREAMED_MARKDOWN.chars().map(|ch| ch.to_string()).collect();
+    let refs: Vec<&str> = chars.iter().map(String::as_str).collect();
+    let streamed = stream_markdown(&refs, WIDTH);
+    assert_eq!(
+        span_fingerprint(&streamed.wrapped_stream),
+        span_fingerprint(&whole.wrapped_stream)
+    );
+
+    let mut sealed = streamed;
+    sealed.finish_response();
+    let mut once = whole;
+    once.finish_response();
+    assert_eq!(
+        span_fingerprint(&sealed.wrapped),
+        span_fingerprint(&once.wrapped)
+    );
+    assert_eq!(sealed.rows[0].text, STREAMED_MARKDOWN.trim_matches('\n'));
+}
+
+#[test]
+fn nested_markdown_keeps_source_indent_when_lines_wrap() {
+    const SRC: &str = "\
+- outer item wraps
+  keeps going now
+  - nested wraps
+    inner text
+
+    ```
+    code line
+    ```
+
+  > quote wraps
+";
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, SRC);
+    const WIDTH: u16 = 16;
+    ready(&mut t, Rect::new(0, 0, WIDTH, 40));
+    // Gutter is 3 columns. Wrapped tails hang under the item text: the outer
+    // bullet's text starts two columns in, the nested bullet's four in, and
+    // the quote's text four in (`  │ `). Code keeps the four spaces it had
+    // in the source.
+    assert_eq!(
+        line_texts(&t.wrapped),
+        [
+            " ∙ • outer item ",
+            "     wraps",
+            "     keeps going",
+            "      now",
+            "     • nested wr",
+            "       aps",
+            "       inner tex",
+            "       t",
+            "   ",
+            "       ```",
+            "       code line",
+            "       ```",
+            "   ",
+            "     │ quote wra",
+            "       ps",
+        ]
+    );
+}
+
+#[test]
+fn copying_rendered_markdown_returns_the_source() {
+    const SRC: &str = "\
+# Title
+
+- **bold** item
+  - nested
+
+```
+code
+```
+
+> quote
+
+See [docs](https://example.com).
+
+| a | b |
+| --- | --- |
+| c | d |
+";
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, SRC);
+    ready(&mut t, Rect::new(0, 0, 80, 40));
+    let shown = line_texts(&t.wrapped).join("\n");
+    assert!(shown.contains('•'), "{shown}");
+    assert!(shown.contains('│'), "{shown}");
+    assert!(!shown.contains("# Title"), "{shown}");
+    let last = t.wrapped.len() - 1;
+    select_rows(&mut t, 0, last);
+    let copied = t.selected_text().expect("selection");
+    assert_eq!(copied, SRC.trim_end_matches('\n'));
+    assert!(!copied.contains('•'));
+    assert!(!copied.contains('│'));
+    assert!(copied.contains("# Title"));
+    assert!(copied.contains("- **bold** item"));
+    assert!(copied.contains("[docs](https://example.com)"));
+    assert!(copied.contains("| a | b |"));
+}
+
+#[test]
+fn copying_a_wrapped_markdown_line_omits_the_soft_break() {
+    const SRC: &str = "**abcdef**";
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, SRC);
+    ready(&mut t, Rect::new(0, 0, 7, 5));
+    let shown = line_texts(&t.wrapped);
+    assert!(shown.len() > 1, "{shown:?}");
+    assert!(shown.iter().all(|line| !line.contains('*')), "{shown:?}");
+    let last = t.wrapped.len() - 1;
+    select_rows(&mut t, 0, last);
+    assert_eq!(t.selected_text().as_deref(), Some(SRC));
+}
+
+#[test]
+fn thinking_and_tool_output_stay_literal() {
+    const RAW: &str = "keep **stars** and `ticks`";
+    let mut t = Transcript::new();
+    t.on_event(&thinking(RAW));
+    t.push_row(LineKind::ToolResult(true), RAW);
+    for row in &mut t.rows {
+        if let Some(body) = row.collapsible.as_mut()
+            && !body.is_expanded()
+        {
+            body.toggle();
+        }
+    }
+    ready(&mut t, Rect::new(0, 0, 80, 20));
+    let shown = line_texts(&t.wrapped).join("\n");
+    assert_eq!(shown.matches(RAW).count(), 2, "{shown}");
+}
+
+fn select_rows(t: &mut Transcript, from: usize, to: usize) {
+    let end_col = t.area.width;
+    let from = u16::try_from(from).unwrap_or(u16::MAX);
+    let to = u16::try_from(to).unwrap_or(u16::MAX);
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 0, from),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), end_col, to),
+        &State::new(),
     );
 }
