@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, LocalShell, ShellEvent, StreamEvent, ToolCallId, ToolEvent, ToolResult,
-    TurnEvent, UserRequestId, present_tool,
+    AgentEvent, AppEvent, LocalShell, ShellEvent, StepStop, StreamEvent, ToolCallId, ToolEvent,
+    ToolResult, TurnEvent, UserRequestId, present_tool,
 };
 use oven_llm::{ContentBlock, Message};
 use ratatui::Terminal;
@@ -692,6 +692,146 @@ fn edits_across_steps_sum_in_the_activity_title() {
             "Edit src/lib.rs".to_string(),
         ]
     );
+}
+
+/// Two edit steps with thinking off: the agent emits step boundaries and, on
+/// some providers, a whitespace text delta. Neither may open a second row.
+fn two_edits_without_thinking(between: &[AppEvent]) -> Transcript {
+    let mut t = Transcript::new();
+    t.push_prompt(LineKind::User, "fix it");
+    t.on_event(&agent(AgentEvent::Turn(TurnEvent::Started)));
+    t.on_event(&agent(AgentEvent::Turn(TurnEvent::StepStarted {
+        index: 1,
+    })));
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    t.on_event(&agent(AgentEvent::Turn(TurnEvent::StepFinished {
+        index: 1,
+        stop: StepStop::ToolUse,
+    })));
+    t.on_event(&agent(AgentEvent::Turn(TurnEvent::StepStarted {
+        index: 2,
+    })));
+    for event in between {
+        t.on_event(event);
+    }
+    t.on_event(&tool_start(
+        2,
+        "file_edit",
+        file_edit_input_at("src\\lib.rs"),
+    ));
+    t.on_event(&tool_end(2, true, EDIT_SUCCESS));
+    t.on_event(&text_delta("done"));
+    t.on_event(&completed());
+    t
+}
+
+#[test]
+fn tool_steps_without_thinking_stay_one_activity() {
+    let t = two_edits_without_thinking(&[]);
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Activity,
+            LineKind::Text,
+            LineKind::Separator
+        ]
+    );
+    assert_eq!(t.rows[1].text, "Edited 2 files");
+    assert_eq!(
+        item_titles(&t, 1),
+        vec![
+            "Edit src/main.rs".to_string(),
+            "Edit src\\lib.rs".to_string()
+        ]
+    );
+}
+
+#[test]
+fn blank_text_between_tool_steps_does_not_split_the_activity() {
+    const GAPS: &[&str] = &["\n", "\r\n", "\r", " \n\t"];
+    for gap in GAPS {
+        let t = two_edits_without_thinking(&[text_delta(gap)]);
+        assert_eq!(
+            kinds_of(&t),
+            vec![
+                LineKind::User,
+                LineKind::Activity,
+                LineKind::Text,
+                LineKind::Separator
+            ],
+            "gap {gap:?}"
+        );
+        assert_eq!(t.rows[1].text, "Edited 2 files", "gap {gap:?}");
+        assert_eq!(t.rows[2].text, "done", "gap {gap:?}");
+    }
+}
+
+#[test]
+fn visible_text_between_tool_steps_still_splits_the_activity() {
+    const ASIDE: &str = "checking";
+    let t = two_edits_without_thinking(&[text_delta(ASIDE)]);
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Activity,
+            LineKind::Text,
+            LineKind::Activity,
+            LineKind::Text,
+            LineKind::Separator,
+        ]
+    );
+    assert_eq!(
+        row_texts(&t),
+        vec![
+            "fix it",
+            "Edited 1 file",
+            ASIDE,
+            "Edited 1 file",
+            "done",
+            ""
+        ]
+    );
+}
+
+#[test]
+fn seeded_blank_text_between_edits_stays_one_activity() {
+    let mut t = Transcript::new();
+    t.seed(&[
+        Message::user_text("fix it"),
+        Message::assistant(vec![ContentBlock::ToolUse {
+            id: "e1".into(),
+            name: "file_edit".into(),
+            input: file_edit_input(),
+            raw_arguments: None,
+        }]),
+        Message::tool_result("e1", EDIT_SUCCESS, false),
+        Message::assistant(vec![
+            ContentBlock::Text {
+                text: "\r\n".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "e2".into(),
+                name: "file_edit".into(),
+                input: file_edit_input_at("src\\lib.rs"),
+                raw_arguments: None,
+            },
+        ]),
+        Message::tool_result("e2", EDIT_SUCCESS, false),
+        Message::assistant_text("done"),
+    ]);
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::Activity,
+            LineKind::Text,
+            LineKind::Separator
+        ]
+    );
+    assert_eq!(t.rows[1].text, "Edited 2 files");
 }
 
 #[test]
