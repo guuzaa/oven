@@ -34,6 +34,17 @@ pub struct History {
     thinking: Vec<Option<(u64, Timestamp)>>,
     revision: u64,
     meta: Option<SessionMeta>,
+    /// Last prefix that is safe to replay: every assistant tool call has its
+    /// result, and usage matches that prefix. A cancelled turn restores it.
+    committed: Committed,
+}
+
+/// A history prefix that can be sent back to the provider.
+#[derive(Debug)]
+struct Committed {
+    len: usize,
+    usage: Usage,
+    usage_at: u64,
 }
 
 impl History {
@@ -44,6 +55,48 @@ impl History {
             thinking: Vec::new(),
             revision: 0,
             meta: None,
+            committed: Committed {
+                len: 0,
+                usage: Usage::default(),
+                usage_at: 0,
+            },
+        }
+    }
+
+    /// Mark the current messages and this turn's usage as safe to replay.
+    pub(crate) fn note_committed(&mut self) {
+        let (usage, usage_at) = self.turn_usage.last().copied().unwrap_or_default();
+        self.committed = Committed {
+            len: self.messages.len(),
+            usage,
+            usage_at,
+        };
+    }
+
+    /// Drop anything recorded after [`note_committed`](Self::note_committed).
+    ///
+    /// The open step may already have stored its assistant message and
+    /// overwritten this turn's usage before its tool calls finished. Restoring
+    /// the mark removes that message and puts the previous usage back, so the
+    /// transcript has no tool call without a result.
+    pub(crate) fn drop_uncommitted(&mut self) {
+        let len = self.committed.len;
+        if self.messages.len() <= len {
+            return;
+        }
+        let usage = self.committed.usage;
+        let usage_at = self.committed.usage_at;
+        self.messages.truncate(len);
+        self.thinking.truncate(len);
+        let users = self
+            .messages
+            .iter()
+            .filter(|(message, _)| message.role == Role::User)
+            .count();
+        let dropped_user = self.turn_usage.len() > users;
+        self.turn_usage.truncate(users);
+        if !dropped_user && let Some(slot) = self.turn_usage.last_mut() {
+            *slot = (usage, usage_at);
         }
     }
 
@@ -66,6 +119,7 @@ impl History {
         self.turn_usage.clear();
         self.thinking.clear();
         self.meta = None;
+        self.note_committed();
     }
 
     /// Record the session's workspace root if it is not already known (a
@@ -121,6 +175,7 @@ impl History {
                 Record::TodoList { .. } => {}
             }
         }
+        self.note_committed();
     }
 
     /// Remove the last user turn (the user message and everything after it),
