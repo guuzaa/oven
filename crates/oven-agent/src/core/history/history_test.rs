@@ -1,4 +1,4 @@
-use oven_llm::ContentBlock;
+use oven_llm::{ContentBlock, Role};
 
 use super::*;
 
@@ -673,4 +673,37 @@ fn rewind_drops_thinking_with_the_turn() {
     h.rewind_last_turn();
     let thinking: Vec<Option<u64>> = h.iter_timed().map(|(_, _, th)| th).collect();
     assert_eq!(thinking, vec![None, Some(100)]);
+}
+
+#[test]
+fn drop_uncommitted_removes_the_open_step_and_restores_usage() {
+    const OPEN_STEP_INPUT: u32 = 99;
+    let mut history = History::new();
+    history.push(Message::user_text("ask"));
+    history.note_committed();
+    history.drop_uncommitted();
+    assert_eq!(
+        history.len(),
+        1,
+        "a step that never landed leaves the prompt"
+    );
+
+    history.push(Message::assistant_text("done"));
+    history.record_usage(&usage(10));
+    history.record_thinking(1, 40);
+    history.note_committed();
+
+    history.push(assistant_tools("c2", "hold", serde_json::json!({})));
+    history.record_usage(&usage(OPEN_STEP_INPUT));
+    history.record_thinking(2, 15);
+    history.drop_uncommitted();
+
+    let roles: Vec<Role> = history.iter().map(|message| message.role).collect();
+    assert_eq!(roles, vec![Role::User, Role::Assistant]);
+    assert!(matches!(&history[1].content[0], ContentBlock::Text { text } if text == "done"));
+    assert_eq!(history.last_turn_usage().input_tokens, 10);
+    let thinking: Vec<Option<u64>> = history.iter_timed().map(|(_, _, span)| span).collect();
+    assert_eq!(thinking, vec![None, Some(40)]);
+    let inputs = usage_inputs(&history);
+    assert_eq!(inputs, vec![10]);
 }

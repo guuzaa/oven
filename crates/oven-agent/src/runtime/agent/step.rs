@@ -187,8 +187,12 @@ impl Agent {
         self.todo_written_this_turn = false;
         self.dismiss_finished_todos(sink);
         let policy = ctx.policy();
+        // The prefix already on disk (or empty) stays if this turn is cancelled
+        // before its future is polled.
+        self.history.note_committed();
         let turn = async {
             self.history.push(Message::user_text(input));
+            self.history.note_committed();
 
             let mut index = 0;
             loop {
@@ -196,6 +200,7 @@ impl Agent {
                     index += 1;
                     sink.emit(AgentEvent::Turn(TurnEvent::StepStarted { index }));
                     let step = self.step(sink, ctx).await?;
+                    self.history.note_committed();
                     sink.emit(AgentEvent::Turn(TurnEvent::StepFinished {
                         index,
                         stop: step.stop(),
@@ -230,6 +235,10 @@ impl Agent {
                 res = &mut turn => res,
             }
         };
+
+        if result.as_ref().is_err_and(|error| error.is_cancelled()) {
+            self.history.drop_uncommitted();
+        }
 
         let duration_ms = self.history.elapsed_ms();
         match &result {

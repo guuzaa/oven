@@ -15,14 +15,19 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::oneshot;
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use async_trait::async_trait;
+use futures::Stream;
 use futures::stream::BoxStream;
 use oven_agent::{
-    Agent, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, Record, TurnEvent, TurnId,
+    Agent, AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, Record, TodoWriteTool,
+    Tool, TurnContext, TurnEvent, TurnId,
 };
 use oven_llm::{
-    ContentBlock, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request,
-    Response, Role, Router, StopReason, StreamEvent, Usage,
+    ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName,
+    Request, Response, Role, Router, StopReason, StreamEvent, Usage,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -4133,4 +4138,553 @@ async fn memory_source_follows_the_session_after_clear() {
     assert_eq!(first.source.as_deref(), Some("session-one"));
     assert_eq!(second.source.as_deref(), Some(new_id.as_str()));
     handle.shutdown().await;
+}
+
+const CANCEL_PARTIAL: &str = "half-written reply";
+const KEPT_USAGE_INPUT: u32 = 21;
+const DROPPED_USAGE_INPUT: u32 = 99;
+
+fn tokens(input: u32) -> Usage {
+    Usage {
+        input_tokens: input,
+        output_tokens: 4,
+        cache_read_tokens: 0,
+        reasoning_tokens: 0,
+    }
+}
+
+fn replay_shape<M: Borrow<Message>>(messages: &[M]) -> Vec<(Role, String)> {
+    messages
+        .iter()
+        .map(Borrow::borrow)
+        .map(|message| {
+            let body = message
+                .content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => text.clone(),
+                    ContentBlock::ToolUse { id, name, .. } => format!("use {name} {id}"),
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        format!("result {tool_use_id}")
+                    }
+                    ContentBlock::Thinking { thinking } => format!("think {thinking}"),
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            (message.role, body)
+        })
+        .collect()
+}
+
+fn assert_replayable<M: Borrow<Message>>(messages: &[M]) {
+    let mut pending = Vec::new();
+    for message in messages.iter().map(Borrow::borrow) {
+        match message.role {
+            Role::Assistant => {
+                assert!(
+                    pending.is_empty(),
+                    "tool call {pending:?} has no result before the next assistant message"
+                );
+                pending = message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+            }
+            Role::Tool => {
+                let id = message
+                    .content
+                    .iter()
+                    .find_map(|block| match block {
+                        ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+                        _ => None,
+                    })
+                    .expect("tool message carries a result");
+                assert_eq!(
+                    pending.first().map(String::as_str),
+                    Some(id),
+                    "tool result {id} does not match the open call {pending:?}"
+                );
+                pending.remove(0);
+            }
+            Role::User | Role::System => assert!(
+                pending.is_empty(),
+                "tool call {pending:?} has no result before the next user message"
+            ),
+        }
+    }
+    assert!(
+        pending.is_empty(),
+        "tool call {pending:?} has no result at the end of the transcript"
+    );
+}
+
+async fn wait_cancelled(sub: &mut mpsc::UnboundedReceiver<AppEvent>, handle: &App) {
+    tokio::time::timeout(settle_timeout(), async {
+        loop {
+            match sub.recv().await {
+                Some(ev) if is_turn_cancelled(&ev) => return,
+                Some(_) => {}
+                None => panic!("channel closed before cancel"),
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for cancel");
+    wait_state(handle, |state| state.phase.is_idle()).await;
+}
+
+async fn session_records(dir: &Path, id: &str) -> Vec<Record> {
+    Session::open(dir, id)
+        .await
+        .unwrap()
+        .load_records()
+        .await
+        .unwrap()
+}
+
+fn saved_messages(records: &[Record]) -> Vec<Message> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            Record::Message { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn saved_usage_inputs(records: &[Record]) -> Vec<u32> {
+    records
+        .iter()
+        .filter_map(|record| match record {
+            Record::TokenUsage { usage, .. } => Some(usage.input_tokens),
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_session_meta(records: &[Record], root: &Path) {
+    match records.first() {
+        Some(Record::SessionMeta(meta)) => {
+            assert_eq!(meta.root, canonical_root(root));
+            assert!(meta.created_at > 0);
+        }
+        other => panic!("expected session meta, got {other:?}"),
+    }
+}
+
+/// Events of one provider round. `hang` waits forever after `events`, and
+/// signals `started` once the caller has already consumed those events.
+struct RoundStream {
+    events: std::collections::VecDeque<Result<StreamEvent, ProviderError>>,
+    started: Option<oneshot::Sender<()>>,
+    hang: bool,
+}
+
+impl Stream for RoundStream {
+    type Item = Result<StreamEvent, ProviderError>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if let Some(event) = this.events.pop_front() {
+            return Poll::Ready(Some(event));
+        }
+        if this.hang {
+            if let Some(started) = this.started.take() {
+                let _ = started.send(());
+            }
+            return Poll::Pending;
+        }
+        Poll::Ready(None)
+    }
+}
+
+struct RoundProvider {
+    rounds: Mutex<std::collections::VecDeque<RoundStream>>,
+}
+
+#[async_trait]
+impl Provider for RoundProvider {
+    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "complete disabled".into(),
+        })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        let round = self
+            .rounds
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more rounds".into(),
+            })?;
+        Ok(Box::pin(round))
+    }
+
+    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+        None
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("rounds".into())
+    }
+}
+
+fn text_events(text: &str, usage: Option<Usage>) -> Vec<Result<StreamEvent, ProviderError>> {
+    let mut events = vec![
+        Ok(StreamEvent::MessageStart {
+            id: "resp".into(),
+            model: "mock".into(),
+        }),
+        Ok(StreamEvent::ContentBlockStart {
+            index: 0,
+            block: ContentBlock::text(""),
+        }),
+        Ok(StreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Delta::TextDelta { text: text.into() },
+        }),
+    ];
+    if let Some(usage) = usage {
+        events.push(Ok(StreamEvent::ContentBlockStop { index: 0 }));
+        events.push(Ok(StreamEvent::MessageDelta {
+            stop_reason: Some(StopReason::EndTurn),
+            usage: Some(usage),
+        }));
+        events.push(Ok(StreamEvent::MessageStop));
+    }
+    events
+}
+
+fn hang_round(text: &str, started: oneshot::Sender<()>) -> RoundStream {
+    RoundStream {
+        events: text_events(text, None).into(),
+        started: Some(started),
+        hang: true,
+    }
+}
+
+fn finish_round(text: &str, usage: Usage) -> RoundStream {
+    RoundStream {
+        events: text_events(text, Some(usage)).into(),
+        started: None,
+        hang: false,
+    }
+}
+
+struct HoldTool {
+    entered: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+#[async_trait]
+impl Tool for HoldTool {
+    fn name(&self) -> &str {
+        "hold"
+    }
+
+    fn description(&self) -> &str {
+        "block until the turn is cancelled"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn run(&self, _args: &serde_json::Value, cx: &TurnContext) -> Result<String, AgentError> {
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        cx.cancellation.cancelled().await;
+        Err(AgentError::cancelled())
+    }
+}
+
+fn tool_response_using(id: &str, name: &str, input: serde_json::Value, usage: Usage) -> Response {
+    let mut response = tool_response(id, name, input);
+    response.usage = Some(usage);
+    response
+}
+
+async fn resume_view(app: &AppBuilder, dir: &Path, id: &str) -> (Vec<(Role, String)>, Usage) {
+    let session = Session::open(dir, id).await.unwrap();
+    let handle = spawn_app_session(app, Box::new(MockProvider::new(vec![])), session).await;
+    let shape = replay_shape(&history(&handle));
+    let usage = handle.last_turn_usage();
+    handle.shutdown().await;
+    (shape, usage)
+}
+
+#[tokio::test]
+async fn cancel_on_the_first_turn_during_streaming_persists_the_prompt() {
+    use crate::core::session::recent_session_id;
+
+    const SESSION_ID: &str = "cancel-stream";
+    const PROMPT: &str = "draft the notes";
+
+    let (started_tx, started_rx) = oneshot::channel();
+    let provider = RoundProvider {
+        rounds: Mutex::new(std::collections::VecDeque::from([hang_round(
+            CANCEL_PARTIAL,
+            started_tx,
+        )])),
+    };
+
+    let tmp = tempdir::TempDir::new("app-cancel-stream").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = Session::open(&dir, SESSION_ID).await.unwrap();
+    let handle = spawn_app_session(&app, Box::new(provider), session).await;
+    let mut sub = handle.subscribe();
+    handle.submit(PROMPT).await.unwrap();
+    let turn_id = wait_turn_id(&mut sub).await;
+    tokio::time::timeout(settle_timeout(), started_rx)
+        .await
+        .expect("stream did not reach the partial reply")
+        .unwrap();
+    handle.cancel(turn_id);
+    wait_cancelled(&mut sub, &handle).await;
+
+    assert_eq!(handle.session_id().as_deref(), Some(SESSION_ID));
+    assert_eq!(handle.last_turn_usage(), Usage::default());
+    let live = history(&handle);
+    assert_replayable(&live);
+    assert_eq!(replay_shape(&live), vec![(Role::User, PROMPT.to_string())]);
+    assert!(
+        !replay_shape(&live)
+            .iter()
+            .any(|(_, body)| body.contains(CANCEL_PARTIAL)),
+        "a partial assistant message is not part of history"
+    );
+    handle.shutdown().await;
+
+    assert!(dir.join(format!("{SESSION_ID}.jsonl")).exists());
+    assert_eq!(
+        recent_session_id(&dir, tmp.path())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(SESSION_ID)
+    );
+    let records = session_records(&dir, SESSION_ID).await;
+    assert_session_meta(&records, tmp.path());
+    let saved = saved_messages(&records);
+    assert_replayable(&saved);
+    assert_eq!(replay_shape(&saved), replay_shape(&live));
+    assert!(
+        saved_usage_inputs(&records).is_empty(),
+        "a stream that never finished has no usage"
+    );
+    assert!(
+        !records
+            .iter()
+            .any(|record| matches!(record, Record::TodoList { .. })),
+        "no checklist was written"
+    );
+
+    let (resumed, usage) = resume_view(&app, &dir, SESSION_ID).await;
+    assert_eq!(resumed, replay_shape(&saved));
+    assert_eq!(usage, Usage::default());
+}
+
+#[tokio::test]
+async fn cancel_during_a_tool_call_keeps_completed_calls_only() {
+    use crate::core::session::recent_session_id;
+
+    const SESSION_ID: &str = "cancel-tool";
+    const PROMPT: &str = "track the work";
+    const TODO_ID: &str = "keep";
+    const FINISHED_CALL: &str = "c-done";
+    const OPEN_CALL: &str = "c-open";
+
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let hold = HoldTool {
+        entered: Mutex::new(Some(entered_tx)),
+    };
+    let kept = tokens(KEPT_USAGE_INPUT);
+    let provider = MockProvider::new(vec![
+        tool_response_using(
+            FINISHED_CALL,
+            TodoWriteTool::NAME,
+            serde_json::json!({
+                "todos": [{ "id": TODO_ID, "content": "stay", "status": "in_progress" }]
+            }),
+            kept,
+        ),
+        tool_response_using(
+            OPEN_CALL,
+            "hold",
+            serde_json::json!({}),
+            tokens(DROPPED_USAGE_INPUT),
+        ),
+    ]);
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(TodoWriteTool), Arc::new(hold)];
+    let mut router = Router::new();
+    router.register(Box::new(provider));
+    let agent = Agent::new(router, tools);
+
+    let tmp = tempdir::TempDir::new("app-cancel-tool").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = Session::open(&dir, SESSION_ID).await.unwrap();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents_from(agent),
+        Some(session),
+        app.root().to_path_buf(),
+        app.config().clone(),
+        None,
+    );
+    let mut sub = handle.subscribe();
+    handle.submit(PROMPT).await.unwrap();
+    let turn_id = wait_turn_id(&mut sub).await;
+    tokio::time::timeout(settle_timeout(), entered_rx)
+        .await
+        .expect("the open tool call did not start")
+        .unwrap();
+    handle.cancel(turn_id);
+    wait_cancelled(&mut sub, &handle).await;
+
+    assert_eq!(handle.session_id().as_deref(), Some(SESSION_ID));
+    assert_eq!(handle.last_turn_usage(), kept);
+    assert_eq!(handle.todos().items.len(), 1);
+    assert_eq!(handle.todos().items[0].id, TODO_ID);
+    let live = history(&handle);
+    assert_replayable(&live);
+    assert_eq!(
+        replay_shape(&live),
+        vec![
+            (Role::User, PROMPT.to_string()),
+            (
+                Role::Assistant,
+                format!("use {} {FINISHED_CALL}", TodoWriteTool::NAME)
+            ),
+            (Role::Tool, format!("result {FINISHED_CALL}")),
+        ]
+    );
+    handle.shutdown().await;
+
+    assert_eq!(
+        recent_session_id(&dir, tmp.path())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(SESSION_ID)
+    );
+    let records = session_records(&dir, SESSION_ID).await;
+    assert_session_meta(&records, tmp.path());
+    let saved = saved_messages(&records);
+    assert_replayable(&saved);
+    assert_eq!(replay_shape(&saved), replay_shape(&live));
+    assert_eq!(saved_usage_inputs(&records), vec![KEPT_USAGE_INPUT]);
+    let todo_ids: Vec<&str> = records
+        .iter()
+        .filter_map(|record| match record {
+            Record::TodoList { items, .. } => Some(items.as_slice()),
+            _ => None,
+        })
+        .next_back()
+        .unwrap()
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(todo_ids, vec![TODO_ID]);
+
+    let session = Session::open(&dir, SESSION_ID).await.unwrap();
+    let resumed = spawn_app_session(&app, Box::new(MockProvider::new(vec![])), session).await;
+    assert_eq!(replay_shape(&history(&resumed)), replay_shape(&saved));
+    assert_eq!(resumed.last_turn_usage(), kept);
+    assert_eq!(resumed.todos().items[0].id, TODO_ID);
+    resumed.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancel_on_a_later_turn_keeps_earlier_turns() {
+    use crate::core::session::recent_session_id;
+
+    const SESSION_ID: &str = "cancel-later";
+    const FIRST_PROMPT: &str = "remember this";
+    const KEPT_ANSWER: &str = "noted";
+    const SECOND_PROMPT: &str = "keep going";
+
+    let (started_tx, started_rx) = oneshot::channel();
+    let kept = tokens(KEPT_USAGE_INPUT);
+    let provider = RoundProvider {
+        rounds: Mutex::new(std::collections::VecDeque::from([
+            finish_round(KEPT_ANSWER, kept),
+            hang_round(CANCEL_PARTIAL, started_tx),
+        ])),
+    };
+
+    let tmp = tempdir::TempDir::new("app-cancel-later").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = Session::open(&dir, SESSION_ID).await.unwrap();
+    let handle = spawn_app_session(&app, Box::new(provider), session).await;
+    assert_eq!(handle.prompt(FIRST_PROMPT).await.unwrap(), KEPT_ANSWER);
+    assert_eq!(handle.last_turn_usage(), kept);
+
+    let mut sub = handle.subscribe();
+    handle.submit(SECOND_PROMPT).await.unwrap();
+    let turn_id = wait_turn_id(&mut sub).await;
+    tokio::time::timeout(settle_timeout(), started_rx)
+        .await
+        .expect("the later turn did not start streaming")
+        .unwrap();
+    handle.cancel(turn_id);
+    wait_cancelled(&mut sub, &handle).await;
+
+    assert_eq!(handle.session_id().as_deref(), Some(SESSION_ID));
+    assert_eq!(
+        handle.last_turn_usage(),
+        Usage::default(),
+        "the cancelled turn produced no usage of its own"
+    );
+    let live = history(&handle);
+    assert_replayable(&live);
+    assert_eq!(
+        replay_shape(&live),
+        vec![
+            (Role::User, FIRST_PROMPT.to_string()),
+            (Role::Assistant, KEPT_ANSWER.to_string()),
+            (Role::User, SECOND_PROMPT.to_string()),
+        ]
+    );
+    handle.shutdown().await;
+
+    assert_eq!(
+        recent_session_id(&dir, tmp.path())
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(SESSION_ID)
+    );
+    let records = session_records(&dir, SESSION_ID).await;
+    assert_session_meta(&records, tmp.path());
+    let saved = saved_messages(&records);
+    assert_replayable(&saved);
+    assert_eq!(replay_shape(&saved), replay_shape(&live));
+    assert_eq!(saved_usage_inputs(&records), vec![KEPT_USAGE_INPUT]);
+    assert!(
+        !replay_shape(&saved)
+            .iter()
+            .any(|(_, body)| body.contains(CANCEL_PARTIAL))
+    );
+
+    let (resumed, usage) = resume_view(&app, &dir, SESSION_ID).await;
+    assert_eq!(resumed, replay_shape(&saved));
+    assert_eq!(usage, Usage::default());
 }

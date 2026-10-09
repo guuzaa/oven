@@ -56,7 +56,11 @@ impl Runtime {
 
         self.shared.sync_subagents();
 
-        if result.is_ok() {
+        // A cancel keeps the prefix that finished (the prompt, completed
+        // steps) and drops the step that was in flight. Persist that prefix
+        // so the first turn of a session can still be resumed.
+        let cancelled = result.as_ref().is_err_and(|error| error.is_cancelled());
+        if result.is_ok() || (cancelled && self.agent.history().len() != 0) {
             self.persist_turn().await;
         }
 
