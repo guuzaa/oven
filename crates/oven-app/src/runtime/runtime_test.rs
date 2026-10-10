@@ -1,7 +1,7 @@
 use crate::capabilities::subagent::{SubagentParts, Subagents};
 use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
-use crate::core::session::{Session, canonical_root};
+use crate::core::session::{Session, canonical_root, session_in_use_message};
 use crate::core::state::{AppPhase, AppState, HistoryChangeReason};
 use crate::memory::{
     AMBIGUOUS_MEMORY, DESCRIPTION_LABEL, KIND_LABEL, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY,
@@ -715,6 +715,15 @@ async fn slash_compact_replaces_history_and_switches_session() {
 
     let new_id = handle.session_id().expect("session id after compact");
     assert_ne!(new_id, "s1");
+    let err = Session::open(&dir, &new_id).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        session_in_use_message(&new_id, Some(std::process::id()))
+    );
+    Session::open(&dir, "s1")
+        .await
+        .expect("compact releases the previous session");
+    handle.shutdown().await;
     let records = Session::open(&dir, &new_id)
         .await
         .unwrap()
@@ -725,7 +734,6 @@ async fn slash_compact_replaces_history_and_switches_session() {
         r,
         Record::Message { message, .. } if message.role == Role::User
     )));
-    handle.shutdown().await;
 }
 
 #[tokio::test]
@@ -1105,6 +1113,39 @@ async fn open_session_without_api_key_starts() {
 }
 
 #[tokio::test]
+async fn open_session_refuses_an_id_another_live_app_holds() {
+    let tmp = tempdir::TempDir::new("app-session-held").unwrap();
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    {
+        let session = Session::open(&dir, "held").await.unwrap();
+        session
+            .append_records(&[oven_agent::Record::Message {
+                timestamp: 1,
+                message: Message::user_text("hi"),
+            }])
+            .await
+            .unwrap();
+    }
+    let app = AppBuilder::new(tmp.path());
+    let handle = app.open_session_in(&dir, Some("held")).await.unwrap();
+    let err = match app.open_session_in(&dir, Some("held")).await {
+        Ok(_) => panic!("a held session must be refused"),
+        Err(err) => err,
+    };
+    assert_eq!(
+        err.to_string(),
+        session_in_use_message("held", Some(std::process::id()))
+    );
+    handle.shutdown().await;
+    app.open_session_in(&dir, Some("held"))
+        .await
+        .unwrap()
+        .shutdown()
+        .await;
+}
+
+#[tokio::test]
 async fn spawn_without_api_key_still_errors() {
     let tmp = tempdir::TempDir::new("app-headless-no-key").unwrap();
     let app = AppBuilder::new(tmp.path());
@@ -1355,6 +1396,14 @@ async fn slash_clear_starts_new_session() {
     assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
     let sid_after_clear = handle.session_id().expect("session id present");
     assert!(uuid::Uuid::parse_str(&sid_after_clear).is_ok());
+    let err = Session::open(&dir, &sid_after_clear).await.unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        session_in_use_message(&sid_after_clear, Some(std::process::id()))
+    );
+    Session::open(&dir, "s1")
+        .await
+        .expect("clear releases the previous session");
     handle.shutdown().await;
 
     let old = loaded_messages(&dir, "s1").await;
@@ -1436,10 +1485,14 @@ async fn fresh_session_without_messages_has_no_id_and_no_file() {
     );
     handle.shutdown().await;
 
-    let files: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.ends_with(crate::core::session::SESSION_LOCK_SUFFIX))
+        .collect();
     assert!(
         files.is_empty(),
-        "no jsonl should be created for an empty session"
+        "no jsonl should be created for an empty session, found {files:?}"
     );
 }
 
