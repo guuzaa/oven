@@ -1965,7 +1965,7 @@ async fn compact_reshows_todo_list_on_the_next_request_only() {
     agent.set_todos(crate::core::todo::TodoList {
         items: vec![pending_item()],
     });
-    agent.compact().await.unwrap();
+    agent.compact(&CancellationToken::new()).await.unwrap();
 
     let req = agent.build_request();
     let last = req.messages.last().unwrap();

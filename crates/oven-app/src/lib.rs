@@ -25,7 +25,9 @@ pub use capabilities::tools::ToolRegistry;
 pub use capabilities::view::present_tool;
 pub use core::config::McpServerConfig;
 pub use core::error::AppError;
-pub use core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent, SubagentEvent};
+pub use core::event::{
+    AppEvent, AppEventKind, AppId, COMPACTION_CANCELLED, CompactionEvent, ShellEvent, SubagentEvent,
+};
 pub use core::input::Input;
 pub use core::mention::FileMentions;
 pub use core::provider::{provider_catalog, provider_models, verify};

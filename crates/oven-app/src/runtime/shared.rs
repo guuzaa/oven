@@ -44,6 +44,9 @@ pub(crate) struct Shared {
     user_config_path: Option<PathBuf>,
     subagent_revision: Mutex<u64>,
     turn: Mutex<Option<ActiveTurn>>,
+    /// Set while a summary request is in flight, so the same cancel that
+    /// stops a turn can abort it. Compaction is not a turn: it has no turn id.
+    compact_cancel: Mutex<Option<CancellationToken>>,
     /// Chats typed while a turn runs. The turn takes them when it uploads
     /// tool results; anything still here when the turn ends is sent later.
     prompts: Mutex<Vec<String>>,
@@ -75,6 +78,7 @@ impl Shared {
             user_config_path,
             subagent_revision: Mutex::new(0),
             turn: Mutex::new(None),
+            compact_cancel: Mutex::new(None),
             prompts: Mutex::new(Vec::new()),
         }
     }
@@ -143,6 +147,32 @@ impl Shared {
         };
         self.set_phase(AppPhase::Cancelling { turn_id });
         active.cancel.cancel();
+    }
+
+    fn compact_token(&self) -> MutexGuard<'_, Option<CancellationToken>> {
+        self.compact_cancel
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Marks the driver busy summarizing and returns the token cancel uses.
+    pub(crate) fn begin_compaction(&self) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        *self.compact_token() = Some(cancel.clone());
+        self.set_phase(AppPhase::Compacting);
+        cancel
+    }
+
+    pub(crate) fn end_compaction(&self) {
+        *self.compact_token() = None;
+    }
+
+    /// Aborts the summary request when one is in flight. A second call, or a
+    /// call with nothing compacting, does nothing.
+    pub(crate) fn cancel_compaction(&self) {
+        if let Some(cancel) = self.compact_token().as_ref() {
+            cancel.cancel();
+        }
     }
 
     pub(crate) fn respond(&self, request_id: UserRequestId, response: UserResponse) {
@@ -487,5 +517,20 @@ mod tests {
 
         assert_eq!(resolved_ids(&mut events), vec![first_id]);
         assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn cancelling_compaction_is_idempotent() {
+        let shared = shared();
+        let cancel = shared.begin_compaction();
+        assert!(matches!(phase(&shared), AppPhase::Compacting));
+
+        shared.cancel_compaction();
+        shared.cancel_compaction();
+
+        assert!(cancel.is_cancelled());
+        shared.end_compaction();
+        shared.cancel_compaction();
+        assert!(cancel.is_cancelled());
     }
 }

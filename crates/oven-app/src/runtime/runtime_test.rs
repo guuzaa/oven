@@ -12,7 +12,7 @@ use crate::{LocalShell, runtime::*};
 use oven_mem::NOT_FOUND;
 use std::borrow::Borrow;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::oneshot;
 
 use std::pin::Pin;
@@ -4687,4 +4687,453 @@ async fn cancel_on_a_later_turn_keeps_earlier_turns() {
     let (resumed, usage) = resume_view(&app, &dir, SESSION_ID).await;
     assert_eq!(resumed, replay_shape(&saved));
     assert_eq!(usage, Usage::default());
+}
+
+const COMPACT_SESSION: &str = "s1";
+const COMPACT_KEPT: &str = "kept answer";
+const COMPACT_PARTIAL: &str = "PARTIAL_SUMMARY";
+const COMPACT_PROMPT_TEXT: &str = "hello";
+
+#[derive(Clone, Copy)]
+enum CompactKind {
+    Manual,
+    Auto,
+}
+
+#[derive(Clone, Copy)]
+enum CompactPoint {
+    Before,
+    During,
+}
+
+struct CompactSnap {
+    id: Option<String>,
+    files: Vec<String>,
+    recent: Option<String>,
+    session_bytes: Vec<u8>,
+    latest_bytes: Vec<u8>,
+    history: Vec<(Role, String)>,
+}
+
+fn jsonl_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    names.sort();
+    names
+}
+
+fn read_bytes(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_default()
+}
+
+async fn compact_snap(handle: &App, dir: &Path) -> CompactSnap {
+    CompactSnap {
+        id: handle.session_id(),
+        files: jsonl_names(dir),
+        recent: crate::core::session::recent_session_id(dir, handle.root())
+            .await
+            .unwrap(),
+        session_bytes: read_bytes(&dir.join(format!("{COMPACT_SESSION}.jsonl"))),
+        latest_bytes: read_bytes(&dir.join("cwd_latest.json")),
+        history: replay_shape(&history(handle)),
+    }
+}
+
+fn kept_history() -> Vec<(Role, String)> {
+    vec![
+        (Role::User, COMPACT_PROMPT_TEXT.to_string()),
+        (Role::Assistant, COMPACT_KEPT.to_string()),
+    ]
+}
+
+struct CancelReport {
+    cancel_count: usize,
+    errors: Vec<String>,
+    notes: Vec<String>,
+    turn_completed: bool,
+    turn_cancelled: bool,
+    history_changed: bool,
+}
+
+impl CancelReport {
+    fn note(&mut self, ev: &AppEvent) {
+        if matches!(compaction_of(ev), Some(CompactionEvent::Cancelled)) {
+            self.cancel_count += 1;
+        }
+        if let AppEventKind::Error { message } = &ev.kind {
+            self.errors.push(message.clone());
+        }
+        if let Some(text) = notification(ev) {
+            self.notes.push(text.to_string());
+        }
+        self.turn_completed |= is_turn_completed(ev);
+        self.turn_cancelled |= is_turn_cancelled(ev);
+        self.history_changed |= is_history_changed(ev);
+    }
+}
+
+async fn wait_compaction_cancelled(
+    handle: &App,
+    rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+) -> CancelReport {
+    let mut report = CancelReport {
+        cancel_count: 0,
+        errors: Vec::new(),
+        notes: Vec::new(),
+        turn_completed: false,
+        turn_cancelled: false,
+        history_changed: false,
+    };
+    let mut state = handle.watch_state();
+    tokio::time::timeout(settle_timeout(), async {
+        loop {
+            if state.borrow().phase.is_idle() && report.cancel_count > 0 {
+                while let Ok(ev) = rx.try_recv() {
+                    report.note(&ev);
+                }
+                return;
+            }
+            tokio::select! {
+                changed = state.changed() => {
+                    changed.expect("state closed while waiting for compaction to cancel");
+                }
+                ev = rx.recv() => match ev {
+                    Some(ev) => report.note(&ev),
+                    None => panic!("event stream closed"),
+                },
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for compaction to cancel");
+    report
+}
+
+enum GateRound {
+    Finish(Vec<Result<StreamEvent, ProviderError>>),
+    Block {
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        dropped: Arc<AtomicBool>,
+    },
+    Hang {
+        events: Vec<Result<StreamEvent, ProviderError>>,
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        dropped: Arc<AtomicBool>,
+    },
+}
+
+struct SummaryGate {
+    rounds: Mutex<std::collections::VecDeque<GateRound>>,
+    info: ModelInfo,
+    calls: Arc<AtomicUsize>,
+}
+
+struct ParkedSummary {
+    events: std::collections::VecDeque<Result<StreamEvent, ProviderError>>,
+    started: Option<oneshot::Sender<()>>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for ParkedSummary {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Stream for ParkedSummary {
+    type Item = Result<StreamEvent, ProviderError>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if let Some(event) = this.events.pop_front() {
+            return Poll::Ready(Some(event));
+        }
+        if let Some(started) = this.started.take() {
+            let _ = started.send(());
+        }
+        Poll::Pending
+    }
+}
+
+struct HeldRequest {
+    dropped: Arc<AtomicBool>,
+}
+
+impl Drop for HeldRequest {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Provider for SummaryGate {
+    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "complete disabled".into(),
+        })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let round = self
+            .rounds
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more rounds".into(),
+            })?;
+        match round {
+            GateRound::Finish(events) => Ok(Box::pin(futures::stream::iter(events))),
+            GateRound::Hang {
+                events,
+                started,
+                dropped,
+            } => Ok(Box::pin(ParkedSummary {
+                events: events.into(),
+                started: started.lock().unwrap().take(),
+                dropped,
+            })),
+            GateRound::Block { started, dropped } => {
+                let _held = HeldRequest { dropped };
+                if let Some(started) = started.lock().unwrap().take() {
+                    let _ = started.send(());
+                }
+                std::future::pending().await
+            }
+        }
+    }
+
+    fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
+        Some(&self.info)
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("gate".into())
+    }
+}
+
+fn gate_info(window: u32) -> ModelInfo {
+    let mut info = ModelInfo::declared("default", ProviderName::Custom("gate".into()));
+    info.context_window = window;
+    info
+}
+
+fn finish_turn(input_tokens: u32) -> GateRound {
+    GateRound::Finish(text_events(
+        COMPACT_KEPT,
+        Some(Usage {
+            input_tokens,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        }),
+    ))
+}
+
+struct ArmedSummary {
+    provider: SummaryGate,
+    started: oneshot::Receiver<()>,
+    dropped: Arc<AtomicBool>,
+}
+
+fn arm_summary(kind: CompactKind, point: CompactPoint) -> ArmedSummary {
+    let (started_tx, started_rx) = oneshot::channel();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let gate = match point {
+        CompactPoint::Before => GateRound::Block {
+            started: Mutex::new(Some(started_tx)),
+            dropped: Arc::clone(&dropped),
+        },
+        CompactPoint::During => GateRound::Hang {
+            events: text_events(COMPACT_PARTIAL, None),
+            started: Mutex::new(Some(started_tx)),
+            dropped: Arc::clone(&dropped),
+        },
+    };
+    let window = match kind {
+        CompactKind::Manual => 0,
+        CompactKind::Auto => 100,
+    };
+    let input_tokens = match kind {
+        CompactKind::Manual => 10,
+        CompactKind::Auto => 90,
+    };
+    ArmedSummary {
+        provider: SummaryGate {
+            rounds: Mutex::new(std::collections::VecDeque::from([
+                finish_turn(input_tokens),
+                gate,
+            ])),
+            info: gate_info(window),
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+        started: started_rx,
+        dropped,
+    }
+}
+
+async fn open_compact_session(provider: Box<dyn Provider>) -> (tempdir::TempDir, App, PathBuf) {
+    let tmp = tempdir::TempDir::new("app-cancel-compact").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let session = Session::open(&dir, COMPACT_SESSION).await.unwrap();
+    let handle = spawn_app_session(&app, provider, session).await;
+    (tmp, handle, dir)
+}
+
+async fn cancel_compaction_leaves_the_session(kind: CompactKind, point: CompactPoint, twice: bool) {
+    let armed = arm_summary(kind, point);
+    let calls = Arc::clone(&armed.provider.calls);
+    let dropped = Arc::clone(&armed.dropped);
+    let started = armed.started;
+    let (_tmp, handle, dir) = open_compact_session(Box::new(armed.provider)).await;
+
+    let mut rx = handle.subscribe();
+    match kind {
+        CompactKind::Manual => {
+            assert_eq!(
+                handle.prompt(COMPACT_PROMPT_TEXT).await.unwrap(),
+                COMPACT_KEPT
+            );
+            handle.submit("/compact").await.unwrap();
+        }
+        CompactKind::Auto => {
+            handle.submit(COMPACT_PROMPT_TEXT).await.unwrap();
+        }
+    }
+    tokio::time::timeout(settle_timeout(), started)
+        .await
+        .expect("the summary request should start")
+        .expect("summary gate dropped before it signaled");
+
+    let before = compact_snap(&handle, &dir).await;
+    handle.cancel_compaction();
+    if twice {
+        handle.cancel_compaction();
+    }
+    let report = wait_compaction_cancelled(&handle, &mut rx).await;
+    let after = compact_snap(&handle, &dir).await;
+
+    assert_eq!(report.cancel_count, 1, "one cancel is one cancellation");
+    assert!(
+        report.errors.is_empty(),
+        "cancel is not a failure: {:?}",
+        report.errors
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note == crate::COMPACTION_CANCELLED),
+        "notes: {:?}",
+        report.notes
+    );
+    assert!(!report.history_changed, "cancel does not replace history");
+    if matches!(kind, CompactKind::Auto) {
+        assert!(report.turn_completed, "the finished turn stays completed");
+        assert!(
+            !report.turn_cancelled,
+            "auto-compact cancel is not a turn cancel"
+        );
+    }
+    assert_eq!(before.id.as_deref(), Some(COMPACT_SESSION));
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.files, before.files);
+    assert_eq!(after.files, vec![format!("{COMPACT_SESSION}.jsonl")]);
+    assert_eq!(after.recent, before.recent);
+    assert_eq!(after.recent.as_deref(), Some(COMPACT_SESSION));
+    assert_eq!(after.session_bytes, before.session_bytes);
+    assert_eq!(after.latest_bytes, before.latest_bytes);
+    assert_eq!(after.history, kept_history());
+    assert!(
+        !after
+            .history
+            .iter()
+            .any(|(_, body)| body.contains(COMPACT_PARTIAL))
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the summary request should be dropped"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "turn plus one summary request"
+    );
+
+    handle.cancel_compaction();
+    assert!(handle.state().phase.is_idle());
+    assert_eq!(replay_shape(&history(&handle)), kept_history());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancel_manual_compact_before_streaming_leaves_the_session() {
+    cancel_compaction_leaves_the_session(CompactKind::Manual, CompactPoint::Before, true).await;
+}
+
+#[tokio::test]
+async fn cancel_manual_compact_during_streaming_leaves_the_session() {
+    cancel_compaction_leaves_the_session(CompactKind::Manual, CompactPoint::During, false).await;
+}
+
+#[tokio::test]
+async fn cancel_auto_compact_before_streaming_leaves_the_session() {
+    cancel_compaction_leaves_the_session(CompactKind::Auto, CompactPoint::Before, false).await;
+}
+
+#[tokio::test]
+async fn cancel_auto_compact_during_streaming_leaves_the_session() {
+    cancel_compaction_leaves_the_session(CompactKind::Auto, CompactPoint::During, false).await;
+}
+
+#[tokio::test]
+async fn shutdown_during_compaction_leaves_the_session() {
+    let armed = arm_summary(CompactKind::Manual, CompactPoint::Before);
+    let dropped = Arc::clone(&armed.dropped);
+    let (_tmp, handle, dir) = open_compact_session(Box::new(armed.provider)).await;
+    assert_eq!(
+        handle.prompt(COMPACT_PROMPT_TEXT).await.unwrap(),
+        COMPACT_KEPT
+    );
+    handle.submit("/compact").await.unwrap();
+    tokio::time::timeout(settle_timeout(), armed.started)
+        .await
+        .expect("the summary request should start")
+        .expect("summary gate dropped before it signaled");
+
+    let session_bytes = read_bytes(&dir.join(format!("{COMPACT_SESSION}.jsonl")));
+    let latest_bytes = read_bytes(&dir.join("cwd_latest.json"));
+    let files = jsonl_names(&dir);
+    tokio::time::timeout(settle_timeout(), handle.shutdown())
+        .await
+        .expect("quitting during compaction should return");
+
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "shutdown drops the summary request"
+    );
+    assert_eq!(jsonl_names(&dir), files);
+    assert_eq!(
+        read_bytes(&dir.join(format!("{COMPACT_SESSION}.jsonl"))),
+        session_bytes
+    );
+    assert_eq!(read_bytes(&dir.join("cwd_latest.json")), latest_bytes);
+    let saved = saved_messages(&session_records(&dir, COMPACT_SESSION).await);
+    assert_eq!(replay_shape(&saved), kept_history());
+    assert!(
+        !replay_shape(&saved)
+            .iter()
+            .any(|(_, body)| body.contains(COMPACT_PARTIAL))
+    );
 }

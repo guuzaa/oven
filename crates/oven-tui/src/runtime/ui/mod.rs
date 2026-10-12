@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::EventStream;
 use futures::StreamExt;
-use oven_app::{AnswerResponse, App, AppEvent, AppState, UserRequestId, UserResponse};
+use oven_app::{AnswerResponse, App, AppEvent, AppPhase, AppState, UserRequestId, UserResponse};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -283,9 +283,13 @@ impl Ui {
     }
 
     pub(super) fn send_cancel(&self) {
-        let turn_id = self.state_rx.borrow().phase.turn_id();
-        if let Some(turn_id) = turn_id {
+        let phase = self.state_rx.borrow().phase.clone();
+        if let Some(turn_id) = phase.turn_id() {
             self.app.cancel(turn_id);
+            return;
+        }
+        if matches!(phase, AppPhase::Compacting) {
+            self.app.cancel_compaction();
         }
     }
 

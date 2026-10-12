@@ -132,6 +132,12 @@ impl App {
         self.shared.cancel(turn_id);
     }
 
+    /// Aborts a compaction in progress. A second call while it is already
+    /// stopping, or a call when nothing is compacting, does nothing.
+    pub fn cancel_compaction(&self) {
+        self.shared.cancel_compaction();
+    }
+
     pub fn set_mode(&self, mode: AgentMode) {
         self.shared.set_mode(mode);
     }

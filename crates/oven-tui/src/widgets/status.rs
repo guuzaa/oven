@@ -708,6 +708,12 @@ mod tests {
                 error: "boom".into(),
             },
         )));
+        bar.on_event(&AppEvent::new(AppEventKind::Compaction(
+            CompactionEvent::Started,
+        )));
+        bar.on_event(&AppEvent::new(AppEventKind::Compaction(
+            CompactionEvent::Cancelled,
+        )));
         let rendered = row(120, &bar, &state);
         assert!(!rendered.contains(COMPACTING), "{rendered}");
         assert!(rendered.contains(CTX), "{rendered}");

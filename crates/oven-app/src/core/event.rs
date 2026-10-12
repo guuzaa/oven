@@ -54,6 +54,8 @@ pub enum SubagentEvent {
     Focus { id: AgentId },
 }
 
+pub const COMPACTION_CANCELLED: &str = "compaction cancelled";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionEvent {
     Started,
@@ -64,6 +66,8 @@ pub enum CompactionEvent {
     Failed {
         error: String,
     },
+    /// The summary request was aborted. History and the session file are unchanged.
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

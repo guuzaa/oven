@@ -129,7 +129,7 @@ auto-pruning dead ones:
 | `Subagent(SubagentEvent)` | `Focus { id }` — a frontend should open a view on one subagent |
 | `HistoryChanged { reason }` | the history was replaced wholesale — rewind, `/clear`, compaction (see [State](#state)) |
 | `Shell(ShellEvent)` | `!cmd` started, finished, failed |
-| `Compaction(CompactionEvent)` | history compaction started, completed (before/after tokens), failed |
+| `Compaction(CompactionEvent)` | history compaction started, completed (before/after tokens), failed, or cancelled |
 | `Notification { text }` | one-shot backend replies: `/model` confirmations, errors that are not fatal |
 | `Error { message }` | turn or IO failure; the runtime keeps running |
 | `Exited` | `/exit` accepted |
@@ -174,11 +174,16 @@ Everything else a user does mid-turn reaches the turn through `Shared`:
 - `TurnContext` carries `Shared` as its `PendingPrompts`: the parked chats
   `App::steer` left, which the turn takes when it uploads tool results.
 - `App::cancel(turn_id)` cancels only if `turn_id` is still the running turn.
+  Compaction is not a turn, so `App::cancel_compaction` is what aborts it;
+  the TUI's cancel key calls that while the phase is `Compacting`.
 
 After the turn: session meta is stamped, trailing agent events are drained,
-the turn is persisted, state is synced, and if context usage reached
-`compact_threshold` the history is compacted. The phase returns to `Idle`
-regardless, so a failed turn never wedges the UI.
+and state is synced. If context usage reached `compact_threshold`,
+auto-compaction is armed before the turn is persisted, so a cancel during
+that write aborts the summary and never calls the model. The finished turn
+stays persisted; cancelling the summary does not reclassify it as a cancelled
+turn. The phase returns to `Idle` when the driver is free, and stays
+`ShuttingDown` if shutdown already won, so a failed turn never wedges the UI.
 
 ## State
 
@@ -201,7 +206,8 @@ The snapshot is the only carrier of levels — mode, model, reasoning effort,
 context window, providers, models, subagents, the phase itself — so a frontend
 reads them as they stand and no event repeats them. What an `Awaiting` turn
 waits for is the agent event that announced the request, not part of the phase,
-and `Compacting` marks the driver busy summarizing with no turn to cancel. The
+and `Compacting` marks the driver busy summarizing. Cancel aborts that summary
+request, including mid-stream, and leaves the session file where it was. The
 one thing a snapshot cannot say is that the history was replaced, so that goes
 out as `HistoryChanged { reason }` (`Rewound`, `Cleared`, `Compacted`,
 `External`): a view rebuilds itself from the state and tells a rewind from a
