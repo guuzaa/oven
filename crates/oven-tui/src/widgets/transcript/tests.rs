@@ -3823,6 +3823,83 @@ See [docs](https://example.com).
 }
 
 #[test]
+fn selecting_inside_a_table_cell_does_not_copy_the_row() {
+    const SRC: &str = "| left | right |\n| --- | --- |\n| L | R |\n";
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, SRC);
+    ready(&mut t, Rect::new(0, 0, 40, 8));
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 7, 0),
+        &State::new(),
+    );
+    let copied = t.selected_text().expect("selection");
+    assert!(copied.contains("left"), "{copied}");
+    assert!(!copied.contains("right"), "{copied}");
+}
+
+#[test]
+fn wrapped_table_stays_inside_its_columns_and_copies_the_source() {
+    const SRC: &str = "| k | value |\n| --- | --- |\n| a | 0123456789abcdef |\n";
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, SRC);
+    ready(&mut t, Rect::new(0, 0, 16, 12));
+    let shown = line_texts(&t.wrapped);
+    let head = shown
+        .iter()
+        .find(|line| line.contains("0123456789"))
+        .expect("wrapped head");
+    let tail = shown
+        .iter()
+        .find(|line| line.contains("abcdef"))
+        .expect("wrapped tail");
+    assert!(!head.contains("abcdef"), "{shown:?}");
+    assert!(!tail.contains("0123456789"), "{shown:?}");
+    assert_eq!(
+        head.find("0123456789"),
+        tail.find("abcdef"),
+        "continuation stays in the value column: {shown:?}"
+    );
+    let last = t.wrapped.len() - 1;
+    select_rows(&mut t, 0, last);
+    assert_eq!(
+        t.selected_text().as_deref(),
+        Some(SRC.trim_end_matches('\n'))
+    );
+}
+
+#[test]
+fn a_cell_break_stays_in_the_column_and_copies_the_source() {
+    const SRC: &str = "| k | hi |\n| --- | --- |\n| a | ab<br>cd |\n";
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, SRC);
+    ready(&mut t, Rect::new(0, 0, 40, 10));
+    let shown = line_texts(&t.wrapped);
+    let head = shown
+        .iter()
+        .find(|line| line.contains("ab"))
+        .expect("first cell line");
+    let tail = shown
+        .iter()
+        .find(|line| line.contains("cd") && !line.contains("ab"))
+        .expect("second cell line");
+    assert_eq!(
+        head.find("ab"),
+        tail.find("cd"),
+        "the break stays in the column: {shown:?}"
+    );
+    let last = t.wrapped.len() - 1;
+    select_rows(&mut t, 0, last);
+    assert_eq!(
+        t.selected_text().as_deref(),
+        Some(SRC.trim_end_matches('\n'))
+    );
+}
+
+#[test]
 fn copying_a_wrapped_markdown_line_omits_the_soft_break() {
     const SRC: &str = "**abcdef**";
     let mut t = Transcript::new();

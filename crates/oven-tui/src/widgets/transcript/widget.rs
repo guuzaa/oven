@@ -19,7 +19,7 @@ use crate::core::theme;
 use crate::platform::clipboard;
 
 use super::kinds::{Header, LineKind, Row};
-use super::markdown::{LineCopy, copied_text};
+use super::markdown::{CopyBuf, LineCopy};
 use super::selection::{SelPos, highlight_line};
 use super::wrap::{
     Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
@@ -1100,7 +1100,7 @@ impl Transcript {
 
     pub(super) fn selected_text(&self) -> Option<String> {
         let (start, end) = self.normalized_sel()?;
-        let mut out = String::new();
+        let mut buf = CopyBuf::new();
         for idx in start.line..=end.line {
             let Some(line) = self.line_at(idx) else {
                 break;
@@ -1111,13 +1111,9 @@ impl Transcript {
             } else {
                 line_display_width(line)
             };
-            let (break_before, text) = copied_text(&self.copy_at(idx), line, from, to);
-            if idx > start.line && break_before {
-                out.push('\n');
-            }
-            out.push_str(&text);
+            buf.push(&self.copy_at(idx), line, from, to, idx > start.line);
         }
-        if out.is_empty() { None } else { Some(out) }
+        buf.finish()
     }
 }
 

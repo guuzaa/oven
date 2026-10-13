@@ -22,6 +22,7 @@ const FENCE_MIN: usize = 3;
 const HEADING_MAX: usize = 6;
 const TAB_WIDTH: usize = 4;
 const TABLE_GAP: usize = 2;
+const MIN_COL_WIDTH: usize = 1;
 
 #[derive(Clone)]
 struct Run {
@@ -36,6 +37,7 @@ pub(super) struct MdLine {
     pub hang: usize,
     source: Arc<str>,
     runs: Arc<[Run]>,
+    table: Option<TableMeta>,
 }
 
 #[derive(Clone)]
@@ -74,10 +76,9 @@ impl MdLine {
 }
 
 impl MdCopy {
-    /// Source text covered by display columns `[from, to)` of this visual row.
-    pub(super) fn slice(&self, from: usize, to: usize) -> String {
+    fn ranges_between(&self, from: usize, to: usize) -> Vec<Range<usize>> {
         if from >= to {
-            return String::new();
+            return Vec::new();
         }
         let start = self
             .body_from
@@ -87,28 +88,121 @@ impl MdCopy {
             .body_from
             .saturating_add(to.saturating_sub(self.origin))
             .clamp(start, self.body_to);
-        let mut out = String::new();
+        let mut out = Vec::new();
         for run in self.runs.iter() {
             let owned = run.col >= self.body_from && run.col < self.body_to;
             let overlaps = run.col < end && run.col + run.width > start;
-            if owned && overlaps {
-                out.push_str(&self.source[run.start..run.end]);
+            if owned && overlaps && run.start < run.end {
+                out.push(run.start..run.end);
             }
         }
         out
     }
 }
 
-pub(super) fn copied_text(
-    copy: &LineCopy,
-    line: &Line<'_>,
-    from: usize,
-    to: usize,
-) -> (bool, String) {
-    match copy {
-        LineCopy::Visual => (true, extract_line_range(line, from, to)),
-        LineCopy::Markdown(md) => (md.break_before, md.slice(from, to)),
+/// Joins a drag. Soft-wrapped pieces of one source line merge by source
+/// offset, so a table row wrapped inside its columns still copies in order.
+pub(super) struct CopyBuf {
+    out: String,
+    pending: Option<PendingCopy>,
+}
+
+struct PendingCopy {
+    source: Arc<str>,
+    ranges: Vec<Range<usize>>,
+}
+
+impl CopyBuf {
+    pub(super) fn new() -> Self {
+        Self {
+            out: String::new(),
+            pending: None,
+        }
     }
+
+    pub(super) fn push(
+        &mut self,
+        copy: &LineCopy,
+        line: &Line<'_>,
+        from: usize,
+        to: usize,
+        after_start: bool,
+    ) {
+        match copy {
+            LineCopy::Visual => {
+                self.flush();
+                if after_start {
+                    self.out.push('\n');
+                }
+                self.out.push_str(&extract_line_range(line, from, to));
+            }
+            LineCopy::Markdown(md) => {
+                let ranges = md.ranges_between(from, to);
+                let newline = after_start && md.break_before;
+                let same = !newline
+                    && self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| Arc::ptr_eq(&pending.source, &md.source));
+                if same && let Some(pending) = self.pending.as_mut() {
+                    pending.ranges.extend(ranges);
+                    return;
+                }
+                self.flush();
+                if newline {
+                    self.out.push('\n');
+                }
+                self.pending = Some(PendingCopy {
+                    source: Arc::clone(&md.source),
+                    ranges,
+                });
+            }
+        }
+    }
+
+    pub(super) fn finish(mut self) -> Option<String> {
+        self.flush();
+        if self.out.is_empty() {
+            None
+        } else {
+            Some(self.out)
+        }
+    }
+
+    fn flush(&mut self) {
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        self.out
+            .push_str(&emit_ranges(&pending.source, &pending.ranges));
+    }
+}
+
+fn emit_ranges(source: &str, ranges: &[Range<usize>]) -> String {
+    let mut spans: Vec<Range<usize>> = ranges
+        .iter()
+        .filter(|range| range.start < range.end)
+        .cloned()
+        .collect();
+    spans.sort_by_key(|range| (range.start, range.end));
+    let len = source.len();
+    let mut out = String::new();
+    let mut covered = 0;
+    let mut begun = false;
+    for range in spans {
+        let mut start = range.start.min(len);
+        let end = range.end.min(len);
+        if begun && start < covered {
+            start = covered;
+        }
+        if start >= end {
+            continue;
+        }
+        out.push_str(&source[start..end]);
+        covered = end;
+        begun = true;
+    }
+    out
 }
 
 pub(super) fn render_markdown(text: &str) -> Vec<MdLine> {
@@ -528,6 +622,7 @@ impl Builder {
             hang,
             source: Arc::from(self.source),
             runs: Arc::from(self.runs),
+            table: None,
         }
     }
 }
@@ -643,6 +738,7 @@ fn blank_line(line: &str) -> MdLine {
         hang: 0,
         source: Arc::from(line),
         runs: Arc::from(Vec::new()),
+        table: None,
     }
 }
 
@@ -730,121 +826,706 @@ fn is_table_separator(line: &str) -> bool {
     dashes >= FENCE_MIN
 }
 
+#[derive(Clone)]
+struct Atom {
+    text: String,
+    style: Style,
+    width: usize,
+    start: usize,
+    end: usize,
+}
+
+struct TableMeta {
+    separator: bool,
+    style: Style,
+    indent: Vec<Atom>,
+    widths: Vec<usize>,
+    gaps: Vec<Vec<Atom>>,
+    /// Each cell is a list of lines. A `<br>` starts a new line.
+    cells: Vec<Vec<Vec<Atom>>>,
+}
+
+#[derive(Clone, Copy)]
+struct CellRange {
+    start: usize,
+    end: usize,
+}
+
+enum Group {
+    Indent(Vec<Atom>),
+    Cell(Vec<Atom>),
+    Gap(Vec<Atom>),
+}
+
+impl Group {
+    fn atoms_mut(&mut self) -> &mut Vec<Atom> {
+        match self {
+            Self::Indent(atoms) | Self::Cell(atoms) | Self::Gap(atoms) => atoms,
+        }
+    }
+}
+
 fn render_table(lines: &[&str]) -> Vec<MdLine> {
-    let cells: Vec<Vec<String>> = lines
+    let cols = lines
         .iter()
-        .enumerate()
-        .map(|(idx, line)| {
-            if idx == 1 {
-                Vec::new()
-            } else {
-                split_cells(line)
-            }
-        })
-        .collect();
-    let cols = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
-    let mut widths = vec![0; cols];
-    for row in &cells {
-        for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.width());
+        .map(|line| cell_ranges(line).len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut widths = vec![MIN_COL_WIDTH; cols];
+    for (idx, line) in lines.iter().enumerate() {
+        if idx == 1 {
+            continue;
+        }
+        let style = row_style(idx);
+        for (i, range) in pad_ranges(&cell_ranges(line), cols, line.len())
+            .iter()
+            .enumerate()
+        {
+            let lines = cell_lines(&line[range.start..range.end], range.start, style);
+            let width = lines.iter().map(|line| atom_width(line)).max().unwrap_or(0);
+            widths[i] = widths[i].max(width.max(MIN_COL_WIDTH));
         }
     }
     lines
         .iter()
         .enumerate()
         .map(|(idx, line)| {
-            let indent = leading_indent(line);
-            let body = if idx == 1 {
-                widths
-                    .iter()
-                    .map(|w| "-".repeat((*w).max(1)))
-                    .collect::<Vec<_>>()
-                    .join(&" ".repeat(TABLE_GAP))
-            } else {
-                let row = &cells[idx];
-                (0..cols)
-                    .map(|i| {
-                        let cell = row.get(i).map(String::as_str).unwrap_or("");
-                        let pad = widths[i].saturating_sub(cell.width());
-                        format!("{cell}{}", " ".repeat(pad))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(&" ".repeat(TABLE_GAP))
-            };
-            let style = if idx == 0 {
-                Style::default().add_modifier(Modifier::BOLD)
-            } else if idx == 1 {
-                theme::dim()
-            } else {
-                Style::default()
-            };
-            table_line(line, &indent, &body, style)
+            let style = row_style(idx);
+            let ranges = pad_ranges(&cell_ranges(line), cols, line.len());
+            let cells = ranges
+                .iter()
+                .enumerate()
+                .map(|(i, range)| {
+                    if idx == 1 {
+                        vec![fill_atoms("-", widths[i], range.start, range.end, style)]
+                    } else {
+                        cell_lines(&line[range.start..range.end], range.start, style)
+                    }
+                })
+                .collect();
+            compose_row(line, &widths, style, idx == 1, cells, &ranges)
         })
         .collect()
 }
 
-fn table_line(source: &str, indent: &str, body: &str, style: Style) -> MdLine {
-    let display = format!("{indent}{body}");
-    let width = display.width();
-    let mut spans = Vec::new();
-    if !indent.is_empty() {
-        spans.push(Span::raw(indent.to_string()));
+fn row_style(idx: usize) -> Style {
+    if idx == 0 {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else if idx == 1 {
+        theme::dim()
+    } else {
+        Style::default()
     }
-    if !body.is_empty() {
-        spans.push(if style == Style::default() {
-            Span::raw(body.to_string())
+}
+
+fn compose_row(
+    line: &str,
+    widths: &[usize],
+    style: Style,
+    separator: bool,
+    cells: Vec<Vec<Vec<Atom>>>,
+    ranges: &[CellRange],
+) -> MdLine {
+    let (hang, indent) = indent_atoms(line);
+    let mut groups = vec![Group::Indent(indent)];
+    let mut counts = Vec::new();
+    let mut line_ws = Vec::new();
+    for (i, cell) in cells.into_iter().enumerate() {
+        if i > 0 {
+            let from = ranges[i - 1].end;
+            let to = ranges[i].start;
+            groups.push(Group::Gap(fill_atoms(" ", TABLE_GAP, from, to, style)));
+        }
+        let line_w = cell.iter().map(|line| atom_width(line)).max().unwrap_or(0);
+        counts.push(cell.iter().map(Vec::len).collect::<Vec<_>>());
+        line_ws.push(line_w);
+        groups.push(Group::Cell(cell.into_iter().flatten().collect()));
+    }
+    seal(&mut groups, line.len());
+
+    let mut indent = Vec::new();
+    let mut gaps = Vec::new();
+    let mut cell_atoms = Vec::new();
+    let mut flat = Vec::new();
+    let mut cursor = 0;
+    for group in groups {
+        match group {
+            Group::Indent(atoms) => {
+                cursor = atoms.last().map(|atom| atom.end).unwrap_or(cursor);
+                flat.extend(atoms.iter().cloned());
+                indent = atoms;
+            }
+            Group::Cell(atoms) => {
+                let col = cell_atoms.len();
+                let at = atoms.last().map(|atom| atom.end).unwrap_or(cursor);
+                let last = col + 1 == widths.len();
+                let pad = if last {
+                    0
+                } else {
+                    widths
+                        .get(col)
+                        .copied()
+                        .unwrap_or(MIN_COL_WIDTH)
+                        .saturating_sub(line_ws[col])
+                };
+                flat.extend(atoms.iter().cloned());
+                flat.extend(pad_atoms(pad, at, style));
+                cursor = at;
+                cell_atoms.push(resplit(atoms, &counts[col]));
+            }
+            Group::Gap(atoms) => {
+                cursor = atoms.last().map(|atom| atom.end).unwrap_or(cursor);
+                flat.extend(atoms.iter().cloned());
+                gaps.push(atoms);
+            }
+        }
+    }
+    let (spans, runs) = paint(&flat);
+    MdLine {
+        spans,
+        hang,
+        source: Arc::from(line),
+        runs: Arc::from(runs),
+        table: Some(TableMeta {
+            separator,
+            style,
+            indent,
+            widths: widths.to_vec(),
+            gaps,
+            cells: cell_atoms,
+        }),
+    }
+}
+
+/// Stacks `<br>` lines and, when the row is wider than `avail`, wraps each
+/// column inside its own box. `None` when the row is already a single fitted line.
+pub(super) fn layout_table(md: &MdLine, avail: usize) -> Option<Vec<MdLine>> {
+    let table = md.table.as_ref()?;
+    let indent_w = atom_width(&table.indent);
+    let gap_w: usize = table.gaps.iter().map(|gap| atom_width(gap)).sum();
+    let boxes: usize = table.widths.iter().sum();
+    let broken = table.cells.iter().any(|cell| cell.len() > 1);
+    if !broken && indent_w + gap_w + boxes <= avail {
+        return None;
+    }
+    let fitted = fit_columns(
+        &table.widths,
+        avail.saturating_sub(indent_w).saturating_sub(gap_w),
+    );
+    let wrapped: Vec<Vec<Vec<Atom>>> = table
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(i, cell)| {
+            let width = fitted
+                .get(i)
+                .copied()
+                .unwrap_or(MIN_COL_WIDTH)
+                .max(MIN_COL_WIDTH);
+            if table.separator {
+                let (start, end) = atom_bounds_lines(cell);
+                vec![fill_atoms("-", width, start, end, table.style)]
+            } else {
+                let mut lines = Vec::new();
+                for line in cell {
+                    lines.extend(wrap_atoms(line, width));
+                }
+                if lines.is_empty() {
+                    lines.push(Vec::new());
+                }
+                lines
+            }
+        })
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let mut lines = Vec::with_capacity(height);
+    for row in 0..height {
+        let mut atoms = Vec::new();
+        if row == 0 {
+            atoms.extend(table.indent.iter().cloned());
         } else {
-            Span::styled(body.to_string(), style)
+            atoms.extend(blank_atoms(&table.indent));
+        }
+        for (i, cell_lines) in wrapped.iter().enumerate() {
+            if i > 0 {
+                let gap = &table.gaps[i - 1];
+                if row == 0 {
+                    atoms.extend(gap.iter().cloned());
+                } else {
+                    atoms.extend(blank_atoms(gap));
+                }
+            }
+            let content = cell_lines.get(row).map(Vec::as_slice).unwrap_or(&[]);
+            let width = fitted
+                .get(i)
+                .copied()
+                .unwrap_or(MIN_COL_WIDTH)
+                .max(MIN_COL_WIDTH);
+            let at = content.last().map(|atom| atom.end).unwrap_or(0);
+            let last = i + 1 == wrapped.len();
+            atoms.extend(content.iter().cloned());
+            if !last {
+                atoms.extend(pad_atoms(
+                    width.saturating_sub(atom_width(content)),
+                    at,
+                    table.style,
+                ));
+            }
+        }
+        lines.push(md_from_atoms(Arc::clone(&md.source), &atoms, 0));
+    }
+    Some(lines)
+}
+
+fn fit_columns(natural: &[usize], budget: usize) -> Vec<usize> {
+    let mut widths = natural.to_vec();
+    let mut sum: usize = widths.iter().sum();
+    if sum <= budget {
+        return widths;
+    }
+    while sum > budget {
+        let Some(i) = widths
+            .iter()
+            .enumerate()
+            .filter(|(_, width)| **width > MIN_COL_WIDTH)
+            .max_by_key(|(_, width)| *width)
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        widths[i] -= 1;
+        sum -= 1;
+    }
+    widths
+}
+
+fn wrap_atoms(atoms: &[Atom], width: usize) -> Vec<Vec<Atom>> {
+    if atoms.is_empty() {
+        return vec![Vec::new()];
+    }
+    let width = width.max(MIN_COL_WIDTH);
+    let mut lines = Vec::new();
+    let mut cur = Vec::new();
+    let mut used = 0;
+    for atom in atoms {
+        let w = atom.width.max(MIN_COL_WIDTH);
+        if used > 0 && used + w > width {
+            lines.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        cur.push(atom.clone());
+        used += atom.width;
+        if used >= width {
+            lines.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+    lines
+}
+
+fn seal(groups: &mut [Group], len: usize) {
+    let mut prev_end = 0;
+    let mut first = true;
+    for group in groups.iter_mut() {
+        for atom in group.atoms_mut() {
+            if first {
+                if atom.start > 0 {
+                    atom.start = 0;
+                }
+                first = false;
+            } else if atom.start > prev_end {
+                atom.start = prev_end;
+            }
+            if atom.end < atom.start {
+                atom.end = atom.start;
+            }
+            prev_end = atom.end;
+        }
+    }
+    if let Some(last) = groups
+        .iter_mut()
+        .rev()
+        .find_map(|group| group.atoms_mut().last_mut())
+        && last.end < len
+    {
+        last.end = len;
+    }
+}
+
+fn cell_ranges(line: &str) -> Vec<CellRange> {
+    let indent = leading_bytes(line);
+    let end = line.trim_end().len();
+    if indent >= end {
+        return vec![CellRange {
+            start: indent,
+            end: indent,
+        }];
+    }
+    let mut start = indent;
+    let mut stop = end;
+    if line.as_bytes().get(start) == Some(&b'|') {
+        start += 1;
+    }
+    if stop > start && line.as_bytes().get(stop - 1) == Some(&b'|') {
+        stop -= 1;
+    }
+    let mut cells = Vec::new();
+    let mut cell_at = start;
+    for (rel, _) in line[start..stop].match_indices('|') {
+        let abs = start + rel;
+        cells.push(trim_cell(line, cell_at, abs));
+        cell_at = abs + 1;
+    }
+    cells.push(trim_cell(line, cell_at, stop));
+    cells
+}
+
+fn pad_ranges(ranges: &[CellRange], cols: usize, len: usize) -> Vec<CellRange> {
+    let mut out = ranges.to_vec();
+    while out.len() < cols {
+        out.push(CellRange {
+            start: len,
+            end: len,
+        });
+    }
+    out
+}
+
+fn trim_cell(line: &str, start: usize, end: usize) -> CellRange {
+    let text = &line[start..end];
+    let lead = text.len() - text.trim_start().len();
+    let trimmed_len = text.trim().len();
+    let text_start = start + lead;
+    CellRange {
+        start: text_start,
+        end: text_start + trimmed_len,
+    }
+}
+
+fn cell_lines(text: &str, offset: usize, style: Style) -> Vec<Vec<Atom>> {
+    if text.is_empty() {
+        return vec![Vec::new()];
+    }
+    let breaks = line_breaks(text);
+    if breaks.is_empty() {
+        return vec![render_cell(text, offset, style)];
+    }
+    let mut lines = Vec::new();
+    let mut cursor = 0;
+    let mut pending = offset;
+    for br in &breaks {
+        let mut atoms = render_cell(&text[cursor..br.start], offset + cursor, style);
+        if let Some(atom) = atoms.first_mut()
+            && pending < atom.start
+        {
+            atom.start = pending;
+        }
+        if let Some(atom) = atoms.last_mut() {
+            atom.end = atom.end.max(offset + br.end);
+            pending = atom.end;
+        } else {
+            pending = offset + br.end;
+        }
+        lines.push(atoms);
+        cursor = br.end;
+    }
+    let mut tail = render_cell(&text[cursor..], offset + cursor, style);
+    if let Some(atom) = tail.first_mut()
+        && pending < atom.start
+    {
+        atom.start = pending;
+    }
+    if !tail.is_empty() {
+        lines.push(tail);
+    }
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+    lines
+}
+
+fn line_breaks(text: &str) -> Vec<Range<usize>> {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    let mut breaks = Vec::new();
+    for (event, range) in Parser::new_ext(text, opts).into_offset_iter() {
+        let split = match &event {
+            Event::HardBreak => true,
+            Event::InlineHtml(html) | Event::Html(html) => is_br(html),
+            _ => false,
+        };
+        if split {
+            breaks.push(range);
+        }
+    }
+    breaks
+}
+
+fn is_br(html: &str) -> bool {
+    let Some(inner) = html.trim().strip_prefix('<') else {
+        return false;
+    };
+    let Some(inner) = inner.strip_suffix('>') else {
+        return false;
+    };
+    inner
+        .trim()
+        .trim_end_matches('/')
+        .trim()
+        .eq_ignore_ascii_case("br")
+}
+
+fn resplit(mut atoms: Vec<Atom>, counts: &[usize]) -> Vec<Vec<Atom>> {
+    let mut lines: Vec<Vec<Atom>> = Vec::with_capacity(counts.len());
+    for count in counts {
+        let n = (*count).min(atoms.len());
+        lines.push(atoms.drain(..n).collect());
+    }
+    if !atoms.is_empty()
+        && let Some(last) = lines.last_mut()
+    {
+        last.append(&mut atoms);
+    }
+    if lines.is_empty() {
+        lines.push(Vec::new());
+    }
+    lines
+}
+
+fn render_cell(text: &str, offset: usize, style: Style) -> Vec<Atom> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut atoms = Vec::new();
+    for piece in inline_pieces(text, style) {
+        let src_start = offset + piece.range.start;
+        let src_end = offset + piece.range.end;
+        let origin = &text[piece.origin.start..piece.origin.end];
+        let inner = origin.find(&piece.display).unwrap_or(0);
+        let disp_start = offset + piece.origin.start + inner;
+        atoms.extend(display_atoms(
+            &piece.display,
+            src_start,
+            src_end,
+            disp_start,
+            piece.style,
+        ));
+    }
+    atoms
+}
+
+fn display_atoms(
+    display: &str,
+    src_start: usize,
+    src_end: usize,
+    disp_start: usize,
+    style: Style,
+) -> Vec<Atom> {
+    if display.is_empty() {
+        return Vec::new();
+    }
+    let mut atoms = Vec::new();
+    let mut byte = disp_start;
+    let chars: Vec<char> = display.chars().collect();
+    let mut carried = src_start;
+    for (i, ch) in chars.iter().enumerate() {
+        let len = ch.len_utf8();
+        let mut start = if i == 0 { src_start } else { byte };
+        let mut end = if i + 1 == chars.len() {
+            src_end
+        } else {
+            byte + len
+        };
+        if start > end {
+            end = start;
+        }
+        let w = width_of(*ch);
+        if w == 0 {
+            carried = start;
+            byte += len;
+            continue;
+        }
+        if carried < start {
+            start = carried;
+        }
+        carried = end;
+        let text = if *ch == '\t' {
+            "    ".to_string()
+        } else {
+            ch.to_string()
+        };
+        atoms.push(Atom {
+            text,
+            style,
+            width: w,
+            start,
+            end,
+        });
+        byte += len;
+    }
+    atoms
+}
+
+fn fill_atoms(
+    unit: &str,
+    count: usize,
+    src_start: usize,
+    src_end: usize,
+    style: Style,
+) -> Vec<Atom> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let src_end = src_end.max(src_start);
+    let span = src_end - src_start;
+    let mut atoms = Vec::with_capacity(count);
+    let mut pos = src_start;
+    for i in 0..count {
+        let next = if i + 1 == count {
+            src_end
+        } else {
+            src_start + span * (i + 1) / count
+        };
+        atoms.push(Atom {
+            text: unit.to_string(),
+            style,
+            width: unit.width().max(MIN_COL_WIDTH),
+            start: pos,
+            end: next,
+        });
+        pos = next;
+    }
+    atoms
+}
+
+fn pad_atoms(count: usize, at: usize, style: Style) -> Vec<Atom> {
+    (0..count)
+        .map(|_| Atom {
+            text: " ".to_string(),
+            style,
+            width: 1,
+            start: at,
+            end: at,
+        })
+        .collect()
+}
+
+fn blank_atoms(atoms: &[Atom]) -> Vec<Atom> {
+    atoms
+        .iter()
+        .map(|atom| Atom {
+            text: atom.text.clone(),
+            style: atom.style,
+            width: atom.width,
+            start: 0,
+            end: 0,
+        })
+        .collect()
+}
+
+fn indent_atoms(line: &str) -> (usize, Vec<Atom>) {
+    let bytes = leading_bytes(line);
+    let mut atoms = Vec::new();
+    let mut i = 0;
+    let mut cols = 0;
+    while i < bytes {
+        let Some(ch) = line[i..].chars().next() else {
+            break;
+        };
+        let len = ch.len_utf8();
+        let w = width_of(ch);
+        if w > 0 {
+            let text = if ch == '\t' {
+                "    ".to_string()
+            } else {
+                ch.to_string()
+            };
+            atoms.push(Atom {
+                text,
+                style: Style::default(),
+                width: w,
+                start: i,
+                end: i + len,
+            });
+            cols += w;
+        }
+        i += len;
+    }
+    (cols, atoms)
+}
+
+fn paint(atoms: &[Atom]) -> (Vec<Span<'static>>, Vec<Run>) {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut runs = Vec::new();
+    let mut col = 0;
+    for atom in atoms {
+        if atom.width == 0 {
+            continue;
+        }
+        runs.push(Run {
+            col,
+            width: atom.width,
+            start: atom.start,
+            end: atom.end,
+        });
+        col += atom.width;
+        if atom.text.is_empty() {
+            continue;
+        }
+        if let Some(last) = spans.last_mut()
+            && last.style == atom.style
+        {
+            last.content.to_mut().push_str(&atom.text);
+            continue;
+        }
+        spans.push(if atom.style == Style::default() {
+            Span::raw(atom.text.clone())
+        } else {
+            Span::styled(atom.text.clone(), atom.style)
         });
     }
     if spans.is_empty() {
         spans.push(Span::raw(""));
     }
-    let runs = if width == 0 {
-        Vec::new()
-    } else {
-        vec![Run {
-            col: 0,
-            width,
-            start: 0,
-            end: source.len(),
-        }]
-    };
+    (spans, runs)
+}
+
+fn md_from_atoms(source: Arc<str>, atoms: &[Atom], hang: usize) -> MdLine {
+    let (spans, runs) = paint(atoms);
     MdLine {
         spans,
-        hang: indent.width(),
-        source: Arc::from(source),
+        hang,
+        source,
         runs: Arc::from(runs),
+        table: None,
     }
 }
 
-fn split_cells(line: &str) -> Vec<String> {
-    let trimmed = line.trim().trim_start_matches('|').trim_end_matches('|');
-    trimmed
-        .split('|')
-        .map(|cell| inline_display(cell.trim()))
-        .collect()
+fn atom_width(atoms: &[Atom]) -> usize {
+    atoms.iter().map(|atom| atom.width).sum()
 }
 
-fn inline_display(content: &str) -> String {
-    inline_pieces(content, Style::default())
-        .into_iter()
-        .map(|piece| piece.display)
-        .collect()
-}
-
-fn leading_indent(line: &str) -> String {
-    let mut out = String::new();
-    for ch in line.chars() {
-        if ch == ' ' {
-            out.push(' ');
-        } else if ch == '\t' {
-            out.push_str("    ");
-        } else {
-            break;
-        }
-    }
-    out
+fn atom_bounds_lines(lines: &[Vec<Atom>]) -> (usize, usize) {
+    let start = lines
+        .iter()
+        .flatten()
+        .map(|atom| atom.start)
+        .min()
+        .unwrap_or(0);
+    let end = lines
+        .iter()
+        .flatten()
+        .map(|atom| atom.end)
+        .max()
+        .unwrap_or(start);
+    (start, end)
 }
 
 fn leading_bytes(line: &str) -> usize {
@@ -871,6 +1552,8 @@ fn width_of(ch: char) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::*;
 
     fn show(line: &MdLine) -> String {
@@ -911,6 +1594,8 @@ mod tests {
             "---",
             "```\nlet x = 1;\n```",
             "| a | b |\n| --- | --- |\n| **c** | d |",
+            "|  | b |\n| --- | --- |\n| c | d |",
+            "| 你 | 好 |\n| --- | --- |\n| 甲 | 乙 |",
             "**open and tail",
         ];
         for sample in SAMPLES {
@@ -954,5 +1639,55 @@ mod tests {
         assert_eq!(render_markdown("# Title")[0].source.as_ref(), "# Title");
         assert_eq!(render_markdown("  - nested")[0].hang, 4);
         assert_eq!(render_markdown("  > quote")[0].hang, 4);
+    }
+
+    #[test]
+    fn selecting_a_table_cell_copies_that_cell() {
+        let lines = render_markdown("| left | right |\n| --- | --- |\n| L | R |");
+        let header = &lines[0];
+        assert_eq!(show(header), "left  right");
+        let width = show(header).width();
+        let copy = header.copy_window(0, 0, width, true);
+        let copied = emit_ranges(&header.source, &copy.ranges_between(0, "left".width()));
+        assert!(copied.contains("left"), "{copied}");
+        assert!(!copied.contains("right"), "{copied}");
+        let all = emit_ranges(&header.source, &copy.ranges_between(0, width));
+        assert_eq!(all, "| left | right |");
+    }
+
+    #[test]
+    fn wide_table_wraps_inside_the_column() {
+        let lines = render_markdown("| k | value |\n| --- | --- |\n| a | 0123456789abcdef |");
+        let body = lines
+            .iter()
+            .find(|line| line.source.contains("0123456789"))
+            .expect("body row");
+        let laid = layout_table(body, 13).expect("column wrap");
+        let shown: Vec<String> = laid.iter().map(show).collect();
+        assert_eq!(shown, ["a  0123456789", "   abcdef"]);
+        let mut ranges = Vec::new();
+        for line in &laid {
+            let width = show(line).width();
+            ranges.extend(line.copy_window(0, 0, width, true).ranges_between(0, width));
+        }
+        assert_eq!(emit_ranges(&body.source, &ranges), body.source.as_ref());
+    }
+
+    #[test]
+    fn a_break_in_a_cell_stays_in_its_column() {
+        let lines = render_markdown("| k | hi |\n| --- | --- |\n| a | ab<br>cd |");
+        let body = lines
+            .iter()
+            .find(|line| line.source.contains("ab<br>cd"))
+            .expect("body row");
+        let laid = layout_table(body, 40).expect("cell break");
+        let shown: Vec<String> = laid.iter().map(show).collect();
+        assert_eq!(shown, ["a  ab", "   cd"]);
+        let mut ranges = Vec::new();
+        for line in &laid {
+            let width = show(line).width();
+            ranges.extend(line.copy_window(0, 0, width, true).ranges_between(0, width));
+        }
+        assert_eq!(emit_ranges(&body.source, &ranges), body.source.as_ref());
     }
 }

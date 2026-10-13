@@ -14,7 +14,7 @@ use super::collapsible::{Collapsible, Section};
 use super::kinds::{
     COLLAPSED_MARKER, EXPANDED_MARKER, Header, LINE_INDENT, LineKind, MESSAGE_INDENT,
 };
-use super::markdown::{LineCopy, MdLine, render_markdown};
+use super::markdown::{LineCopy, MdLine, layout_table, render_markdown};
 use crate::core::theme;
 
 pub(super) struct Buf<'a> {
@@ -621,6 +621,39 @@ fn wrap_markdown_into(buf: &mut Buf<'_>, text: &str, width: usize) {
 
 fn wrap_md_line(buf: &mut Buf<'_>, gutter: &str, gutter_style: Style, md: &MdLine, width: usize) {
     let gutter_w = gutter.width();
+    let body_cols = glyphs_of(&md.spans)
+        .iter()
+        .map(|glyph| glyph.width)
+        .sum::<usize>();
+    let avail = if width == 0 {
+        body_cols.max(1)
+    } else {
+        width.saturating_sub(gutter_w).max(1)
+    };
+    if let Some(lines) = layout_table(md, avail) {
+        let continuation = " ".repeat(gutter_w);
+        for (i, line) in lines.iter().enumerate() {
+            let row_gutter = if i == 0 {
+                gutter
+            } else {
+                continuation.as_str()
+            };
+            wrap_md_plain(buf, row_gutter, gutter_style, line, width, i == 0);
+        }
+        return;
+    }
+    wrap_md_plain(buf, gutter, gutter_style, md, width, true);
+}
+
+fn wrap_md_plain(
+    buf: &mut Buf<'_>,
+    gutter: &str,
+    gutter_style: Style,
+    md: &MdLine,
+    width: usize,
+    hard_break: bool,
+) {
+    let gutter_w = gutter.width();
     let glyphs = glyphs_of(&md.spans);
     let body_cols = glyphs.iter().map(|glyph| glyph.width).sum::<usize>();
     let avail = if width == 0 {
@@ -640,7 +673,7 @@ fn wrap_md_line(buf: &mut Buf<'_>, gutter: &str, gutter_style: Style, md: &MdLin
             gutter_w,
             0,
             0,
-            true,
+            hard_break,
         );
         return;
     }
@@ -665,7 +698,7 @@ fn wrap_md_line(buf: &mut Buf<'_>, gutter: &str, gutter_style: Style, md: &MdLin
             spans.push(Span::raw(" ".repeat(hang)));
         }
         spans.extend(spans_between(&glyphs, from, to));
-        buf.push_md(Line::from(spans), md, origin, from, to, first);
+        buf.push_md(Line::from(spans), md, origin, from, to, first && hard_break);
         from = to;
         first = false;
     }
