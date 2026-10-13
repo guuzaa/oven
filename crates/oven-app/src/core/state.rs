@@ -118,8 +118,8 @@ pub enum AppPhase {
     Cancelling {
         turn_id: TurnId,
     },
-    /// The history is being summarized: the driver is busy, but there is no
-    /// turn to cancel.
+    /// The history is being summarized. Cancel aborts the summary request
+    /// and leaves the session as it was.
     Compacting,
     ShuttingDown,
 }

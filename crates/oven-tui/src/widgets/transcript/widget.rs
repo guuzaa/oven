@@ -6,8 +6,8 @@ use super::collapsible::Collapsible;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, AppEventKind, LocalShell, ShellEvent, StreamEvent, ToolEvent, ToolResult,
-    ToolView, TurnEvent, present_tool,
+    AgentEvent, AppEvent, AppEventKind, COMPACTION_CANCELLED, CompactionEvent, LocalShell,
+    ShellEvent, StreamEvent, ToolEvent, ToolResult, ToolView, TurnEvent, present_tool,
 };
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
@@ -1306,12 +1306,17 @@ impl Component for Transcript {
                     self.push_shell_output(body, false);
                 }
             },
-            AppEventKind::Compaction(ev) => {
-                if matches!(ev, oven_app::CompactionEvent::Completed { .. }) {
+            AppEventKind::Compaction(ev) => match ev {
+                CompactionEvent::Completed { .. } => {
                     self.push_row(LineKind::System, "context compacted");
                     self.push_separator();
                 }
-            }
+                CompactionEvent::Cancelled => {
+                    self.push_row(LineKind::System, COMPACTION_CANCELLED);
+                    self.push_separator();
+                }
+                CompactionEvent::Started | CompactionEvent::Failed { .. } => {}
+            },
             AppEventKind::HistoryChanged { .. }
             | AppEventKind::Exited
             | AppEventKind::Subagent(_)

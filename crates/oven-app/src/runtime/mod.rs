@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use oven_agent::{Agent, Record, RunPolicy, TodoList};
+use oven_agent::{Agent, AgentError, CancellationToken, CompactStats, Record, RunPolicy, TodoList};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
 use oven_mem::MemoryStore;
 use tokio::sync::{mpsc, watch};
@@ -15,7 +15,9 @@ use crate::App;
 use crate::capabilities::subagent::Subagents;
 use crate::commands::{CommandOutcome, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
-use crate::core::event::{AppEventKind, AppId, CompactionEvent, EventBus, SubagentEvent};
+use crate::core::event::{
+    AppEventKind, AppId, COMPACTION_CANCELLED, CompactionEvent, EventBus, SubagentEvent,
+};
 use crate::core::input::Input;
 use crate::core::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
@@ -210,7 +212,8 @@ impl Runtime {
 
     /// Compact the conversation into a summary and start a fresh session
     /// file holding only the summary. Shared by `/compact` and the
-    /// auto-compaction trigger; failures leave the history untouched.
+    /// auto-compaction trigger; failures and cancellation leave the history
+    /// and the session file untouched.
     async fn compact_history(&mut self) {
         if self.agent.history().len() == 0 {
             self.emit(AppEventKind::Notification {
@@ -218,9 +221,45 @@ impl Runtime {
             });
             return;
         }
-        self.shared.set_phase(AppPhase::Compacting);
+        let cancel = self.shared.begin_compaction();
         self.emit(AppEventKind::Compaction(CompactionEvent::Started));
-        match self.agent.compact().await {
+        self.drive_compaction(cancel).await;
+    }
+
+    /// Arms auto-compaction before the turn is persisted, so a cancel during
+    /// that write is remembered and the summary is never requested.
+    fn arm_auto_compact(&mut self) -> Option<CancellationToken> {
+        if self.agent.history().len() == 0 || !self.should_auto_compact() {
+            return None;
+        }
+        let cancel = self.shared.begin_compaction();
+        self.emit(AppEventKind::Compaction(CompactionEvent::Started));
+        Some(cancel)
+    }
+
+    /// Runs a compaction whose cancel token is already installed. On success
+    /// the history has been replaced, so the new session file is written
+    /// even if shutdown arrives in the same moment. A cancel or a shutdown
+    /// before that returns the summary request without touching the session.
+    async fn drive_compaction(&mut self, cancel: CancellationToken) {
+        let outcome = {
+            let compact = self.agent.compact(&cancel);
+            tokio::pin!(compact);
+            tokio::select! {
+                biased;
+                () = self.shared.shutdown.cancelled() => {
+                    self.shared.set_phase(AppPhase::ShuttingDown);
+                    cancel.cancel();
+                    compact.await
+                }
+                result = &mut compact => result,
+            }
+        };
+        self.finish_compaction(outcome).await;
+    }
+
+    async fn finish_compaction(&mut self, outcome: Result<CompactStats, AgentError>) {
+        match outcome {
             Ok(stats) => {
                 self.switch_session().await;
                 if let Some(store) = &self.session {
@@ -237,14 +276,28 @@ impl Runtime {
                     text: format_compacted(stats.before_tokens, stats.after_tokens),
                 });
             }
-            Err(e) => {
+            Err(error) if error.is_cancelled() => {
+                tracing::info!("compaction cancelled");
+                self.emit(AppEventKind::Compaction(CompactionEvent::Cancelled));
+                if !self.shared.shutdown.is_cancelled() {
+                    self.emit(AppEventKind::Notification {
+                        text: COMPACTION_CANCELLED.into(),
+                    });
+                }
+            }
+            Err(error) => {
                 self.emit(AppEventKind::Compaction(CompactionEvent::Failed {
-                    error: e.message.clone(),
+                    error: error.message.clone(),
                 }));
-                self.emit_error(format!("compact failed: {}", e.message));
+                self.emit_error(format!("compact failed: {}", error.message));
             }
         }
-        self.shared.set_phase(AppPhase::Idle);
+        self.shared.end_compaction();
+        if self.shared.shutdown.is_cancelled() {
+            self.shared.set_phase(AppPhase::ShuttingDown);
+        } else {
+            self.shared.set_phase(AppPhase::Idle);
+        }
     }
 
     /// Write the compacted history (summary message) into the freshly

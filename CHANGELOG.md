@@ -3,9 +3,11 @@
 ## [Unreleased]
 
 ### Changed
+- **Breaking:** `Agent::compact` takes a `CancellationToken`. A cancelled or failed summary leaves history untouched
 - **Breaking:** `AppConfig::load`, `load_file`, `save_at`, `save_provider_at`, and `ensure_user_config` are async, and so are `App::submit` and `App::rewind`. A `/model` switch writes config without blocking a runtime thread. The file format is unchanged
 
 ### Fixed
+- Cancelling during `/compact` or auto-compaction aborts the summary request, including mid-stream, and leaves the session id, session file, and `cwd_latest.json` unchanged. Cancelling auto-compaction keeps the turn that already finished
 - Config saves write a temporary file and rename it into place, so a crash or a concurrent save no longer leaves a truncated `config.toml`. Creating the template user config no longer races with another process creating it
 
 ## [0.0.11] - 2026-10-06

@@ -59,16 +59,23 @@ impl Runtime {
         // A cancel keeps the prefix that finished (the prompt, completed
         // steps) and drops the step that was in flight. Persist that prefix
         // so the first turn of a session can still be resumed.
+        //
+        // Auto-compaction is armed first, so a cancel during the persist
+        // still reaches the summary. Cancelling it drops only the summary:
+        // the turn that just finished stays persisted, the same way a
+        // cancelled turn keeps the steps that already completed.
         let cancelled = result.as_ref().is_err_and(|error| error.is_cancelled());
+        let auto_compact = result.is_ok().then(|| self.arm_auto_compact()).flatten();
         if result.is_ok() || (cancelled && self.agent.history().len() != 0) {
             self.persist_turn().await;
         }
 
         self.sync_state();
-        if result.is_ok() && self.should_auto_compact() {
-            self.compact_history().await;
+        if let Some(cancel) = auto_compact {
+            self.drive_compaction(cancel).await;
+        } else if !self.shared.shutdown.is_cancelled() {
+            self.shared.set_phase(AppPhase::Idle);
         }
-        self.shared.set_phase(AppPhase::Idle);
     }
 
     pub(crate) async fn run_slash(&mut self, name: &str, args: &str) {

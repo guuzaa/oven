@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, LocalShell, ShellEvent, StepStop, StreamEvent, ToolCallId, ToolEvent,
-    ToolResult, TurnEvent, UserRequestId, present_tool,
+    AgentEvent, AppEvent, COMPACTION_CANCELLED, CompactionEvent, LocalShell, ShellEvent, StepStop,
+    StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, UserRequestId, present_tool,
 };
 use oven_llm::{ContentBlock, Message};
 use ratatui::Terminal;
@@ -596,6 +596,18 @@ fn loop_limit_reached_appends_system_line() {
     assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::System]);
     let expected = format!("{LOOP_LIMIT_REACHED} (100 iterations)");
     assert_eq!(t.rows.last().unwrap().text, expected);
+}
+
+#[test]
+fn compaction_cancelled_appends_system_line() {
+    let mut t = Transcript::new();
+    t.push_prompt(LineKind::User, "q");
+    t.on_event(&AppEvent::compaction(CompactionEvent::Cancelled));
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::User, LineKind::System, LineKind::Separator]
+    );
+    assert_eq!(t.rows[1].text.as_str(), COMPACTION_CANCELLED);
 }
 
 #[test]
