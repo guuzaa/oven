@@ -3620,6 +3620,91 @@ fn a_drag_survives_a_row_that_grows_under_it() {
 }
 
 #[test]
+fn scrolling_a_long_prompt_does_not_grow_its_frame() {
+    const WIDTH: u16 = 40;
+    const HEIGHT: u16 = 20;
+    let mut t = Transcript::new();
+    let prompt = (1..=12)
+        .map(|i| format!("prompt {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    t.push_prompt(LineKind::User, "first");
+    fill(&mut t, 8);
+    t.push_prompt(LineKind::User, &prompt);
+    t.push_row(LineKind::Text, "short answer");
+    ready(&mut t, Rect::new(0, 0, WIDTH, HEIGHT));
+
+    let frame = prompt_frame(&t.wrapped, "prompt 1");
+    assert_eq!(frame.len(), MAX_STICKY_PROMPT_ROWS);
+    assert!(line_text(&frame[1]).contains("prompt 1"));
+    assert!(
+        line_text(frame.last().unwrap()).starts_with('╰'),
+        "the capped frame keeps its bottom border"
+    );
+    assert!(
+        frame
+            .iter()
+            .all(|line| !line_text(line).contains("prompt 7")),
+        "lines past the cap are dropped, not wrapped into a taller box"
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    let paint = |t: &mut Transcript, terminal: &mut Terminal<TestBackend>| {
+        terminal
+            .draw(|f| t.draw(f, f.area(), &State::new()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..HEIGHT)
+            .map(|y| {
+                (0..WIDTH)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let pinned = paint(&mut t, &mut terminal);
+    assert!(pinned.iter().any(|row| row.contains("prompt 1")));
+    assert!(pinned.iter().all(|row| !row.contains("prompt 12")));
+
+    t.scroll_up(1);
+    let scrolled = paint(&mut t, &mut terminal);
+    let frame = prompt_frame_text(&scrolled, "prompt 1");
+    assert_eq!(
+        frame.len(),
+        MAX_STICKY_PROMPT_ROWS,
+        "scrolling the prompt into the transcript must not grow the box: {frame:?}"
+    );
+    assert!(frame[0].starts_with('╭') && frame.last().unwrap().starts_with('╰'));
+    assert!(scrolled.iter().all(|row| !row.contains("prompt 12")));
+}
+
+fn prompt_frame<'a>(lines: &'a [Line<'static>], marker: &str) -> &'a [Line<'static>] {
+    let texts: Vec<String> = lines.iter().map(line_text).collect();
+    let range = frame_range(&texts, marker);
+    &lines[range]
+}
+
+fn prompt_frame_text<'a>(rows: &'a [String], marker: &str) -> &'a [String] {
+    &rows[frame_range(rows, marker)]
+}
+
+fn frame_range(rows: &[String], marker: &str) -> Range<usize> {
+    let body = rows
+        .iter()
+        .position(|row| row.contains(marker))
+        .unwrap_or_else(|| panic!("{marker} is on screen: {rows:?}"));
+    let start = (0..=body)
+        .rev()
+        .find(|idx| rows[*idx].starts_with('╭'))
+        .unwrap_or_else(|| panic!("frame has a top border: {rows:?}"));
+    let end = (body..rows.len())
+        .find(|idx| rows[*idx].starts_with('╰'))
+        .unwrap_or_else(|| panic!("frame has a bottom border: {rows:?}"));
+    start..end + 1
+}
+
+#[test]
 fn a_long_sticky_prompt_still_closes_its_frame() {
     const WIDTH: u16 = 40;
     const HEIGHT: u16 = 12;

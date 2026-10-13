@@ -62,6 +62,10 @@ impl Buf<'_> {
 }
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
+/// Rows a prompt frame may occupy, borders included. A longer prompt keeps its
+/// top and its bottom rule and drops the middle, so the box stays this tall
+/// both while it is pinned and while a scroll draws it in the transcript.
+pub(super) const MAX_STICKY_PROMPT_ROWS: usize = 8;
 /// Screen rows — counted after wrapping — a body still receiving content may
 /// occupy, so a line that wraps into many rows is capped by the rows it takes,
 /// not by the newline it came from.
@@ -316,6 +320,7 @@ impl PromptFrame {
 /// than an answer. Body lines are `[left edge, marker, text, padded right edge]`;
 /// the marker shows on the first line only.
 fn wrap_prompt_frame_into(buf: &mut Buf<'_>, frame: &PromptFrame, text: &str, width: usize) {
+    let start = buf.len();
     let style = frame.border;
     let set = theme::border_type().to_border_set();
     let rule = |left: &str, fill: &str, right: &str| {
@@ -353,6 +358,20 @@ fn wrap_prompt_frame_into(buf: &mut Buf<'_>, frame: &PromptFrame, text: &str, wi
         set.horizontal_bottom,
         set.bottom_right,
     ));
+    cap_prompt_frame(buf, start);
+}
+
+/// Drops middle body lines once a frame is taller than [`MAX_STICKY_PROMPT_ROWS`],
+/// leaving the bottom rule in place. The wrapped lines are what a scroll paints,
+/// so the cap has to happen here; pinning alone would let the same prompt grow
+/// back to its full height as soon as it leaves the header.
+fn cap_prompt_frame(buf: &mut Buf<'_>, start: usize) {
+    let end = buf.len();
+    if end - start <= MAX_STICKY_PROMPT_ROWS {
+        return;
+    }
+    let drop_from = start + MAX_STICKY_PROMPT_ROWS - 1;
+    buf.drain(drop_from..end - 1);
 }
 
 /// The pinned prompt block inside `height` rows, still closed: its last row is
