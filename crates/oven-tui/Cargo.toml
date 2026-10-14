@@ -22,7 +22,7 @@ ratatui = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
 tui-textarea-2 = { workspace = true }
-unicode-width = { workspace = true }
+unicode-width = { workspace = true, features = ["cjk"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 

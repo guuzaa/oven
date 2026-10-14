@@ -621,7 +621,12 @@ fn format_markdown_lines(text: &str) -> Vec<Line<'static>> {
 struct Glyph {
     ch: char,
     style: Style,
+    /// Columns in the copy map. Matches the markdown run, which is the cell
+    /// the buffer (and a mouse click) uses.
     width: usize,
+    /// Columns the terminal advances. Ambiguous glyphs such as `•` and `│`
+    /// are one cell here and two on a CJK terminal.
+    terminal: usize,
 }
 
 fn wrap_markdown_into(buf: &mut Buf<'_>, text: &str, width: usize) {
@@ -644,11 +649,7 @@ fn wrap_md_line(buf: &mut Buf<'_>, gutter: &str, gutter_style: Style, md: &MdLin
         .iter()
         .map(|glyph| glyph.width)
         .sum::<usize>();
-    let avail = if width == 0 {
-        body_cols.max(1)
-    } else {
-        width.saturating_sub(gutter_w).max(1)
-    };
+    let avail = markdown_body_budget(width, gutter_w, body_cols);
     if let Some(lines) = layout_table(md, avail) {
         let continuation = " ".repeat(gutter_w);
         for (i, line) in lines.iter().enumerate() {
@@ -675,11 +676,7 @@ fn wrap_md_plain(
     let gutter_w = gutter.width();
     let glyphs = glyphs_of(&md.spans);
     let body_cols = glyphs.iter().map(|glyph| glyph.width).sum::<usize>();
-    let avail = if width == 0 {
-        body_cols.max(1)
-    } else {
-        width.saturating_sub(gutter_w).max(1)
-    };
+    let avail = markdown_body_budget(width, gutter_w, body_cols);
     let hang = md.hang.min(avail.saturating_sub(1));
     let continuation = " ".repeat(gutter_w);
     if body_cols == 0 {
@@ -723,6 +720,27 @@ fn wrap_md_plain(
     }
 }
 
+/// Terminal columns a markdown body may use.
+///
+/// The last screen column stays empty. A glyph there arms pending wrap, so
+/// the cursor drops a row before the next move. While a reply streams, that
+/// gap opens under the text and the caret jumps into it.
+fn markdown_body_budget(width: usize, gutter_w: usize, unwrapped: usize) -> usize {
+    if width == 0 {
+        return unwrapped.max(1);
+    }
+    let limit = width.saturating_sub(1);
+    limit.saturating_sub(gutter_w).max(1)
+}
+
+fn column_width(ch: char) -> usize {
+    ch.width().unwrap_or(0)
+}
+
+fn terminal_width(ch: char) -> usize {
+    ch.width_cjk().unwrap_or(0).max(column_width(ch))
+}
+
 fn glyphs_of(spans: &[Span<'static>]) -> Vec<Glyph> {
     spans
         .iter()
@@ -730,7 +748,8 @@ fn glyphs_of(spans: &[Span<'static>]) -> Vec<Glyph> {
             span.content.chars().map(|ch| Glyph {
                 ch,
                 style: span.style,
-                width: ch.width().unwrap_or(0),
+                width: column_width(ch),
+                terminal: terminal_width(ch),
             })
         })
         .collect()
@@ -749,10 +768,10 @@ fn take_cols(glyphs: &[Glyph], from_col: usize, room: usize) -> usize {
         if glyph.width == 0 {
             continue;
         }
-        if taken > 0 && taken + glyph.width > room {
+        if taken > 0 && taken + glyph.terminal > room {
             break;
         }
-        taken += glyph.width;
+        taken += glyph.terminal;
         end = next;
         col = next;
         if taken >= room {
@@ -856,4 +875,17 @@ pub(crate) fn split_at_width(s: &str, max_width: usize) -> (&str, &str) {
 
 pub(super) fn line_display_width(line: &Line<'_>) -> usize {
     line.spans.iter().map(|s| s.content.width()).sum()
+}
+
+pub(super) fn line_terminal_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .flat_map(|span| span.content.chars())
+        .map(terminal_width)
+        .sum()
+}
+
+/// Whether `caret` can sit on `line` and still leave the last column empty.
+pub(super) fn fits_stream_caret(line: &Line<'_>, width: usize, caret: &str) -> bool {
+    width > 0 && line_terminal_width(line) + caret.width_cjk() < width
 }

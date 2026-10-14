@@ -28,7 +28,8 @@ use super::selection::{extract_line_range, highlight_line, slice_cols};
 use super::widget::{LOOP_LIMIT_REACHED, MAX_STICKY_PROMPT_ROWS, Transcript};
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
-    apply_shimmer, format_elapsed, format_lines, format_thought, line_display_width, tail_lines,
+    apply_shimmer, format_elapsed, format_lines, format_thought, line_display_width,
+    line_terminal_width, tail_lines,
 };
 
 const ELAPSED_0: &str = "Worked for 0s";
@@ -132,7 +133,7 @@ fn wrapped_assistant_gutter_is_drawn_once() {
     t.push_row(LineKind::Text, "abcdefgh");
     ready(&mut t, Rect::new(0, 0, 7, 5));
     let rows: Vec<String> = t.wrapped.iter().map(line_text).collect();
-    assert_eq!(rows, vec![" ∙ abcd", "   efgh"]);
+    assert_eq!(rows, vec![" ∙ abc", "   def", "   gh"]);
 }
 
 #[test]
@@ -146,8 +147,9 @@ fn wrapped_streamed_assistant_gutter_is_drawn_once() {
         .unwrap();
     let buf = terminal.backend().buffer();
     let row = |y: u16| (0..WIDTH).map(|x| buf[(x, y)].symbol()).collect::<String>();
-    assert!(row(0).starts_with(" ∙ abcd"), "{:?}", row(0));
-    assert!(row(1).starts_with("   efgh"), "{:?}", row(1));
+    assert!(row(0).starts_with(" ∙ abc"), "{:?}", row(0));
+    assert!(row(1).starts_with("   def"), "{:?}", row(1));
+    assert!(row(2).starts_with("   gh"), "{:?}", row(2));
 }
 
 #[test]
@@ -3086,12 +3088,13 @@ fn mouse_selects_wrapped_lines() {
     let mut t = Transcript::new();
     t.push_row(LineKind::Text, "abcdefgh");
     ready(&mut t, Rect::new(0, 0, 7, 5));
+    let last = u16::try_from(t.wrapped.len() - 1).unwrap();
     t.handle_mouse(
         mouse(MouseEventKind::Down(MouseButton::Left), 3, 0),
         &State::new(),
     );
     t.handle_mouse(
-        mouse(MouseEventKind::Drag(MouseButton::Left), 7, 1),
+        mouse(MouseEventKind::Drag(MouseButton::Left), 7, last),
         &State::new(),
     );
     assert_eq!(t.selected_text().as_deref(), Some("abcdefgh"));
@@ -3849,21 +3852,22 @@ fn nested_markdown_keeps_source_indent_when_lines_wrap() {
     assert_eq!(
         line_texts(&t.wrapped),
         [
-            " ∙ • outer item ",
-            "     wraps",
-            "     keeps going",
-            "      now",
-            "     • nested wr",
-            "       aps",
-            "       inner tex",
-            "       t",
+            " ∙ • outer ite",
+            "     m wraps",
+            "     keeps goin",
+            "     g now",
+            "     • nested ",
+            "       wraps",
+            "       inner te",
+            "       xt",
             "   ",
             "       ```",
-            "       code line",
+            "       code lin",
+            "       e",
             "       ```",
             "   ",
-            "     │ quote wra",
-            "       ps",
+            "     │ quote w",
+            "       raps",
         ]
     );
 }
@@ -3935,17 +3939,17 @@ fn wrapped_table_stays_inside_its_columns_and_copies_the_source() {
     let shown = line_texts(&t.wrapped);
     let head = shown
         .iter()
-        .find(|line| line.contains("0123456789"))
+        .find(|line| line.contains("012345678"))
         .expect("wrapped head");
     let tail = shown
         .iter()
-        .find(|line| line.contains("abcdef"))
+        .find(|line| line.contains("9abcdef"))
         .expect("wrapped tail");
-    assert!(!head.contains("abcdef"), "{shown:?}");
-    assert!(!tail.contains("0123456789"), "{shown:?}");
+    assert!(!head.contains("9abcdef"), "{shown:?}");
+    assert!(!tail.contains("012345678"), "{shown:?}");
     assert_eq!(
-        head.find("0123456789"),
-        tail.find("abcdef"),
+        head.find("012345678"),
+        tail.find("9abcdef"),
         "continuation stays in the value column: {shown:?}"
     );
     let last = t.wrapped.len() - 1;
@@ -3996,6 +4000,50 @@ fn copying_a_wrapped_markdown_line_omits_the_soft_break() {
     let last = t.wrapped.len() - 1;
     select_rows(&mut t, 0, last);
     assert_eq!(t.selected_text().as_deref(), Some(SRC));
+}
+
+#[test]
+fn wrapped_markdown_leaves_the_last_column_empty() {
+    const WIDTH: u16 = 40;
+    let mut t = Transcript::new();
+    t.push_row(
+        LineKind::Text,
+        "A paragraph long enough to wrap, with a list:\n\n- item that also wraps across the row\n> and a quote that wraps too\n\n“省略号……” repeats across the row.\n",
+    );
+    ready(&mut t, Rect::new(0, 0, WIDTH, 20));
+    for line in &t.wrapped {
+        let w = line_terminal_width(line);
+        assert!(
+            w < usize::from(WIDTH),
+            "line fills the last column ({w}): {}",
+            line_text(line)
+        );
+    }
+}
+
+#[test]
+fn stream_caret_stays_off_the_last_column() {
+    const WIDTH: u16 = 20;
+    let mut t = Transcript::new();
+    t.push_stream(LineKind::Text, &format!("{}xy", "abcdefghij".repeat(8)));
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, 8)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let mut saw_caret = false;
+    for y in 0..8 {
+        let row: String = (0..WIDTH).map(|x| buf[(x, y)].symbol()).collect();
+        assert_eq!(
+            buf[(WIDTH - 1, y)].symbol(),
+            " ",
+            "last column filled at row {y}: {row:?}"
+        );
+        if row.contains('▊') {
+            saw_caret = true;
+        }
+    }
+    assert!(saw_caret, "caret should stay visible on the tail");
 }
 
 #[test]

@@ -23,9 +23,9 @@ use super::markdown::{CopyBuf, LineCopy};
 use super::selection::{SelPos, highlight_line};
 use super::wrap::{
     Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
-    apply_hover, apply_shimmer, collect_lines, format_elapsed, format_thought, line_display_width,
-    paint_visible, shimmer_phase, sticky_prompt_lines, tail_lines, trim_message, wrap_body_into,
-    wrap_collapsible_into, wrap_row_into,
+    apply_hover, apply_shimmer, collect_lines, fits_stream_caret, format_elapsed, format_thought,
+    line_display_width, paint_visible, shimmer_phase, sticky_prompt_lines, tail_lines,
+    trim_message, wrap_body_into, wrap_collapsible_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -1379,6 +1379,7 @@ impl Component for Transcript {
             && end == total
             && (state.frame / CARET_FRAMES).is_multiple_of(2)
             && let Some(last) = visible.last_mut()
+            && fits_stream_caret(last, self.width(), STREAM_CARET)
         {
             last.spans
                 .push(Span::styled(STREAM_CARET, theme::assistant()));
