@@ -8,6 +8,11 @@
 //! after the final assistant message of each user turn, so messages no
 //! longer carry per-message usage.
 //!
+//! Opening a session takes an exclusive advisory lock on `<id>.jsonl.lock`,
+//! held until the last clone of that [`Session`] is dropped. The kernel
+//! releases the lock if the holder dies, so a crashed process cannot block
+//! the next resume. A second open of a held id fails instead of attaching.
+//!
 //! Reading is backward compatible: lines written by older versions — a bare
 //! `Message` or the `{"message": ..., "usage": ...}` envelope — are accepted
 //! with timestamp 0, and a non-zero envelope usage becomes a `TokenUsage`
@@ -28,6 +33,8 @@ use thiserror::Error;
 const SHORT_SESSION_ID_LEN: usize = 8;
 const SESSION_SPAN_NAME: &str = "session";
 const SESSION_SPAN_ID_FIELD: &str = "id";
+const SESSION_FILE_SUFFIX: &str = ".jsonl";
+pub(crate) const SESSION_LOCK_SUFFIX: &str = ".jsonl.lock";
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -37,6 +44,16 @@ pub enum SessionError {
     Parse(PathBuf, usize, serde_json::Error),
     #[error("session id '{0}' contains path separators")]
     BadId(String),
+    #[error("{}", session_in_use_message(id, *pid))]
+    InUse { id: String, pid: Option<u32> },
+}
+
+/// What a refused resume says. The CLI prints this on stderr and exits.
+pub(crate) fn session_in_use_message(id: &str, pid: Option<u32>) -> String {
+    match pid {
+        Some(pid) => format!("session {id} is in use by process {pid}"),
+        None => format!("session {id} is in use by another process"),
+    }
 }
 
 /// Absolute, symlink-resolved form of a workspace root, falling back to the
@@ -92,6 +109,10 @@ pub(crate) fn record_session_span(id: &str) {
 pub struct Session {
     id: String,
     path: PathBuf,
+    /// Shared so `Session` clones (the store, a tool) keep one lock alive.
+    /// `Mutex` is what makes the file `Send`; it is never locked again.
+    #[allow(dead_code)]
+    lock: Arc<Mutex<super::session_lock::SessionLock>>,
 }
 
 /// Legacy JSONL line written by older versions: a message plus the usage its
@@ -103,25 +124,53 @@ struct RecordLine {
     usage: Usage,
 }
 
+fn session_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}{SESSION_FILE_SUFFIX}"))
+}
+
+fn lock_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}{SESSION_LOCK_SUFFIX}"))
+}
+
 impl Session {
-    /// Open (or create) the session file for `id`. The file is created lazily
-    /// on the first append.
+    /// Open the session for `id` and hold its lock until the last clone is
+    /// dropped. The transcript file is created lazily on the first append.
+    /// Fails with [`SessionError::InUse`] when another live process already
+    /// holds this id.
     pub async fn open(dir: &Path, id: &str) -> Result<Self, SessionError> {
         validate_id(id)?;
         fs::create_dir_all(dir)
             .await
             .map_err(|e| SessionError::Io(dir.to_path_buf(), e))?;
+        let lock_at = lock_path(dir, id);
+        let lock = match super::session_lock::acquire(&lock_at)
+            .map_err(|e| SessionError::Io(lock_at, e))?
+        {
+            super::session_lock::Acquire::Acquired(lock) => lock,
+            super::session_lock::Acquire::Held { pid } => {
+                tracing::warn!(session_id = %id, pid = ?pid, "session already open");
+                return Err(SessionError::InUse {
+                    id: id.to_string(),
+                    pid,
+                });
+            }
+        };
         Ok(Self {
             id: id.to_string(),
-            path: dir.join(format!("{id}.jsonl")),
+            path: session_path(dir, id),
+            lock: Arc::new(Mutex::new(lock)),
         })
     }
 
+    /// Resume `id` when that transcript already exists; otherwise start a new
+    /// uuid v7 session. An explicit id is locked only when its file exists,
+    /// so a miss does not leave a lock behind for an id this call discards.
     pub async fn resolve(dir: &Path, id: Option<&str>) -> Result<Self, SessionError> {
         if let Some(id) = id {
-            let candidate = Self::open(dir, id).await?;
-            if fs::try_exists(candidate.path()).await.unwrap_or(false) {
-                return Ok(candidate);
+            validate_id(id)?;
+            let path = session_path(dir, id);
+            if fs::try_exists(&path).await.unwrap_or(false) {
+                return Self::open(dir, id).await;
             }
         }
 
@@ -188,19 +237,11 @@ impl Session {
     }
 
     /// Replace the entire session file with `records`. Used by rewind, which
-    /// truncates the persisted conversation together with its usage.
+    /// truncates the persisted conversation together with its usage. The new
+    /// bytes land in a unique temporary file and are renamed into place, so
+    /// a crash leaves the previous transcript intact.
     pub async fn overwrite(&self, records: &[Record]) -> Result<(), SessionError> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&self.path)
-            .await
-            .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        file.write_all(encode_records(records).as_bytes())
-            .await
-            .map_err(|e| SessionError::Io(self.path.clone(), e))?;
-        file.flush()
+        oven_host::write_atomic(&self.path, encode_records(records).as_bytes())
             .await
             .map_err(|e| SessionError::Io(self.path.clone(), e))
     }
@@ -287,14 +328,10 @@ async fn load_recent(dir: &Path) -> Result<BTreeMap<String, String>, SessionErro
 
 async fn save_recent(dir: &Path, map: &BTreeMap<String, String>) -> Result<(), SessionError> {
     let path = recent_path(dir);
-    let tmp = dir.join("cwd_latest.json.tmp");
     let text = serde_json::to_string_pretty(map).expect("recent map serialization cannot fail");
-    fs::write(&tmp, text)
+    oven_host::write_atomic(&path, text.as_bytes())
         .await
-        .map_err(|e| SessionError::Io(path.clone(), e))?;
-    fs::rename(&tmp, &path)
-        .await
-        .map_err(|e| SessionError::Io(path.clone(), e))
+        .map_err(|e| SessionError::Io(path, e))
 }
 
 /// Remember that `session_id` is the most recent session used in `root`.
@@ -384,6 +421,15 @@ mod tests {
         tempdir::TempDir::new("oven-session").unwrap()
     }
 
+    fn assert_no_temp_files(dir: &Path) {
+        let leftovers: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
     #[test]
     fn current_or_session_span_reuses_open_session_span() {
         let _guard =
@@ -438,6 +484,158 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.load_records().await.unwrap().len(), 1);
+        assert_no_temp_files(tmp.path());
+    }
+
+    #[tokio::test]
+    async fn overwrite_never_publishes_a_partial_transcript() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        session
+            .overwrite(&[message_record(0, Message::user_text("seed"))])
+            .await
+            .unwrap();
+        let path = session.path().to_path_buf();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_reader = Arc::clone(&stop);
+        let reader = tokio::task::spawn_blocking(move || {
+            let mut bad = Vec::new();
+            while !stop_reader.load(Ordering::Relaxed) {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) if text.is_empty() => {
+                        bad.push("empty".to_string());
+                        break;
+                    }
+                    Ok(text) => {
+                        for (i, line) in text.lines().filter(|line| !line.is_empty()).enumerate() {
+                            if serde_json::from_str::<serde_json::Value>(line).is_err() {
+                                bad.push(format!("line {i}: {line}"));
+                                break;
+                            }
+                        }
+                        if !bad.is_empty() {
+                            break;
+                        }
+                    }
+                    // Windows replace can briefly hide the destination.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => {
+                        bad.push(err.to_string());
+                        break;
+                    }
+                }
+            }
+            bad
+        });
+        for n in 0..40u64 {
+            session
+                .overwrite(&[message_record(
+                    n,
+                    Message::user_text(format!("body-{n}-{}", "x".repeat(64))),
+                )])
+                .await
+                .unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        let bad = reader.await.unwrap();
+        assert!(bad.is_empty(), "{bad:?}");
+        let loaded = session.load_records().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_no_temp_files(tmp.path());
+    }
+
+    #[tokio::test]
+    async fn a_second_open_reports_the_holder_and_drop_releases_the_lock() {
+        let tmp = tmp();
+        let held = Session::open(tmp.path(), "s1").await.unwrap();
+        let err = Session::open(tmp.path(), "s1").await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            session_in_use_message("s1", Some(std::process::id()))
+        );
+        drop(held);
+        Session::open(tmp.path(), "s1").await.unwrap();
+    }
+
+    const HOLDER_ID: &str = "held-session";
+    const HOLDER_ENV: &str = "OVEN_SESSION_LOCK_HOLDER";
+    const HOLDER_READY: &str = "ready";
+    const HOLDER_TEST: &str = "core::session::tests::session_lock_holder_child";
+    const HOLDER_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    const LOCK_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn session_lock_holder_child() {
+        let Ok(dir) = std::env::var(HOLDER_ENV) else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let _session = Session::open(&dir, HOLDER_ID).await.unwrap();
+        std::fs::write(dir.join(HOLDER_READY), std::process::id().to_string()).unwrap();
+        let mut byte = [0u8; 1];
+        let _ = std::io::Read::read(&mut std::io::stdin(), &mut byte);
+    }
+
+    #[tokio::test]
+    async fn a_second_process_cannot_open_a_held_session() {
+        let tmp = tmp();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(HOLDER_ENV, tmp.path())
+            .args(["--exact", HOLDER_TEST])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let stderr_text = Arc::new(std::sync::Mutex::new(String::new()));
+        let stderr_slot = Arc::clone(&stderr_text);
+        std::thread::spawn(move || {
+            let mut captured = String::new();
+            let _ = std::io::Read::read_to_string(&mut { stderr }, &mut captured);
+            *stderr_slot.lock().unwrap() = captured;
+        });
+
+        let ready = tmp.path().join(HOLDER_READY);
+        let started = std::time::Instant::now();
+        while !ready.exists() {
+            if started.elapsed() > HOLDER_START_TIMEOUT {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "holder did not lock the session: {}",
+                    stderr_text.lock().unwrap()
+                );
+            }
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!(
+                    "holder exited early ({status}): {}",
+                    stderr_text.lock().unwrap()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let err = Session::open(tmp.path(), HOLDER_ID).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            session_in_use_message(HOLDER_ID, Some(child.id()))
+        );
+
+        child.kill().unwrap();
+        let _ = child.wait();
+        let released = std::time::Instant::now();
+        loop {
+            match Session::open(tmp.path(), HOLDER_ID).await {
+                Ok(_) => break,
+                Err(SessionError::InUse { .. }) if released.elapsed() < LOCK_RELEASE_TIMEOUT => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(err) => panic!("{err}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -562,6 +760,11 @@ mod tests {
         assert!(Session::open(tmp.path(), "../escape").await.is_err());
         assert!(Session::open(tmp.path(), "a/b").await.is_err());
         assert!(Session::open(tmp.path(), "").await.is_err());
+        assert!(
+            Session::resolve(tmp.path(), Some("../escape"))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -620,7 +823,42 @@ mod tests {
         );
 
         assert!(tmp.path().join("cwd_latest.json").exists());
-        assert!(!tmp.path().join("cwd_latest.json.tmp").exists());
+        assert_no_temp_files(tmp.path());
+    }
+
+    #[tokio::test]
+    async fn concurrent_recent_saves_leave_parseable_json() {
+        let tmp = tmp();
+        let dir = tmp.path().to_path_buf();
+        let left = {
+            let dir = dir.clone();
+            tokio::spawn(async move {
+                for i in 0..30 {
+                    record_recent(&dir, Path::new("/ws-a"), &format!("a{i}"))
+                        .await
+                        .unwrap();
+                }
+            })
+        };
+        let right = {
+            let dir = dir.clone();
+            tokio::spawn(async move {
+                for i in 0..30 {
+                    record_recent(&dir, Path::new("/ws-b"), &format!("b{i}"))
+                        .await
+                        .unwrap();
+                }
+            })
+        };
+        left.await.unwrap();
+        right.await.unwrap();
+
+        let text = tokio::fs::read_to_string(dir.join("cwd_latest.json"))
+            .await
+            .unwrap();
+        let map: BTreeMap<String, String> = serde_json::from_str(&text).unwrap();
+        assert!(!map.is_empty(), "{text}");
+        assert_no_temp_files(&dir);
     }
 
     #[tokio::test]
