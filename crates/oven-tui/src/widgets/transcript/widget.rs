@@ -22,13 +22,16 @@ use super::kinds::{Header, LineKind, Row};
 use super::markdown::{CopyBuf, LineCopy};
 use super::selection::{SelPos, highlight_line};
 use super::wrap::{
-    Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
-    apply_hover, apply_shimmer, collect_lines, fits_stream_caret, format_elapsed, format_thought,
-    line_display_width, paint_visible, shimmer_phase, sticky_prompt_lines, tail_lines,
-    trim_message, wrap_body_into, wrap_collapsible_into, wrap_row_into,
+    Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, PROMPT_BODY_SLOTS, RESULT_LABEL,
+    THINKING_LABEL, THOUGHT_LABEL, apply_hover, apply_shimmer, collect_lines, fits_stream_caret,
+    format_elapsed, format_thought, line_display_width, paint_visible, shimmer_phase,
+    sticky_prompt_window, sticky_row_index, tail_lines, trim_message, wrap_body_into,
+    wrap_collapsible_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
+/// Body lines one wheel tick moves inside a sent prompt.
+const PROMPT_WHEEL_STEP: isize = 1;
 const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
@@ -364,6 +367,106 @@ impl Transcript {
         origin
     }
 
+    /// Scrolls the sent prompt under the pointer when its body is taller than
+    /// the frame. At the end of that window the wheel falls through to the
+    /// transcript.
+    fn scroll_prompt_at(&mut self, column: u16, row: u16, delta: isize) -> bool {
+        let Some(idx) = self.prompt_row_at(column, row) else {
+            return false;
+        };
+        let max = self.rows[idx].prompt_body.saturating_sub(PROMPT_BODY_SLOTS);
+        if max == 0 {
+            return false;
+        }
+        let next = self.rows[idx]
+            .prompt_scroll
+            .saturating_add_signed(delta)
+            .min(max);
+        if next == self.rows[idx].prompt_scroll {
+            return false;
+        }
+        let applied = isize::try_from(next).unwrap_or(0)
+            - isize::try_from(self.rows[idx].prompt_scroll).unwrap_or(0);
+        let body = self.prompt_body_span(idx);
+        self.rows[idx].prompt_scroll = next;
+        self.rewrap_row(idx);
+        if let Some((start, end)) = body {
+            self.follow_prompt_scroll(start, end, -applied);
+        }
+        true
+    }
+
+    fn prompt_row_at(&self, column: u16, row: u16) -> Option<usize> {
+        let line = self.pos_at(column, row).line;
+        self.rows.iter().enumerate().find_map(|(idx, row)| {
+            if !row.kind.is_prompt() {
+                return None;
+            }
+            let (start, end) = self.row_span(idx);
+            (start <= line && line < end).then_some(idx)
+        })
+    }
+
+    fn row_span(&self, idx: usize) -> (usize, usize) {
+        let start = self.row_offsets[idx];
+        let end = self
+            .row_offsets
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(self.wrapped.len());
+        (start, end)
+    }
+
+    /// Body lines of a framed prompt, excluding its borders and any leading blank.
+    fn prompt_body_span(&self, idx: usize) -> Option<(usize, usize)> {
+        let (start, end) = self.row_span(idx);
+        let frame_start = (start..end).find(|&line| {
+            self.wrapped
+                .get(line)
+                .is_some_and(|line| line_display_width(line) > 0)
+        })?;
+        let body_end = end.checked_sub(1)?;
+        (body_end > frame_start + 1).then_some((frame_start + 1, body_end))
+    }
+
+    fn follow_prompt_scroll(&mut self, body_start: usize, body_end: usize, delta: isize) {
+        let map = |pos: SelPos| -> Option<SelPos> {
+            if pos.line < body_start || pos.line >= body_end {
+                return Some(pos);
+            }
+            let line = pos.line.checked_add_signed(delta)?;
+            (body_start..body_end)
+                .contains(&line)
+                .then_some(SelPos { line, col: pos.col })
+        };
+        let (Some(anchor), Some(head)) = (
+            self.select_anchor.and_then(map),
+            self.select_head.and_then(map),
+        ) else {
+            self.clear_selection();
+            return;
+        };
+        self.select_anchor = Some(anchor);
+        self.select_head = Some(head);
+    }
+
+    fn sticky_wrapped_line(&self, start: usize, sticky_height: u16, rel_y: usize) -> usize {
+        let end = self
+            .rows
+            .iter()
+            .enumerate()
+            .find_map(|(idx, row)| {
+                if !row.kind.is_prompt() {
+                    return None;
+                }
+                let (row_start, row_end) = self.row_span(idx);
+                (row_start <= start && start < row_end).then_some(row_end)
+            })
+            .unwrap_or(start);
+        let frame_len = end.saturating_sub(start).max(1);
+        start + sticky_row_index(frame_len, usize::from(sticky_height), rel_y)
+    }
+
     fn note_tool_start(&mut self, call_id: &str, view: &ToolView) {
         self.stop_live_thinking();
         if !view.collapse {
@@ -538,6 +641,8 @@ impl Transcript {
             text,
             collapsible,
             headers: Vec::new(),
+            prompt_scroll: 0,
+            prompt_body: 0,
         });
         self.row_offsets.push(self.wrapped.len());
         self.wrap_row(self.rows.len() - 1);
@@ -566,20 +671,32 @@ impl Transcript {
         width: usize,
         live_rows: Option<usize>,
         separator: bool,
-    ) -> Vec<Header> {
+    ) -> (Vec<Header>, usize) {
         if let Some(collapsible) = &row.collapsible {
-            wrap_collapsible_into(
-                buf,
-                row.kind,
-                &row.text,
-                collapsible,
-                width,
-                live_rows,
-                separator,
+            (
+                wrap_collapsible_into(
+                    buf,
+                    row.kind,
+                    &row.text,
+                    collapsible,
+                    width,
+                    live_rows,
+                    separator,
+                ),
+                0,
             )
         } else {
-            wrap_row_into(buf, row.kind, &row.text, width, separator);
-            Vec::new()
+            (
+                Vec::new(),
+                wrap_row_into(
+                    buf,
+                    row.kind,
+                    &row.text,
+                    width,
+                    separator,
+                    row.prompt_scroll,
+                ),
+            )
         }
     }
 
@@ -643,8 +760,8 @@ impl Transcript {
 
     fn wrap_row(&mut self, idx: usize) {
         let width = self.width();
-        let headers = if width == 0 {
-            Vec::new()
+        let (headers, body) = if width == 0 {
+            (Vec::new(), 0)
         } else {
             let separator = !self.wrapped.is_empty();
             let live_rows = self.live_body_rows(idx);
@@ -655,6 +772,7 @@ impl Transcript {
             Self::wrap_row_into(&mut buf, &self.rows[idx], width, live_rows, separator)
         };
         self.rows[idx].headers = headers;
+        self.finish_prompt_window(idx, body);
         debug_assert_eq!(self.wrapped.len(), self.copies.len());
     }
 
@@ -671,8 +789,8 @@ impl Transcript {
             .unwrap_or(self.wrapped.len());
         let mut lines = Vec::new();
         let mut copies = Vec::new();
-        let mut headers = match self.width() {
-            0 => Vec::new(),
+        let (mut headers, body) = match self.width() {
+            0 => (Vec::new(), 0),
             width => {
                 let separator = start > 0;
                 let live_rows = self.live_body_rows(idx);
@@ -689,6 +807,7 @@ impl Transcript {
             header.line += start;
         }
         self.rows[idx].headers = headers;
+        self.finish_prompt_window(idx, body);
         let delta = shift_of(end - start, lines.len());
         self.wrapped.splice(start..end, lines);
         self.copies.splice(start..end, copies);
@@ -699,6 +818,12 @@ impl Transcript {
             }
             self.shift_selection(end, delta);
         }
+    }
+
+    fn finish_prompt_window(&mut self, idx: usize, body: usize) {
+        let max = body.saturating_sub(PROMPT_BODY_SLOTS);
+        self.rows[idx].prompt_body = body;
+        self.rows[idx].prompt_scroll = self.rows[idx].prompt_scroll.min(max);
     }
 
     /// A body that is still growing — live thinking or tool calls still in
@@ -824,7 +949,7 @@ impl Transcript {
         };
         let raw_line = match self.sticky_prompt {
             Some((start, sticky_height)) if rel_y < usize::from(sticky_height) => {
-                start.saturating_add(rel_y)
+                self.sticky_wrapped_line(start, sticky_height, rel_y)
             }
             Some((_, sticky_height)) => self
                 .render_start
@@ -1139,12 +1264,16 @@ impl Component for Transcript {
         });
         match mouse.kind {
             MouseEventKind::ScrollUp if in_area => {
-                self.scroll_up(MOUSE_SCROLL_STEP);
+                if !self.scroll_prompt_at(mouse.column, mouse.row, -PROMPT_WHEEL_STEP) {
+                    self.scroll_up(MOUSE_SCROLL_STEP);
+                }
                 self.update_hover(in_area, mouse.column, mouse.row);
                 KeyResult::Handled
             }
             MouseEventKind::ScrollDown if in_area => {
-                self.scroll_down(MOUSE_SCROLL_STEP);
+                if !self.scroll_prompt_at(mouse.column, mouse.row, PROMPT_WHEEL_STEP) {
+                    self.scroll_down(MOUSE_SCROLL_STEP);
+                }
                 self.update_hover(in_area, mouse.column, mouse.row);
                 KeyResult::Handled
             }
@@ -1337,17 +1466,22 @@ impl Component for Transcript {
 
         let (prompt_range, content_start) = self.layout_viewport(area.height);
         self.sticky_prompt = None;
+        let sel = self.normalized_sel();
         let mut content_area = area;
         if let Some((prompt_start, prompt_end)) = prompt_range {
-            let prompt_lines = &self.wrapped[prompt_start..prompt_end];
-            let height = prompt_lines
-                .len()
+            let frame_len = prompt_end.saturating_sub(prompt_start);
+            let height = frame_len
                 .min(MAX_STICKY_PROMPT_ROWS)
-                .min(area.height as usize);
+                .min(usize::from(area.height));
             if height > 0 {
+                let mut window =
+                    sticky_prompt_window(&self.wrapped[prompt_start..prompt_end], height);
+                for (offset, line) in &mut window {
+                    paint_selection(line, prompt_start + *offset, sel);
+                }
+                let lines = window.into_iter().map(|(_, line)| line).collect();
                 let height = u16::try_from(height).unwrap_or(area.height);
                 let prompt_area = Rect::new(area.x, area.y, area.width, height);
-                let lines = sticky_prompt_lines(prompt_lines, usize::from(height));
                 paint_visible(f, prompt_area, lines);
                 content_area.y = content_area.y.saturating_add(height);
                 content_area.height = content_area.height.saturating_sub(height);
@@ -1384,25 +1518,8 @@ impl Component for Transcript {
             last.spans
                 .push(Span::styled(STREAM_CARET, theme::assistant()));
         }
-        if let Some((sel_start, sel_end)) = self.normalized_sel() {
-            for (i, line) in visible.iter_mut().enumerate() {
-                let idx = start + i;
-                if idx < sel_start.line || idx > sel_end.line {
-                    continue;
-                }
-                let width = line_display_width(line);
-                let from = if idx == sel_start.line {
-                    sel_start.col
-                } else {
-                    0
-                };
-                let to = if idx == sel_end.line {
-                    sel_end.col
-                } else {
-                    width
-                };
-                *line = highlight_line(line, from, to);
-            }
+        for (i, line) in visible.iter_mut().enumerate() {
+            paint_selection(line, start + i, sel);
         }
         paint_visible(f, content_area, visible);
     }
@@ -1456,6 +1573,19 @@ fn shift_pos(pos: SelPos, edge: usize, delta: isize) -> SelPos {
         line: pos.line.saturating_add_signed(delta),
         col: pos.col,
     }
+}
+
+fn paint_selection(line: &mut Line<'static>, idx: usize, sel: Option<(SelPos, SelPos)>) {
+    let Some((start, end)) = sel else {
+        return;
+    };
+    if idx < start.line || idx > end.line {
+        return;
+    }
+    let width = line_display_width(line);
+    let from = if idx == start.line { start.col } else { 0 };
+    let to = if idx == end.line { end.col } else { width };
+    *line = highlight_line(line, from, to);
 }
 
 fn result_text(content: &[ContentBlock]) -> String {

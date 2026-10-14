@@ -62,10 +62,12 @@ impl Buf<'_> {
 }
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
-/// Rows a prompt frame may occupy, borders included. A longer prompt keeps its
-/// top and its bottom rule and drops the middle, so the box stays this tall
-/// both while it is pinned and while a scroll draws it in the transcript.
+/// Rows a prompt frame may occupy, borders included. A longer prompt scrolls
+/// inside this window, so the box stays this tall while it is pinned and while
+/// a scroll draws it in the transcript.
 pub(super) const MAX_STICKY_PROMPT_ROWS: usize = 8;
+/// Body rows visible inside that window, once the top and bottom rules are set aside.
+pub(super) const PROMPT_BODY_SLOTS: usize = MAX_STICKY_PROMPT_ROWS - 2;
 /// Screen rows — counted after wrapping — a body still receiving content may
 /// occupy, so a line that wraps into many rows is capped by the rows it takes,
 /// not by the newline it came from.
@@ -260,15 +262,15 @@ pub(super) fn wrap_row_into(
     text: &str,
     width: usize,
     separator: bool,
-) {
+    prompt_scroll: usize,
+) -> usize {
     if separator {
         buf.push_visual(Line::from(""));
     }
     if let Some(frame) = PromptFrame::of(kind)
         && width > PROMPT_FRAME_COLS + frame.marker.width()
     {
-        wrap_prompt_frame_into(buf, &frame, text, width);
-        return;
+        return wrap_prompt_frame_into(buf, &frame, text, width, prompt_scroll);
     }
     if kind == LineKind::Separator {
         if text.is_empty() {
@@ -276,9 +278,10 @@ pub(super) fn wrap_row_into(
         } else {
             wrap_body_into(buf, kind, text, width);
         }
-        return;
+        return 0;
     }
     wrap_body_into(buf, kind, text, width);
+    0
 }
 
 pub(super) fn wrap_body_into(buf: &mut Buf<'_>, kind: LineKind, text: &str, width: usize) {
@@ -318,9 +321,15 @@ impl PromptFrame {
 
 /// Frames a submitted prompt like the composer, so it reads as input rather
 /// than an answer. Body lines are `[left edge, marker, text, padded right edge]`;
-/// the marker shows on the first line only.
-fn wrap_prompt_frame_into(buf: &mut Buf<'_>, frame: &PromptFrame, text: &str, width: usize) {
-    let start = buf.len();
+/// the marker stays on the first visible line. Returns how many body lines the
+/// text wrapped to, including the ones the window scrolled off.
+fn wrap_prompt_frame_into(
+    buf: &mut Buf<'_>,
+    frame: &PromptFrame,
+    text: &str,
+    width: usize,
+    prompt_scroll: usize,
+) -> usize {
     let style = frame.border;
     let set = theme::border_type().to_border_set();
     let rule = |left: &str, fill: &str, right: &str| {
@@ -331,57 +340,68 @@ fn wrap_prompt_frame_into(buf: &mut Buf<'_>, frame: &PromptFrame, text: &str, wi
     let body_width = width - PROMPT_FRAME_COLS - marker_width;
     let left_edge = format!("{} ", set.vertical_left);
     let continuation = " ".repeat(marker_width);
-    let mut marker: &str = frame.marker;
-    buf.push_visual(rule(set.top_left, set.horizontal_top, set.top_right));
+    let mut chunks = Vec::new();
     for part in trim_message(text).split('\n') {
         let mut rest = part.strip_suffix('\r').unwrap_or(part);
         loop {
             let (chunk, next) = split_at_width(rest, body_width);
-            let pad = " ".repeat(body_width.saturating_sub(chunk.width()));
-            buf.push_visual(Line::from(vec![
-                Span::styled(left_edge.clone(), style),
-                Span::styled(
-                    mem::replace(&mut marker, &continuation).to_string(),
-                    frame.marker_style,
-                ),
-                Span::styled(chunk.to_string(), frame.body),
-                Span::styled(format!("{pad} {}", set.vertical_right), style),
-            ]));
+            chunks.push(chunk.to_string());
             if next.is_empty() {
                 break;
             }
             rest = next;
         }
     }
+    let body_rows = chunks.len();
+    let scroll = prompt_scroll.min(body_rows.saturating_sub(PROMPT_BODY_SLOTS));
+    buf.push_visual(rule(set.top_left, set.horizontal_top, set.top_right));
+    let mut marker: &str = frame.marker;
+    for chunk in chunks.into_iter().skip(scroll).take(PROMPT_BODY_SLOTS) {
+        let pad = " ".repeat(body_width.saturating_sub(chunk.width()));
+        buf.push_visual(Line::from(vec![
+            Span::styled(left_edge.clone(), style),
+            Span::styled(
+                mem::replace(&mut marker, &continuation).to_string(),
+                frame.marker_style,
+            ),
+            Span::styled(chunk, frame.body),
+            Span::styled(format!("{pad} {}", set.vertical_right), style),
+        ]));
+    }
     buf.push_visual(rule(
         set.bottom_left,
         set.horizontal_bottom,
         set.bottom_right,
     ));
-    cap_prompt_frame(buf, start);
+    body_rows
 }
 
-/// Drops middle body lines once a frame is taller than [`MAX_STICKY_PROMPT_ROWS`],
-/// leaving the bottom rule in place. The wrapped lines are what a scroll paints,
-/// so the cap has to happen here; pinning alone would let the same prompt grow
-/// back to its full height as soon as it leaves the header.
-fn cap_prompt_frame(buf: &mut Buf<'_>, start: usize) {
-    let end = buf.len();
-    if end - start <= MAX_STICKY_PROMPT_ROWS {
-        return;
+/// The pinned prompt inside `height` rows, still closed. Each entry is the
+/// source offset in `lines` and the line itself: a short viewport keeps the
+/// bottom rule, so the last screen row is not the next source line.
+pub(super) fn sticky_prompt_window(
+    lines: &[Line<'static>],
+    height: usize,
+) -> Vec<(usize, Line<'static>)> {
+    let frame_len = lines.len();
+    let rows = height.min(frame_len);
+    (0..rows)
+        .map(|rel| {
+            let idx = sticky_row_index(frame_len, rows, rel);
+            (idx, lines[idx].clone())
+        })
+        .collect()
+}
+
+/// Source offset of screen row `rel_y` in a prompt frame of `frame_len` lines
+/// drawn into `height` rows.
+pub(super) fn sticky_row_index(frame_len: usize, height: usize, rel_y: usize) -> usize {
+    if frame_len == 0 {
+        return 0;
     }
-    let drop_from = start + MAX_STICKY_PROMPT_ROWS - 1;
-    buf.drain(drop_from..end - 1);
-}
-
-/// The pinned prompt block inside `height` rows, still closed: its last row is
-/// the frame's bottom rule, so a truncation drops middle body lines instead of
-/// the border.
-pub(super) fn sticky_prompt_lines(lines: &[Line<'static>], height: usize) -> Vec<Line<'static>> {
-    let last = lines.len() - 1;
-    let mut visible = lines[..height.saturating_sub(1).min(last)].to_vec();
-    visible.push(lines[last].clone());
-    visible
+    let last = frame_len - 1;
+    let head = height.saturating_sub(1).min(last);
+    if rel_y < head { rel_y } else { last }
 }
 
 pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {

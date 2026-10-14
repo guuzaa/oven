@@ -12,7 +12,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -3741,6 +3741,161 @@ fn a_long_sticky_prompt_still_closes_its_frame() {
         row(bottom - 1).starts_with('│'),
         "the rows the cap drops are body lines: {:?}",
         row(bottom - 1)
+    );
+}
+
+#[test]
+fn selecting_a_sent_prompt_highlights_every_line() {
+    const WIDTH: u16 = 40;
+    const HEIGHT: u16 = 12;
+    const PROMPT: &str = "alpha\nbeta";
+    let mut t = Transcript::new();
+    t.push_prompt(LineKind::User, PROMPT);
+    t.push_row(LineKind::Text, "answer");
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    let paint = |t: &mut Transcript, terminal: &mut Terminal<TestBackend>| {
+        terminal
+            .draw(|f| t.draw(f, f.area(), &State::new()))
+            .unwrap();
+    };
+    paint(&mut t, &mut terminal);
+
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 4, 1),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 8, 2),
+        &State::new(),
+    );
+    assert_eq!(t.selected_text().as_deref(), Some(PROMPT));
+
+    paint(&mut t, &mut terminal);
+    let buf = terminal.backend().buffer();
+    let reversed = |y: u16, text: &str| {
+        let row: String = (0..WIDTH).map(|x| buf[(x, y)].symbol()).collect();
+        let byte = row.find(text).expect(text);
+        let start = row[..byte].width();
+        (0..text.width()).all(|i| {
+            buf[(u16::try_from(start + i).unwrap(), y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        })
+    };
+    assert!(reversed(1, "alpha"), "the first prompt line is highlighted");
+    assert!(reversed(2, "beta"), "the next prompt line is highlighted");
+    assert!(
+        !buf[(0, 1)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED),
+        "the frame border stays unselected"
+    );
+}
+
+#[test]
+fn wheel_scrolls_a_long_sent_prompt_inside_its_frame() {
+    const WIDTH: u16 = 40;
+    const HEIGHT: u16 = 24;
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.push_prompt(LineKind::User, "earlier");
+    fill(&mut t, 8);
+    let prompt = (1..=12)
+        .map(|i| format!("prompt {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    t.push_prompt(LineKind::User, &prompt);
+    fill(&mut t, 30);
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    let screen = |terminal: &Terminal<TestBackend>| -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        (0..HEIGHT)
+            .map(|y| {
+                (0..WIDTH)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    };
+    let paint = |t: &mut Transcript, terminal: &mut Terminal<TestBackend>| {
+        terminal
+            .draw(|f| t.draw(f, f.area(), &State::new()))
+            .unwrap();
+    };
+    paint(&mut t, &mut terminal);
+    let pinned = screen(&terminal);
+    assert!(pinned.iter().any(|row| row.contains("prompt 1")));
+    assert!(pinned.iter().all(|row| !row.contains("prompt 12")));
+
+    t.handle_mouse(mouse(MouseEventKind::ScrollUp, 4, 1), &State::new());
+    assert!(
+        t.top.is_some(),
+        "a wheel at the top of the prompt scrolls the transcript"
+    );
+    t.scroll_down(u16::MAX);
+    paint(&mut t, &mut terminal);
+    assert!(t.top.is_none());
+
+    t.scroll_up(1);
+    paint(&mut t, &mut terminal);
+    let anchored = t.top;
+    assert!(anchored.is_some());
+    assert!(screen(&terminal).iter().any(|row| row.contains("prompt 1")));
+
+    let mut guard = 0;
+    while !screen(&terminal)
+        .iter()
+        .any(|row| row.contains("prompt 12"))
+    {
+        t.handle_mouse(mouse(MouseEventKind::ScrollDown, 4, 1), &State::new());
+        assert_eq!(t.top, anchored, "the prompt scrolls inside its frame");
+        paint(&mut t, &mut terminal);
+        guard += 1;
+        assert!(guard < 20, "the prompt never revealed its last line");
+    }
+    let shown = screen(&terminal);
+    let frame = prompt_frame_text(&shown, "prompt 12");
+    assert_eq!(frame.len(), MAX_STICKY_PROMPT_ROWS);
+    assert!(frame[0].starts_with('╭') && frame.last().unwrap().starts_with('╰'));
+
+    let row = shown
+        .iter()
+        .position(|row| row.contains("prompt 12"))
+        .expect("prompt 12 is on screen");
+    let row = u16::try_from(row).unwrap();
+    t.handle_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 4, row),
+        &State::new(),
+    );
+    t.handle_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 13, row),
+        &State::new(),
+    );
+    assert_eq!(t.selected_text().as_deref(), Some("prompt 12"));
+    paint(&mut t, &mut terminal);
+    let buf = terminal.backend().buffer();
+    let text = "prompt 12";
+    let line: String = (0..WIDTH).map(|x| buf[(x, row)].symbol()).collect();
+    let byte = line.find(text).expect("prompt 12");
+    let start = line[..byte].width();
+    assert!(
+        (0..text.width()).all(|i| {
+            buf[(u16::try_from(start + i).unwrap(), row)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        }),
+        "a scrolled prompt line highlights while it is selected"
+    );
+
+    t.handle_mouse(mouse(MouseEventKind::ScrollDown, 4, 1), &State::new());
+    assert_ne!(
+        t.top, anchored,
+        "past the last prompt line the wheel scrolls the transcript"
     );
 }
 

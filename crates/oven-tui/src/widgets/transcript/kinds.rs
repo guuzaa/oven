@@ -77,6 +77,10 @@ pub(super) struct Row {
     /// Marker lines, in wrapped-line order: the row's own header first, then
     /// one per nested item.
     pub headers: Vec<Header>,
+    /// Body lines scrolled off the top of a framed prompt.
+    pub prompt_scroll: usize,
+    /// Wrapped body lines of a framed prompt, before its window.
+    pub prompt_body: usize,
 }
 
 /// A clickable ▸/▾ marker. `path` walks nested items by section index, so an
