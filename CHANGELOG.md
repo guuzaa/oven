@@ -1,14 +1,26 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.0] - 2026-10-14
+
+### Added
+- The transcript renders assistant Markdown: inline marks come from `pulldown-cmark`, and lists, quotes, fences, headings and tables from a line scan that keeps the source indentation as hanging wrap, with `code`, `link` and per-level `heading` styles. Assistant text rows and the live stream both reparse the whole message on each rewrap, and a mouse selection maps display columns back to the original Markdown — hidden markers left out, soft-break newlines not inserted. Thinking and tool output stay literal
 
 ### Changed
 - **Breaking:** `Agent::compact` takes a `CancellationToken`. A cancelled or failed summary leaves history untouched
 - **Breaking:** `AppConfig::load`, `load_file`, `save_at`, `save_provider_at`, and `ensure_user_config` are async, and so are `App::submit` and `App::rewind`. A `/model` switch writes config without blocking a runtime thread. The file format is unchanged
+- The todo checklist and the plan reminder leave the system prompt: a checklist rides along as a user message on the single request after it changes, and a reminder is a user message on the request after `PLAN_REMINDER_AFTER_MISSES` tool rounds skip `todo_write`, after which the count restarts. Neither is stored, so the cached prefix stays byte-identical for the whole session, and `prompt_template::mode` composes the mode prompt over the base in place of the removed `plan` module
+- Tool rows are named by verb — `Searched`, `Found`, `Edited`, `Wrote`, `Asked`, `Fetched` — so a call with malformed arguments groups with the siblings it belongs to instead of falling back to its raw tool name; `file_edit` keeps the path (without the diff) when its strings do not parse
+- Release builds run on `ubuntu-24.04` and cache the cargo registry with `actions/cache`, keyed on the target and `Cargo.lock`
 
 ### Fixed
 - Cancelling during `/compact` or auto-compaction aborts the summary request, including mid-stream, and leaves the session id, session file, and `cwd_latest.json` unchanged. Cancelling auto-compaction keeps the turn that already finished
 - Config saves write a temporary file and rename it into place, so a crash or a concurrent save no longer leaves a truncated `config.toml`. Creating the template user config no longer races with another process creating it
+- A cancelled turn keeps the prompt and every step that finished: the in-flight step is dropped so no tool call is left without a result, and usage, todos and session meta are saved for that prefix, so the first turn of a new session lands under `~/.oven/sessions` and can be resumed
+- A text delta that is only a newline, CR or spaces no longer seals the open activity row. That text is never drawn, and with thinking off it arrives between tool steps, so each edit used to start a row of its own
+- Table rows map every glyph back to its source, so a selection copies one cell instead of the whole line and a wide cell wraps inside its column rather than as prose
+- A long prompt frame stays capped while scrolling it back into the transcript: the row cap only applied to the pinned header, so the box grew with every line
+- The stream caret no longer jumps on wrapped Markdown: a glyph in the last column arms pending wrap, which opened a blank row under the text while a reply streamed
+- The prompt box drawn after you press Enter now highlights selected text, and a long prompt scrolls inside that box.
 
 ## [0.0.11] - 2026-10-06
 
