@@ -130,13 +130,31 @@ pub(super) fn format_thought(ms: Option<u64>) -> String {
 }
 
 pub(crate) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
+    paint_rows(f, area, lines, true);
+}
+
+/// Paints `lines`. `write_last_column` is false while a reply streams: a glyph
+/// in that column arms pending wrap, so the next row — the caret — lands under
+/// a blank one.
+pub(crate) fn paint_rows(
+    f: &mut Frame<'_>,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+    write_last_column: bool,
+) {
     f.render_widget(Paragraph::new(lines), area);
     // Wide CJK glyphs leave a stale trailing cell on Windows; force a full paint.
     let buf = f.buffer_mut();
     let area = area.intersection(*buf.area());
+    let last = area.right().saturating_sub(1);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            buf[(x, y)].set_diff_option(CellDiffOption::AlwaysUpdate);
+            let option = if !write_last_column && x == last {
+                CellDiffOption::Skip
+            } else {
+                CellDiffOption::AlwaysUpdate
+            };
+            buf[(x, y)].set_diff_option(option);
         }
     }
 }
@@ -908,4 +926,20 @@ pub(super) fn line_terminal_width(line: &Line<'_>) -> usize {
 /// Whether `caret` can sit on `line` and still leave the last column empty.
 pub(super) fn fits_stream_caret(line: &Line<'_>, width: usize, caret: &str) -> bool {
     width > 0 && line_terminal_width(line) + caret.width_cjk() < width
+}
+
+pub(super) fn line_has_glyph(line: &Line<'_>) -> bool {
+    line.spans
+        .iter()
+        .any(|span| span.content.chars().any(|ch| !ch.is_whitespace()))
+}
+
+/// The row under a stream line that already ends at the wrap width. The caret
+/// is the first glyph; a blank row is not inserted above it.
+pub(super) fn stream_caret_line(caret: &str) -> Line<'static> {
+    let gutter = continuation_prefix(LineKind::Text, &line_prefix(LineKind::Text));
+    Line::from(vec![
+        Span::styled(gutter, LineKind::Text.style()),
+        Span::styled(caret.to_string(), theme::assistant()),
+    ])
 }

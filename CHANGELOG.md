@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- The stream caret stays on the last glyph of a reply. A trailing newline no longer opens a blank row under the paragraph, and a line that ends on the wrap width puts the caret on the next row
+
 ## [0.1.0] - 2026-10-14
 
 ### Added
