@@ -24,15 +24,15 @@ use super::selection::{SelPos, highlight_line};
 use super::wrap::{
     Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, PROMPT_BODY_SLOTS, RESULT_LABEL,
     THINKING_LABEL, THOUGHT_LABEL, apply_hover, apply_shimmer, collect_lines, fits_stream_caret,
-    format_elapsed, format_thought, line_display_width, paint_visible, shimmer_phase,
-    sticky_prompt_window, sticky_row_index, tail_lines, trim_message, wrap_body_into,
-    wrap_collapsible_into, wrap_row_into,
+    format_elapsed, format_thought, line_display_width, line_has_glyph, paint_rows, paint_visible,
+    shimmer_phase, sticky_prompt_window, sticky_row_index, stream_caret_line, tail_lines,
+    trim_message, wrap_body_into, wrap_collapsible_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
 /// Body lines one wheel tick moves inside a sent prompt.
 const PROMPT_WHEEL_STEP: isize = 1;
-const STREAM_CARET: &str = "▊";
+pub(super) const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 pub(super) use super::wrap::MAX_STICKY_PROMPT_ROWS;
@@ -842,14 +842,42 @@ impl Transcript {
         if width == 0 || self.streaming.is_empty() {
             return;
         }
-        let mut buf = Buf {
-            lines: &mut self.wrapped_stream,
-            copies: &mut self.stream_copies,
+        // A trailing newline is not a row yet. Rendering it opens a blank line
+        // under the paragraph and the caret drops onto that line.
+        let body = if self.stream_kind == LineKind::Text {
+            self.streaming.trim_end_matches(['\n', '\r'])
+        } else {
+            self.streaming.as_str()
         };
-        if !self.wrapped.is_empty() {
-            buf.push_visual(Line::from(""));
+        if body.is_empty() {
+            return;
         }
-        wrap_body_into(&mut buf, self.stream_kind, &self.streaming, width);
+        let mut lines = Vec::new();
+        let mut copies = Vec::new();
+        wrap_body_into(
+            &mut Buf {
+                lines: &mut lines,
+                copies: &mut copies,
+            },
+            self.stream_kind,
+            body,
+            width,
+        );
+        if self.stream_kind == LineKind::Text {
+            while lines.last().is_some_and(|line| !line_has_glyph(line)) {
+                lines.pop();
+                copies.pop();
+            }
+        }
+        if lines.is_empty() {
+            return;
+        }
+        if !self.wrapped.is_empty() {
+            self.wrapped_stream.push(Line::from(""));
+            self.stream_copies.push(LineCopy::Visual);
+        }
+        self.wrapped_stream.append(&mut lines);
+        self.stream_copies.append(&mut copies);
         debug_assert_eq!(self.wrapped_stream.len(), self.stream_copies.len());
     }
 
@@ -1509,19 +1537,20 @@ impl Component for Transcript {
         {
             *line = apply_hover(line, self.width());
         }
-        if self.is_live_text()
-            && end == total
-            && (state.frame / CARET_FRAMES).is_multiple_of(2)
-            && let Some(last) = visible.last_mut()
-            && fits_stream_caret(last, self.width(), STREAM_CARET)
-        {
-            last.spans
-                .push(Span::styled(STREAM_CARET, theme::assistant()));
+        if self.is_live_text() && end == total && (state.frame / CARET_FRAMES).is_multiple_of(2) {
+            place_stream_caret(
+                &mut visible,
+                self.width(),
+                height,
+                !self.wrapped_stream.is_empty(),
+            );
         }
         for (i, line) in visible.iter_mut().enumerate() {
             paint_selection(line, start + i, sel);
         }
-        paint_visible(f, content_area, visible);
+        // Leave the last column unwritten. A glyph there arms pending wrap,
+        // which opens a blank row and the caret lands under it.
+        paint_rows(f, content_area, visible, !self.is_live_text());
     }
 }
 
@@ -1532,6 +1561,34 @@ fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)>
         .cloned()
         .map(|message| (Arc::new(message), 0, None))
         .collect()
+}
+
+/// Puts the caret on the last stream row when one column remains before the
+/// screen edge, and on the following row when that line already ends there.
+/// The extra row replaces the top of a full viewport so the caret is not
+/// clipped, and nothing is inserted between the text and the caret.
+fn place_stream_caret(
+    visible: &mut Vec<Line<'static>>,
+    width: usize,
+    height: usize,
+    on_tail: bool,
+) {
+    let on_last = on_tail
+        && visible
+            .last()
+            .is_some_and(|line| fits_stream_caret(line, width, STREAM_CARET));
+    if on_last {
+        visible
+            .last_mut()
+            .expect("stream row")
+            .spans
+            .push(Span::styled(STREAM_CARET, theme::assistant()));
+        return;
+    }
+    if visible.len() >= height && height > 0 {
+        visible.remove(0);
+    }
+    visible.push(stream_caret_line(STREAM_CARET));
 }
 
 /// Whether `text` survives as a transcript row. Newlines and other

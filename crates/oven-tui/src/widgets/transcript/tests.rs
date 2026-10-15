@@ -25,7 +25,7 @@ use super::kinds::{
 };
 use super::selection::{extract_line_range, highlight_line, slice_cols};
 
-use super::widget::{LOOP_LIMIT_REACHED, MAX_STICKY_PROMPT_ROWS, Transcript};
+use super::widget::{LOOP_LIMIT_REACHED, MAX_STICKY_PROMPT_ROWS, STREAM_CARET, Transcript};
 use super::wrap::{
     MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
     apply_shimmer, format_elapsed, format_lines, format_thought, line_display_width,
@@ -141,7 +141,7 @@ fn wrapped_streamed_assistant_gutter_is_drawn_once() {
     const WIDTH: u16 = 7;
     let mut t = Transcript::new();
     t.push_stream(LineKind::Text, "abcdefgh");
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, 3)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, 4)).unwrap();
     terminal
         .draw(|f| t.draw(f, f.area(), &State::new()))
         .unwrap();
@@ -4199,6 +4199,81 @@ fn stream_caret_stays_off_the_last_column() {
         }
     }
     assert!(saw_caret, "caret should stay visible on the tail");
+}
+
+const STREAM_PARAGRAPH: &str = "The on_power_changed is in haier_camera_manager.c (take_photo), and the user is asking me to think about its design given a problem: UVC handle only closes on full power-off. Let me read the relevant code.";
+
+fn painted_rows(text: &str, width: u16, height: u16) -> Vec<String> {
+    let mut t = Transcript::new();
+    t.push_stream(LineKind::Text, text);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    (0..height)
+        .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+        .collect()
+}
+
+fn caret_and_text_rows(rows: &[String]) -> (u16, u16) {
+    let caret = STREAM_CARET.chars().next().expect("caret");
+    let mut caret_y = None;
+    let mut text_y = None;
+    for (y, row) in rows.iter().enumerate() {
+        let y = u16::try_from(y).unwrap_or(u16::MAX);
+        if row.contains(caret) {
+            caret_y = Some(y);
+        }
+        let without = row.replace(caret, " ");
+        if without.chars().any(|ch| !ch.is_whitespace()) {
+            text_y = Some(y);
+        }
+    }
+    (
+        text_y.expect("streamed paragraph"),
+        caret_y.expect("stream caret"),
+    )
+}
+
+#[test]
+fn stream_caret_sits_on_the_last_glyph() {
+    let rows = painted_rows(STREAM_PARAGRAPH, 80, 8);
+    let (text, caret) = caret_and_text_rows(&rows);
+    assert_eq!(
+        text, caret,
+        "caret leaves a gap under the paragraph: {rows:?}"
+    );
+    assert!(
+        rows[usize::from(caret)].contains("code."),
+        "caret is not on the last glyph: {rows:?}"
+    );
+}
+
+#[test]
+fn trailing_newlines_do_not_open_a_row_under_the_stream() {
+    let rows = painted_rows(&format!("{STREAM_PARAGRAPH}\n\n"), 80, 8);
+    let (text, caret) = caret_and_text_rows(&rows);
+    assert_eq!(
+        text, caret,
+        "a trailing newline drops the caret onto a blank row: {rows:?}"
+    );
+}
+
+#[test]
+fn stream_caret_wraps_to_the_next_row_without_a_blank() {
+    const WIDTH: u16 = 45;
+    let rows = painted_rows(STREAM_PARAGRAPH, WIDTH, 8);
+    let (text, caret) = caret_and_text_rows(&rows);
+    assert_eq!(
+        caret,
+        text + 1,
+        "a full line must put the caret on the next row, with no blank between: {rows:?}"
+    );
+    assert!(
+        !rows[usize::from(text)].contains(STREAM_CARET),
+        "caret shares a row that already ends at the wrap width: {rows:?}"
+    );
 }
 
 #[test]
