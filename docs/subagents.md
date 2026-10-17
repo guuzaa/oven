@@ -13,7 +13,7 @@ Terminology follows common usage: *loop engineering* treats the loop as a first-
 | Tradeoff | Choice | Why |
 |----------|--------|-----|
 | Persistence | **None** | The session keeps only the `task` call and its result. A subagent's internal conversation dies with the app, as in Claude Code. This skips the whole "tag `Record` with an agent + stable id + rebuild on resume" apparatus. |
-| Result delivery | **Foreground blocks + background polls** | `task` blocks by default and returns the subagent's final answer as the tool result; `background=true` returns the name immediately and the driver reads it later with `task_output`. Tool calls inside a `step` are serial, so only background mode gives real parallelism. |
+| Result delivery | **Foreground blocks + background is pushed** | `task` blocks by default and returns the subagent's final answer as the tool result; `background=true` returns the name immediately, and when the subagent ends the driver is *told* — the notice rides along with the tool results of whatever step is running, or waits in the queue until a later step runs tools, so the driver reads it without polling and a subagent that outlives its turn is not lost. `task_output` remains the way to fetch a report on demand. Tool calls inside a `step` are serial, so only background mode gives real parallelism. |
 | TUI | **Bar + separate viewer** | Reuse the existing `Transcript` component (scrolling, selection, collapsing, streaming all come free) instead of indenting subagent blocks into the main transcript, which would disturb the row/burst model. |
 | Approval | **Restrict tools by role, no prompts** | A subagent's `TurnContext` carries none of the approval, loop-limit, or question channels, so it **cannot structurally** stop and wait for a human. What it may do is decided by its role. |
 
@@ -178,7 +178,7 @@ So the only difference between a "foreground" and a "background" subagent is **w
 | Name | `explore#1`, per-role counter, unique within this app run |
 | Index | 1-based position in the listing (`/agents 2`) |
 | Foreground result | The `task` tool result: `[name done · N steps, M tool calls · K tokens · T s]` + the report, clamped to 16 KB |
-| Background result | `task_output {name}` fetches the report; omit `name` to list all |
+| Background result | The driver is told when it ends — `[subagent notice] explore#1: done · N steps, M tool calls · K tokens · T s` is appended to its history behind the tool results of the step that was running, and reaches the next provider request. A subagent still running when its turn ends leaves the notice queued: the next turn that runs tools picks it up. `task_output {name}` then fetches the report; omit `name` to list all |
 
 ### 4.8 Running several calls from one step in parallel
 

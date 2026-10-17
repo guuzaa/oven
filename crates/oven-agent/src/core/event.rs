@@ -39,6 +39,12 @@ pub enum TurnEvent {
     UserAppended {
         text: String,
     },
+    /// Something that happened on its own — a subagent finishing, say —
+    /// appended the same way. A frontend draws it as its own line rather
+    /// than as something the user typed.
+    NoticeAppended {
+        text: String,
+    },
     Completed {
         usage: Usage,
         duration_ms: u64,

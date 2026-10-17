@@ -13,14 +13,15 @@ use std::time::Instant;
 use async_trait::async_trait;
 use oven_agent::{
     Agent, AgentError, AgentEvent, AgentId, CancellationToken, EventSink, NodeHandle, NodeInfo,
-    NodeOutcome, NodeReport, NodeStatus, RoleSpec, RouterHandle, RunPolicy, SpawnRequest,
-    SubagentSpawner, Tool, ToolEvent, TurnContext, TurnEvent, TurnId,
+    NodeOutcome, NodeReport, NodeStatus, PendingInput, RoleSpec, RouterHandle, RunPolicy,
+    SpawnRequest, SubagentSpawner, Tool, ToolEvent, TurnContext, TurnEvent, TurnId,
 };
 use oven_host::{as_ms, now_ms};
 use oven_llm::{ModelId, Usage};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use crate::core::event::{BusSink, EventBus};
+use crate::runtime::pending::TurnInbox;
 use tokio::task::JoinHandle;
 
 /// Finished subagents kept for `/agents` and `task_output` before the oldest
@@ -56,6 +57,8 @@ pub(crate) struct SubagentParts {
     pub(crate) max_iters: usize,
     pub(crate) events: EventBus,
     pub(crate) wake: mpsc::UnboundedSender<()>,
+    /// Where a finished subagent tells the turn that is waiting on it.
+    pub(crate) inbox: Arc<TurnInbox>,
 }
 
 pub(crate) struct Subagents {
@@ -72,6 +75,7 @@ pub(crate) struct Subagents {
     max_iters: usize,
     events: EventBus,
     wake: mpsc::UnboundedSender<()>,
+    inbox: Arc<TurnInbox>,
     /// Cancelled when the app shuts down, which stops every subagent.
     root: CancellationToken,
 }
@@ -88,6 +92,7 @@ impl Subagents {
             max_iters: parts.max_iters,
             events: parts.events,
             wake: parts.wake,
+            inbox: parts.inbox,
             root: CancellationToken::new(),
         })
     }
@@ -192,6 +197,7 @@ impl Subagents {
             max_iters: 1,
             events: EventBus::new(),
             wake,
+            inbox: Arc::new(TurnInbox::default()),
         })
     }
 
@@ -215,7 +221,7 @@ impl Subagents {
 
     /// Records the terminal state and prunes the oldest finished subagents.
     fn finish(&self, id: AgentId, status: NodeStatus, report: String, usage: Usage) {
-        {
+        let notice = {
             let mut registry = self.lock();
             let Some(entry) = registry.entries.iter_mut().find(|e| e.info.id == id) else {
                 return;
@@ -224,8 +230,15 @@ impl Subagents {
             entry.info.usage = usage;
             entry.info.finished_at = Some(now_ms());
             entry.report = Some(report);
+            // A foreground subagent is being awaited by the `task` call that
+            // spawned it, whose result says all of this already.
+            let notice = entry.info.background.then(|| entry.info.notice());
             registry.revision += 1;
             registry.prune();
+            notice
+        };
+        if let Some(text) = notice {
+            self.inbox.push(PendingInput::Notice { text });
         }
         self.notify();
     }
@@ -539,7 +552,7 @@ impl EventSink for CountingSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_agent::{Agent, ToolCallId, ToolResult, ToolView};
+    use oven_agent::{Agent, PendingInbox, ToolCallId, ToolResult, ToolView};
     use oven_llm::Router;
 
     fn bare() -> Arc<Subagents> {
@@ -576,6 +589,85 @@ mod tests {
             .unwrap_err();
         assert!(err.message.contains("nope/model"), "{}", err.message);
         assert!(err.message.contains("list_models"), "{}", err.message);
+    }
+
+    /// A supervisor the test can read the notices of.
+    fn noticed() -> (Arc<Subagents>, Arc<TurnInbox>) {
+        let agent = Agent::new(Router::new(), Vec::new());
+        let inbox = Arc::new(TurnInbox::default());
+        let (wake, _) = mpsc::unbounded_channel();
+        let subagents = Subagents::new(SubagentParts {
+            parent: agent.id(),
+            router: agent.router_handle(),
+            roles: Vec::new(),
+            max_concurrent: 1,
+            max_iters: 1,
+            events: EventBus::new(),
+            wake,
+            inbox: Arc::clone(&inbox),
+        });
+        (subagents, inbox)
+    }
+
+    fn registered(subagents: &Subagents, background: bool) -> AgentId {
+        let id = AgentId::next();
+        subagents.lock().entries.push(Entry {
+            info: NodeInfo {
+                id,
+                name: "explore#1".into(),
+                role: "explore".into(),
+                label: "read note.txt".into(),
+                background,
+                parent: AgentId::next(),
+                status: NodeStatus::Pending,
+                usage: Usage::default(),
+                tool_calls: 3,
+                steps: 2,
+                started_at: 0,
+                finished_at: Some(1_000),
+            },
+            cancel: CancellationToken::new(),
+            report: None,
+        });
+        id
+    }
+
+    #[test]
+    fn a_finished_background_subagent_tells_the_turn_waiting_on_it() {
+        let (subagents, inbox) = noticed();
+        let id = registered(&subagents, true);
+
+        subagents.finish(
+            id,
+            NodeStatus::Completed,
+            "the file says hello".into(),
+            Usage::default(),
+        );
+
+        let taken = inbox.take();
+        assert!(
+            matches!(taken.as_slice(), [PendingInput::Notice { text }]
+                if text.contains("explore#1") && text.contains("done")),
+            "{taken:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_foreground_subagent_says_nothing_extra() {
+        let (subagents, inbox) = noticed();
+        let id = registered(&subagents, false);
+
+        subagents.finish(
+            id,
+            NodeStatus::Completed,
+            "the file says hello".into(),
+            Usage::default(),
+        );
+
+        assert!(
+            inbox.take().is_empty(),
+            "the `task` call awaiting it reads the outcome itself"
+        );
     }
 
     #[test]

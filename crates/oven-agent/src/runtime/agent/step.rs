@@ -20,8 +20,9 @@ use crate::core::identity::ToolCallId;
 use crate::core::interaction::{ApprovalDecision, LoopLimitDecision};
 use crate::core::mode::{AgentMode, ToolAccess};
 use crate::core::sink::EventSink;
+use crate::core::subagent::notice_message;
 use crate::core::todo::TodoList;
-use crate::core::turn::{Step, StepCall, TurnContext, TurnOutput};
+use crate::core::turn::{PendingInput, Step, StepCall, TurnContext, TurnOutput};
 
 /// Prefix of the tool error returned when a call's arguments are not JSON.
 pub(super) const INVALID_JSON_ARGUMENTS: &str = "invalid JSON arguments";
@@ -71,7 +72,7 @@ impl Agent {
         let gates = gate_calls(&planned, ctx).await?;
         let records = run_calls(&planned, gates, ctx, sink).await;
         let (calls, wrote_todo) = self.commit_calls(&planned, records, sink);
-        self.append_queued_prompts(ctx, sink);
+        self.append_pending(ctx, sink);
         self.note_todo_round(wrote_todo);
         Ok(Step { text, calls, usage })
     }
@@ -87,12 +88,22 @@ impl Agent {
         }
     }
 
-    /// Chats typed while tools were running ride along with the results the
-    /// next provider request uploads.
-    fn append_queued_prompts(&mut self, ctx: &TurnContext, sink: &mut impl EventSink) {
-        for text in ctx.take_pending() {
-            self.history.push(Message::user_text(text.clone()));
-            sink.emit(AgentEvent::Turn(TurnEvent::UserAppended { text }));
+    /// What reached the turn while its tools ran rides along with the
+    /// results the next provider request uploads. A notice that outlived
+    /// the turn it belongs to is told to this one: it still describes
+    /// something the model asked for.
+    fn append_pending(&mut self, ctx: &TurnContext, sink: &mut impl EventSink) {
+        for input in ctx.take_pending() {
+            match input {
+                PendingInput::User(text) => {
+                    self.history.push(Message::user_text(text.clone()));
+                    sink.emit(AgentEvent::Turn(TurnEvent::UserAppended { text }));
+                }
+                PendingInput::Notice { text } => {
+                    self.history.push(notice_message(&text));
+                    sink.emit(AgentEvent::Turn(TurnEvent::NoticeAppended { text }));
+                }
+            }
         }
     }
 

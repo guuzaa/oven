@@ -36,9 +36,9 @@ pub use core::state::{AppPhase, AppState, HistoryChangeReason, SessionState};
 pub use core::{complete, config};
 pub use oven_agent::{
     AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AnswerTool,
-    ApprovalDecision, CallOutcome, CancellationToken, LoopLimitDecision, NodeInfo, NodeStatus,
-    Question, QuestionOption, RoleSpec, Skill, SkillRegistry, StepStop, StreamEvent, TodoItem,
-    TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
+    ApprovalDecision, CallOutcome, CancellationToken, LoopLimitDecision, NOTICE_MARK, NodeInfo,
+    NodeStatus, Question, QuestionOption, RoleSpec, Skill, SkillRegistry, StepStop, StreamEvent,
+    TodoItem, TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
     UserRequestId, UserResponse,
 };
 pub use platform::shell::{LocalShell, ShellInput, display_shell_line};

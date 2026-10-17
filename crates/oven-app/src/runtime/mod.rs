@@ -27,6 +27,7 @@ use crate::core::state::{
     AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens, context_window,
 };
 use crate::runtime::inbox::InboxReceiver;
+use crate::runtime::pending::TurnInbox;
 use crate::runtime::shared::{GOODBYE, Shared, save_provider_overlay};
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
@@ -41,6 +42,7 @@ pub(crate) struct AppAgents {
     pub(crate) subagents: Arc<Subagents>,
     pub(crate) events: EventBus,
     pub(crate) wake_rx: mpsc::UnboundedReceiver<()>,
+    pub(crate) inbox: Arc<TurnInbox>,
     pub(crate) memory: Option<Arc<MemoryStore>>,
     /// The same store the memory write tool reads, when a session exists.
     pub(crate) session: Option<SessionStore>,
@@ -607,6 +609,7 @@ pub(crate) fn spawn_runtime(
         &agents.main,
         config,
         user_config_path,
+        Arc::clone(&agents.inbox),
     ));
     let runtime = Runtime::new(
         agents,
@@ -739,6 +742,7 @@ fn slug_without_variant(raw: &str) -> String {
 }
 
 pub(crate) mod inbox;
+pub(crate) mod pending;
 pub(crate) mod shared;
 mod turn;
 

@@ -7,7 +7,7 @@ use crate::memory::{
     AMBIGUOUS_MEMORY, DESCRIPTION_LABEL, KIND_LABEL, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY,
     SOURCE_LABEL,
 };
-use crate::{App, AppBuilder, NodeStatus};
+use crate::{App, AppBuilder, NOTICE_MARK, NodeStatus};
 use crate::{LocalShell, runtime::*};
 use oven_mem::NOT_FOUND;
 use std::borrow::Borrow;
@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use futures::Stream;
 use futures::stream::BoxStream;
 use oven_agent::{
-    Agent, AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, Record, TodoWriteTool,
-    Tool, TurnContext, TurnEvent, TurnId,
+    Agent, AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, PendingInput, Record,
+    TaskTool, TodoWriteTool, Tool, TurnContext, TurnEvent, TurnId,
 };
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName,
@@ -31,6 +31,7 @@ use oven_llm::{
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
 
 fn agent_from(provider: Box<dyn Provider>) -> AppAgents {
@@ -44,6 +45,10 @@ fn agent_from(provider: Box<dyn Provider>) -> AppAgents {
 fn agents_from(agent: Agent) -> AppAgents {
     let events = EventBus::new();
     let (wake, wake_rx) = mpsc::unbounded_channel();
+    // One queue, the way the builder wires it: a finished subagent reaches
+    // the turn that is running through here, so the two must not each have
+    // their own.
+    let inbox = Arc::new(TurnInbox::default());
     let subagents = Subagents::new(SubagentParts {
         parent: agent.id(),
         router: agent.router_handle(),
@@ -52,6 +57,7 @@ fn agents_from(agent: Agent) -> AppAgents {
         max_iters: 1,
         events: events.clone(),
         wake: wake.clone(),
+        inbox: Arc::clone(&inbox),
     });
     drop(wake);
     AppAgents {
@@ -59,6 +65,7 @@ fn agents_from(agent: Agent) -> AppAgents {
         subagents,
         events,
         wake_rx,
+        inbox,
         memory: None,
         session: None,
     }
@@ -3630,6 +3637,214 @@ async fn tool_calls_in_one_step_run_concurrently() {
         .unwrap();
     assert_eq!(out, "both done");
     assert_eq!(handle.subagents().len(), 2);
+    handle.shutdown().await;
+}
+
+/// Answers the driver's first request only once the test lets it, so the test
+/// can reach into the running turn before it asks for anything.
+struct GatedProvider {
+    gate: Arc<Notify>,
+    first: AtomicBool,
+    responses: Mutex<std::collections::VecDeque<Response>>,
+}
+
+impl GatedProvider {
+    fn new(gate: Arc<Notify>, responses: Vec<Response>) -> Self {
+        Self {
+            gate,
+            first: AtomicBool::new(true),
+            responses: Mutex::new(responses.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for GatedProvider {
+    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        if self.first.swap(false, Ordering::SeqCst) {
+            self.gate.notified().await;
+        }
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more mock responses".into(),
+            })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("gated".into())
+    }
+}
+
+/// A subagent that finishes while the driver works reaches the driver's next
+/// request as a notice, so it does not have to keep asking `task_output`.
+#[tokio::test]
+async fn a_finished_subagent_notifies_the_driver() {
+    const NOTICE: &str = "explore#1: done · 3 steps, 6 tool calls · 1040 tokens · 32.4s";
+    let tmp = tempdir::TempDir::new("app-runtime-subagent-notice").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let gate = Arc::new(Notify::new());
+    let mock = GatedProvider::new(
+        Arc::clone(&gate),
+        vec![
+            tool_response("c1", "file_read", serde_json::json!({"path": "note.txt"})),
+            text_response("done"),
+        ],
+    );
+    let app = AppBuilder::new(tmp.path());
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let inbox = Arc::clone(&agents.inbox);
+    let app = Arc::new(spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    ));
+    let mut phase = app.watch_state();
+    let replying = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { app.prompt("read it").await })
+    };
+
+    // The driver holds its first request at the gate, so the notice is in its
+    // inbox before it has asked the provider anything.
+    while !matches!(phase.borrow().phase, AppPhase::Running { .. }) {
+        phase.changed().await.unwrap();
+    }
+    inbox.push(PendingInput::Notice {
+        text: NOTICE.into(),
+    });
+    gate.notify_one();
+
+    assert_eq!(replying.await.unwrap().unwrap(), "done");
+    let uploaded = history(&app).iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::Text { text } => text.contains(NOTICE) && text.contains(NOTICE_MARK),
+            _ => false,
+        })
+    });
+    assert!(uploaded, "the notice rides the tool-result upload");
+    Arc::into_inner(app)
+        .expect("the reply task is done")
+        .shutdown()
+        .await;
+}
+
+/// A real background subagent, driven through the `task` tool, that outlives
+/// the turn which spawned it: the notice it leaves waits in the inbox until
+/// a later turn uploads it.
+#[tokio::test]
+async fn a_background_subagent_notice_reaches_a_later_turn() {
+    /// Answers the driver and the subagent from their own queues: only the
+    /// driver mounts `task`, so the request says which one is asking.
+    struct ByCallerProvider {
+        driver: Mutex<std::collections::VecDeque<Response>>,
+        child: Mutex<std::collections::VecDeque<Response>>,
+    }
+
+    #[async_trait]
+    impl Provider for ByCallerProvider {
+        async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+            let queue = if req.tools.iter().any(|tool| tool.name == TaskTool::NAME) {
+                &self.driver
+            } else {
+                &self.child
+            };
+            queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| ProviderError::Api {
+                    status: 500,
+                    body: "no more mock responses".into(),
+                })
+        }
+
+        async fn stream(
+            &self,
+            _req: &Request,
+        ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+            Err(ProviderError::Api {
+                status: 500,
+                body: "stream disabled in mock".into(),
+            })
+        }
+
+        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+            ModelInfo::non_streaming(&self.provider_name(), id)
+        }
+
+        fn provider_name(&self) -> ProviderName {
+            ProviderName::Custom("by-caller".into())
+        }
+    }
+
+    let tmp = tempdir::TempDir::new("app-runtime-background-notice").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let provider = ByCallerProvider {
+        driver: Mutex::new(
+            vec![
+                tool_response(
+                    "t1",
+                    "task",
+                    serde_json::json!({
+                        "description": "read the note",
+                        "prompt": "read note.txt",
+                        "role": "explore",
+                        "background": true,
+                    }),
+                ),
+                text_response("delegated"),
+                tool_response("f1", "file_read", serde_json::json!({"path": "note.txt"})),
+                text_response("noted"),
+            ]
+            .into(),
+        ),
+        child: Mutex::new(vec![text_response("the file says hello")].into()),
+    };
+    let app = AppBuilder::new(tmp.path());
+    let handle = spawn_app(&app, Box::new(provider)).await;
+
+    assert_eq!(handle.prompt("delegate it").await.unwrap(), "delegated");
+    // The subagent outlived the turn that asked for it, so its notice is
+    // parked with nothing running to read it.
+    wait_state(&handle, |state| {
+        !state.subagents.is_empty() && state.subagents.iter().all(|node| !node.status.is_active())
+    })
+    .await;
+
+    assert_eq!(handle.prompt("what did it find?").await.unwrap(), "noted");
+    let noticed = history(&handle).iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::Text { text } => {
+                text.contains(NOTICE_MARK) && text.contains("explore#1") && text.contains("done")
+            }
+            _ => false,
+        })
+    });
+    assert!(
+        noticed,
+        "a notice that outlived its turn still reaches the driver"
+    );
     handle.shutdown().await;
 }
 

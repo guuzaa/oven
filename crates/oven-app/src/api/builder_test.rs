@@ -143,7 +143,6 @@ async fn capture_app(app: AppBuilder) -> CapturedPrompt {
                 background: true,
                 model: agents.main.model(),
                 reasoning_effort: None,
-                parent_turn: TurnId::next(),
                 cancellation: CancellationToken::new(),
             })
             .await

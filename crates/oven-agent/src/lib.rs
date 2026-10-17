@@ -42,12 +42,13 @@ pub use core::prompt_template::{
 pub use core::selection::{ModelSelection, Selection};
 pub use core::sink::{EventSink, NullSink, VecEventSink};
 pub use core::subagent::{
-    NodeHandle, NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest,
+    NOTICE_MARK, NodeHandle, NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest,
     SubagentSpawner,
 };
 pub use core::todo::{TodoItem, TodoList, TodoStatus};
 pub use core::turn::{
-    DEFAULT_MAX_ITERS, PendingPrompts, RunPolicy, Step, StepCall, TurnContext, TurnOutput,
+    DEFAULT_MAX_ITERS, PendingInbox, PendingInput, RunPolicy, Step, StepCall, TurnContext,
+    TurnOutput,
 };
 pub use core::view::{ToolCaps, ToolPermission, ToolView};
 pub use oven_llm::RouterHandle;

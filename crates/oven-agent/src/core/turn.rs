@@ -21,10 +21,22 @@ use crate::core::view::ToolView;
 
 pub const DEFAULT_MAX_ITERS: usize = 200;
 
-/// Chats typed while a turn is running. The driver takes them once, after
-/// tool results are written, and appends each one behind those results.
-pub trait PendingPrompts: Debug + Send + Sync {
-    fn take(&self) -> Vec<String>;
+/// Something that reached a running turn while it worked: a chat the user
+/// typed, or something that happened on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingInput {
+    /// A chat typed while tools were running.
+    User(String),
+    /// Something the turn should know about, e.g. a subagent finishing. A
+    /// subagent that outlives the turn it was spawned by still reports: a
+    /// late notice is worth more to the next turn than a dropped one.
+    Notice { text: String },
+}
+
+/// What reached the turn while it ran. The driver takes it once, after tool
+/// results are written, and appends each item behind those results.
+pub trait PendingInbox: Debug + Send + Sync {
+    fn take(&self) -> Vec<PendingInput>;
 }
 
 /// How much one run may spend before it stops on its own.
@@ -64,7 +76,7 @@ pub struct TurnContext {
     /// Absent when nobody can answer: a subagent, or a headless run.
     requests: Option<Arc<dyn RequestSink>>,
     /// Absent for a subagent, and for a run nobody is typing into.
-    prompts: Option<Arc<dyn PendingPrompts>>,
+    inbox: Option<Arc<dyn PendingInbox>>,
 }
 
 impl TurnContext {
@@ -75,7 +87,7 @@ impl TurnContext {
             selection,
             policy: RunPolicy::default(),
             requests: None,
-            prompts: None,
+            inbox: None,
         }
     }
 
@@ -93,17 +105,17 @@ impl TurnContext {
         self
     }
 
-    pub fn with_pending(mut self, prompts: Arc<dyn PendingPrompts>) -> Self {
-        self.prompts = Some(prompts);
+    pub fn with_inbox(mut self, inbox: Arc<dyn PendingInbox>) -> Self {
+        self.inbox = Some(inbox);
         self
     }
 
-    /// Chats parked while this turn runs. Empty when nobody is typing, or
-    /// nothing has been parked since the last take.
-    pub fn take_pending(&self) -> Vec<String> {
-        self.prompts
+    /// What reached this turn while it ran. Empty when nobody is typing and
+    /// nothing happened, or everything has been taken since the last step.
+    pub fn take_pending(&self) -> Vec<PendingInput> {
+        self.inbox
             .as_ref()
-            .map(|prompts| prompts.take())
+            .map(|inbox| inbox.take())
             .unwrap_or_default()
     }
 

@@ -7,7 +7,8 @@ use crate::capabilities::tools::{
 };
 use crate::core::identity::ToolCallId;
 use crate::core::sink::{NullSink, VecEventSink};
-use crate::core::turn::{PendingPrompts, TurnContext};
+use crate::core::subagent::NOTICE_MARK;
+use crate::core::turn::{PendingInbox, PendingInput, TurnContext};
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt, iter};
 use oven_llm::{
@@ -1834,15 +1835,21 @@ fn completed_item() -> crate::core::todo::TodoItem {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ParkedPrompts {
-    texts: Mutex<Vec<String>>,
+    texts: Mutex<Vec<PendingInput>>,
 }
 
-impl PendingPrompts for ParkedPrompts {
-    fn take(&self) -> Vec<String> {
+impl PendingInbox for ParkedPrompts {
+    fn take(&self) -> Vec<PendingInput> {
         std::mem::take(&mut self.texts.lock().unwrap())
     }
+}
+
+fn parked(texts: Vec<PendingInput>) -> Arc<ParkedPrompts> {
+    Arc::new(ParkedPrompts {
+        texts: Mutex::new(texts),
+    })
 }
 
 #[tokio::test]
@@ -1859,9 +1866,10 @@ async fn queued_prompts_are_appended_after_tool_results() {
         router_with(Box::new(mock)),
         vec![Arc::new(FileReadTool::new(tmp.path()))],
     );
-    let ctx = turn_ctx(&agent).with_pending(Arc::new(ParkedPrompts {
-        texts: Mutex::new(vec![FIRST.into(), SECOND.into()]),
-    }));
+    let ctx = turn_ctx(&agent).with_inbox(parked(vec![
+        PendingInput::User(FIRST.into()),
+        PendingInput::User(SECOND.into()),
+    ]));
     let mut sink = VecEventSink::default();
     run_with(&mut agent, "read it", &ctx, &mut sink)
         .await
@@ -1891,23 +1899,137 @@ async fn queued_prompts_are_appended_after_tool_results() {
 
 #[tokio::test]
 async fn queued_prompt_stays_parked_when_the_turn_calls_no_tools() {
-    let prompts = Arc::new(ParkedPrompts {
-        texts: Mutex::new(vec!["later".into()]),
-    });
+    let prompts = parked(vec![PendingInput::User("later".into())]);
     let mock = MockProvider::new(vec![text_response("done")]);
     let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
-    let ctx = turn_ctx(&agent).with_pending(Arc::clone(&prompts) as Arc<dyn PendingPrompts>);
+    let ctx = turn_ctx(&agent).with_inbox(Arc::clone(&prompts) as Arc<dyn PendingInbox>);
     run_with(&mut agent, "hi", &ctx, &mut VecEventSink::default())
         .await
         .unwrap();
 
-    assert_eq!(prompts.texts.lock().unwrap().as_slice(), ["later"]);
+    assert_eq!(
+        prompts.texts.lock().unwrap().as_slice(),
+        [PendingInput::User("later".into())]
+    );
     assert_eq!(
         agent
             .history()
             .filter(|message| message.role == Role::User)
             .count(),
         1
+    );
+}
+
+#[tokio::test]
+async fn a_subagent_notice_rides_the_tool_result_upload_marked() {
+    const NOTICE: &str = "explore#1: done · 3 steps, 6 tool calls · 1540 tokens · 32.4s";
+    let (mock, seen) = CaptureRequests::new(vec![
+        tool_response("c1", "file_read", json!({"path": "note.txt"})),
+        text_response("done"),
+    ]);
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mut agent = Agent::new(
+        router_with(Box::new(mock)),
+        vec![Arc::new(FileReadTool::new(tmp.path()))],
+    );
+    let ctx = turn_ctx(&agent);
+    let ctx = ctx.with_inbox(parked(vec![PendingInput::Notice {
+        text: NOTICE.into(),
+    }]));
+    let mut sink = VecEventSink::default();
+    run_with(&mut agent, "read it", &ctx, &mut sink)
+        .await
+        .unwrap();
+
+    let reqs = seen.lock().unwrap().clone();
+    let uploaded = &reqs[1].messages;
+    let notice_at = uploaded
+        .iter()
+        .rposition(|message| content_has(message, NOTICE))
+        .expect("the notice is uploaded");
+    assert!(content_has(&uploaded[notice_at], NOTICE_MARK));
+    assert_eq!(uploaded[notice_at].role, Role::User);
+    assert_eq!(
+        agent
+            .history()
+            .filter(|message| content_has(message, NOTICE_MARK))
+            .count(),
+        1,
+        "the mark is what a reloaded transcript reads the notice back from"
+    );
+    let appended: Vec<&str> = sink
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Turn(TurnEvent::NoticeAppended { text }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(appended, [NOTICE]);
+}
+
+#[tokio::test]
+async fn a_notice_that_outlived_its_turn_is_still_told() {
+    const NOTICE: &str = "explore#1: done · 1 steps, 2 tool calls · 40 tokens · 1.0s";
+    let mock = MockProvider::new(vec![
+        tool_response("c1", "file_read", json!({"path": "note.txt"})),
+        text_response("done"),
+    ]);
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mut agent = Agent::new(
+        router_with(Box::new(mock)),
+        vec![Arc::new(FileReadTool::new(tmp.path()))],
+    );
+    let ctx = turn_ctx(&agent).with_inbox(parked(vec![PendingInput::Notice {
+        text: NOTICE.into(),
+    }]));
+    let mut sink = VecEventSink::default();
+    run_with(&mut agent, "read it", &ctx, &mut sink)
+        .await
+        .unwrap();
+
+    assert!(
+        agent.history().any(|message| content_has(message, NOTICE)),
+        "a subagent that finished after its turn ended still reports"
+    );
+    assert!(
+        sink.events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::Turn(TurnEvent::NoticeAppended { .. }))),
+        "the notice is drawn as well as uploaded"
+    );
+}
+
+#[tokio::test]
+async fn rewind_past_a_notice_returns_the_prompt_it_followed() {
+    const NOTICE: &str = "explore#1: done · 1 steps, 2 tool calls · 40 tokens · 1.0s";
+    let mock = MockProvider::new(vec![
+        tool_response("c1", "file_read", json!({"path": "note.txt"})),
+        text_response("done"),
+    ]);
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let mut agent = Agent::new(
+        router_with(Box::new(mock)),
+        vec![Arc::new(FileReadTool::new(tmp.path()))],
+    );
+    let ctx = turn_ctx(&agent).with_inbox(parked(vec![PendingInput::Notice {
+        text: NOTICE.into(),
+    }]));
+    run_with(&mut agent, "read it", &ctx, &mut VecEventSink::default())
+        .await
+        .unwrap();
+
+    let removed = agent.rewind_last_turn().expect("the turn to rewind");
+    assert!(
+        content_has(&removed, "read it"),
+        "the prompt the user typed comes back, not the notice"
+    );
+    assert!(
+        !agent.history().any(|message| content_has(message, NOTICE)),
+        "the notice goes with the turn it followed"
     );
 }
 

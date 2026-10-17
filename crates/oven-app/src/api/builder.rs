@@ -25,6 +25,7 @@ use crate::core::event::{AppId, EventBus};
 use crate::core::provider::RouterCatalog;
 use crate::core::session::{Session, SessionStore, canonical_root, session_span};
 use crate::platform::dirs;
+use crate::runtime::pending::TurnInbox;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
 use crate::{SkillRegistry, ToolRegistry};
 
@@ -293,6 +294,9 @@ impl AppBuilder {
         // runtime only ever listens on it.
         let router = router_handle(router);
         let main_id = AgentId::next();
+        // The supervisor and the running turn share it: a finished
+        // subagent reaches the turn that is waiting on it through here.
+        let inbox = Arc::new(TurnInbox::default());
         let subagents = Subagents::new(SubagentParts {
             parent: main_id,
             router: router.clone(),
@@ -301,6 +305,7 @@ impl AppBuilder {
             max_iters: self.config.subagents.max_iters,
             events: events.clone(),
             wake: wake.clone(),
+            inbox: Arc::clone(&inbox),
         });
 
         let mut tools = base;
@@ -331,6 +336,7 @@ impl AppBuilder {
             subagents,
             events,
             wake_rx,
+            inbox,
             memory: self.memory.clone(),
             session: sessions,
         })

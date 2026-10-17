@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use oven_agent::{
-    Agent, AgentEvent, AgentId, AgentMode, CancellationToken, PendingPrompts, PendingRequest,
+    Agent, AgentEvent, AgentId, AgentMode, CancellationToken, PendingInput, PendingRequest,
     RequestSink, RouterHandle, Selection, ToolEvent, TurnEvent, TurnId, UserRequest, UserRequestId,
     UserResponse,
 };
@@ -17,6 +17,7 @@ use crate::capabilities::subagent::Subagents;
 use crate::core::config::AppConfig;
 use crate::core::event::{AppEventKind, EventBus};
 use crate::core::state::{AppPhase, AppState};
+use crate::runtime::pending::TurnInbox;
 
 /// The turn that is running now: how to stop it, and the one request it is
 /// waiting on the user for.
@@ -47,9 +48,10 @@ pub(crate) struct Shared {
     /// Set while a summary request is in flight, so the same cancel that
     /// stops a turn can abort it. Compaction is not a turn: it has no turn id.
     compact_cancel: Mutex<Option<CancellationToken>>,
-    /// Chats typed while a turn runs. The turn takes them when it uploads
-    /// tool results; anything still here when the turn ends is sent later.
-    prompts: Mutex<Vec<String>>,
+    /// What reached the running turn. The turn takes it when it uploads
+    /// tool results; anything still here when the turn ends reaches the
+    /// next one.
+    inbox: Arc<TurnInbox>,
 }
 
 impl fmt::Debug for Shared {
@@ -66,6 +68,7 @@ impl Shared {
         agent: &Agent,
         config: AppConfig,
         user_config_path: Option<PathBuf>,
+        inbox: Arc<TurnInbox>,
     ) -> Self {
         Self {
             state,
@@ -79,27 +82,23 @@ impl Shared {
             subagent_revision: Mutex::new(0),
             turn: Mutex::new(None),
             compact_cancel: Mutex::new(None),
-            prompts: Mutex::new(Vec::new()),
+            inbox,
         }
     }
 
-    fn prompts(&self) -> MutexGuard<'_, Vec<String>> {
-        self.prompts.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     pub(crate) fn push_prompt(&self, text: String) {
-        self.prompts().push(text);
+        self.inbox.push(PendingInput::User(text));
     }
 
     /// Drops one parked chat equal to `text`, preferring the latest.
     /// `false` when the running turn already took it.
     pub(crate) fn claim_prompt(&self, text: &str) -> bool {
-        let mut prompts = self.prompts();
-        let Some(index) = prompts.iter().rposition(|queued| queued == text) else {
-            return false;
-        };
-        prompts.remove(index);
-        true
+        self.inbox.claim_chat(text)
+    }
+
+    /// What the running turn reads while it works.
+    pub(crate) fn inbox(&self) -> Arc<TurnInbox> {
+        Arc::clone(&self.inbox)
     }
 
     pub(crate) fn user_config_path(&self) -> Option<&Path> {
@@ -245,12 +244,6 @@ impl Shared {
     }
 }
 
-impl PendingPrompts for Shared {
-    fn take(&self) -> Vec<String> {
-        std::mem::take(&mut *self.prompts())
-    }
-}
-
 impl RequestSink for Shared {
     fn submit(&self, turn_id: TurnId, request: PendingRequest) -> bool {
         let event = requested_event(&request);
@@ -329,6 +322,7 @@ mod tests {
             &agent,
             AppConfig::default(),
             None,
+            Arc::new(TurnInbox::default()),
         )
     }
 

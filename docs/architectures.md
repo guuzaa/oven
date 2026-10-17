@@ -609,7 +609,7 @@ task / task_output ──► Arc<dyn SubagentSpawner> ──► Subagents
 | Cancellation | One token per subagent, cancelled by name, by the turn that spawned it, or by app shutdown. |
 | Prompts | A subagent's `TurnContext` carries no request sink, so it can never park waiting on a user. It runs in `AgentMode::Agent`; what it may do comes from its role. |
 | Status | The registry is the single source of truth; `AppState.subagents` mirrors it, `/agents` reads it, and `task_output` reads it, so the three cannot disagree. |
-| Results | A foreground `task` returns the report as its tool result; a background one returns a name to poll with `task_output`. |
+| Results | A foreground `task` returns the report as its tool result; a background one returns a name and, when it ends, pushes a notice into the driver's turn — the same inbox a chat typed mid-turn uses. |
 | Persistence | None. Subagents live for the app run; only the tool call and its result are in the driver's history, so `/agents` after a resume shows nothing. |
 
 Subagents are deliberately one-shot: a finished subagent's `Agent` is dropped

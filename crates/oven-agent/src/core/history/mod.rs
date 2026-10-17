@@ -11,6 +11,8 @@ use std::sync::Arc;
 use oven_host::now_ms;
 use oven_llm::{Message, Role, Usage};
 
+use crate::core::subagent::is_notice;
+
 pub use record::{Record, SessionMeta};
 
 type Timestamp = u64;
@@ -180,12 +182,14 @@ impl History {
 
     /// Remove the last user turn (the user message and everything after it),
     /// returning the removed user message. Returns `None` when there is no
-    /// user message to rewind.
+    /// user message to rewind. A completion notice is not a turn of the
+    /// user's: rewinding past one drops it with the turn it followed, so
+    /// the prompt the frontend puts back is the one the user typed.
     pub fn rewind_last_turn(&mut self) -> Option<Message> {
         let idx = self
             .messages
             .iter()
-            .rposition(|(m, _)| m.role == Role::User)?;
+            .rposition(|(m, _)| m.role == Role::User && !is_notice(m))?;
         let removed = self.messages.drain(idx..).next()?;
         let _ = self.thinking.drain(idx..);
         let _ = self.turn_usage.pop();

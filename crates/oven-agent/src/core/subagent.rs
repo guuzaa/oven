@@ -8,12 +8,39 @@
 //! without knowing how they are built.
 
 use async_trait::async_trait;
-use oven_llm::{ModelId, ReasoningEffort, Usage};
+use oven_llm::{ContentBlock, Message, ModelId, ReasoningEffort, Role, Usage};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::error::AgentError;
 use crate::core::identity::{AgentId, TurnId};
+
+/// Marks a completion notice in the history, so a frontend can tell it from
+/// something the user typed once a session is reloaded. It is the only
+/// handle a reloaded transcript has: a message carries no other origin, so
+/// the mark is written and read through [`notice_message`] and [`is_notice`]
+/// rather than spelled out anywhere else.
+pub const NOTICE_MARK: &str = "[subagent notice]";
+
+/// How a caller reads the rest of what a subagent did. `task` points at it
+/// before a background subagent has finished, a notice quotes it after.
+pub const READ_RESULT_HINT: &str = "read its result with task_output";
+
+/// The user message a completion notice rides in: the model reads it as
+/// something that happened while it worked, and a reloaded transcript reads
+/// the mark back to tell it from a typed prompt.
+pub(crate) fn notice_message(text: &str) -> Message {
+    Message::user_text(format!("{NOTICE_MARK} {text}"))
+}
+
+/// Whether `message` is a completion notice rather than something the user
+/// typed.
+pub(crate) fn is_notice(message: &Message) -> bool {
+    message.role == Role::User
+        && message.content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text } if text.starts_with(NOTICE_MARK)),
+        )
+}
 
 /// A role a subagent can play: which tools it may use, and what it is told
 /// to do with them. The name is what the model asks for and what the
@@ -94,6 +121,26 @@ impl NodeInfo {
             .unwrap_or_else(oven_host::now_ms)
             .saturating_sub(self.started_at)
     }
+
+    /// What this subagent has done so far: status, provider round trips,
+    /// tool calls, tokens and time. `task_output` renders it and a
+    /// completion notice quotes it, so the two never describe the same
+    /// subagent differently.
+    pub fn progress(&self) -> String {
+        progress(
+            self.status.label(),
+            self.steps,
+            self.tool_calls,
+            self.usage,
+            self.elapsed_ms(),
+        )
+    }
+
+    /// The one line a caller that is not waiting on this subagent reads:
+    /// what finished, what it spent, and how to read the rest.
+    pub fn notice(&self) -> String {
+        format!("{}: {}; {READ_RESULT_HINT}.", self.name, self.progress())
+    }
 }
 
 /// A subagent plus the report it produced, as `task_output` wants them.
@@ -113,8 +160,6 @@ pub struct SpawnRequest {
     pub background: bool,
     pub model: ModelId,
     pub reasoning_effort: Option<ReasoningEffort>,
-    /// The caller's turn, which a foreground subagent's lifetime follows.
-    pub parent_turn: TurnId,
     pub cancellation: CancellationToken,
 }
 
@@ -127,6 +172,33 @@ pub struct NodeOutcome {
     pub steps: u32,
     pub usage: Usage,
     pub duration_ms: u64,
+}
+
+impl NodeOutcome {
+    /// What a caller that waited on this subagent reads before its report.
+    pub fn progress(&self) -> String {
+        progress(
+            self.status.label(),
+            self.steps,
+            self.tool_calls,
+            self.usage,
+            self.duration_ms,
+        )
+    }
+}
+
+fn progress(status: &str, steps: u32, tool_calls: u32, usage: Usage, duration_ms: u64) -> String {
+    let tally = match steps {
+        0 => "not started".to_string(),
+        _ => format!("{steps} steps, {tool_calls} tool calls"),
+    };
+    // Cache reads are a subset of the input tokens, not extra ones: a
+    // provider charges for the prompt once and serves part of it from cache.
+    let tokens = usage.input_tokens.saturating_add(usage.output_tokens);
+    format!(
+        "{status} · {tally} · {tokens} tokens · {:.1}s",
+        duration_ms as f64 / 1000.0
+    )
 }
 
 /// A spawned subagent. A caller that wants the result waits on it; a caller
@@ -212,5 +284,67 @@ mod tests {
         assert!(!NodeStatus::Completed.is_active());
         assert!(!NodeStatus::Cancelled.is_active());
         assert!(!NodeStatus::Failed { error: "x".into() }.is_active());
+    }
+
+    fn usage(input_tokens: u32, output_tokens: u32) -> Usage {
+        Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        }
+    }
+
+    #[test]
+    fn progress_counts_the_reported_tokens_once() {
+        let mut reported = usage(1000, 40);
+        reported.cache_read_tokens = 500;
+        let outcome = NodeOutcome {
+            status: NodeStatus::Completed,
+            report: String::new(),
+            tool_calls: 6,
+            steps: 3,
+            usage: reported,
+            duration_ms: 32_400,
+        };
+        assert_eq!(
+            outcome.progress(),
+            "done · 3 steps, 6 tool calls · 1040 tokens · 32.4s"
+        );
+    }
+
+    #[test]
+    fn a_subagent_that_never_ran_says_so() {
+        let mut queued = info(NodeStatus::Pending, 0, Some(0));
+        queued.steps = 0;
+        queued.tool_calls = 0;
+        queued.usage = usage(1000, 40);
+        assert_eq!(
+            queued.progress(),
+            "queued · not started · 1040 tokens · 0.0s"
+        );
+    }
+
+    #[test]
+    fn a_notice_quotes_the_progress_and_points_at_task_output() {
+        let mut done = info(NodeStatus::Completed, 0, Some(1_000));
+        done.steps = 3;
+        done.tool_calls = 6;
+        done.usage = usage(1000, 40);
+        assert_eq!(
+            done.notice(),
+            format!("explore#1: {}; {READ_RESULT_HINT}.", done.progress())
+        );
+    }
+
+    #[test]
+    fn a_notice_message_round_trips_through_the_mark() {
+        let message = notice_message("explore#1 finished");
+        assert!(is_notice(&message));
+        assert_eq!(message.role, Role::User);
+        assert!(!is_notice(&Message::user_text("explore#1 finished")));
+        assert!(!is_notice(&Message::assistant_text(format!(
+            "{NOTICE_MARK} quoted"
+        ))));
     }
 }

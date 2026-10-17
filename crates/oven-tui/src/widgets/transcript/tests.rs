@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, COMPACTION_CANCELLED, CompactionEvent, LocalShell, ShellEvent, StepStop,
-    StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, UserRequestId, present_tool,
+    AgentEvent, AppEvent, COMPACTION_CANCELLED, CompactionEvent, LocalShell, NOTICE_MARK,
+    ShellEvent, StepStop, StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, UserRequestId,
+    present_tool,
 };
 use oven_llm::{ContentBlock, Message};
 use ratatui::Terminal;
@@ -46,6 +47,7 @@ const THOUGHT_1_5S: &str = "Thought for 1.5s";
 const THOUGHT_1M_1S: &str = "Thought for 1m 1s";
 const TODO_SUMMARY: &str = "todo_write · 1 todos (0 in_progress, 0 completed)";
 const BURST_SUMMARY: &str = "Ran 1 command";
+const NOTICE: &str = "explore#1: done · 3 steps, 6 tool calls · 1040 tokens · 32.4s";
 
 fn wide(t: &mut Transcript) {
     t.area.width = 80;
@@ -598,6 +600,67 @@ fn loop_limit_reached_appends_system_line() {
     assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::System]);
     let expected = format!("{LOOP_LIMIT_REACHED} (100 iterations)");
     assert_eq!(t.rows.last().unwrap().text, expected);
+}
+
+#[test]
+fn a_subagent_notice_appends_system_line() {
+    let mut t = Transcript::new();
+    t.push_prompt(LineKind::User, "q");
+    t.on_event(&agent(AgentEvent::Turn(TurnEvent::NoticeAppended {
+        text: NOTICE.into(),
+    })));
+    assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::System]);
+    assert_eq!(t.rows.last().unwrap().text, NOTICE);
+}
+
+#[test]
+fn a_seeded_notice_is_a_system_line_not_a_prompt() {
+    let mut t = Transcript::new();
+    t.seed(&[
+        Message::user_text("delegate it"),
+        Message::user_text(format!("{NOTICE_MARK} {NOTICE}")),
+        Message::assistant_text("all done"),
+    ]);
+    assert_eq!(
+        kinds_of(&t),
+        vec![
+            LineKind::User,
+            LineKind::System,
+            LineKind::Text,
+            LineKind::Separator
+        ]
+    );
+    assert_eq!(
+        t.rows[1].text, NOTICE,
+        "the mark is a wire detail, not text"
+    );
+    assert_eq!(
+        t.rewind_text().as_deref(),
+        Some("delegate it"),
+        "a notice is never the row a rewind puts back"
+    );
+}
+
+#[test]
+fn a_notice_reads_the_same_live_and_reloaded() {
+    let mut live = Transcript::new();
+    live.push_prompt(LineKind::User, "delegate it");
+    live.on_event(&agent(AgentEvent::Turn(TurnEvent::NoticeAppended {
+        text: NOTICE.into(),
+    })));
+
+    let mut reloaded = Transcript::new();
+    reloaded.seed(&[
+        Message::user_text("delegate it"),
+        Message::user_text(format!("{NOTICE_MARK} {NOTICE}")),
+    ]);
+
+    assert_eq!(kinds_of(&live), kinds_of(&reloaded));
+    assert_eq!(
+        live.rows.last().unwrap().text,
+        reloaded.rows.last().unwrap().text,
+        "a notice a session reloaded is drawn the way the live one was"
+    );
 }
 
 #[test]

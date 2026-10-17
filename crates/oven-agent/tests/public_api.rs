@@ -8,14 +8,15 @@ use oven_agent::{
     ApprovalDecision, BUILTIN_TOOLS, BashTool, BuiltinTool, CallOutcome, CancellationToken,
     CompactStats, DEFAULT_MAX_ITERS, EventSink, FileEditTool, FileReadTool, FileWriteTool,
     GlobTool, GrepTool, History, InstructionDoc, InstructionScope, LoopLimitDecision,
-    MAX_ITERS_EXCEEDED, ModelSelection, NO_USER_TO_ANSWER, NOTHING_TO_COMPACT, NodeHandle,
-    NodeInfo, NodeOutcome, NodeReport, NodeStatus, NullSink, PendingPrompts, PendingRequest,
-    Question, QuestionOption, Record, RequestSink, RoleSpec, RouterHandle, RunPolicy, Selection,
-    SessionMeta, Skill, SkillReadTool, SkillRegistry, SpawnRequest, Step, StepCall, StepStop,
-    StreamEvent, SubagentSpawner, TaskOutputTool, TaskTool, TodoItem, TodoList, TodoStatus,
-    TodoWriteTool, Tool, ToolAccess, ToolCallId, ToolCaps, ToolEvent, ToolOutputStream,
-    ToolPermission, ToolResult, ToolView, TurnContext, TurnEvent, TurnId, TurnOutput, UserRequest,
-    UserRequestId, UserResponse, VecEventSink, WebFetchTool, present_tool,
+    MAX_ITERS_EXCEEDED, ModelSelection, NO_USER_TO_ANSWER, NOTHING_TO_COMPACT, NOTICE_MARK,
+    NodeHandle, NodeInfo, NodeOutcome, NodeReport, NodeStatus, NullSink, PendingInbox,
+    PendingInput, PendingRequest, Question, QuestionOption, Record, RequestSink, RoleSpec,
+    RouterHandle, RunPolicy, Selection, SessionMeta, Skill, SkillReadTool, SkillRegistry,
+    SpawnRequest, Step, StepCall, StepStop, StreamEvent, SubagentSpawner, TaskOutputTool, TaskTool,
+    TodoItem, TodoList, TodoStatus, TodoWriteTool, Tool, ToolAccess, ToolCallId, ToolCaps,
+    ToolEvent, ToolOutputStream, ToolPermission, ToolResult, ToolView, TurnContext, TurnEvent,
+    TurnId, TurnOutput, UserRequest, UserRequestId, UserResponse, VecEventSink, WebFetchTool,
+    present_tool,
 };
 
 #[test]

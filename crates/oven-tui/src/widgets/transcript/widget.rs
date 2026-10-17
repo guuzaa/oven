@@ -7,7 +7,7 @@ use super::collapsible::Collapsible;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
     AgentEvent, AppEvent, AppEventKind, COMPACTION_CANCELLED, CompactionEvent, LocalShell,
-    ShellEvent, StreamEvent, ToolEvent, ToolResult, ToolView, TurnEvent, present_tool,
+    NOTICE_MARK, ShellEvent, StreamEvent, ToolEvent, ToolResult, ToolView, TurnEvent, present_tool,
 };
 use oven_llm::{ContentBlock, Message, Role};
 use ratatui::Frame;
@@ -177,6 +177,8 @@ impl Transcript {
                                 if let Some(sh) = LocalShell::try_parse(text) {
                                     self.push_prompt(LineKind::Shell, &sh.command);
                                     self.push_shell_output(&sh.output, sh.ok());
+                                } else if text.starts_with(NOTICE_MARK) {
+                                    self.push_row(LineKind::System, notice_body(text));
                                 } else {
                                     turn_started_at = Some(*ts);
                                     self.push_row(LineKind::User, text);
@@ -1415,6 +1417,10 @@ impl Component for Transcript {
                     self.flush_streaming();
                     self.push_prompt(LineKind::User, text);
                 }
+                AgentEvent::Turn(TurnEvent::NoticeAppended { text }) => {
+                    self.flush_streaming();
+                    self.push_row(LineKind::System, notice_body(text));
+                }
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
                     self.stop_live_thinking();
                     self.flush_streaming();
@@ -1600,6 +1606,13 @@ fn has_visible_text(text: &str) -> bool {
 /// A result body, or the placeholder the transcript shows for no output.
 fn result_body(body: &str) -> &str {
     if body.is_empty() { NO_OUTPUT } else { body }
+}
+
+/// What a notice says, without the mark a persisted one carries. A live
+/// notice arrives without it, so a notice reads the same whichever way it
+/// reached the transcript.
+fn notice_body(text: &str) -> &str {
+    text.strip_prefix(NOTICE_MARK).unwrap_or(text).trim()
 }
 
 /// What a standalone call should append. A success with no output adds nothing.

@@ -8,18 +8,17 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oven_llm::{ModelId, Usage};
+use oven_llm::ModelId;
 use serde_json::{Value, json};
 
 use crate::capabilities::tools::{Tool, ToolCaps, ToolPermission, ToolView, require_str};
 use crate::core::error::AgentError;
 use crate::core::mode::AgentMode;
 use crate::core::subagent::{
-    NodeInfo, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest, SubagentSpawner,
+    NodeOutcome, NodeReport, NodeStatus, READ_RESULT_HINT, RoleSpec, SpawnRequest, SubagentSpawner,
 };
 use crate::core::turn::TurnContext;
 
-const BACKGROUND_HINT: &str = "Read its result later with task_output.";
 const NO_SUBAGENTS: &str = "no subagents have run in this session";
 const PLAN_MODE_NOTE: &str = " In plan mode only the read-only roles may run.";
 const MODEL_NOTE: &str = " By default a subagent runs on your model; pass `model` to run it on \
@@ -105,7 +104,6 @@ impl TaskTool {
                 .unwrap_or(false),
             model,
             reasoning_effort,
-            parent_turn: cx.turn_id,
             cancellation: cx.cancellation.clone(),
         })
     }
@@ -196,7 +194,8 @@ impl Tool for TaskTool {
         let handle = self.spawner.spawn(request).await?;
         match background {
             true => Ok(format!(
-                "[{} started in the background. {BACKGROUND_HINT}]",
+                "[{} started in the background. You will be told when it finishes; \
+                 {READ_RESULT_HINT}.]",
                 handle.name
             )),
             false => {
@@ -293,13 +292,7 @@ fn describe(roles: &[RoleSpec]) -> String {
 }
 
 fn render_outcome(name: &str, outcome: NodeOutcome) -> String {
-    let mut text = format!(
-        "[{name} {} · {} · {} · {}]",
-        outcome.status.label(),
-        tally(outcome.steps, outcome.tool_calls),
-        tokens(outcome.usage),
-        seconds(outcome.duration_ms)
-    );
+    let mut text = format!("[{name} {}]", outcome.progress());
     match &outcome.status {
         NodeStatus::Failed { error } => {
             let _ = write!(text, "\n{error}");
@@ -320,15 +313,7 @@ fn render_reports(reports: &[NodeReport]) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
-        let _ = write!(
-            out,
-            "{} · {} · {} · {} · {}",
-            report.info.name,
-            report.info.status.label(),
-            tally(report.info.steps, report.info.tool_calls),
-            tokens(report.info.usage),
-            elapsed(&report.info)
-        );
+        let _ = write!(out, "{} · {}", report.info.name, report.info.progress());
         match &report.report {
             Some(report) if !report.trim().is_empty() => {
                 let _ = write!(out, "\n  {}", clamp(report.trim(), MAX_REPORT_BYTES));
@@ -337,26 +322,6 @@ fn render_reports(reports: &[NodeReport]) -> String {
         }
     }
     out
-}
-
-fn tally(steps: u32, tool_calls: u32) -> String {
-    match steps {
-        0 => "not started".to_string(),
-        _ => format!("{steps} steps, {tool_calls} tool calls"),
-    }
-}
-
-fn tokens(usage: Usage) -> String {
-    let total = usage.input_tokens.saturating_add(usage.output_tokens);
-    format!("{total} tokens")
-}
-
-fn seconds(duration_ms: u64) -> String {
-    format!("{:.1}s", duration_ms as f64 / 1000.0)
-}
-
-fn elapsed(info: &NodeInfo) -> String {
-    seconds(info.elapsed_ms())
 }
 
 fn clamp(text: &str, max: usize) -> String {
@@ -373,8 +338,9 @@ fn clamp(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::core::identity::{AgentId, TurnId};
-    use crate::core::subagent::NodeHandle;
+    use crate::core::subagent::{NodeHandle, NodeInfo};
     use crate::core::turn::TurnContext;
+    use oven_llm::Usage;
     use serde_json::json;
     use std::sync::Mutex;
     use tokio::sync::oneshot;
@@ -691,12 +657,5 @@ mod tests {
         let view = TaskTool::view_input(&json!({"description": "find it", "role": "explore"}));
         assert_eq!(view.summary, "Agent explore: find it");
         assert_eq!(TaskTool::view_input(&json!({})).summary, TaskTool::NAME);
-    }
-
-    #[test]
-    fn tokens_are_the_reported_input_and_output() {
-        let mut reported = usage(1000, 40);
-        reported.cache_read_tokens = 500;
-        assert_eq!(tokens(reported), "1040 tokens");
     }
 }
