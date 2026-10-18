@@ -10,6 +10,7 @@
     <link rel="stylesheet" href="./app.css" />
   </head>
   <body>
+    <div class="scroll-progress" aria-hidden="true"></div>
     <header class="topbar">
       <a class="brand" href="#" data-link aria-label="oven home">
         <img class="brand-mark" src="./icon.svg" alt="" width="32" height="32" /><span class="brand-name">Oven</span>
@@ -56,43 +57,40 @@
             <img class="mascot" src="./icon.svg" alt="oven mascot: a smiling little oven" width="168" height="168" />
             <div class="window" aria-label="Example one-shot run">
               <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i><span>~/oven</span></div>
-              <pre><span class="t-prompt">$</span> oven -Q "what does this project do?"
-<span class="t-out">Oven reads and edits your files, runs shell commands, delegates to subagents and remembers your project between sessions.</span>
-<span class="t-prompt">$</span> oven <span class="t-dim"># opens the interactive TUI</span>
-<span class="t-prompt">$</span> <span class="caret" aria-hidden="true"></span></pre>
+              <pre><span class="t-line"><span class="t-prompt">$</span> oven -Q "what does this project do?"</span><span class="t-line"><span class="t-out">Oven reads and edits your files, runs shell commands, delegates to subagents and remembers your project between sessions.</span></span><span class="t-line"><span class="t-prompt">$</span> oven <span class="t-dim"># opens the interactive TUI</span></span><span class="t-line"><span class="t-prompt">$</span> <span class="caret" aria-hidden="true"></span></span></pre>
             </div>
           </div>
         </div>
 
         <section id="features">
-          <h2>What's in the oven</h2>
+          <h2 data-reveal>What's in the oven</h2>
           <ul class="features">
-            <li class="feature">
+            <li class="feature" data-reveal>
               <span class="feature-icon" aria-hidden="true">📝</span>
               <h3>Reads &amp; edits code</h3>
               <p>Built-in <code>file_read</code>, <code>file_edit</code>, <code>file_write</code>, <code>glob</code> and <code>grep</code> tools work inside your workspace, and <code>web_fetch</code> pulls a page back as markdown.</p>
             </li>
-            <li class="feature">
+            <li class="feature" data-reveal>
               <span class="feature-icon" aria-hidden="true">🐚</span>
               <h3>Runs your shell</h3>
               <p>The agent runs commands with <code>bash</code>. Type <code>!cargo test</code> in the TUI to run a command yourself and share its output.</p>
             </li>
-            <li class="feature">
+            <li class="feature" data-reveal>
               <span class="feature-icon" aria-hidden="true">🧠</span>
               <h3>Durable memory</h3>
               <p>Remembers facts per workspace and per user. Manage them with <code>oven mem</code> or <code>/memory</code>, or skip them with <code>--amnesia</code>.</p>
             </li>
-            <li class="feature">
+            <li class="feature" data-reveal>
               <span class="feature-icon" aria-hidden="true">🧁</span>
               <h3>Subagents</h3>
               <p>Delegates side jobs to concurrent subagents. Watch or stop them with <code>/agents</code>.</p>
             </li>
-            <li class="feature">
+            <li class="feature" data-reveal>
               <span class="feature-icon" aria-hidden="true">🔌</span>
               <h3>Any compatible model</h3>
               <p>Speaks OpenAI chat completions or responses. DeepSeek, xAI, Moonshot, Zhipu and your own proxy via <code>oven model add</code>.</p>
             </li>
-            <li class="feature">
+            <li class="feature" data-reveal>
               <span class="feature-icon" aria-hidden="true">🧩</span>
               <h3>MCP, skills, rules</h3>
               <p>Mounts MCP servers (stdio or HTTP), loads <code>SKILL.md</code> skills and injects <code>AGENTS.md</code> / <code>CLAUDE.md</code>.</p>
@@ -101,9 +99,9 @@
         </section>
 
         <section id="run">
-          <h2>Two ways to run it</h2>
+          <h2 data-reveal>Two ways to run it</h2>
           <div class="modes">
-            <article class="mode">
+            <article class="mode" data-reveal>
               <p class="mode-tag">interactive</p>
               <h3>Chat in the TUI</h3>
               <pre><code>oven
@@ -112,7 +110,7 @@ oven -s my-session   # named session
 oven -C ~/project    # other workspace</code></pre>
               <p>Needs a real terminal. Sessions are saved as JSONL under <code>~/.oven/sessions/</code>.</p>
             </article>
-            <article class="mode">
+            <article class="mode" data-reveal>
               <p class="mode-tag mode-tag-alt">headless</p>
               <h3>One-shot with <code>-Q</code></h3>
               <pre><code>oven -Q "what does this project do?"
@@ -127,9 +125,9 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
         </section>
 
         <section id="tui">
-          <h2>Inside the TUI</h2>
+          <h2 data-reveal>Inside the TUI</h2>
           <div class="cheats">
-            <div class="cheat">
+            <div class="cheat" data-reveal>
               <h3>Keys</h3>
               <dl>
                 <dt><kbd>Enter</kbd></dt><dd>send the prompt</dd>
@@ -140,7 +138,7 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
                 <dt><kbd>Ctrl</kbd>+<kbd>C</kbd></dt><dd>quit</dd>
               </dl>
             </div>
-            <div class="cheat">
+            <div class="cheat" data-reveal>
               <h3>Slash commands</h3>
               <dl>
                 <dt><code>/model</code></dt><dd>switch model: <code>/model &lt;id&gt; [none|low|medium|high]</code></dd>
@@ -157,18 +155,18 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
         </section>
 
         <section id="setup">
-          <h2>Ready in three steps</h2>
+          <h2 data-reveal>Ready in three steps</h2>
           <ol class="steps">
-            <li class="step">
+            <li class="step" data-reveal>
               <h3>Install</h3>
               <p>Run the one-liner above, then restart your terminal.</p>
             </li>
-            <li class="step">
+            <li class="step" data-reveal>
               <h3>Add a model</h3>
               <pre><code>oven model add</code></pre>
               <p>Or just set env vars for one run: <code>OVEN_MODEL</code>, <code>OVEN_API_KEY</code>, <code>OVEN_BASE_URL</code>.</p>
             </li>
-            <li class="step">
+            <li class="step" data-reveal>
               <h3>Start cooking</h3>
               <pre><code>cd your-project &amp;&amp; oven</code></pre>
               <p>Config lives in <code>.oven.toml</code> or <code>~/.oven/config.toml</code>. <code>oven --help</code> lists every flag.</p>
@@ -179,7 +177,7 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
 
       <section class="view" data-view="downloads" hidden>
         <h1 class="page-title">Downloads</h1>
-        <p class="lede">
+        <p class="lede" data-reveal>
           The one-liner is the recommended install. Grab a release asset directly if you prefer —
           <a href="#install" data-link>back to the install command</a>.
         </p>
@@ -188,7 +186,7 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
 
       <section class="view" data-view="releases" hidden>
         <h1 class="page-title">Releases</h1>
-        <p class="lede">
+        <p class="lede" data-reveal>
           What changed in each version, straight from
           <a href="https://github.com/guuzaa/oven/blob/master/CHANGELOG.md" rel="noopener">CHANGELOG.md</a>.
           <a href="/downloads" data-link>Get the latest build →</a>
@@ -197,7 +195,7 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
       </section>
     </main>
 
-    <footer class="footer">
+    <footer class="footer" data-reveal>
       <p class="footer-brand"><img src="./icon.svg" alt="" width="24" height="24" />Baked with Rust · MIT licensed</p>
       <p class="footer-links">
         <a href="https://github.com/guuzaa/oven">GitHub</a>
@@ -207,6 +205,8 @@ oven --amnesia -Q "explain src/main.rs"</code></pre>
       </p>
       <p class="footer-note">Downloads and installers are mirrored by the oven worker; GitHub stays the source of truth.</p>
     </footer>
+
+    <button class="to-top" type="button" aria-label="Back to top">↑</button>
 
     <script src="./app.js" defer></script>
   </body>

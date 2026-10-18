@@ -3,6 +3,8 @@ const COPY_SELECTOR = "[data-copy]";
 const VIEW_SELECTOR = "[data-view]";
 const NAV_SELECTOR = "[data-nav]";
 const TAB_SELECTOR = '[role="tab"]';
+const REVEAL_SELECTOR = "[data-reveal]";
+const RIPPLE_TARGETS = ".button, .copy, .tab, kbd";
 
 const RELEASE_PATH = "/latest";
 const ASSET_PATH = "/dl";
@@ -44,6 +46,11 @@ const CURRENT_PLATFORM_LABEL = "your system";
 
 const COPY_LABEL_RESET_MS = 1_200;
 const SIZE_UNITS = ["B", "KiB", "MiB", "GiB"];
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)");
+const REVEAL_STAGGER_MS = 70;
+const REVEAL_STAGGER_STEPS = 6;
+const SCROLL_OFFSET_PX = 480;
+const SCROLL_BEHAVIOR = () => (REDUCED_MOTION.matches ? "auto" : "smooth");
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -54,6 +61,14 @@ function el(tag, className, text) {
     node.textContent = text;
   }
   return node;
+}
+
+function loadingNote(text) {
+  return el("p", "release-empty is-loading", text);
+}
+
+function stagger(nodes) {
+  nodes.forEach((node, index) => node.style.setProperty("--delay", `${Math.min(index, REVEAL_STAGGER_STEPS) * REVEAL_STAGGER_MS}ms`));
 }
 
 function formatSize(bytes) {
@@ -110,15 +125,102 @@ function initCopy() {
       try {
         await navigator.clipboard.writeText(code.textContent.trim());
         button.textContent = "Copied";
+        button.classList.add("is-copied");
       } catch {
         button.textContent = "Failed";
       }
       window.clearTimeout(reset);
       reset = window.setTimeout(() => {
         button.textContent = label;
+        button.classList.remove("is-copied");
       }, COPY_LABEL_RESET_MS);
     });
   }
+}
+
+const revealObserver =
+  "IntersectionObserver" in window
+    ? new IntersectionObserver(
+        (entries, observer) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) {
+              continue;
+            }
+            entry.target.classList.add("is-in");
+            observer.unobserve(entry.target);
+          }
+        },
+        { rootMargin: "0px 0px -8% 0px" },
+      )
+    : null;
+
+function initReveal() {
+  const nodes = [...document.querySelectorAll(REVEAL_SELECTOR)];
+  const groups = new Map();
+  for (const node of nodes) {
+    const siblings = groups.get(node.parentElement);
+    if (siblings) {
+      siblings.push(node);
+    } else {
+      groups.set(node.parentElement, [node]);
+    }
+  }
+  for (const siblings of groups.values()) {
+    stagger(siblings);
+  }
+  if (!revealObserver) {
+    for (const node of nodes) {
+      node.classList.add("is-in");
+    }
+    return;
+  }
+  for (const node of nodes) {
+    revealObserver.observe(node);
+  }
+}
+
+function initRipple() {
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target.closest(RIPPLE_TARGETS);
+    if (!target || REDUCED_MOTION.matches) {
+      return;
+    }
+    const box = target.getBoundingClientRect();
+    const size = 2 * Math.max(box.width, box.height);
+    const ripple = document.createElement("span");
+    ripple.className = "ripple";
+    ripple.style.width = `${size}px`;
+    ripple.style.height = `${size}px`;
+    ripple.style.left = `${event.clientX - box.left - size / 2}px`;
+    ripple.style.top = `${event.clientY - box.top - size / 2}px`;
+    ripple.addEventListener("animationend", () => ripple.remove());
+    target.append(ripple);
+  });
+}
+
+function initScrollChrome() {
+  const progress = document.querySelector(".scroll-progress");
+  const topbar = document.querySelector(".topbar");
+  const toTop = document.querySelector(".to-top");
+  let frame = 0;
+
+  const update = () => {
+    frame = 0;
+    const travel = document.documentElement.scrollHeight - window.innerHeight;
+    const ratio = travel > 0 ? Math.min(window.scrollY / travel, 1) : 0;
+    progress?.style.setProperty("--progress", ratio.toFixed(4));
+    const scrolled = window.scrollY > SCROLL_OFFSET_PX;
+    topbar?.classList.toggle("is-condensed", scrolled);
+    toTop?.classList.toggle("is-shown", scrolled);
+  };
+  const schedule = () => {
+    frame ||= window.requestAnimationFrame(update);
+  };
+
+  window.addEventListener("scroll", schedule, { passive: true });
+  window.addEventListener("resize", schedule, { passive: true });
+  update();
+  toTop?.addEventListener("click", () => window.scrollTo({ top: 0, behavior: SCROLL_BEHAVIOR() }));
 }
 
 function viewFor(pathname) {
@@ -148,7 +250,7 @@ function showView(view, hash) {
 
   const anchor = hash ? document.querySelector(hash) : null;
   if (anchor) {
-    anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+    anchor.scrollIntoView({ behavior: SCROLL_BEHAVIOR(), block: "start" });
   } else {
     window.scrollTo({ top: 0 });
   }
@@ -252,7 +354,7 @@ async function renderRelease() {
   if (!host) {
     return;
   }
-  host.replaceChildren(el("p", "release-empty", "loading latest release…"));
+  host.replaceChildren(loadingNote("loading latest release…"));
 
   let release;
   try {
@@ -282,12 +384,15 @@ async function renderRelease() {
   }
   const current = detectOs();
   const platforms = PLATFORMS.toSorted((left, right) => Number(right.os === current) - Number(left.os === current));
+  const cards = [];
   for (const platform of platforms) {
     const matching = assets.filter((asset) => asset.os === platform.os).sort(byLabel);
     if (matching.length) {
-      host.append(platformCard(tag, platform, matching, platform.os === current));
+      cards.push(platformCard(tag, platform, matching, platform.os === current));
     }
   }
+  stagger(cards);
+  host.append(...cards);
   appendReleasesLink(host);
 }
 
@@ -383,9 +488,10 @@ function changelogEntry({ version, date, sections }, open) {
   }
   entry.append(summary);
 
+  const body = el("div", "entry-body");
   for (const { title, items } of sections) {
     if (title) {
-      entry.append(el("h3", `entry-section entry-${title.toLowerCase()}`, title));
+      body.append(el("h3", `entry-section entry-${title.toLowerCase()}`, title));
     }
     const list = el("ul", "entry-items");
     for (const item of items) {
@@ -393,15 +499,16 @@ function changelogEntry({ version, date, sections }, open) {
       row.append(inlineMarkdown(item));
       list.append(row);
     }
-    entry.append(list);
+    body.append(list);
   }
 
   if (tagged) {
     const link = el("a", "entry-link", "View release on GitHub →");
     link.href = `${RELEASE_TAG_URL}/v${encodeURIComponent(version)}`;
     link.rel = "noopener";
-    entry.append(link);
+    body.append(link);
   }
+  entry.append(body);
   return entry;
 }
 
@@ -410,7 +517,7 @@ async function renderChangelog() {
   if (!host) {
     return;
   }
-  host.replaceChildren(el("p", "release-empty", "loading changelog…"));
+  host.replaceChildren(loadingNote("loading changelog…"));
 
   let releases;
   try {
@@ -422,7 +529,9 @@ async function renderChangelog() {
   }
 
   const listed = releases.filter((release) => release.sections.some((section) => section.items.length));
-  host.replaceChildren(...listed.map((release, index) => changelogEntry(release, index === 0)));
+  const cards = listed.map((release, index) => changelogEntry(release, index === 0));
+  stagger(cards);
+  host.replaceChildren(...cards);
   appendReleasesLink(host);
 }
 
@@ -437,4 +546,7 @@ applyMirror();
 initTabs();
 initCopy();
 initLinks();
+initReveal();
+initRipple();
+initScrollChrome();
 renderRoute();
