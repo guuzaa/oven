@@ -30,11 +30,6 @@ impl Collapsible {
         }
     }
 
-    pub(super) fn collapsed(mut self) -> Self {
-        self.expanded = false;
-        self
-    }
-
     pub(super) fn append(&mut self, text: &str) {
         match self.sections.last_mut() {
             Some(Section::Text(last)) => last.push_str(text),

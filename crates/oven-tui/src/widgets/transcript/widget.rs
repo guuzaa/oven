@@ -533,10 +533,13 @@ impl Transcript {
             return;
         }
         if self.activity_row.is_none() {
+            // Open from the start: the row shows the newest of its body while
+            // the turn runs. A row the user closed reads as closed, so a later
+            // delta does not reopen it.
             self.push_row_with_detail(
                 LineKind::Activity,
                 String::new(),
-                Some(Collapsible::from_sections(Vec::new()).collapsed()),
+                Some(Collapsible::from_sections(Vec::new())),
             );
             self.activity_row = Some(self.rows.len() - 1);
         }
@@ -828,13 +831,12 @@ impl Transcript {
         self.rows[idx].prompt_scroll = self.rows[idx].prompt_scroll.min(max);
     }
 
-    /// A body that is still growing — live thinking or tool calls still in
-    /// flight — renders only its newest screen rows, so it cannot scroll the
-    /// view up.
+    /// The activity row stays open while its turn runs, so its body renders
+    /// only the newest screen rows: a growing body cannot scroll the view up.
+    /// The budget lifts once the row is sealed, and the whole body draws when
+    /// the user opens it.
     fn live_body_rows(&self, idx: usize) -> Option<usize> {
-        let live = self.activity_row == Some(idx)
-            && (self.activity.thinking_live() || self.activity.tools_running());
-        live.then_some(MAX_LIVE_BODY_ROWS)
+        (self.activity_row == Some(idx)).then_some(MAX_LIVE_BODY_ROWS)
     }
 
     pub(super) fn rewrap_stream(&mut self) {
@@ -1186,25 +1188,18 @@ impl Transcript {
         self.retire_thinking(format_thought(Some(duration_ms)));
     }
 
-    /// Streaming is over for the block, so it collapses: its windowed body stops
-    /// here and an expanded block would blank the screen until the next row.
+    /// Settles the live thought on the label it is given: a thought beside
+    /// calls folds into its own header, while a thought on its own keeps its
+    /// body until the row is sealed.
     fn retire_thinking(&mut self, title: String) {
         if !self.activity.retire_thinking(&title) {
             return;
         }
-        let fold = self.activity.is_flat_thinking();
         self.sync_activity();
-        if fold
-            && let Some(row) = self.activity_row
-            && let Some(body) = self.rows[row].collapsible.as_mut()
-        {
-            body.collapse_tree();
-            self.rewrap_row(row);
-        }
     }
 
-    /// Header lines that should shimmer: the activity header while it is
-    /// folded, or the live thought once the user opens the timeline.
+    /// Header lines that should shimmer: the live thought's own header while
+    /// one streams, and the activity header otherwise.
     fn shimmer_lines(&self) -> Vec<usize> {
         let Some(row) = self.activity_row else {
             return Vec::new();

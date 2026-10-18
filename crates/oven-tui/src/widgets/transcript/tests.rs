@@ -725,14 +725,13 @@ fn a_collapsed_diff_stays_collapsed_when_thinking_continues() {
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
     ready(&mut t, Rect::new(0, 0, 80, 16));
-    toggle_row(&mut t, 0);
 
     let has = |t: &Transcript, needle: &str| {
         t.wrapped
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(has(&t, "- old"));
+    assert!(has(&t, "- old"), "the open row shows the diff it ran");
     let diff_row = wrapped_row_of(&t, "Edited src/main.rs");
     double_click(&mut t, 2, diff_row);
     assert!(!has(&t, "- old"));
@@ -1104,33 +1103,28 @@ fn tool_result_double_click_toggles_detail() {
     let detail = result_detail(&t, 0);
     assert_eq!(detail.body(), OUTPUT);
     assert!(detail.is_expanded());
-    assert!(
-        t.wrapped
-            .iter()
-            .all(|line| !line_text(line).contains("more lines of output")),
-        "the activity header hides the result until it is opened"
-    );
-
-    double_click(&mut t, 2, 0);
-    assert!(
+    let has = |t: &Transcript| {
         t.wrapped
             .iter()
             .any(|line| line_text(line).contains("more lines of output"))
-    );
+    };
+    assert!(has(&t), "the open row shows the result while the turn runs");
 
     let header_y = t
         .wrapped
         .iter()
         .position(|line| line_text(line).contains(RESULT_LABEL))
         .expect("result header") as u16;
+    double_click(&mut t, 2, 0);
+    assert!(!has(&t), "the row header folds the whole body");
+
+    double_click(&mut t, 2, 0);
+    assert!(has(&t));
+
     double_click(&mut t, 2, header_y);
 
     assert!(!result_detail(&t, 0).is_expanded());
-    assert!(
-        t.wrapped
-            .iter()
-            .all(|line| !line_text(line).contains("more lines of output"))
-    );
+    assert!(!has(&t));
 
     t.handle_mouse(
         mouse(MouseEventKind::Up(MouseButton::Left), 2, header_y),
@@ -1237,12 +1231,15 @@ fn expanding_a_block_grows_downward_and_keeps_its_header() {
 fn next_message_collapses_previous_details() {
     let mut t = Transcript::new();
     t.on_event(&thinking("plan"));
-    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+    assert!(
+        t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
+        "the row opens while its turn runs"
+    );
 
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, true, "edited"));
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+    assert!(t.rows[0].collapsible.as_ref().unwrap().is_expanded());
     assert_eq!(t.rows[0].text, "Edited 1 file");
 
     t.on_event(&text_delta("done"));
@@ -1252,49 +1249,40 @@ fn next_message_collapses_previous_details() {
 }
 
 #[test]
-fn expanding_during_generation_stays_open() {
+fn a_row_the_user_closed_stays_closed() {
     let mut t = Transcript::new();
     t.on_event(&thinking("plan"));
-    t.on_event(&text_delta("ans"));
-    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
-
     t.rows[0]
         .collapsible
         .as_mut()
-        .expect("thinking detail")
+        .expect("activity body")
         .toggle();
-    t.on_event(&text_delta("wer"));
-    t.on_event(&completed());
+
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, "edited"));
+    t.on_event(&thinking("more"));
     assert!(
-        t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
-        "manual expand must survive later tokens in the same message"
+        !t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
+        "a closed row is not reopened by the next event"
     );
+
+    t.on_event(&completed());
+    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
 }
 
 #[test]
-fn manual_expand_survives_next_thinking() {
+fn a_row_the_user_opened_survives_the_end_of_the_turn() {
     let mut t = Transcript::new();
-    t.on_event(&thinking("one"));
+    t.on_event(&thinking("plan"));
+    let body = t.rows[0].collapsible.as_mut().expect("activity body");
+    body.toggle();
+    body.toggle();
+
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
-    t.on_event(&tool_end(1, true, "edited"));
-    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
-
-    t.rows[0]
-        .collapsible
-        .as_mut()
-        .expect("thinking detail")
-        .toggle();
-    t.on_event(&thinking("two"));
-
-    assert!(t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+    t.on_event(&completed());
     assert!(
-        t.rows
-            .last()
-            .unwrap()
-            .collapsible
-            .as_ref()
-            .unwrap()
-            .is_expanded()
+        t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
+        "a row the user opened stays open once the turn moves on"
     );
 }
 
@@ -1304,13 +1292,16 @@ fn ended_stream_collapses_its_details() {
     t.on_event(&thinking("plan"));
     t.on_event(&thinking_done(1_500));
     assert!(
-        !t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
-        "streaming ended, so the windowed body is gone"
+        t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
+        "the row stays open while its turn runs"
     );
 
     t.on_event(&started());
     t.push_prompt(LineKind::User, "next");
-    assert!(!t.rows[0].collapsible.as_ref().unwrap().is_expanded());
+    assert!(
+        !t.rows[0].collapsible.as_ref().unwrap().is_expanded(),
+        "the next prompt folds it"
+    );
 }
 
 #[test]
@@ -1521,12 +1512,12 @@ fn burst_collapses_once_the_next_row_arrives() {
     ));
     t.on_event(&tool_end(1, true, "src/main.rs:1:todo"));
     assert!(
-        !t.rows[0]
+        t.rows[0]
             .collapsible
             .as_ref()
             .expect("burst detail")
             .is_expanded(),
-        "a tool run starts folded"
+        "a tool run opens while its turn runs"
     );
 
     t.on_event(&text_delta("done"));
@@ -1586,19 +1577,21 @@ fn live_thinking_body_windows_to_the_newest_lines() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(
-        !has(&t, "t12"),
-        "the chain stays behind the activity header"
-    );
-    toggle_row(&mut t, 0);
     assert!(has(&t, EARLIER_5_LINES), "{:?}", t.wrapped);
-    assert!(has(&t, "t12"));
+    assert!(
+        has(&t, "t12"),
+        "the open row shows the newest lines of the chain"
+    );
     assert!(!has(&t, "t04"));
 
     toggle_row(&mut t, 0);
+    assert!(!has(&t, "t12"), "the user closes the row");
+
     t.on_event(&thinking_done(1_500));
-    assert!(!has(&t, EARLIER_5_LINES));
-    assert!(!has(&t, "t12"), "no gap is left before the next row");
+    assert!(!has(&t, "t12"), "a closed row stays closed");
+
+    t.on_event(&completed());
+    assert!(!has(&t, "t12"), "the row folds once the turn moves on");
 
     toggle_row(&mut t, 0);
     let has = |needle: &str| {
@@ -1606,7 +1599,10 @@ fn live_thinking_body_windows_to_the_newest_lines() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_5_LINES));
+    assert!(
+        !has(EARLIER_5_LINES),
+        "the window lifts once the turn is over"
+    );
     assert!(has("t01"));
     assert!(has("t12"));
 }
@@ -1628,13 +1624,10 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(!has(&t, "c10"), "calls stay behind the activity header");
-    toggle_row(&mut t, 0);
     assert!(has(&t, EARLIER_3_LINES), "{:?}", t.wrapped);
-    assert!(has(&t, "c10"));
+    assert!(has(&t, "c10"), "the open row shows the newest calls");
     assert!(!has(&t, "c01"));
 
-    toggle_row(&mut t, 0);
     t.on_event(&completed());
     let has = |needle: &str| {
         t.wrapped
@@ -1661,6 +1654,58 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
 }
 
 #[test]
+fn the_activity_row_opens_while_the_turn_runs_and_folds_when_it_ends() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    let has = |t: &Transcript, needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(has(&t, "- old"), "the running turn shows what it edited");
+
+    t.on_event(&completed());
+    assert!(!has(&t, "- old"), "the turn ending folds the row away");
+
+    toggle_row(&mut t, 0);
+    let item = wrapped_row_of(&t, "Edited src/main.rs");
+    double_click(&mut t, 2, item);
+    assert!(has(&t, "- old"), "the user opens it again");
+}
+
+/// Calls that already reported a result keep the row inside its budget: the
+/// body is capped for the whole turn, not only while a call is in flight.
+#[test]
+fn a_settled_burst_stays_inside_the_live_row_budget() {
+    let mut t = Transcript::new();
+    for i in 1..=(MAX_LIVE_BODY_ROWS + 2) as u64 {
+        t.on_event(&tool_start(
+            i,
+            "bash",
+            serde_json::json!({ "command": format!("c{i:02}") }),
+        ));
+        t.on_event(&tool_end(i, true, "ok"));
+    }
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+
+    assert_eq!(t.wrapped.len(), 1 + MAX_LIVE_BODY_ROWS, "{:?}", t.wrapped);
+    assert!(line_text(&t.wrapped[1]).contains(EARLIER_3_LINES));
+    assert!(
+        line_text(t.wrapped.last().unwrap()).contains("c10"),
+        "the newest call is the one still on screen"
+    );
+
+    t.on_event(&completed());
+    toggle_row(&mut t, 0);
+    assert!(
+        t.wrapped.iter().any(|line| line_text(line).contains("c01")),
+        "the whole body renders once the turn is over"
+    );
+}
+
+#[test]
 fn live_diff_burst_windows_to_the_newest_calls() {
     let mut t = Transcript::new();
     for i in 1..=(MAX_LIVE_BODY_ROWS + 2) {
@@ -1680,17 +1725,14 @@ fn live_diff_burst_windows_to_the_newest_calls() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(
-        !has(&t, "Edited src/f10.rs"),
-        "edits stay behind the activity header"
-    );
-    toggle_row(&mut t, 0);
     assert!(has(&t, EARLIER_23_LINES), "{:?}", t.wrapped);
-    assert!(has(&t, "Edited src/f10.rs"));
+    assert!(
+        has(&t, "Edited src/f10.rs"),
+        "the open row shows the newest edits"
+    );
     assert!(!has(&t, "Edited src/f01.rs"));
     assert!(has(&t, "- old"), "a visible item still shows its diff");
 
-    toggle_row(&mut t, 0);
     t.on_event(&completed());
     let has = |needle: &str| {
         t.wrapped
@@ -1716,6 +1758,8 @@ fn live_diff_burst_windows_to_the_newest_calls() {
 /// Columns an 80-wide body has under its 3-column prefix.
 const WRAP_COLUMNS: usize = 77;
 const TAIL_COLUMNS: usize = 40;
+/// Rows a body of that width and length wraps to.
+const LONG_BODY_ROWS: usize = MAX_LIVE_BODY_ROWS + 1;
 
 #[test]
 fn live_body_window_counts_wrapped_rows() {
@@ -1723,9 +1767,6 @@ fn live_body_window_counts_wrapped_rows() {
     let long = "z".repeat(WRAP_COLUMNS * MAX_LIVE_BODY_ROWS + TAIL_COLUMNS);
     t.on_event(&thinking(&format!("{long}\n")));
     ready(&mut t, Rect::new(0, 0, 80, 24));
-    assert_eq!(t.wrapped.len(), 1, "the chain stays on one header");
-    toggle_row(&mut t, 0);
-
     assert_eq!(
         t.wrapped.len(),
         1 + MAX_LIVE_BODY_ROWS,
@@ -1740,15 +1781,17 @@ fn live_body_window_counts_wrapped_rows() {
     assert_eq!(zs(t.wrapped.last().unwrap()), TAIL_COLUMNS);
 
     toggle_row(&mut t, 0);
-    t.on_event(&thinking_done(1_500));
-    ready(&mut t, Rect::new(0, 0, 80, 24));
-    assert_eq!(t.wrapped.len(), 1, "a retired row collapses at once");
+    assert_eq!(t.wrapped.len(), 1, "the user closes the row");
 
+    t.on_event(&thinking_done(1_500));
+    assert_eq!(t.wrapped.len(), 1, "a closed row stays closed");
+
+    t.finish_response();
     toggle_row(&mut t, 0);
     assert_eq!(
         t.wrapped.len(),
-        2 + MAX_LIVE_BODY_ROWS,
-        "the whole body renders once the row stops streaming"
+        1 + LONG_BODY_ROWS,
+        "the whole body renders once the turn stops streaming"
     );
 }
 
@@ -1847,10 +1890,7 @@ fn file_edit_aggregates_with_a_nested_diff() {
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert_eq!(t.rows[0].text, "Edited 1 file");
     let burst = t.rows[0].collapsible.as_ref().expect("burst detail");
-    assert!(
-        !burst.is_expanded(),
-        "the edit stays behind the activity header"
-    );
+    assert!(burst.is_expanded(), "the edit shows while its turn runs");
     assert_eq!(burst.body(), "");
     assert_eq!(
         diff_items(&t),
@@ -2074,7 +2114,6 @@ fn nested_diff_lines_are_indented_past_their_item_title() {
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
     ready(&mut t, Rect::new(0, 0, 80, 10));
-    toggle_row(&mut t, 0);
 
     let removed = t
         .wrapped
@@ -2637,13 +2676,13 @@ fn wheel_up_with_nothing_above_the_turn_keeps_following_the_tail() {
         screen(&terminal)
             .iter()
             .any(|row| row.contains(THINKING_LABEL)),
-        "the folded header stays on screen"
+        "the header stays on screen"
     );
     assert!(
         screen(&terminal)
             .iter()
-            .all(|row| !row.contains("still going")),
-        "later thinking stays inside the activity"
+            .any(|row| row.contains("still going")),
+        "the open row draws the newest thinking under it"
     );
 }
 
@@ -3616,7 +3655,6 @@ fn a_streaming_body_keeps_its_window_without_a_full_rewrap() {
     let long = "z".repeat(WRAP_COLUMNS * MAX_LIVE_BODY_ROWS + TAIL_COLUMNS);
     t.on_event(&thinking(&format!("{long}\n")));
     ready(&mut t, Rect::new(0, 0, 80, 24));
-    toggle_row(&mut t, 0);
     assert_eq!(t.wrapped.len(), 1 + MAX_LIVE_BODY_ROWS);
 
     t.on_event(&thinking("a delta arrives\n"));
@@ -3636,7 +3674,6 @@ fn a_retitled_burst_keeps_its_windowed_body() {
         ));
     }
     ready(&mut t, Rect::new(0, 0, 80, 24));
-    toggle_row(&mut t, 0);
 
     t.on_event(&tool_end(1, false, "boom"));
 
