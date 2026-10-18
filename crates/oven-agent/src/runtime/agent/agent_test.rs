@@ -955,7 +955,7 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
     const BROKEN_ARGUMENTS: &str = "{";
 
     let broken = super::step::invalid_json_arguments(BROKEN_ARGUMENTS).unwrap();
-    assert!(broken.starts_with(super::step::INVALID_JSON_ARGUMENTS));
+    assert_eq!(broken, super::step::INVALID_JSON_ARGUMENTS);
 
     let tmp = tmp_dir();
     std::fs::write(tmp.path().join(NOTE_NAME), NOTE_BODY).unwrap();
@@ -1062,10 +1062,122 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
         results[0].1
     );
     assert!(results[1].0, "the broken call is a tool error");
+    assert_eq!(
+        results[1].1,
+        format!("error: {broken}"),
+        "the model is told the arguments failed, without the broken text"
+    );
+}
+
+#[tokio::test]
+async fn tool_call_markup_written_as_text_is_not_shown() {
+    const MARKUP: &str = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>";
+    const RECOVERED: &str = "done";
+
+    let (markup_head, markup_tail) = MARKUP.split_at(12);
+    let provider = QueuedStreams::new(vec![
+        vec![
+            message_start(),
+            LlmStreamEvent::ContentBlockStart {
+                index: 0,
+                block: ContentBlock::text(""),
+            },
+            LlmStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta {
+                    text: markup_head.into(),
+                },
+            },
+            LlmStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta {
+                    text: markup_tail.into(),
+                },
+            },
+            LlmStreamEvent::ContentBlockStart {
+                index: 1,
+                block: ContentBlock::ToolUse {
+                    id: "call_bad".into(),
+                    name: BashTool::NAME.into(),
+                    input: serde_json::Value::String(String::new()),
+                    raw_arguments: None,
+                },
+            },
+            LlmStreamEvent::ContentBlockDelta {
+                index: 1,
+                delta: Delta::InputJsonDelta {
+                    partial_json: "{".into(),
+                },
+            },
+            LlmStreamEvent::MessageDelta {
+                stop_reason: Some(StopReason::ToolUse),
+                usage: None,
+            },
+            LlmStreamEvent::MessageStop,
+        ],
+        vec![
+            message_start(),
+            LlmStreamEvent::ContentBlockStart {
+                index: 0,
+                block: ContentBlock::text(""),
+            },
+            LlmStreamEvent::ContentBlockDelta {
+                index: 0,
+                delta: Delta::TextDelta {
+                    text: RECOVERED.into(),
+                },
+            },
+            LlmStreamEvent::MessageStop,
+        ],
+    ]);
+
+    let tmp = tmp_dir();
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(BashTool::new(tmp.path()))];
+    let mut agent = Agent::new(router_with(Box::new(provider)), tools);
+    let mut sink = VecEventSink::default();
+    let result = run_plain(&mut agent, "list files", &mut sink)
+        .await
+        .unwrap();
+    assert_eq!(result.text(), RECOVERED);
     assert!(
-        results[1].1.contains(&broken),
-        "the model is told why the arguments failed: {}",
-        results[1].1
+        sink.events.iter().all(|event| !matches!(
+            event,
+            AgentEvent::Stream(StreamEvent::TextDelta { text }) if text.contains("<tool_call>")
+        )),
+        "the markup never reaches the transcript"
+    );
+    assert!(
+        agent.history().all(|message| message.content.iter().all(
+            |block| !matches!(block, ContentBlock::Text { text } if text.contains("<tool_call>"))
+        )),
+        "a reloaded session does not show the markup either"
+    );
+    let results: Vec<(bool, String)> = agent
+        .history()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => Some((
+                *is_error,
+                content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        [(
+            true,
+            format!("error: {}", super::step::INVALID_JSON_ARGUMENTS)
+        )],
+        "the call is still reported as a tool error"
     );
 }
 

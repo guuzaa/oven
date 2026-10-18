@@ -27,9 +27,6 @@ use crate::core::turn::{PendingInput, Step, StepCall, TurnContext, TurnOutput};
 /// Prefix of the tool error returned when a call's arguments are not JSON.
 pub(super) const INVALID_JSON_ARGUMENTS: &str = "invalid JSON arguments";
 
-/// How much of a broken `arguments` string to quote back to the model.
-const RECEIVED_ARGUMENTS_CHARS: usize = 200;
-
 impl Agent {
     /// One provider round trip: ask, commit the reply, run the tools it asked
     /// for. [`Agent::run`] is one loop policy over this; a strategy of its own
@@ -318,14 +315,12 @@ struct PlannedCall {
     tool: Option<Arc<dyn Tool>>,
 }
 
-/// `Some` when `raw` is not JSON. The message quotes the serde error and a
-/// prefix of the text the model actually emitted.
+/// `Some` when `raw` is not JSON. The model gets only the reason, not the
+/// broken text it already knows it emitted.
 pub(super) fn invalid_json_arguments(raw: &str) -> Option<String> {
-    let error = serde_json::from_str::<Value>(raw).err()?;
-    let received = truncate(raw, RECEIVED_ARGUMENTS_CHARS);
-    Some(format!(
-        "{INVALID_JSON_ARGUMENTS}: {error}; received: {received}"
-    ))
+    serde_json::from_str::<Value>(raw)
+        .is_err()
+        .then(|| INVALID_JSON_ARGUMENTS.to_string())
 }
 
 /// What a call may do: run with the tool it resolved to, or report without

@@ -72,8 +72,7 @@ mod tests {
             FileEditTool::NAME,
             &json!({
                 "path": "src/main.rs",
-                "old_string": "old",
-                "new_string": "new"
+                "edit": [{ "old_string": "old", "new_string": "new" }]
             }),
         );
         assert_eq!(edit.summary, format!("{} src/main.rs", FileEditTool::VERB));

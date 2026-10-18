@@ -1669,8 +1669,7 @@ fn live_diff_burst_windows_to_the_newest_calls() {
             "file_edit",
             serde_json::json!({
                 "path": format!("src/f{i:02}.rs"),
-                "old_string": "old",
-                "new_string": "new"
+                "edit": [{ "old_string": "old", "new_string": "new" }]
             }),
         ));
     }
@@ -1762,16 +1761,14 @@ fn todo_input() -> serde_json::Value {
 fn file_edit_input() -> serde_json::Value {
     serde_json::json!({
         "path": "src/main.rs",
-        "old_string": "old",
-        "new_string": "new"
+        "edit": [{ "old_string": "old", "new_string": "new" }]
     })
 }
 
 fn file_edit_input_at(path: &str) -> serde_json::Value {
     serde_json::json!({
         "path": path,
-        "old_string": "libold",
-        "new_string": "libnew"
+        "edit": [{ "old_string": "libold", "new_string": "libnew" }]
     })
 }
 
@@ -1876,7 +1873,7 @@ fn file_edit_with_broken_arguments_still_reads_as_an_edit() {
     t.on_event(&tool_start(
         2,
         "file_edit",
-        serde_json::json!({ "old_string": "old", "new_string": "new" }),
+        serde_json::json!({ "edit": [{ "old_string": "old", "new_string": "new" }] }),
     ));
     t.on_event(&tool_end(1, false, EDIT_ERROR));
     t.on_event(&tool_end(2, false, EDIT_ERROR));

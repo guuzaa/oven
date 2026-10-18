@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use oven_llm::{
-    Client, Delta, Message, Provider, ReasoningEffort, Request, Response, Role, StreamCollector,
-    StreamEvent as LlmStreamEvent, ThinkingMode,
+    Client, ContentBlock, Delta, Message, Provider, ReasoningEffort, Request, Response, Role,
+    StreamCollector, StreamEvent as LlmStreamEvent, ThinkingMode,
 };
 
 use oven_host::as_ms;
@@ -18,6 +18,12 @@ use crate::core::event::{AgentEvent, StreamEvent};
 use crate::core::mode::{AgentMode, ToolAccess};
 use crate::core::prompt_template;
 use crate::core::sink::EventSink;
+
+/// Some models write a tool call as text instead of a structured call. The
+/// markup is not prose, so the transcript drops it; the call itself still
+/// fails as a tool result.
+const TOOL_CALL_OPEN: &str = "<tool_call>";
+const TOOL_CALL_CLOSE: &str = "</tool_call>";
 
 impl Agent {
     fn llm_tools(&self, mode: AgentMode) -> Vec<oven_llm::Tool> {
@@ -128,6 +134,7 @@ impl Agent {
             Ok(mut stream) => {
                 let mut collector = StreamCollector::new();
                 let mut thinking = ThinkingSpan::default();
+                let mut calls = ToolCallGate::default();
                 while let Some(event) = stream.next().await {
                     match event {
                         Err(e) => return Err(e.into()),
@@ -142,9 +149,11 @@ impl Agent {
                                     }
                                     Delta::TextDelta { text } if !text.is_empty() => {
                                         thinking.close(sink);
-                                        sink.emit(AgentEvent::Stream(StreamEvent::TextDelta {
-                                            text: text.clone(),
-                                        }));
+                                        if let Some(text) = calls.push(text) {
+                                            sink.emit(AgentEvent::Stream(StreamEvent::TextDelta {
+                                                text,
+                                            }));
+                                        }
                                     }
                                     // A streamed tool call ends the reasoning phase.
                                     Delta::InputJsonDelta { .. } => thinking.close(sink),
@@ -156,10 +165,88 @@ impl Agent {
                     }
                 }
                 let span = thinking.finish(sink);
-                Ok((collector.finish()?, span))
+                if let Some(text) = calls.finish() {
+                    sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
+                }
+                let mut response = collector.finish()?;
+                strip_tool_call_text(&mut response);
+                Ok((response, span))
             }
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+/// Whether `text` is a whole tool call written as markup rather than prose.
+fn is_tool_call_envelope(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with(TOOL_CALL_OPEN) && text.ends_with(TOOL_CALL_CLOSE)
+}
+
+/// Removes envelope text blocks from the reply before it reaches the history,
+/// so a reloaded session shows what the live one did.
+fn strip_tool_call_text(response: &mut Response) {
+    response.content.retain(
+        |block| !matches!(block, ContentBlock::Text { text } if is_tool_call_envelope(text)),
+    );
+}
+
+/// Holds the head of a streamed text block until it is clear whether the block
+/// is a tool call envelope. Ordinary prose is held for at most the length of
+/// the open tag; an envelope is held until it closes, then dropped.
+#[derive(Default)]
+struct ToolCallGate {
+    held: String,
+    /// The held text begins with [`TOOL_CALL_OPEN`].
+    envelope: bool,
+}
+
+impl ToolCallGate {
+    /// Returns the text to draw, `None` while the head is still undecided or
+    /// the block is an envelope.
+    fn push(&mut self, text: &str) -> Option<String> {
+        if self.envelope {
+            self.held.push_str(text);
+            return self.settle();
+        }
+        if self.held.is_empty() {
+            let trimmed = text.trim_start();
+            if !TOOL_CALL_OPEN.starts_with(trimmed) && !trimmed.starts_with(TOOL_CALL_OPEN) {
+                return Some(text.to_string());
+            }
+        }
+        self.held.push_str(text);
+        let trimmed = self.held.trim_start();
+        if TOOL_CALL_OPEN.starts_with(trimmed) {
+            return None;
+        }
+        if trimmed.starts_with(TOOL_CALL_OPEN) {
+            self.envelope = true;
+            return self.settle();
+        }
+        self.flush()
+    }
+
+    /// Decides a held envelope: text after its close tag makes the block prose,
+    /// which has to be drawn.
+    fn settle(&mut self) -> Option<String> {
+        let after_close = self
+            .held
+            .find(TOOL_CALL_CLOSE)
+            .map(|end| &self.held[end + TOOL_CALL_CLOSE.len()..]);
+        if after_close.is_some_and(|rest| !rest.trim().is_empty()) {
+            return self.flush();
+        }
+        None
+    }
+
+    fn finish(self) -> Option<String> {
+        (!self.held.is_empty() && !is_tool_call_envelope(&self.held)).then_some(self.held)
+    }
+
+    fn flush(&mut self) -> Option<String> {
+        self.envelope = false;
+        (!self.held.is_empty()).then(|| std::mem::take(&mut self.held))
     }
 }
 
@@ -169,7 +256,8 @@ async fn complete_unstreamed(
     sink: &mut impl EventSink,
 ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
     let started = Instant::now();
-    let response = router.complete(req).await?;
+    let mut response = router.complete(req).await?;
+    strip_tool_call_text(&mut response);
     let reasoning = response.thinking();
     let span = (!reasoning.is_empty()).then(|| thinking_span(started.elapsed()));
     if !reasoning.is_empty() {
@@ -187,4 +275,60 @@ async fn complete_unstreamed(
         sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
     }
     Ok((response, span))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ToolCallGate, is_tool_call_envelope};
+
+    const ENVELOPE: &str = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>";
+
+    #[test]
+    fn prose_passes_without_waiting() {
+        let mut gate = ToolCallGate::default();
+        assert_eq!(gate.push("hello"), Some("hello".into()));
+        assert_eq!(gate.finish(), None);
+    }
+
+    #[test]
+    fn a_prefix_of_the_open_tag_waits_for_more_text() {
+        let mut gate = ToolCallGate::default();
+        assert_eq!(gate.push("<tool"), None);
+        assert_eq!(gate.push("?"), Some("<tool?".into()));
+        assert_eq!(gate.finish(), None);
+    }
+
+    #[test]
+    fn a_split_envelope_is_dropped() {
+        let mut gate = ToolCallGate::default();
+        let (head, tail) = ENVELOPE.split_at(12);
+        assert_eq!(gate.push(head), None);
+        assert_eq!(gate.push(tail), None);
+        assert_eq!(gate.finish(), None);
+    }
+
+    #[test]
+    fn text_after_an_envelope_is_kept() {
+        let mut gate = ToolCallGate::default();
+        let answer = format!("{ENVELOPE}\ndone");
+        assert_eq!(gate.push(&answer), Some(answer.clone()));
+        assert_eq!(gate.finish(), None);
+    }
+
+    #[test]
+    fn an_incomplete_envelope_is_kept() {
+        let mut gate = ToolCallGate::default();
+        assert_eq!(gate.push("<tool_call>\n<function=bash>"), None);
+        assert_eq!(gate.finish(), Some("<tool_call>\n<function=bash>".into()));
+    }
+
+    #[test]
+    fn only_a_whole_markup_block_is_an_envelope() {
+        assert!(is_tool_call_envelope(ENVELOPE));
+        assert!(is_tool_call_envelope(&format!("\n{ENVELOPE}\n")));
+        assert!(!is_tool_call_envelope(
+            ENVELOPE.trim_end_matches("</tool_call>")
+        ));
+        assert!(!is_tool_call_envelope("see <tool_call> for an example"));
+    }
 }
