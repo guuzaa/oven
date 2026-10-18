@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>og card</title>
+    <style>
+      :root {
+        --bg: #fff7ec;
+        --dots: #f6e3cc;
+        --line: #3a2117;
+        --text: #3a2117;
+        --muted: #7d6253;
+        --accent: #ff7a45;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+      }
+
+      body {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        align-items: center;
+        gap: 80px;
+        box-sizing: border-box;
+        padding: 0 100px;
+        background-color: var(--bg);
+        background-image: radial-gradient(var(--dots) 2px, transparent 2px);
+        background-size: 64px 64px;
+        color: var(--text);
+        font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+
+      .mark {
+        width: 280px;
+        height: 280px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 128px;
+        line-height: 1;
+        letter-spacing: -0.04em;
+      }
+
+      .tagline {
+        margin: 28px 0 0;
+        font-size: 44px;
+        font-weight: 700;
+        line-height: 1.2;
+      }
+
+      .meta {
+        margin: 48px 0 0;
+        color: var(--muted);
+        font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 28px;
+        letter-spacing: 0.02em;
+      }
+
+      .sep {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <svg class="mark" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="oven mascot">
+      <g fill="none" stroke="#ffb48f" stroke-width="3.2" stroke-linecap="round">
+        <path d="M25 13c-3-2.5 3-4.5 0-8" />
+        <path d="M39 13c-3-2.5 3-4.5 0-8" />
+      </g>
+      <rect x="14" y="54" width="9" height="7" rx="3.5" fill="#c9562a" />
+      <rect x="41" y="54" width="9" height="7" rx="3.5" fill="#c9562a" />
+      <rect x="5" y="15" width="54" height="43" rx="15" fill="#ff8550" />
+      <rect x="5" y="15" width="54" height="13" rx="6.5" fill="#ff9b6b" />
+      <circle cx="15" cy="21.5" r="3" fill="#fff4e8" />
+      <circle cx="24" cy="21.5" r="3" fill="#fff4e8" />
+      <rect x="38" y="19.5" width="15" height="4" rx="2" fill="#ffd36e" />
+      <rect x="11.5" y="31" width="41" height="22" rx="9" fill="#fff4e8" />
+      <g fill="#3a2117">
+        <circle cx="24.5" cy="40" r="2.8" />
+        <circle cx="39.5" cy="40" r="2.8" />
+      </g>
+      <ellipse cx="18.5" cy="45.5" rx="3.2" ry="1.9" fill="#ffa3b5" />
+      <ellipse cx="45.5" cy="45.5" rx="3.2" ry="1.9" fill="#ffa3b5" />
+      <path d="M29 44.5q3 3.2 6 0" fill="none" stroke="#3a2117" stroke-width="2.2" stroke-linecap="round" />
+    </svg>
+    <div>
+      <h1>oven</h1>
+      <p class="tagline">A toy coding agent for joy only.</p>
+      <p class="meta">rust <span class="sep">·</span> tui <span class="sep">·</span> subagents <span class="sep">·</span> memory</p>
+    </div>
+  </body>
+</html>
