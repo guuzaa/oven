@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, ToolView, TurnContext};
+use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, TurnContext};
 use oven_mem::{Memory, MemoryScope, MemoryStore, PutOutcome};
 use serde_json::{Value, json};
 
@@ -90,7 +90,7 @@ impl Tool for MemoryWriteTool {
         }
     }
 
-    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let scope_raw = required_str(args, "scope", MISSING_SCOPE)?;
         let id_raw = required_str(args, "id", MISSING_ID)?;
         let kind_raw = required_str(args, "kind", MISSING_KIND)?;
@@ -111,7 +111,7 @@ impl Tool for MemoryWriteTool {
             })
             .await
             .map_err(|err| AgentError::from(err.to_string()))?;
-        Ok(outcome_text(scope, id.as_str(), outcome))
+        Ok(outcome_text(scope, id.as_str(), outcome).into())
     }
 }
 
@@ -138,7 +138,9 @@ fn outcome_text(scope: MemoryScope, id: &str, outcome: PutOutcome) -> String {
 
 #[cfg(test)]
 mod tests {
-    use oven_agent::{AgentMode, CancellationToken, Selection, Tool, TurnContext, TurnId};
+    use oven_agent::{
+        AgentMode, CancellationToken, Selection, Tool, ToolOutcome, TurnContext, TurnId,
+    };
     use oven_llm::ModelId;
     use oven_mem::{MemoryId, MemoryRoots, MemoryScope, MemoryStore};
     use serde_json::json;
@@ -192,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn reports_created_and_persists_source() {
         let (tmp, tool) = tool(Some(SESSION)).await;
-        let out = tool.run(&args("proxy fact"), &turn()).await.unwrap();
+        let ToolOutcome { output: out, .. } = tool.run(&args("proxy fact"), &turn()).await.unwrap();
         assert_eq!(
             out,
             format!("{CREATED_MEMORY} workspace/proxy-requires-http2")
@@ -216,7 +218,8 @@ mod tests {
     async fn reports_replaced_with_the_previous_description() {
         let (_tmp, tool) = tool(None).await;
         tool.run(&args("first fact"), &turn()).await.unwrap();
-        let out = tool.run(&args("revised fact"), &turn()).await.unwrap();
+        let ToolOutcome { output: out, .. } =
+            tool.run(&args("revised fact"), &turn()).await.unwrap();
         assert_eq!(
             out,
             format!(

@@ -1834,7 +1834,8 @@ fn wrapped_row_of(t: &Transcript, needle: &str) -> u16 {
         .expect("wrapped line")
 }
 
-const EDIT_SUCCESS: &str = "edited src/main.rs: replaced 1 occurrence(s), 3 bytes -> 3 bytes";
+const EDIT_SUCCESS: &str = "edited src/main.rs: 1 edit(s), 3 bytes -> 3 bytes";
+const EDIT_LANDED: &str = "2 - old\n2 + new";
 const EDIT_ERROR: &str = "old_string not found";
 
 #[test]
@@ -2130,6 +2131,25 @@ fn an_answer_row_ends_on_the_answer_the_user_picked() {
         diff_items(&t),
         vec![("Asked which database?".to_string(), "postgres".to_string())],
         "the row ends on the answer, not on the choices offered"
+    );
+}
+
+#[test]
+fn an_edit_row_ends_on_the_lines_the_edit_moved() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&finished(
+        1,
+        ToolResult::Success {
+            output: EDIT_SUCCESS.into(),
+        },
+        Some(EDIT_LANDED),
+    ));
+
+    assert_eq!(
+        diff_items(&t),
+        vec![("Edited src/main.rs".to_string(), EDIT_LANDED.to_string())],
+        "the row ends on where the edit landed, not on the diff it asked for"
     );
 }
 

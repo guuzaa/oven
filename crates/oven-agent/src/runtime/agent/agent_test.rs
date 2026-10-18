@@ -3,7 +3,7 @@ use crate::RunPolicy;
 use crate::StepStop;
 use crate::TurnId;
 use crate::capabilities::tools::{
-    AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool,
+    AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool, ToolOutcome,
 };
 use crate::core::identity::ToolCallId;
 use crate::core::sink::{NullSink, VecEventSink};
@@ -478,6 +478,42 @@ async fn agent_loop_executes_tool_then_finishes() {
 }
 
 #[tokio::test]
+async fn a_landed_edit_reports_the_lines_it_moved() {
+    let tmp = tmp_dir();
+    std::fs::write(tmp.path().join("note.txt"), "one\ntwo\n").unwrap();
+
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "call_1",
+            "file_edit",
+            json!({"path": "note.txt", "edit": [{ "old_string": "two", "new_string": "2" }]}),
+        ),
+        text_response("done"),
+    ]);
+
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileEditTool::new(tmp.path()))];
+    let mut agent = Agent::new(router_with(Box::new(mock)), tools);
+    let mut sink = VecEventSink::default();
+    run_plain(&mut agent, "edit note.txt", &mut sink)
+        .await
+        .unwrap();
+
+    let detail = sink
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Tool(ToolEvent::Finished { detail, .. }) => detail.clone(),
+            _ => None,
+        })
+        .expect("the landing event reports what the call shows");
+    assert_eq!(detail, "2 - two\n2 + 2");
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("note.txt")).unwrap(),
+        "one\n2\n"
+    );
+}
+
+#[tokio::test]
 async fn ask_rejects_hidden_write_tool_without_writing() {
     let tmp = tmp_dir();
     let mock = MockProvider::new(vec![
@@ -696,15 +732,15 @@ impl Tool for PairedTool {
         &self,
         _args: &serde_json::Value,
         _cx: &TurnContext,
-    ) -> Result<String, AgentError> {
+    ) -> Result<ToolOutcome, AgentError> {
         match self.waits {
             true => {
                 self.signal.notified().await;
-                Ok(format!("{} last", self.name))
+                Ok(format!("{} last", self.name).into())
             }
             false => {
                 self.signal.notify_one();
-                Ok(format!("{} first", self.name))
+                Ok(format!("{} first", self.name).into())
             }
         }
     }
@@ -743,7 +779,7 @@ impl Tool for ExclusiveTool {
         &self,
         _args: &serde_json::Value,
         _cx: &TurnContext,
-    ) -> Result<String, AgentError> {
+    ) -> Result<ToolOutcome, AgentError> {
         self.log
             .lock()
             .unwrap()
@@ -753,7 +789,7 @@ impl Tool for ExclusiveTool {
             .lock()
             .unwrap()
             .push(format!("leave {}", self.name));
-        Ok(self.name.to_string())
+        Ok(self.name.into())
     }
 }
 

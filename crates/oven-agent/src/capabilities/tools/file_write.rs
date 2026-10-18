@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str, resolve_within};
+use super::{
+    Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, labeled, require_str, resolve_within,
+};
 
 use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
@@ -65,18 +67,14 @@ impl Tool for FileWriteTool {
             "required": ["path", "content"]
         })
     }
-    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;
         let content = require_str(args, "content", Self::NAME)?;
         let path = resolve_within(&self.root, path_str)?;
         oven_host::write(&path, content)
             .await
             .map_err(|e| AgentError::from(format!("write {}: {}", path.display(), e)))?;
-        Ok(format!(
-            "wrote {} bytes to {}",
-            content.len(),
-            path.display()
-        ))
+        Ok(format!("wrote {} bytes to {}", content.len(), path.display()).into())
     }
 }
 
@@ -127,7 +125,7 @@ mod tests {
         let tmp = tmp_dir();
         let root = tmp.path();
         let write = FileWriteTool::new(root);
-        let out = write
+        let ToolOutcome { output: out, .. } = write
             .run(
                 &json!({"path": "hello.txt", "content": "line one\nline two"}),
                 &turn(),
@@ -136,7 +134,9 @@ mod tests {
             .unwrap();
         assert!(out.contains("wrote"));
         let read = FileReadTool::new(root);
-        let content = read
+        let ToolOutcome {
+            output: content, ..
+        } = read
             .run(&json!({"path": "hello.txt"}), &turn())
             .await
             .unwrap();

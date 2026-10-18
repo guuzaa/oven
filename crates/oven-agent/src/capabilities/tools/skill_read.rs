@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::capabilities::tools::Tool;
+use crate::capabilities::tools::{Tool, ToolOutcome};
 use crate::core::error::AgentError;
 
 use crate::core::turn::TurnContext;
@@ -48,7 +48,7 @@ impl Tool for SkillReadTool {
         })
     }
 
-    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let id = args
             .get("skill_id")
             .and_then(|v| v.as_str())
@@ -59,6 +59,7 @@ impl Tool for SkillReadTool {
             .ok_or_else(|| AgentError::from(format!("unknown skill: {id}")))?;
         tokio::fs::read_to_string(path)
             .await
+            .map(Into::into)
             .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))
     }
 }
@@ -80,7 +81,7 @@ mod tests {
         let sources = Arc::new(BTreeMap::from([("files".to_string(), file.clone())]));
         let tool = SkillReadTool::new(sources);
 
-        let out = tool
+        let ToolOutcome { output: out, .. } = tool
             .run(&json!({"skill_id": "files"}), &turn())
             .await
             .unwrap();
@@ -88,7 +89,7 @@ mod tests {
 
         // Content is re-read from disk on every call.
         std::fs::write(&file, "updated body\n").unwrap();
-        let out = tool
+        let ToolOutcome { output: out, .. } = tool
             .run(&json!({"skill_id": "files"}), &turn())
             .await
             .unwrap();

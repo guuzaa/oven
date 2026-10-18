@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::core::turn::TurnContext;
 
-use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
+use super::{Tool, ToolOutcome, ToolView, parse_limit, require_str, resolve_within};
 use crate::core::error::AgentError;
 use crate::core::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
 use oven_host::walk_dir_stream;
@@ -81,7 +81,7 @@ impl Tool for GrepTool {
             "required": ["pattern"]
         })
     }
-    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;
         let re = compile_regex(
             pattern,
@@ -146,13 +146,13 @@ impl Tool for GrepTool {
         }
 
         if out.is_empty() {
-            return Ok("(no matches)".to_string());
+            return Ok("(no matches)".into());
         }
         let mut text = out.join("\n");
         if out.len() >= limit {
             let _ = write!(text, "\n[truncated at {limit} results]");
         }
-        Ok(text)
+        Ok(text.into())
     }
 }
 
@@ -221,7 +221,8 @@ mod tests {
         let root = tmp.path();
         write(root, "a.rs", "fn foo() {}\nfn bar() {}\n");
         let grep = GrepTool::new(root);
-        let out = grep.run(&json!({"pattern": "foo"}), &turn()).await.unwrap();
+        let ToolOutcome { output: out, .. } =
+            grep.run(&json!({"pattern": "foo"}), &turn()).await.unwrap();
         assert_eq!(out, "a.rs:1:fn foo() {}");
     }
 
@@ -231,7 +232,7 @@ mod tests {
         let root = tmp.path();
         write(root, "a.txt", "Hello\nworld\n");
         let grep = GrepTool::new(root);
-        let out = grep
+        let ToolOutcome { output: out, .. } = grep
             .run(
                 &json!({"pattern": "hello", "case_insensitive": true}),
                 &turn(),
@@ -239,11 +240,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, "a.txt:1:Hello");
-        let err = grep
+        let ToolOutcome { output: out, .. } = grep
             .run(&json!({"pattern": "hello"}), &turn())
             .await
             .unwrap();
-        assert_eq!(err, "(no matches)");
+        assert_eq!(out, "(no matches)");
     }
 
     #[tokio::test]
@@ -253,7 +254,7 @@ mod tests {
         write(root, "a.rs", "needle\n");
         write(root, "a.txt", "needle\n");
         let grep = GrepTool::new(root);
-        let out = grep
+        let ToolOutcome { output: out, .. } = grep
             .run(&json!({"pattern": "needle", "include": "*.rs"}), &turn())
             .await
             .unwrap();
@@ -270,7 +271,7 @@ mod tests {
         write(root, "real.txt", "needle\n");
         write(root, ".github/ci.yml", "needle\n");
         let grep = GrepTool::new(root);
-        let out = grep
+        let ToolOutcome { output: out, .. } = grep
             .run(&json!({"pattern": "needle"}), &turn())
             .await
             .unwrap();
@@ -291,7 +292,7 @@ mod tests {
         write(root, "real.txt", "needle\n");
         write(root, ".hidden/x.txt", "needle\n");
         let grep = GrepTool::new(root);
-        let out = grep
+        let ToolOutcome { output: out, .. } = grep
             .run(&json!({"pattern": "needle"}), &turn())
             .await
             .unwrap();

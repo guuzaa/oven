@@ -23,6 +23,36 @@ impl ToolView {
     }
 }
 
+/// What a tool hands back: the text the history keeps, and the body a
+/// frontend shows under the call once it has landed.
+///
+/// A tool learns things while it runs — where an edit matched, which option
+/// the user picked — so it reports the landed body itself rather than leaving
+/// the frontend to re-derive it from the arguments it was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolOutcome {
+    pub output: String,
+    pub detail: Option<String>,
+}
+
+impl From<&str> for ToolOutcome {
+    fn from(output: &str) -> Self {
+        Self {
+            output: output.to_string(),
+            detail: None,
+        }
+    }
+}
+
+impl From<String> for ToolOutcome {
+    fn from(output: String) -> Self {
+        Self {
+            output,
+            detail: None,
+        }
+    }
+}
+
 /// What a tool may do to the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolPermission {

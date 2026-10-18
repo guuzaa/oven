@@ -50,7 +50,7 @@ pub use core::turn::{
     DEFAULT_MAX_ITERS, PendingInbox, PendingInput, RunPolicy, Step, StepCall, TurnContext,
     TurnOutput,
 };
-pub use core::view::{ToolCaps, ToolPermission, ToolView};
+pub use core::view::{ToolCaps, ToolOutcome, ToolPermission, ToolView};
 pub use oven_llm::RouterHandle;
 pub use runtime::agent::{Agent, router_handle};
 pub use runtime::compact::{CompactStats, NOTHING_TO_COMPACT};

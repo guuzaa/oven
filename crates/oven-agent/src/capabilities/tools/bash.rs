@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::core::turn::TurnContext;
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str};
+use super::{Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, labeled, require_str};
 use crate::core::error::AgentError;
 use oven_host::{CommandError, run_shell_command};
 
@@ -63,7 +63,7 @@ impl Tool for BashTool {
             "required": ["command"]
         })
     }
-    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let command = require_str(args, "command", Self::NAME)?;
         let output = run_shell_command(command, &self.root, self.timeout, Some(&cx.cancellation))
             .await
@@ -94,7 +94,7 @@ impl Tool for BashTool {
         if text.is_empty() {
             text.push_str("(no output)");
         }
-        Ok(text)
+        Ok(text.into())
     }
 }
 
@@ -138,7 +138,7 @@ mod tests {
     async fn bash_runs_command_and_captures_output() {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path());
-        let out = bash
+        let ToolOutcome { output: out, .. } = bash
             .run(&json!({"command": "echo hi"}), &turn())
             .await
             .unwrap();
@@ -149,7 +149,7 @@ mod tests {
     async fn bash_reports_nonzero_exit() {
         let tmp = tmp_dir();
         let bash = BashTool::new(tmp.path());
-        let out = bash
+        let ToolOutcome { output: out, .. } = bash
             .run(&json!({"command": "exit 7"}), &turn())
             .await
             .unwrap();
@@ -173,7 +173,7 @@ mod tests {
         let root: PathBuf = tmp.path().to_path_buf();
         std::fs::write(root.join("marker.txt"), "found").unwrap();
         let bash = BashTool::new(&root);
-        let out = bash
+        let ToolOutcome { output: out, .. } = bash
             .run(&json!({"command": read_marker_command()}), &turn())
             .await
             .unwrap();

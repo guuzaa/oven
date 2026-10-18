@@ -19,10 +19,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::core::error::AgentError;
-use crate::core::event::ToolResult;
 use crate::core::turn::TurnContext;
 
-pub use crate::core::view::{ToolCaps, ToolPermission, ToolView};
+pub use crate::core::view::{ToolCaps, ToolOutcome, ToolPermission, ToolView};
 pub use answer::AnswerTool;
 pub use bash::BashTool;
 pub use catalog::{BUILTIN_TOOLS, BuiltinTool};
@@ -51,13 +50,10 @@ pub trait Tool: Send + Sync {
     fn view(&self, input: &Value) -> ToolView {
         present_tool(self.name(), input)
     }
-    fn result_detail(&self, _result: &ToolResult) -> Option<String> {
-        None
-    }
     fn caps(&self) -> ToolCaps {
         ToolCaps::default()
     }
-    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError>;
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError>;
 }
 
 pub(crate) fn resolve_within(root: &Path, rel: &str) -> Result<PathBuf, AgentError> {

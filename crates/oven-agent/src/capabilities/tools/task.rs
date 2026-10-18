@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use oven_llm::ModelId;
 use serde_json::{Value, json};
 
-use crate::capabilities::tools::{Tool, ToolCaps, ToolPermission, ToolView, require_str};
+use crate::capabilities::tools::{
+    Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, require_str,
+};
 use crate::core::error::AgentError;
 use crate::core::mode::AgentMode;
 use crate::core::subagent::{
@@ -188,7 +190,7 @@ impl Tool for TaskTool {
         Self::view_input(input)
     }
 
-    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let request = self.parse(args, cx)?;
         let background = request.background;
         let handle = self.spawner.spawn(request).await?;
@@ -197,10 +199,11 @@ impl Tool for TaskTool {
                 "[{} started in the background. You will be told when it finishes; \
                  {READ_RESULT_HINT}.]",
                 handle.name
-            )),
+            )
+            .into()),
             false => {
                 let name = handle.name.clone();
-                Ok(render_outcome(&name, handle.join().await?))
+                Ok(render_outcome(&name, handle.join().await?).into())
             }
         }
     }
@@ -256,7 +259,7 @@ impl Tool for TaskOutputTool {
         Self::view_input(input)
     }
 
-    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let name = args
             .get("name")
             .and_then(Value::as_str)
@@ -269,9 +272,9 @@ impl Tool for TaskOutputTool {
             .reports(name)
             .map_err(|e| AgentError::from(format!("{}: {}", Self::NAME, e.message)))?;
         if reports.is_empty() {
-            return Ok(NO_SUBAGENTS.to_string());
+            return Ok(NO_SUBAGENTS.into());
         }
-        Ok(render_reports(&reports))
+        Ok(render_reports(&reports).into())
     }
 }
 
@@ -454,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn foreground_returns_the_report_with_a_tally() {
         let spawner = MockSpawner::new(completed());
-        let out = tool(spawner.clone())
+        let ToolOutcome { output: out, .. } = tool(spawner.clone())
             .run(
                 &json!({"description": "find it", "prompt": "go"}),
                 &TurnContext::for_test(),
@@ -477,7 +480,7 @@ mod tests {
     #[tokio::test]
     async fn background_returns_without_waiting() {
         let spawner = MockSpawner::new(completed());
-        let out = tool(spawner.clone())
+        let ToolOutcome { output: out, .. } = tool(spawner.clone())
             .run(
                 &json!({"description": "find it", "prompt": "go", "background": true}),
                 &TurnContext::for_test(),
@@ -568,7 +571,7 @@ mod tests {
             },
             ..completed()
         };
-        let out = tool(MockSpawner::new(outcome))
+        let ToolOutcome { output: out, .. } = tool(MockSpawner::new(outcome))
             .run(
                 &json!({"description": "find it", "prompt": "go"}),
                 &TurnContext::for_test(),
@@ -586,7 +589,7 @@ mod tests {
             report: "x".repeat(MAX_REPORT_BYTES * 2),
             ..completed()
         };
-        let out = tool(MockSpawner::new(outcome))
+        let ToolOutcome { output: out, .. } = tool(MockSpawner::new(outcome))
             .run(
                 &json!({"description": "find it", "prompt": "go"}),
                 &TurnContext::for_test(),
@@ -617,17 +620,18 @@ mod tests {
             ),
             report: None,
         }];
-        let out = TaskOutputTool::new(MockSpawner::with_reports(completed(), reports))
-            .run(&json!({}), &TurnContext::for_test())
-            .await
-            .unwrap();
+        let ToolOutcome { output: out, .. } =
+            TaskOutputTool::new(MockSpawner::with_reports(completed(), reports))
+                .run(&json!({}), &TurnContext::for_test())
+                .await
+                .unwrap();
         assert!(out.contains("explore#1 · running"), "{out}");
         assert!(out.contains("4 steps, 3 tool calls"), "{out}");
     }
 
     #[tokio::test]
     async fn task_output_says_so_when_nothing_ran() {
-        let out = TaskOutputTool::new(MockSpawner::new(completed()))
+        let ToolOutcome { output: out, .. } = TaskOutputTool::new(MockSpawner::new(completed()))
             .run(&json!({"name": "explore#1"}), &TurnContext::for_test())
             .await
             .unwrap();

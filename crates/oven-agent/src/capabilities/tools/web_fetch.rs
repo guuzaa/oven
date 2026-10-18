@@ -7,7 +7,7 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, StatusCode, Url};
 use serde_json::{Value, json};
 
-use super::{Tool, ToolView, labeled, require_str};
+use super::{Tool, ToolOutcome, ToolView, labeled, require_str};
 use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
 
@@ -82,10 +82,10 @@ impl Tool for WebFetchTool {
             "required": ["url"]
         })
     }
-    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let url = parse_url(require_str(args, "url", Self::NAME)?)?;
         let (content_type, body) = self.fetch(&url, cx).await?;
-        render(&body, &content_type)
+        render(&body, &content_type).map(Into::into)
     }
 }
 
@@ -262,7 +262,7 @@ mod tests {
     async fn returns_html_as_markdown() {
         let server = serve(200, CONTENT_TYPE_HTML, PAGE_HTML).await;
         let tool = WebFetchTool::new();
-        let out = tool
+        let ToolOutcome { output: out, .. } = tool
             .run(&json!({ "url": page_url(&server) }), &turn())
             .await
             .unwrap();

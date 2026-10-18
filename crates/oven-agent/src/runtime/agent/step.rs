@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use super::Agent;
 use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
-use crate::capabilities::tools::{TodoWriteTool, Tool, present_tool};
+use crate::capabilities::tools::{TodoWriteTool, Tool, ToolOutcome, present_tool};
 use crate::core::error::{AgentError, MAX_ITERS_EXCEEDED};
 use crate::core::event::{AgentEvent, CallOutcome, ToolEvent, ToolResult, TurnEvent};
 use crate::core::identity::ToolCallId;
@@ -449,20 +449,22 @@ async fn run_calls(
 
     while let Some((index, outcome, started)) = running.next().await {
         let call = &planned[index];
-        let result = match outcome {
-            Ok(output) => ToolResult::Success {
-                output: truncate(&output, MAX_TOOL_OUTPUT_BYTES),
-            },
-            Err(error) => ToolResult::Failed {
-                error: error.to_string(),
-                output: Some(truncate(&format!("error: {error}"), MAX_TOOL_OUTPUT_BYTES)),
-            },
+        let (result, detail) = match outcome {
+            Ok(ToolOutcome { output, detail }) => (
+                ToolResult::Success {
+                    output: truncate(&output, MAX_TOOL_OUTPUT_BYTES),
+                },
+                detail,
+            ),
+            Err(error) => (
+                ToolResult::Failed {
+                    error: error.to_string(),
+                    output: Some(truncate(&format!("error: {error}"), MAX_TOOL_OUTPUT_BYTES)),
+                },
+                None,
+            ),
         };
         log_tool_finished(&call.name, call.call_id, &result, started);
-        let detail = call
-            .tool
-            .as_ref()
-            .and_then(|tool| tool.result_detail(&result));
         pending[index] = Some(CallRecord::of(&result));
         sink.emit(AgentEvent::Tool(ToolEvent::Finished {
             call_id: call.call_id,

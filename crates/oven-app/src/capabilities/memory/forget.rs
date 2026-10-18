@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, ToolView, TurnContext};
+use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, TurnContext};
 use oven_mem::MemoryStore;
 use serde_json::{Value, json};
 
@@ -65,7 +65,7 @@ impl Tool for MemoryForgetTool {
         }
     }
 
-    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let scope_raw = args
             .get("scope")
             .and_then(Value::as_str)
@@ -80,7 +80,7 @@ impl Tool for MemoryForgetTool {
             .forget(scope, &id)
             .await
             .map_err(|err| AgentError::from(err.to_string()))?;
-        Ok(format!("{FORGOT_MEMORY} {scope}/{id}"))
+        Ok(format!("{FORGOT_MEMORY} {scope}/{id}").into())
     }
 }
 
@@ -147,7 +147,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            out,
+            out.output,
             format!("{FORGOT_MEMORY} workspace/proxy-requires-http2")
         );
         assert!(!path.exists());

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView};
+use super::{Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView};
 
 use crate::core::error::AgentError;
 use crate::core::todo::TodoList;
@@ -77,8 +77,8 @@ impl Tool for TodoWriteTool {
         })
     }
 
-    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let next = TodoList::parse(args).map_err(AgentError::from)?;
-        Ok(next.summary())
+        Ok(next.summary().into())
     }
 }

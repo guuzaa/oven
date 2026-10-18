@@ -23,7 +23,7 @@ use futures::Stream;
 use futures::stream::BoxStream;
 use oven_agent::{
     Agent, AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, PendingInput, Record,
-    TaskTool, TodoWriteTool, Tool, TurnContext, TurnEvent, TurnId,
+    TaskTool, TodoWriteTool, Tool, ToolOutcome, TurnContext, TurnEvent, TurnId,
 };
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName,
@@ -4616,7 +4616,11 @@ impl Tool for HoldTool {
         serde_json::json!({ "type": "object", "properties": {} })
     }
 
-    async fn run(&self, _args: &serde_json::Value, cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(
+        &self,
+        _args: &serde_json::Value,
+        cx: &TurnContext,
+    ) -> Result<ToolOutcome, AgentError> {
         if let Some(entered) = self.entered.lock().unwrap().take() {
             let _ = entered.send(());
         }

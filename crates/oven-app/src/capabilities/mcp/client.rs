@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
-use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, TurnContext};
+use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, TurnContext};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ResourceContents};
 use rmcp::service::{RoleClient, RunningService, serve_client};
 use rmcp::transport::TokioChildProcess;
@@ -246,7 +246,7 @@ impl Tool for McpTool {
         }
     }
 
-    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let arguments = args.as_object().cloned().ok_or_else(|| {
             AgentError::from(format!(
                 "mcp:{}: arguments must be an object",
@@ -267,7 +267,7 @@ impl Tool for McpTool {
                 self.server_id, self.remote_name, e
             ))
         })?;
-        Ok(format_result(&result))
+        Ok(format_result(&result).into())
     }
 }
 

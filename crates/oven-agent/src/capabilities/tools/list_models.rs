@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use oven_llm::ModelInfo;
 use serde_json::{Value, json};
 
-use crate::capabilities::tools::Tool;
+use crate::capabilities::tools::{Tool, ToolOutcome};
 use crate::core::error::AgentError;
 use crate::core::models::ModelCatalog;
 use crate::core::turn::TurnContext;
@@ -43,12 +43,12 @@ impl Tool for ListModelsTool {
         json!({"type": "object", "properties": {}})
     }
 
-    async fn run(&self, _args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, _args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let models = self.catalog.models();
         if models.is_empty() {
-            return Ok(NO_MODELS.to_string());
+            return Ok(NO_MODELS.into());
         }
-        Ok(render(&models))
+        Ok(render(&models).into())
     }
 }
 
@@ -107,7 +107,7 @@ mod tests {
 
     #[tokio::test]
     async fn lists_each_model_with_its_limits() {
-        let out = tool(vec![
+        let ToolOutcome { output: out, .. } = tool(vec![
             model("deepseek-v4-flash", 1_000_000, 384_000),
             model("model", 0, 0),
         ])
@@ -126,7 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn says_so_when_nothing_is_available() {
-        let out = tool(Vec::new())
+        let ToolOutcome { output: out, .. } = tool(Vec::new())
             .run(&json!({}), &TurnContext::for_test())
             .await
             .unwrap();

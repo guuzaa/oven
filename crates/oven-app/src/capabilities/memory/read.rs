@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use oven_agent::{AgentError, Tool, ToolCaps, ToolPermission, ToolView, TurnContext};
+use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, TurnContext};
 use oven_mem::MemoryStore;
 use serde_json::{Value, json};
 
@@ -67,7 +67,7 @@ impl Tool for MemoryReadTool {
         }
     }
 
-    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let scope_raw = args
             .get("scope")
             .and_then(Value::as_str)
@@ -88,13 +88,16 @@ impl Tool for MemoryReadTool {
             memory.kind.as_str(),
             memory.description,
             memory.body
-        ))
+        )
+        .into())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use oven_agent::{AgentMode, CancellationToken, Selection, Tool, TurnContext, TurnId};
+    use oven_agent::{
+        AgentMode, CancellationToken, Selection, Tool, ToolOutcome, TurnContext, TurnId,
+    };
     use oven_llm::ModelId;
     use oven_mem::{INVALID_ID, MemoryRoots, MemoryStore, USER_SCOPE_UNAVAILABLE};
     use serde_json::json;
@@ -136,7 +139,7 @@ mod tests {
             "---\nkind: fact\ndescription: proxy fact\n---\n\nedited body\n",
         )
         .unwrap();
-        let out = tool
+        let ToolOutcome { output: out, .. } = tool
             .run(
                 &json!({"scope": "workspace", "id": "proxy-requires-http2"}),
                 &turn(),

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::core::turn::TurnContext;
 
-use super::{Tool, ToolView, parse_limit, require_str, resolve_within};
+use super::{Tool, ToolOutcome, ToolView, parse_limit, require_str, resolve_within};
 use crate::core::error::AgentError;
 use crate::core::matching::compile_glob;
 use oven_host::walk_dir_stream;
@@ -70,7 +70,7 @@ impl Tool for GlobTool {
             "required": ["pattern"]
         })
     }
-    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;
         let matcher = compile_glob(pattern)
             .map_err(|e| AgentError::from(format!("glob: invalid pattern {pattern:?}: {e}")))?;
@@ -114,13 +114,13 @@ impl Tool for GlobTool {
         hits.sort();
 
         if hits.is_empty() {
-            return Ok("(no matches)".to_string());
+            return Ok("(no matches)".into());
         }
         let mut out = hits.join("\n");
         if hits.len() >= limit {
             let _ = write!(out, "\n[truncated at {limit} results]");
         }
-        Ok(out)
+        Ok(out.into())
     }
 }
 
@@ -151,7 +151,7 @@ mod tests {
         write(root, "src/main.rs", "x");
         write(root, "README.md", "x");
         let glob = GlobTool::new(root);
-        let out = glob
+        let ToolOutcome { output: out, .. } = glob
             .run(&json!({"pattern": "**/*.rs"}), &turn())
             .await
             .unwrap();
@@ -169,7 +169,7 @@ mod tests {
         write(root, "skip.txt", "x");
         write(root, ".github/keep.txt", "x");
         let glob = GlobTool::new(root);
-        let out = glob
+        let ToolOutcome { output: out, .. } = glob
             .run(&json!({"pattern": "**/*.txt"}), &turn())
             .await
             .unwrap();
@@ -188,7 +188,7 @@ mod tests {
         write(root, "keep.txt", "x");
         write(root, ".hidden/x.txt", "x");
         let glob = GlobTool::new(root);
-        let out = glob
+        let ToolOutcome { output: out, .. } = glob
             .run(&json!({"pattern": "**/*.txt"}), &turn())
             .await
             .unwrap();
@@ -204,7 +204,7 @@ mod tests {
             write(root, &format!("f{i}.txt"), "x");
         }
         let glob = GlobTool::new(root);
-        let out = glob
+        let ToolOutcome { output: out, .. } = glob
             .run(&json!({"pattern": "**/*.txt", "limit": 2}), &turn())
             .await
             .unwrap();

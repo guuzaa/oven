@@ -4,9 +4,8 @@ use serde_json::{Value, json};
 
 use crate::core::turn::TurnContext;
 
-use super::{Tool, ToolCaps, ToolView, labeled};
+use super::{Tool, ToolCaps, ToolOutcome, ToolView, labeled};
 use crate::core::error::AgentError;
-use crate::core::event::ToolResult;
 use crate::core::interaction::{AnswerResponse, Question, QuestionOption};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";
@@ -83,15 +82,6 @@ impl Tool for AnswerTool {
         Self::view_input(input)
     }
 
-    /// The answer the user picked, so the row ends on what was chosen rather
-    /// than on what was offered, which the prompt already listed.
-    fn result_detail(&self, result: &ToolResult) -> Option<String> {
-        let ToolResult::Success { output } = result else {
-            return None;
-        };
-        output.strip_prefix(USER_ANSWER_PREFIX).map(str::to_string)
-    }
-
     fn caps(&self) -> ToolCaps {
         // A frontend shows one question at a time: a second one asked while
         // the first waits would replace it and strand the answer.
@@ -147,14 +137,17 @@ impl Tool for AnswerTool {
         })
     }
 
-    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let question = Self::parse(args).map_err(AgentError::from)?;
         match cx.ask(question).await? {
-            AnswerResponse::Answered { answer } => Ok(format!(
-                "{USER_ANSWER_PREFIX}{}",
-                clamp(&answer, MAX_ANSWER_CHARS)
-            )),
-            AnswerResponse::Declined => Ok(USER_SKIPPED.to_string()),
+            AnswerResponse::Answered { answer } => {
+                let answer = clamp(&answer, MAX_ANSWER_CHARS);
+                Ok(ToolOutcome {
+                    output: format!("{USER_ANSWER_PREFIX}{answer}"),
+                    detail: Some(answer),
+                })
+            }
+            AnswerResponse::Declined => Ok(USER_SKIPPED.into()),
         }
     }
 }
@@ -188,9 +181,41 @@ mod tests {
         tx: &mpsc::UnboundedSender<PendingRequest>,
         args: Value,
         cx: TurnContext,
-    ) -> Result<String, AgentError> {
+    ) -> Result<ToolOutcome, AgentError> {
         let cx = cx.with_requests(Arc::new(tx.clone()));
         AnswerTool.run(&args, &cx).await
+    }
+
+    /// The outcome of a question the user answered with `answer`.
+    async fn answered(answer: &str) -> ToolOutcome {
+        replied(AnswerResponse::Answered {
+            answer: answer.to_string(),
+        })
+        .await
+    }
+
+    /// The outcome of a question the user declined to answer.
+    async fn declined() -> ToolOutcome {
+        replied(AnswerResponse::Declined).await
+    }
+
+    async fn replied(response: AnswerResponse) -> ToolOutcome {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
+        let asker = tokio::spawn(async move {
+            asked(rx.recv().await.unwrap())
+                .responder
+                .send(response)
+                .unwrap();
+        });
+        let outcome = run_with(
+            &tx,
+            json!({ "question": QUESTION }),
+            TurnContext::for_test(),
+        )
+        .await
+        .unwrap();
+        asker.await.unwrap();
+        outcome
     }
 
     /// The parts of a question a test checks and answers with.
@@ -328,73 +353,24 @@ mod tests {
         assert_eq!(view.summary, AnswerTool::VERB);
     }
 
-    #[test]
-    fn the_answer_becomes_the_calls_detail() {
-        let answered = AnswerTool.result_detail(&ToolResult::Success {
-            output: format!("{USER_ANSWER_PREFIX}{ANSWER}"),
-        });
-        assert_eq!(answered.as_deref(), Some(ANSWER));
+    #[tokio::test]
+    async fn the_answer_becomes_the_calls_detail() {
+        let outcome = answered(ANSWER).await;
+        assert_eq!(outcome.detail.as_deref(), Some(ANSWER));
+        assert_eq!(outcome.output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
     }
 
-    #[test]
-    fn a_call_that_never_reached_the_user_keeps_no_detail() {
-        assert_eq!(
-            AnswerTool.result_detail(&ToolResult::Success {
-                output: USER_SKIPPED.into(),
-            }),
-            None
-        );
-        assert_eq!(
-            AnswerTool.result_detail(&ToolResult::Failed {
-                error: "answer: empty question".into(),
-                output: None,
-            }),
-            None
-        );
+    #[tokio::test]
+    async fn a_call_the_user_declined_keeps_no_detail() {
+        let outcome = declined().await;
+        assert_eq!(outcome.output, USER_SKIPPED);
+        assert_eq!(outcome.detail, None);
     }
 
     #[tokio::test]
     async fn returns_what_the_user_picked() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
-        let asker = tokio::spawn(async move {
-            let asked = asked(rx.recv().await.unwrap());
-            assert_eq!(asked.question.question, QUESTION);
-            asked
-                .responder
-                .send(AnswerResponse::Answered {
-                    answer: ANSWER.into(),
-                })
-                .unwrap();
-        });
-        let output = run_with(
-            &tx,
-            json!({ "question": QUESTION }),
-            TurnContext::for_test(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
-        asker.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_skipped_question_is_not_an_error() {
-        let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
-        let asker = tokio::spawn(async move {
-            asked(rx.recv().await.unwrap())
-                .responder
-                .send(AnswerResponse::Declined)
-                .unwrap();
-        });
-        let output = run_with(
-            &tx,
-            json!({ "question": QUESTION }),
-            TurnContext::for_test(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(output, USER_SKIPPED);
-        asker.await.unwrap();
+        let outcome = answered(ANSWER).await;
+        assert_eq!(outcome.output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
     }
 
     #[tokio::test]
@@ -411,10 +387,10 @@ mod tests {
                 .unwrap();
         });
         let verbose = "context ".repeat(MAX_QUESTION_CHARS);
-        let output = run_with(&tx, json!({ "question": verbose }), TurnContext::for_test())
+        let outcome = run_with(&tx, json!({ "question": verbose }), TurnContext::for_test())
             .await
             .unwrap();
-        assert_eq!(output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
+        assert_eq!(outcome.output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
         asker.await.unwrap();
     }
 
@@ -429,7 +405,7 @@ mod tests {
                 .send(AnswerResponse::Answered { answer })
                 .unwrap();
         });
-        let output = run_with(
+        let outcome = run_with(
             &tx,
             json!({ "question": QUESTION }),
             TurnContext::for_test(),
@@ -437,11 +413,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            output.chars().count(),
+            outcome.output.chars().count(),
             USER_ANSWER_PREFIX.chars().count() + MAX_ANSWER_CHARS
         );
-        assert!(output.ends_with(TRUNCATION_MARK));
-        assert!(!output.contains(TAIL), "the pasted tail must be cut");
+        assert!(outcome.output.ends_with(TRUNCATION_MARK));
+        assert!(
+            !outcome.output.contains(TAIL),
+            "the pasted tail must be cut"
+        );
         asker.await.unwrap();
     }
 

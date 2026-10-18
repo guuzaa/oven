@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolCaps, ToolPermission, ToolView, labeled, require_str, resolve_within};
+use super::{
+    Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, labeled, require_str, resolve_within,
+};
 
 use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
@@ -75,39 +77,71 @@ impl FileEditTool {
     }
 }
 
-fn apply_edits(
+/// An edit that landed, and the line its first line starts on.
+struct AppliedEdit<'a> {
+    edit: &'a Edit<'a>,
+    /// 1-based, counted in the content as it stands when the edit applies: the
+    /// file itself for the first edit of a call, and already shifted by the
+    /// edits before it for the ones after.
+    line: usize,
+}
+
+fn apply_edits<'a>(
     content: &str,
-    edits: &[Edit<'_>],
+    edits: &'a [Edit<'_>],
     path: &Path,
-) -> Result<(String, usize), AgentError> {
+) -> Result<(String, Vec<AppliedEdit<'a>>), AgentError> {
     let mut content = content.to_string();
-    let mut replacements = 0;
+    let mut applied = Vec::with_capacity(edits.len());
     for (index, edit) in edits.iter().enumerate() {
-        let matches = content.matches(edit.old_string).count();
-        if matches == 0 {
+        let Some(offset) = content.find(edit.old_string) else {
             return Err(AgentError::from(format!(
                 "edit[{index}]: old_string not found in {}",
                 path.display()
             )));
-        }
+        };
+        let matches = 1 + content[offset + edit.old_string.len()..]
+            .matches(edit.old_string)
+            .count();
         if matches != 1 {
             return Err(AgentError::from(format!(
-                "edit[{index}]: old_string matched {} times in {}; \
+                "edit[{index}]: old_string matched {matches} times in {}; \
                  add more surrounding context so it matches exactly once",
-                matches,
                 path.display()
             )));
         }
-        replacements += 1;
+        let line = content[..offset].matches('\n').count() + 1;
+        applied.push(AppliedEdit { edit, line });
         content = content.replacen(edit.old_string, edit.new_string, 1);
     }
-    Ok((content, replacements))
+    Ok((content, applied))
 }
 
 fn diff_lines(old_string: &str, new_string: &str) -> String {
     let removed = old_string.lines().map(|line| format!("- {line}"));
     let added = new_string.lines().map(|line| format!("+ {line}"));
     removed.chain(added).collect::<Vec<_>>().join("\n")
+}
+
+/// The diff of an edit that landed, with a gutter naming the line each side
+/// sits on: the removed lines in the file as it was, the added ones in the
+/// file as it now is.
+fn landed_diff(applied: &AppliedEdit<'_>) -> String {
+    let removed = applied.edit.old_string.lines().count();
+    let added = applied.edit.new_string.lines().count();
+    let last_line = applied.line + removed.max(added).saturating_sub(1);
+    let width = last_line.to_string().len();
+    let lines = |text: &str, sign: char| {
+        text.lines()
+            .enumerate()
+            .map(|(index, line)| format!("{:>width$} {sign} {line}", applied.line + index))
+            .collect::<Vec<_>>()
+    };
+    lines(applied.edit.old_string, '-')
+        .into_iter()
+        .chain(lines(applied.edit.new_string, '+'))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[async_trait]
@@ -152,7 +186,7 @@ impl Tool for FileEditTool {
             "required": ["path", "edit"]
         })
     }
-    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<String, AgentError> {
+    async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;
         let edits = Self::parse_edits(args)?;
 
@@ -164,18 +198,25 @@ impl Tool for FileEditTool {
             .await
             .map_err(|e| AgentError::from(format!("read {}: {}", path.display(), e)))?;
 
-        let (new_content, replacements) = apply_edits(&content, &edits, &path)?;
+        let (new_content, applied) = apply_edits(&content, &edits, &path)?;
         oven_host::write(&path, &new_content)
             .await
             .map_err(|e| AgentError::from(format!("write {}: {}", path.display(), e)))?;
-        Ok(format!(
-            "edited {}: {} edit(s), {} replacement(s), {} bytes -> {} bytes",
-            path.display(),
-            edits.len(),
-            replacements,
-            content.len(),
-            new_content.len()
-        ))
+        let detail = applied
+            .iter()
+            .map(landed_diff)
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(ToolOutcome {
+            output: format!(
+                "edited {}: {} edit(s), {} bytes -> {} bytes",
+                path.display(),
+                edits.len(),
+                content.len(),
+                new_content.len()
+            ),
+            detail: Some(detail),
+        })
     }
 }
 
@@ -224,6 +265,85 @@ mod tests {
             .detail,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn the_landed_diff_names_the_line_the_edit_landed_on() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let edit = FileEditTool::new(tmp.path());
+        let outcome = edit
+            .run(
+                &json!({"path": "a.txt", "edit": [{ "old_string": "two", "new_string": "2" }]}),
+                &turn(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.detail.as_deref(), Some("2 - two\n2 + 2"));
+    }
+
+    #[tokio::test]
+    async fn the_landed_diff_numbers_every_line_it_moves() {
+        let tmp = tmp_dir();
+        let head = (1..=8)
+            .map(|number| format!("line {number}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(tmp.path().join("a.txt"), format!("{head}\nb\nc\nd\n")).unwrap();
+        let edit = FileEditTool::new(tmp.path());
+        let outcome = edit
+            .run(
+                &json!({
+                    "path": "a.txt",
+                    "edit": [{ "old_string": "b\nc", "new_string": "B\nC\nD" }]
+                }),
+                &turn(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.detail.as_deref(),
+            Some(" 9 - b\n10 - c\n 9 + B\n10 + C\n11 + D")
+        );
+    }
+
+    #[tokio::test]
+    async fn every_edit_of_a_call_reports_where_it_landed() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("a.txt"), "x\ny\n").unwrap();
+        let edit = FileEditTool::new(tmp.path());
+        let outcome = edit
+            .run(
+                &json!({
+                    "path": "a.txt",
+                    "edit": [
+                        { "old_string": "x", "new_string": "X" },
+                        { "old_string": "y", "new_string": "Y" },
+                    ]
+                }),
+                &turn(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.detail.as_deref(),
+            Some("1 - x\n1 + X\n2 - y\n2 + Y")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_matched_nowhere_reports_the_error_only() {
+        let tmp = tmp_dir();
+        std::fs::write(tmp.path().join("a.txt"), "hello\n").unwrap();
+        let edit = FileEditTool::new(tmp.path());
+        let err = edit
+            .run(
+                &json!({"path": "a.txt", "edit": [{ "old_string": "zzz", "new_string": "x" }]}),
+                &turn(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("not found"), "{}", err.message);
     }
 
     #[tokio::test]

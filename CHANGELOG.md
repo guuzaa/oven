@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** `Tool::run` returns `ToolOutcome { output, detail }` — the text history keeps, and the body a frontend shows under the call once it lands — and `Tool::result_detail` is gone. `file_edit` reports the diff it applied with a gutter naming the line each side sits on, so an edit row ends on where the edit landed instead of on the diff the model asked for; `ToolOutcome: From<String>` keeps a tool that has nothing to add a one-line change
+
 ### Fixed
 - The stream caret stays on the last glyph of a reply. A trailing newline no longer opens a blank row under the paragraph, and a line that ends on the wrap width puts the caret on the next row
 

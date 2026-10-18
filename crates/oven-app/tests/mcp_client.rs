@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mockall::mock;
-use oven_agent::{CancellationToken, Tool, TurnContext};
+use oven_agent::{CancellationToken, Tool, ToolOutcome, TurnContext};
 use oven_app::AppBuilder;
 use oven_app::config::AppConfig;
 use oven_app::mcp::McpRegistry;
@@ -70,7 +70,7 @@ async fn mcp_tool_calls_through_mock_caller() {
     assert_eq!(tool.name(), "test_echo");
     assert_eq!(tool.description(), "[mcp:test] Echo the given text back");
 
-    let out = tool
+    let ToolOutcome { output: out, .. } = tool
         .run(&serde_json::json!({"text": "hi"}), &turn())
         .await
         .unwrap();
