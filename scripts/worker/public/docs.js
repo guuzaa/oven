@@ -1,7 +1,13 @@
 const SOURCE_URL = "https://github.com/guuzaa/oven/blob/master";
 const PLAY_INTERVAL_MS = 3_200;
 const LOOP_INTERVAL_MS = 750;
-const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)");
+const REVEAL_SELECTOR = "[data-reveal]";
+const REVEAL_STAGGER_MS = 70;
+const REVEAL_STAGGER_STEPS = 6;
+const RIPPLE_TARGETS = ".ctl, .tab, .button";
+const SCROLL_OFFSET_PX = 480;
+const SCROLL_BEHAVIOR = () => (REDUCED_MOTION.matches ? "auto" : "smooth");
 
 const CHAPTERS = {
   start: "boot",
@@ -494,6 +500,102 @@ function todoRow(mark, text) {
   return row;
 }
 
+function stagger(nodes) {
+  nodes.forEach((node, index) => node.style.setProperty("--delay", `${Math.min(index, REVEAL_STAGGER_STEPS) * REVEAL_STAGGER_MS}ms`));
+}
+
+const revealObserver =
+  "IntersectionObserver" in window
+    ? new IntersectionObserver(
+        (entries, observer) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) {
+              continue;
+            }
+            entry.target.classList.add("is-in");
+            observer.unobserve(entry.target);
+          }
+        },
+        { rootMargin: "0px 0px -8% 0px" },
+      )
+    : null;
+
+function initReveal() {
+  const nodes = [...document.querySelectorAll(REVEAL_SELECTOR)];
+  const groups = new Map();
+  for (const node of nodes) {
+    const siblings = groups.get(node.parentElement);
+    if (siblings) {
+      siblings.push(node);
+    } else {
+      groups.set(node.parentElement, [node]);
+    }
+  }
+  for (const siblings of groups.values()) {
+    stagger(siblings);
+  }
+  if (!revealObserver) {
+    for (const node of nodes) {
+      node.classList.add("is-in");
+    }
+    return;
+  }
+  for (const node of nodes) {
+    revealObserver.observe(node);
+  }
+}
+
+function initRipple() {
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target.closest(RIPPLE_TARGETS);
+    if (!target || REDUCED_MOTION.matches || target.matches(":disabled")) {
+      return;
+    }
+    const box = target.getBoundingClientRect();
+    const size = 2 * Math.max(box.width, box.height);
+    const ripple = document.createElement("span");
+    ripple.className = "ripple";
+    ripple.setAttribute("aria-hidden", "true");
+    ripple.style.width = `${size}px`;
+    ripple.style.height = `${size}px`;
+    ripple.style.left = `${event.clientX - box.left - size / 2}px`;
+    ripple.style.top = `${event.clientY - box.top - size / 2}px`;
+    ripple.addEventListener("animationend", () => ripple.remove());
+    target.append(ripple);
+  });
+}
+
+function initScrollChrome() {
+  const progress = document.querySelector(".scroll-progress");
+  const toTop = document.querySelector(".to-top");
+  let frame = 0;
+  let lastRatio = -1;
+  let lastScrolled = null;
+
+  const update = () => {
+    frame = 0;
+    const travel = document.documentElement.scrollHeight - window.innerHeight;
+    const ratio = travel > 0 ? Math.min(window.scrollY / travel, 1) : 0;
+    if (ratio !== lastRatio) {
+      lastRatio = ratio;
+      progress?.style.setProperty("--progress", ratio.toFixed(4));
+    }
+    const scrolled = window.scrollY > SCROLL_OFFSET_PX;
+    if (scrolled !== lastScrolled) {
+      lastScrolled = scrolled;
+      toTop?.classList.toggle("is-shown", scrolled);
+    }
+  };
+  const schedule = () => {
+    frame ||= window.requestAnimationFrame(update);
+  };
+
+  window.addEventListener("scroll", schedule, { passive: true });
+  window.addEventListener("resize", schedule, { passive: true });
+  update();
+  toTop?.addEventListener("click", () => window.scrollTo({ top: 0, behavior: SCROLL_BEHAVIOR() }));
+}
+
 function initTrace() {
   const root = document.getElementById("trace-player");
   if (!root) {
@@ -774,7 +876,7 @@ function initParallel() {
 
   document.getElementById("par-run").addEventListener("click", () => {
     window.cancelAnimationFrame(frame);
-    if (REDUCED_MOTION) {
+    if (REDUCED_MOTION.matches) {
       render(total);
       return;
     }
@@ -901,3 +1003,6 @@ initPlan();
 initSubagents();
 initQuiz();
 initPhases();
+initReveal();
+initRipple();
+initScrollChrome();

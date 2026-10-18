@@ -63,6 +63,8 @@ main dt code,
 }
 
 .ctl {
+  position: relative;
+  overflow: hidden;
   padding: 0.35rem 0.85rem;
   border: 2px solid var(--line);
   border-radius: 999px;
@@ -72,11 +74,27 @@ main dt code,
   font-size: 0.85rem;
   font-weight: 800;
   cursor: pointer;
+  touch-action: manipulation;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    translate 0.15s var(--ease),
+    box-shadow 0.15s ease;
 }
 
 .ctl:hover:not(:disabled) {
   background: var(--accent-2);
   color: var(--accent-ink);
+}
+
+@media (hover: hover) {
+  .ctl:hover:not(:disabled) {
+    translate: 0 -0.1rem;
+  }
+}
+
+.ctl:active:not(:disabled) {
+  translate: 0 1px;
 }
 
 .ctl:disabled {

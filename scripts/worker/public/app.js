@@ -4,7 +4,7 @@ const VIEW_SELECTOR = "[data-view]";
 const NAV_SELECTOR = "[data-nav]";
 const TAB_SELECTOR = '[role="tab"]';
 const REVEAL_SELECTOR = "[data-reveal]";
-const RIPPLE_TARGETS = ".button, .copy, .tab, kbd";
+const RIPPLE_TARGETS = ".button, .copy, .tab";
 
 const RELEASE_PATH = "/latest";
 const ASSET_PATH = "/dl";
@@ -182,13 +182,14 @@ function initReveal() {
 function initRipple() {
   document.addEventListener("pointerdown", (event) => {
     const target = event.target.closest(RIPPLE_TARGETS);
-    if (!target || REDUCED_MOTION.matches) {
+    if (!target || REDUCED_MOTION.matches || target.matches(":disabled")) {
       return;
     }
     const box = target.getBoundingClientRect();
     const size = 2 * Math.max(box.width, box.height);
     const ripple = document.createElement("span");
     ripple.className = "ripple";
+    ripple.setAttribute("aria-hidden", "true");
     ripple.style.width = `${size}px`;
     ripple.style.height = `${size}px`;
     ripple.style.left = `${event.clientX - box.left - size / 2}px`;
@@ -200,18 +201,24 @@ function initRipple() {
 
 function initScrollChrome() {
   const progress = document.querySelector(".scroll-progress");
-  const topbar = document.querySelector(".topbar");
   const toTop = document.querySelector(".to-top");
   let frame = 0;
+  let lastRatio = -1;
+  let lastScrolled = null;
 
   const update = () => {
     frame = 0;
     const travel = document.documentElement.scrollHeight - window.innerHeight;
     const ratio = travel > 0 ? Math.min(window.scrollY / travel, 1) : 0;
-    progress?.style.setProperty("--progress", ratio.toFixed(4));
+    if (ratio !== lastRatio) {
+      lastRatio = ratio;
+      progress?.style.setProperty("--progress", ratio.toFixed(4));
+    }
     const scrolled = window.scrollY > SCROLL_OFFSET_PX;
-    topbar?.classList.toggle("is-condensed", scrolled);
-    toTop?.classList.toggle("is-shown", scrolled);
+    if (scrolled !== lastScrolled) {
+      lastScrolled = scrolled;
+      toTop?.classList.toggle("is-shown", scrolled);
+    }
   };
   const schedule = () => {
     frame ||= window.requestAnimationFrame(update);
