@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use oven_agent::{
     Agent, AgentId, AnswerTool, InstructionDoc, ListModelsTool, MEMORY_PROMPT, Record, RoleSpec,
-    Skill, SkillReadTool, SubagentSpawner, TaskOutputTool, TaskTool, TodoWriteTool, Tool,
-    ToolPermission, load_instructions, router_handle, subagent_preamble,
+    Skill, SkillReadTool, SubagentSpawner, TOP_LEVEL_PROMPT, TaskOutputTool, TaskTool,
+    TodoWriteTool, Tool, ToolPermission, load_instructions, router_handle, subagent_preamble,
 };
 #[cfg(test)]
 use oven_llm::Provider;
@@ -280,14 +280,15 @@ impl AppBuilder {
             base.push(Arc::new(MemoryForgetTool::new(Arc::clone(store))));
         }
 
-        let mut system = oven_agent::system_prompt(
+        let mut child_system = oven_agent::system_prompt(
             &self.root,
             &self.instructions,
             self.skills.merged_system_prompt(),
         );
         if let Some(store) = &self.memory {
-            system = append_memory(system, store);
+            child_system = append_memory(child_system, store);
         }
+        let main_system = format!("{}\n\n{child_system}", TOP_LEVEL_PROMPT.trim());
         let events = EventBus::new();
         let (wake, wake_rx) = mpsc::unbounded_channel();
         // `wake` goes to the supervisor, which keeps the channel open; the
@@ -300,7 +301,7 @@ impl AppBuilder {
         let subagents = Subagents::new(SubagentParts {
             parent: main_id,
             router: router.clone(),
-            roles: Self::build_roles(&base, &system),
+            roles: Self::build_roles(&base, &child_system),
             max_concurrent: self.config.subagents.max_concurrent,
             max_iters: self.config.subagents.max_iters,
             events: events.clone(),
@@ -322,7 +323,7 @@ impl AppBuilder {
         }
         let mut main = Agent::with_router(router, tools)
             .with_id(main_id)
-            .with_system(system);
+            .with_system(main_system);
         if let Some(effort) = self
             .config
             .active_provider_config()

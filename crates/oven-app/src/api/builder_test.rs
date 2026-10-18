@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use oven_agent::{
     CancellationToken, ListModelsTool, MEMORY_PROMPT, NullSink, SpawnRequest, SubagentSpawner,
-    TurnContext, TurnId,
+    TOP_LEVEL_PROMPT, TurnContext, TurnId,
 };
 use oven_llm::{
     ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
@@ -178,6 +178,17 @@ fn base_prompt(app: &AppBuilder) -> String {
     app.system_without_memory()
 }
 
+fn main_prompt(common: &str) -> String {
+    format!("{}\n\n{common}", TOP_LEVEL_PROMPT.trim())
+}
+
+fn common_of_driver(driver: &str) -> &str {
+    driver
+        .strip_prefix(TOP_LEVEL_PROMPT.trim())
+        .and_then(|rest| rest.strip_prefix("\n\n"))
+        .expect("driver starts with the top-level prompt")
+}
+
 #[tokio::test]
 async fn catalog_reaches_driver_and_role_prompts() {
     let tmp = tempdir::TempDir::new("memory-prompt").unwrap();
@@ -188,24 +199,31 @@ async fn catalog_reaches_driver_and_role_prompts() {
         "catalog is separated by a blank line"
     );
     assert!(captured.driver.contains(CATALOG_ENTRY));
+    assert!(captured.driver.contains(TOP_LEVEL_PROMPT.trim()));
+    let common = common_of_driver(&captured.driver);
     assert_eq!(
         captured.explore,
-        super::role_system(
-            &captured.driver,
-            super::EXPLORE_ROLE,
-            super::EXPLORE_GUIDANCE
-        )
+        super::role_system(common, super::EXPLORE_ROLE, super::EXPLORE_GUIDANCE)
     );
     assert_eq!(
         captured.general,
-        super::role_system(
-            &captured.driver,
-            super::GENERAL_ROLE,
-            super::GENERAL_GUIDANCE
-        )
+        super::role_system(common, super::GENERAL_ROLE, super::GENERAL_GUIDANCE)
     );
     assert!(captured.explore.contains(CATALOG_ENTRY));
     assert!(captured.general.contains(CATALOG_ENTRY));
+    assert!(!captured.explore.contains(TOP_LEVEL_PROMPT.trim()));
+    assert!(!captured.general.contains(TOP_LEVEL_PROMPT.trim()));
+}
+
+#[tokio::test]
+async fn driver_only_tools_stay_out_of_role_prompts() {
+    let tmp = tempdir::TempDir::new("top-level-prompt").unwrap();
+    let captured = capture(tmp.path(), AppConfig::default()).await;
+    for prompt in [&captured.explore, &captured.general] {
+        for tool in ["`answer`", "`todo_write`", "`task`"] {
+            assert!(!prompt.contains(tool), "{tool}");
+        }
+    }
 }
 
 #[tokio::test]
@@ -225,17 +243,17 @@ async fn guidance_precedes_catalog() {
 async fn empty_store_adds_guidance_without_catalog() {
     let tmp = tempdir::TempDir::new("memory-prompt-empty").unwrap();
     let app = isolated_app(tmp.path(), AppConfig::default()).await;
-    let expected = super::append_block(base_prompt(&app), MEMORY_PROMPT);
+    let common = super::append_block(base_prompt(&app), MEMORY_PROMPT);
     let empty = capture(tmp.path(), AppConfig::default()).await;
-    assert_eq!(empty.driver, expected);
+    assert_eq!(empty.driver, main_prompt(&common));
     assert!(!empty.driver.contains(MEMORY_TAG));
     assert_eq!(
         empty.explore,
-        super::role_system(&expected, super::EXPLORE_ROLE, super::EXPLORE_GUIDANCE)
+        super::role_system(&common, super::EXPLORE_ROLE, super::EXPLORE_GUIDANCE)
     );
     assert_eq!(
         empty.general,
-        super::role_system(&expected, super::GENERAL_ROLE, super::GENERAL_GUIDANCE)
+        super::role_system(&common, super::GENERAL_ROLE, super::GENERAL_GUIDANCE)
     );
 }
 
@@ -246,18 +264,18 @@ async fn unloaded_matches_prompt_without_memory() {
     let app = AppBuilder::new(tmp.path())
         .with_config(AppConfig::default())
         .await;
-    let expected = base_prompt(&app);
+    let common = base_prompt(&app);
     let disabled = capture_app(app).await;
-    assert_eq!(disabled.driver, expected);
+    assert_eq!(disabled.driver, main_prompt(&common));
     assert!(!disabled.driver.contains(MEMORY_PROMPT));
     assert!(!disabled.driver.contains(MEMORY_TAG));
     assert_eq!(
         disabled.explore,
-        super::role_system(&expected, super::EXPLORE_ROLE, super::EXPLORE_GUIDANCE)
+        super::role_system(&common, super::EXPLORE_ROLE, super::EXPLORE_GUIDANCE)
     );
     assert_eq!(
         disabled.general,
-        super::role_system(&expected, super::GENERAL_ROLE, super::GENERAL_GUIDANCE)
+        super::role_system(&common, super::GENERAL_ROLE, super::GENERAL_GUIDANCE)
     );
     assert!(
         !disabled

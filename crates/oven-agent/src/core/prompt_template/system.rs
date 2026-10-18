@@ -32,10 +32,9 @@ pub fn system_prompt(
 
 fn env_block(root: &Path) -> String {
     let workspace = canonical_root(root);
-    let cwd = std::env::current_dir().map_or_else(|_| workspace.clone(), |p| canonical_root(&p));
     let git = if is_git_repo(root) { "yes" } else { "no" };
     format!(
-        "<env>\n  Working directory: {cwd}\n  Workspace root folder: {workspace}\n  Is directory a git repo: {git}\n  Platform: {}\n  Today's date: {}\n</env>",
+        "<env>\n  Workspace root folder: {workspace}\n  Is directory a git repo: {git}\n  Platform: {}\n  Today's date: {}\n</env>",
         platform(),
         today(),
     )
@@ -55,16 +54,13 @@ fn platform() -> &'static str {
 
 #[inline]
 fn is_git_repo(start: &Path) -> bool {
-    start
-        .canonicalize()
-        .unwrap_or_else(|_| start.to_path_buf())
-        .join(".git")
-        .exists()
+    let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    start.ancestors().any(|dir| dir.join(".git").exists())
 }
 
 #[inline]
 fn today() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+    chrono::Local::now().format("%Y-%m-%d %:z").to_string()
 }
 
 #[cfg(test)]
@@ -78,6 +74,13 @@ mod tests {
     fn system_prompt_includes_bundled_markdown() {
         let prompt = system_prompt(Path::new("."), &[], None);
         assert!(prompt.starts_with(BASE_PROMPT.trim()));
+    }
+
+    #[test]
+    fn shared_prompt_leaves_top_level_tools_to_the_caller() {
+        for tool in ["`answer`", "`todo_write`", "`task`"] {
+            assert!(!BASE_PROMPT.contains(tool), "{tool}");
+        }
     }
 
     #[tokio::test]
@@ -135,7 +138,19 @@ mod tests {
         assert!(block.contains("  Is directory a git repo: yes"));
         assert!(block.contains(&format!("  Platform: {}", platform())));
         assert!(block.contains(&format!("  Today's date: {}", today())));
+        assert!(!block.contains("Working directory"));
         assert!(block.ends_with("</env>"));
+    }
+
+    #[test]
+    fn env_block_detects_a_git_repo_in_a_parent() {
+        let tmp = tempdir::TempDir::new("env-parent-git").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let block = env_block(&nested);
+        assert!(block.contains("  Is directory a git repo: yes"));
     }
 
     #[test]

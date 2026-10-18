@@ -36,8 +36,8 @@ pub use core::interaction::{
 pub use core::mode::{AgentMode, ToolAccess};
 pub use core::models::ModelCatalog;
 pub use core::prompt_template::{
-    InstructionDoc, InstructionScope, MEMORY_PROMPT, load_instructions, subagent_preamble,
-    system_prompt,
+    InstructionDoc, InstructionScope, MEMORY_PROMPT, TOP_LEVEL_PROMPT, load_instructions,
+    subagent_preamble, system_prompt,
 };
 pub use core::selection::{ModelSelection, Selection};
 pub use core::sink::{EventSink, NullSink, VecEventSink};
