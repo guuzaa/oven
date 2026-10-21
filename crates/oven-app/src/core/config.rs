@@ -860,6 +860,9 @@ impl AppConfig {
         };
         file.write_all(DEFAULT_USER_CONFIG.as_bytes())
             .await
+            .map_err(|e| ConfigError::Write(path.to_path_buf(), e))?;
+        file.sync_all()
+            .await
             .map_err(|e| ConfigError::Write(path.to_path_buf(), e))
     }
 
@@ -995,24 +998,23 @@ mod tests {
     const STALE_CONFIG_TAIL: &str = "stale-tail-must-not-remain";
     const EXISTING_USER_CONFIG: &str =
         "active = \"deepseek\"\n[providers.deepseek]\nmodel = \"kept\"\n";
+    const EDITED_USER_CONFIG: &str =
+        "active = \"deepseek\"\n[providers.deepseek]\nmodel = \"edited\"\n";
 
     #[tokio::test]
     async fn ensure_user_config_creates_template_once() {
         let tmp = tempdir::TempDir::new("oven-config").unwrap();
-        let path = tmp.path().join("config.toml");
+        let path = tmp.path().join(SAVED_CONFIG_FILE);
         AppConfig::ensure_user_config_at(&path).await.unwrap();
-        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_USER_CONFIG);
         let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         let mut expected = AppConfig::default();
         expected.merge(toml::from_str(DEFAULT_USER_CONFIG).unwrap());
         assert_eq!(cfg, expected);
 
-        std::fs::write(
-            &path,
-            "active = \"deepseek\"\n[providers.deepseek]\nmodel = \"edited\"\n",
-        )
-        .unwrap();
+        std::fs::write(&path, EDITED_USER_CONFIG).unwrap();
         AppConfig::ensure_user_config_at(&path).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), EDITED_USER_CONFIG);
         let cfg = AppConfig::load(None, Some(&path)).await.unwrap();
         assert_eq!(
             cfg.active_provider_config().unwrap().model.as_deref(),
