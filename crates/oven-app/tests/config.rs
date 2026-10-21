@@ -136,6 +136,23 @@ async fn project_model_metadata_merges_field_by_field() {
     assert_eq!(params.supports_vision, Some(false));
 }
 
+#[tokio::test]
+async fn a_model_without_a_window_defaults_to_one_million() {
+    let tmp = tempdir::TempDir::new("oven-default-window").unwrap();
+    let user = tmp.path().join("user.toml");
+    write(
+        &user,
+        "active = \"myproxy\"\n\n[providers.myproxy]\napi_key = \"k\"\n\n[providers.myproxy.models.\"m\"]\nmax_output_tokens = 8192\n",
+    );
+
+    let cfg = AppConfig::load(Some(&user), None).await.unwrap();
+    let provider = cfg.active_provider_config().unwrap();
+    let models: Vec<_> = provider.effective_models().collect();
+    assert_eq!(models[0].1.context_window, Some(1_000_000));
+    assert_eq!(models[0].1.max_output_tokens, Some(8192));
+    assert_eq!(provider.models["m"].context_window, None);
+}
+
 fn write(path: &Path, content: &str) {
     let mut f = std::fs::File::create(path).unwrap();
     f.write_all(content.as_bytes()).unwrap();

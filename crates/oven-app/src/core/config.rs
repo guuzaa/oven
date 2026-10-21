@@ -25,6 +25,9 @@ const DEFAULT_SUBAGENT_CONCURRENT: usize = 4;
 const DEFAULT_SUBAGENT_ITERS: usize = 60;
 const CONFIG_TMP_EXTENSION: &str = "tmp";
 
+/// Context window assumed for a model that declares none. 
+pub const DEFAULT_CONTEXT_WINDOW: u32 = 1_000_000;
+
 /// Stands in for the API key of a printed config preview.
 const REDACTED_KEY: &str = "<redacted>";
 
@@ -381,10 +384,13 @@ impl ProviderConfig {
     /// Each declared model with [`metadata`](Self::metadata) filled in, keyed
     /// by wire id. The stored entries stay as written, so saving never bakes an
     /// inherited value into a model that only meant to follow the provider.
+    /// A model that declares no context window gets
+    /// [`DEFAULT_CONTEXT_WINDOW`].
     pub fn effective_models(&self) -> impl Iterator<Item = (&str, ModelMetadata)> + '_ {
         self.models.iter().map(|(id, metadata)| {
             let mut params = metadata.clone();
             params.fill_missing(&self.metadata);
+            params.context_window = params.context_window.or(Some(DEFAULT_CONTEXT_WINDOW));
             (id.as_str(), params)
         })
     }
@@ -1082,6 +1088,18 @@ mod tests {
         assert_eq!(provider.api_key.as_deref(), Some("xai-key"));
         assert_eq!(provider.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(provider.model.as_deref(), Some("grok-4.6"));
+    }
+
+    #[test]
+    fn a_model_without_a_window_falls_back_to_the_default() {
+        let cfg: AppConfig = toml::from_str(
+            "active = \"p\"\n\n[providers.p.models.\"m\"]\nmax_output_tokens = 8192\n",
+        )
+        .unwrap();
+        let provider = cfg.active_provider_config().unwrap();
+        let models: Vec<_> = provider.effective_models().collect();
+        assert_eq!(models[0].1.context_window, Some(DEFAULT_CONTEXT_WINDOW));
+        assert_eq!(models[0].1.max_output_tokens, Some(8192));
     }
 
     #[test]
