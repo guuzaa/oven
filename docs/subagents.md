@@ -128,9 +128,9 @@ This yields a free benefit: **"node revisit" happens naturally in a graph** — 
 | Role | Tool set | Purpose |
 |------|----------|---------|
 | `explore` | every tool with `permission == Read` | Read-only investigation; the **only** role Plan mode allows |
-| `general` | everything except `answer` / `todo_write` / `task` / `task_output` | The default role |
+| `general` | everything except `answer` / `todo_write` / `task` / `task_output` / `memory_write` / `memory_forget` | The default role |
 
-The tool subset is **partitioned by capability**, not listed by hand, so a new read-only tool lands in `explore` automatically. The exclusions are the tools that talk to the user, manage the driver's plan, or would nest delegation.
+The tool subset is **partitioned by capability**, not listed by hand, so a new read-only tool lands in `explore` automatically. The exclusions are the tools that talk to the user, manage the driver's plan, would nest delegation, or would touch durable memory (`memory_write` / `memory_forget` stay with the driver, so a subagent cannot silently rewrite what is remembered). Everything else — including `file_write`, `file_edit`, and `bash` — is available to `general`, and a subagent's `TurnContext` carries no approval channel, so those writes run unapproved. Plan mode is what keeps a subagent read-only: `task` refuses a writing role outright, leaving `explore` the only role that may run.
 
 A subagent's system prompt = the driver's (same instructions / skills / env) + the `subagent.md` preamble (only the final answer comes back; it cannot ask questions; keep it short) + the role guidance.
 
