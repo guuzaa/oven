@@ -443,10 +443,7 @@ impl Runtime {
             .name
             .clone()
             .expect("provider name assigned before update");
-        next.providers
-            .entry(name.clone())
-            .or_default()
-            .merge_fields(&overlay);
+        next.merge_provider(&name, &overlay);
         next.active_provider.name = name;
         let model = next
             .active_provider_config()

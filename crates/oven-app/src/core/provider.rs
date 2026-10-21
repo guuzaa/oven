@@ -20,18 +20,7 @@ fn declared_model_info(
     provider_name: &ProviderName,
 ) -> ModelInfo {
     let mut info = ModelInfo::declared(id, provider_name.clone());
-    if let Some(tokens) = params.context_window {
-        info.context_window = tokens;
-    }
-    if let Some(tokens) = params.max_output_tokens {
-        info.max_output_tokens = tokens;
-    }
-    info.capabilities = info.capabilities.with_overrides(
-        params.supports_vision,
-        params.supports_tools,
-        params.supports_streaming,
-        params.supports_system_prompt,
-    );
+    params.apply_to(&mut info);
     info
 }
 

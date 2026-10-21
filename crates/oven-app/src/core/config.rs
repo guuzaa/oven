@@ -25,13 +25,31 @@ const DEFAULT_SUBAGENT_CONCURRENT: usize = 4;
 const DEFAULT_SUBAGENT_ITERS: usize = 60;
 const CONFIG_TMP_EXTENSION: &str = "tmp";
 
-/// Context window assumed for a model that declares none. 
+/// Context window assumed for a model that declares none.
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 1_000_000;
 
 /// Stands in for the API key of a printed config preview.
 const REDACTED_KEY: &str = "<redacted>";
 
 static CONFIG_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Which side wins when a stored value and an incoming one meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prefer {
+    /// The stored value wins; the incoming one only fills an empty field.
+    Stored,
+    /// The incoming value wins.
+    Incoming,
+}
+
+/// Merge one optional field under `prefer`.
+fn pick<T: Clone>(slot: &mut Option<T>, incoming: &Option<T>, prefer: Prefer) {
+    if let Some(value) = incoming
+        && (prefer == Prefer::Incoming || slot.is_none())
+    {
+        *slot = Some(value.clone());
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -147,35 +165,54 @@ impl ModelMetadata {
         }
     }
 
-    /// Overlay the fields `overlay` sets onto `self`.
-    pub fn merge_fields(&mut self, overlay: &Self) {
-        if overlay.context_window.is_some() {
-            self.context_window = overlay.context_window;
+    /// Apply the declared fields onto a model entry: the limits replace the
+    /// entry's, and a capability replaces its flag only when it is set.
+    pub fn apply_to(&self, info: &mut ModelInfo) {
+        if let Some(tokens) = self.context_window {
+            info.context_window = tokens;
         }
-        if overlay.max_output_tokens.is_some() {
-            self.max_output_tokens = overlay.max_output_tokens;
+        if let Some(tokens) = self.max_output_tokens {
+            info.max_output_tokens = tokens;
         }
-        if overlay.supports_system_prompt.is_some() {
-            self.supports_system_prompt = overlay.supports_system_prompt;
-        }
-        if overlay.supports_tools.is_some() {
-            self.supports_tools = overlay.supports_tools;
-        }
-        if overlay.supports_streaming.is_some() {
-            self.supports_streaming = overlay.supports_streaming;
-        }
-        if overlay.supports_vision.is_some() {
-            self.supports_vision = overlay.supports_vision;
-        }
+        info.capabilities = info.capabilities.with_overrides(
+            self.supports_vision,
+            self.supports_tools,
+            self.supports_streaming,
+            self.supports_system_prompt,
+        );
     }
 
+    /// Merge `incoming` in: [`Prefer::Incoming`] lets it win, [`Prefer::Stored`]
+    /// lets it fill only what is unset.
+    fn merge(&mut self, incoming: &Self, prefer: Prefer) {
+        pick(&mut self.context_window, &incoming.context_window, prefer);
+        pick(
+            &mut self.max_output_tokens,
+            &incoming.max_output_tokens,
+            prefer,
+        );
+        pick(
+            &mut self.supports_system_prompt,
+            &incoming.supports_system_prompt,
+            prefer,
+        );
+        pick(&mut self.supports_tools, &incoming.supports_tools, prefer);
+        pick(
+            &mut self.supports_streaming,
+            &incoming.supports_streaming,
+            prefer,
+        );
+        pick(&mut self.supports_vision, &incoming.supports_vision, prefer);
+    }
+
+    /// Overlay `Some` fields from `overlay` onto `self`.
+    pub fn merge_fields(&mut self, overlay: &Self) {
+        self.merge(overlay, Prefer::Incoming);
+    }
+
+    /// Copy unset fields from `src`.
     fn fill_missing(&mut self, src: &Self) {
-        self.context_window = self.context_window.or(src.context_window);
-        self.max_output_tokens = self.max_output_tokens.or(src.max_output_tokens);
-        self.supports_system_prompt = self.supports_system_prompt.or(src.supports_system_prompt);
-        self.supports_tools = self.supports_tools.or(src.supports_tools);
-        self.supports_streaming = self.supports_streaming.or(src.supports_streaming);
-        self.supports_vision = self.supports_vision.or(src.supports_vision);
+        self.merge(src, Prefer::Stored);
     }
 }
 
@@ -395,64 +432,37 @@ impl ProviderConfig {
         })
     }
 
-    /// Overlay `Some` fields from `overlay` onto `self`.
-    pub fn merge_fields(&mut self, overlay: &ProviderConfig) {
-        if let Some(n) = &overlay.name {
-            self.name = Some(n.into());
-        }
-        if let Some(m) = &overlay.model {
-            self.model = Some(m.into());
-        }
-        if let Some(u) = &overlay.base_url {
-            self.base_url = Some(u.into());
-        }
-        if let Some(p) = overlay.protocol {
-            self.protocol = Some(p);
-        }
-        if let Some(k) = &overlay.api_key {
-            self.api_key = Some(k.into());
-        }
-        if let Some(e) = overlay.reasoning_effort {
-            self.reasoning_effort = Some(e);
-        }
-        self.metadata.merge_fields(&overlay.metadata);
-        for (id, metadata) in &overlay.models {
+    /// Merge `incoming` in: [`Prefer::Incoming`] lets it win, [`Prefer::Stored`]
+    /// lets it fill only what is unset.
+    fn merge_with(&mut self, incoming: &Self, prefer: Prefer) {
+        pick(&mut self.name, &incoming.name, prefer);
+        pick(&mut self.model, &incoming.model, prefer);
+        pick(&mut self.base_url, &incoming.base_url, prefer);
+        pick(&mut self.protocol, &incoming.protocol, prefer);
+        pick(&mut self.api_key, &incoming.api_key, prefer);
+        pick(
+            &mut self.reasoning_effort,
+            &incoming.reasoning_effort,
+            prefer,
+        );
+        self.metadata.merge(&incoming.metadata, prefer);
+        for (id, metadata) in &incoming.models {
             self.models
                 .entry(id.clone())
                 .or_default()
-                .merge_fields(metadata);
+                .merge(metadata, prefer);
         }
         self.normalize();
     }
 
+    /// Overlay `Some` fields from `overlay` onto `self`.
+    pub fn merge_fields(&mut self, overlay: &ProviderConfig) {
+        self.merge_with(overlay, Prefer::Incoming);
+    }
+
     /// Copy unset fields from `src`, model by model.
     pub fn fill_missing(&mut self, src: &ProviderConfig) {
-        if self.name.is_none() {
-            self.name.clone_from(&src.name);
-        }
-        if self.model.is_none() {
-            self.model.clone_from(&src.model);
-        }
-        if self.base_url.is_none() {
-            self.base_url.clone_from(&src.base_url);
-        }
-        if self.protocol.is_none() {
-            self.protocol = src.protocol;
-        }
-        if self.api_key.is_none() {
-            self.api_key.clone_from(&src.api_key);
-        }
-        if self.reasoning_effort.is_none() {
-            self.reasoning_effort = src.reasoning_effort;
-        }
-        self.metadata.fill_missing(&src.metadata);
-        for (id, metadata) in &src.models {
-            self.models
-                .entry(id.clone())
-                .or_default()
-                .fill_missing(metadata);
-        }
-        self.normalize();
+        self.merge_with(src, Prefer::Stored);
     }
 }
 
@@ -640,11 +650,7 @@ impl<'de> Deserialize<'de> for AppConfig {
                 .clone()
                 .unwrap_or_else(|| canonical_vendor(&key));
             provider.name = Some(name.clone());
-            config
-                .providers
-                .entry(name)
-                .or_default()
-                .merge_fields(&provider);
+            config.merge_provider(&name, &provider);
         }
 
         // Legacy `[provider]` block: its `name` was the selection and its
@@ -653,11 +659,7 @@ impl<'de> Deserialize<'de> for AppConfig {
             provider.normalize();
             let name = provider.name.clone().unwrap_or_default();
             provider.name = Some(name.clone());
-            config
-                .providers
-                .entry(name.clone())
-                .or_default()
-                .merge_fields(&provider);
+            config.merge_provider(&name, &provider);
             name
         });
 
@@ -734,10 +736,7 @@ impl AppConfig {
         }
         for (name, mut provider) in overlay.providers {
             provider.normalize();
-            self.providers
-                .entry(canonical_vendor(&name))
-                .or_default()
-                .merge_fields(&provider);
+            self.merge_provider(&canonical_vendor(&name), &provider);
         }
         if overlay.request_timeout_secs != default_request_timeout_secs() {
             self.request_timeout_secs = overlay.request_timeout_secs;
@@ -761,6 +760,14 @@ impl AppConfig {
             }
         }
         self.mcps.extend(overlay.mcps);
+    }
+
+    /// Merge one provider table into the saved vendors under `name`, and hand
+    /// back the saved entry.
+    pub fn merge_provider(&mut self, name: &str, provider: &ProviderConfig) -> &mut ProviderConfig {
+        let entry = self.providers.entry(name.to_string()).or_default();
+        entry.merge_fields(provider);
+        entry
     }
 
     pub fn active_provider_config(&self) -> Option<&ProviderConfig> {
@@ -888,9 +895,7 @@ impl AppConfig {
                     .then(|| config.active_provider.name.clone())
             })
             .ok_or_else(|| ConfigError::InvalidProvider("provider name is required".into()))?;
-        let provider = config.providers.entry(name.clone()).or_default();
-        provider.merge_fields(overlay);
-        provider.name = Some(name.clone());
+        config.merge_provider(&name, overlay).name = Some(name.clone());
         config.active_provider.name = name;
         Self::save_at(path, &config).await
     }
@@ -1196,6 +1201,29 @@ supports_vision = true
             .collect();
         assert_eq!(models[0].1.context_window, Some(1_000_000));
         assert_eq!(models[0].1.max_output_tokens, Some(8192));
+    }
+
+    #[test]
+    fn merging_and_filling_are_mirrors() {
+        let overlay = ProviderConfig {
+            model: Some("overlay".into()),
+            base_url: Some("https://example.com".into()),
+            ..Default::default()
+        };
+        let stored = ProviderConfig {
+            model: Some("stored".into()),
+            ..Default::default()
+        };
+
+        let mut merged = stored.clone();
+        merged.merge_fields(&overlay);
+        assert_eq!(merged.model.as_deref(), Some("overlay"));
+        assert_eq!(merged.base_url.as_deref(), Some("https://example.com"));
+
+        let mut filled = stored;
+        filled.fill_missing(&overlay);
+        assert_eq!(filled.model.as_deref(), Some("stored"));
+        assert_eq!(filled.base_url.as_deref(), Some("https://example.com"));
     }
 
     #[test]
