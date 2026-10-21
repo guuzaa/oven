@@ -17,6 +17,7 @@ pub const USER_SCOPE_UNAVAILABLE: &str = "user memory scope is unavailable";
 pub const DESCRIPTION_TOO_LONG: &str = "memory description exceeds MAX_DESCRIPTION";
 pub const BODY_TOO_LONG: &str = "memory body exceeds MAX_BODY";
 pub const CATALOG_TOO_LONG: &str = "memory catalog exceeds MAX_CATALOG_CHARS";
+pub const RENDER_FAILED: &str = "memory frontmatter could not be rendered";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MemoryError {
@@ -48,6 +49,8 @@ pub enum MemoryError {
     BodyTooLong,
     #[error("{CATALOG_TOO_LONG} ({MAX_CATALOG_CHARS})")]
     CatalogTooLong,
+    #[error("{RENDER_FAILED}: {message}")]
+    Render { message: String },
     #[error("{message}")]
     Io { message: String },
 }

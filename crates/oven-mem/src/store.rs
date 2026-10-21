@@ -94,7 +94,8 @@ impl MemoryStore {
         if !self.budget_allows(&memory) {
             return Err(MemoryError::CatalogTooLong);
         }
-        if let Err(err) = oven_host::write_atomic(&path, render(&memory)).await {
+        let rendered = render(&memory)?;
+        if let Err(err) = oven_host::write_atomic(&path, rendered).await {
             warn!(path = %path.display(), error = %err, "memory write failed");
             return Err(MemoryError::Io {
                 message: err.to_string(),

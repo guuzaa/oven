@@ -44,7 +44,7 @@ pub fn parse(id: MemoryId, scope: MemoryScope, raw: &str) -> Result<Memory, Memo
     })
 }
 
-pub fn render(memory: &Memory) -> String {
+pub fn render(memory: &Memory) -> Result<String, MemoryError> {
     let mut map = Mapping::new();
     map.insert(Value::from(KIND_KEY), Value::from(memory.kind.as_str()));
     map.insert(
@@ -54,12 +54,14 @@ pub fn render(memory: &Memory) -> String {
     if let Some(source) = &memory.source {
         map.insert(Value::from(SOURCE_KEY), Value::from(source.as_str()));
     }
-    let yaml = serde_yaml::to_string(&map).expect("memory frontmatter is valid yaml");
+    let yaml = serde_yaml::to_string(&map).map_err(|err| MemoryError::Render {
+        message: err.to_string(),
+    })?;
     let yaml = yaml
         .trim_start_matches("---\n")
         .trim_start_matches("---\r\n")
         .trim_end_matches(['\n', '\r']);
-    format!("{FENCE}\n{yaml}\n{FENCE}\n\n{}", memory.body)
+    Ok(format!("{FENCE}\n{yaml}\n{FENCE}\n\n{}", memory.body))
 }
 
 fn kind_from_front(kind: Option<String>) -> Result<MemoryKind, MemoryError> {
@@ -113,7 +115,7 @@ mod tests {
     #[test]
     fn round_trip_equality() {
         let memory = sample(Some("01J8Z".into()));
-        let parsed = parse(id(), MemoryScope::Workspace, &render(&memory)).unwrap();
+        let parsed = parse(id(), MemoryScope::Workspace, &render(&memory).unwrap()).unwrap();
         assert_eq!(parsed, memory);
     }
 
@@ -144,7 +146,7 @@ mod tests {
     #[test]
     fn source_omitted_when_none() {
         let memory = sample(None);
-        let rendered = render(&memory);
+        let rendered = render(&memory).unwrap();
         assert!(!rendered.contains("source:"));
         assert!(rendered.contains(&memory.description));
         let parsed = parse(id(), memory.scope, &rendered).unwrap();
