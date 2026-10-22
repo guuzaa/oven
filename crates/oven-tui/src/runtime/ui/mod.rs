@@ -234,23 +234,23 @@ impl Ui {
         if self.pending.is_empty() {
             return;
         }
-        if self.state.busy && self.pending.iter().all(|queued| !queued.immediate) {
+        if self.state.busy && self.pending.iter().all(|queued| !queued.is_immediate()) {
             return;
         }
         let queued = std::mem::take(&mut self.pending);
         let mut rest = Vec::new();
         let mut iter = queued.into_iter();
         while let Some(queued) = iter.next() {
-            if self.state.busy && !queued.immediate {
+            if self.state.busy && !queued.is_immediate() {
                 rest.push(queued);
                 continue;
             }
-            if queued.steered && !self.app.claim_steer(&queued.text) {
+            if queued.is_steered() && !self.app.claim_steer(&queued.text) {
                 continue;
             }
             match self.app.submit(&queued.text).await {
                 Ok(input) => {
-                    if queued.echo {
+                    if queued.is_echoed() {
                         self.push_submitted(&input);
                     }
                 }
@@ -271,7 +271,7 @@ impl Ui {
         if let Some(index) = self
             .pending
             .iter()
-            .position(|queued| queued.steered && queued.text == text)
+            .position(|queued| queued.is_steered() && queued.text == text)
         {
             self.pending.remove(index);
         }
@@ -311,34 +311,60 @@ impl Ui {
     }
 }
 
+/// A message waiting for its turn.
 struct Queued {
     text: String,
+    /// When it goes out, and what happens to it.
+    dispatch: Dispatch,
+}
+
+/// When a queued message goes out.
+#[derive(Clone, Copy)]
+enum Dispatch {
     /// Parked with the running turn, which appends it after the next tool
     /// results. A slash command or shell line stays local until the driver
     /// is free.
-    steered: bool,
+    Parked {
+        /// Whether the running turn may steer into it.
+        steered: bool,
+    },
     /// Sent on the next flush even while a turn is running (`/model`, `/setup`).
-    immediate: bool,
-    /// Drawn into the transcript when sent. A quiet submit is not.
-    echo: bool,
+    Immediate {
+        /// Drawn into the transcript when it goes out. A quiet submit is not.
+        echo: bool,
+    },
 }
 
 impl Queued {
     fn held(text: String, steered: bool) -> Self {
         Self {
             text,
-            steered,
-            immediate: false,
-            echo: true,
+            dispatch: Dispatch::Parked { steered },
         }
     }
 
     fn now(text: String, echo: bool) -> Self {
         Self {
             text,
-            steered: false,
-            immediate: true,
-            echo,
+            dispatch: Dispatch::Immediate { echo },
+        }
+    }
+
+    /// Whether it goes out even while a turn is running.
+    fn is_immediate(&self) -> bool {
+        matches!(self.dispatch, Dispatch::Immediate { .. })
+    }
+
+    /// Whether the running turn may steer into it.
+    fn is_steered(&self) -> bool {
+        matches!(self.dispatch, Dispatch::Parked { steered: true })
+    }
+
+    /// Whether it is drawn into the transcript when it goes out.
+    fn is_echoed(&self) -> bool {
+        match self.dispatch {
+            Dispatch::Parked { .. } => true,
+            Dispatch::Immediate { echo } => echo,
         }
     }
 }

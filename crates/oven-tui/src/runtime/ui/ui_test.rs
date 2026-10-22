@@ -738,7 +738,7 @@ async fn a_model_switch_typed_mid_turn_jumps_the_queue() {
     ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_eq!(pending_texts(&ui), [TEST_ANSWER, MODEL_SWITCH]);
-    assert!(ui.pending[1].immediate && !ui.pending[1].echo);
+    assert!(ui.pending[1].is_immediate() && !ui.pending[1].is_echoed());
 
     ui.maybe_flush().await;
 
