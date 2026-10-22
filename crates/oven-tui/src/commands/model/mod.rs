@@ -13,6 +13,10 @@ use oven_app::config::AppConfig;
 
 use crate::commands::report;
 
+/// The scales a token count is written in.
+pub(crate) const THOUSAND: u32 = 1_000;
+pub(crate) const MILLION: u32 = 1_000_000;
+
 /// The config a subcommand reads, and the files it could come from. Only the
 /// user file is ever written; the project file is reported when it overrides.
 pub(crate) struct Context {

@@ -11,7 +11,7 @@ use oven_app::{provider_catalog, provider_models};
 use oven_llm::{ModelCapabilities, ModelInfo, ProviderName, canonical_vendor};
 use unicode_width::UnicodeWidthStr;
 
-use super::Context;
+use super::{Context, MILLION, THOUSAND};
 use crate::platform::style::{Ink, Palette};
 
 /// Endpoint ids, or why the endpoint could not be asked, per provider.
@@ -472,8 +472,10 @@ fn non_zero(value: u32) -> Option<u32> {
 fn tokens(value: Option<u32>) -> String {
     match value {
         None => UNKNOWN.to_string(),
-        Some(value) if value >= 1_000_000 => format!("{:.1}M", f64::from(value) / 1_000_000.0),
-        Some(value) if value >= 1_000 => format!("{}k", value / 1_000),
+        Some(value) if value >= MILLION => {
+            format!("{:.1}M", f64::from(value) / f64::from(MILLION))
+        }
+        Some(value) if value >= THOUSAND => format!("{}k", value / THOUSAND),
         Some(value) => value.to_string(),
     }
 }

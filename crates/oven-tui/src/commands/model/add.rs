@@ -9,7 +9,7 @@ use oven_app::config::{AppConfig, ModelMetadata, ProviderConfig};
 use oven_app::{AppError, provider_catalog, provider_models, verify};
 use oven_llm::{ModelInfo, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
 
-use super::Context;
+use super::{Context, MILLION, THOUSAND};
 use crate::commands::prompt::{PromptError, Prompter, Stdin, choose, required_text};
 
 /// How long the endpoint's model list and the verification request may take.
@@ -69,10 +69,17 @@ pub(crate) struct Args {
 /// A provider table ready to write, and whether writing it also selects it.
 #[derive(Debug)]
 struct Plan {
-    slug: String,
-    id: String,
+    /// The provider table. Its own name is the slug it is filed under.
     provider: ProviderConfig,
+    id: String,
     activate: bool,
+}
+
+impl Plan {
+    /// The slug the table is filed under.
+    fn slug(&self) -> &str {
+        self.provider.name.as_deref().unwrap_or_default()
+    }
 }
 
 pub(crate) async fn run(ctx: &Context, args: &Args) -> Result<String, AppError> {
@@ -139,7 +146,6 @@ async fn plan(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Plan, 
     // The file that is written holds the user's own key.
     provider.api_key = user_key;
     Ok(Plan {
-        slug,
         id,
         provider,
         activate,
@@ -175,29 +181,28 @@ async fn verify_draft(
 
 async fn apply(ctx: &Context, plan: &Plan) -> Result<String, AppError> {
     let path = ctx.user_path()?;
+    let slug = plan.slug().to_string();
     let mut config = AppConfig::load_file(path)
         .await?
         .unwrap_or_else(AppConfig::empty);
-    config
-        .providers
-        .insert(plan.slug.clone(), plan.provider.clone());
+    config.providers.insert(slug.clone(), plan.provider.clone());
     if plan.activate {
-        config.active_provider.name.clone_from(&plan.slug);
+        config.active_provider.name = slug.clone();
     }
     AppConfig::save_at(path, &config).await?;
 
-    let mut text = format!("saved {}/{} to {}", plan.slug, plan.id, path.display());
+    let mut text = format!("saved {slug}/{} to {}", plan.id, path.display());
     if plan.activate {
         let _ = write!(text, "\nactive model is now {}", active_model(&config));
     } else {
         let _ = write!(text, "\nactive model unchanged: {}", active_model(&config));
     }
-    if ctx.project_declares(&plan.slug).await {
+    if ctx.project_declares(&slug).await {
         let _ = write!(
             text,
             "\nnote: {} also declares {} and takes precedence",
             ctx.project_path.display(),
-            plan.slug
+            slug
         );
     }
     Ok(text)
@@ -487,9 +492,9 @@ fn optional(p: &mut dyn Prompter, prompt: &str) -> Result<Option<String>, AppErr
 fn parse_tokens(raw: &str) -> Result<u32, AppError> {
     let raw = raw.trim().to_ascii_lowercase();
     let (digits, scale) = match raw.strip_suffix('k') {
-        Some(head) => (head, 1_000),
+        Some(head) => (head, u64::from(THOUSAND)),
         None => match raw.strip_suffix('m') {
-            Some(head) => (head, 1_000_000),
+            Some(head) => (head, u64::from(MILLION)),
             None => (raw.as_str(), 1),
         },
     };
@@ -557,7 +562,7 @@ mod tests {
         args.model = Some("grok-4.6".into());
         let mut p = Scripted::new().secrets(["xai-key"]);
         let plan = plan(&mut p, &ctx, &args).await.unwrap();
-        assert_eq!(plan.slug, "xai");
+        assert_eq!(plan.slug(), "xai");
         assert_eq!(plan.provider.name.as_deref(), Some("xai"));
         assert_eq!(plan.provider.api_key.as_deref(), Some("xai-key"));
         assert_eq!(plan.provider.model.as_deref(), Some("grok-4.6"));
@@ -740,7 +745,6 @@ mod tests {
             config: AppConfig::empty(),
         };
         let plan = Plan {
-            slug: "my-proxy".into(),
             id: "my-model".into(),
             provider: ProviderConfig {
                 name: Some("my-proxy".into()),
