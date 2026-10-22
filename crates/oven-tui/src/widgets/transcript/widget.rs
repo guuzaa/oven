@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
-use crate::core::component::{Action, Component, KeyResult, State};
+use crate::core::component::{Action, KeyResult, State};
 use crate::core::theme;
 use crate::platform::clipboard;
 
@@ -1247,8 +1247,8 @@ impl Transcript {
     }
 }
 
-impl Component for Transcript {
-    fn handle_key(&mut self, key: KeyEvent, _state: &State) -> KeyResult {
+impl Transcript {
+    pub(crate) fn handle_key(&mut self, key: KeyEvent, _state: &State) -> KeyResult {
         match key.code {
             KeyCode::PageUp => {
                 let page = u16::try_from(self.height().max(1)).unwrap_or(u16::MAX);
@@ -1264,7 +1264,7 @@ impl Component for Transcript {
         }
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
         let in_area = self.area.contains(ratatui::layout::Position {
             x: mouse.column,
             y: mouse.row,
@@ -1336,7 +1336,7 @@ impl Component for Transcript {
         }
     }
 
-    fn on_event(&mut self, ev: &AppEvent) {
+    pub(crate) fn on_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Stream(StreamEvent::ThinkingDelta { text }) => {
@@ -1466,7 +1466,7 @@ impl Component for Transcript {
         }
     }
 
-    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
+    pub(crate) fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
         let resized = area.width != self.area.width;
         self.area = area;
         if resized {

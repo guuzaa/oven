@@ -31,13 +31,17 @@ impl LineKind {
         match self {
             LineKind::User => theme::user(),
             LineKind::Shell => theme::shell(),
-            LineKind::Thinking | LineKind::Activity => theme::thinking(),
             LineKind::Text => theme::assistant(),
-            LineKind::Tool | LineKind::Diff => theme::tool(),
-            LineKind::ToolResult(true) | LineKind::ShellResult(true) => theme::ok(),
+            LineKind::Thinking
+            | LineKind::Activity
+            | LineKind::Tool
+            | LineKind::Diff
+            | LineKind::ToolResult(true)
+            | LineKind::ShellResult(true)
+            | LineKind::System
+            | LineKind::Separator => theme::dim(),
             LineKind::ToolResult(false) | LineKind::ShellResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
-            LineKind::System | LineKind::Separator => theme::dim(),
         }
     }
 

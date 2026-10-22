@@ -8,7 +8,7 @@ use crossterm::event::{
 use oven_app::AppEvent;
 use ratatui::layout::Rect;
 
-use crate::core::component::{Action, Component, KeyResult};
+use crate::core::component::{Action, KeyResult};
 use crate::core::esc::{ESC_CONFIRM_WINDOW, EscAction};
 use crate::core::hint;
 use crate::core::keys::is_mode_toggle;
