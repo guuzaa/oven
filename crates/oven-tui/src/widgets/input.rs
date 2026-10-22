@@ -279,8 +279,6 @@ impl InputView {
 
 impl InputView {
     pub(crate) fn handle_key(&mut self, key: KeyEvent, state: &State) -> KeyResult {
-        self.refresh_popups();
-
         if self.setup.is_open() {
             return match self.setup.handle_key(key) {
                 SetupWizardAction::Handled => KeyResult::Handled,
@@ -365,6 +363,7 @@ impl InputView {
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.textarea.insert_newline();
+                self.refresh_popups();
                 KeyResult::Handled
             }
             KeyCode::Enter => {
