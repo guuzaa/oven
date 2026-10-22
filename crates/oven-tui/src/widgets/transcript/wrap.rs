@@ -304,7 +304,7 @@ pub(super) fn wrap_row_into(
 
 pub(super) fn wrap_body_into(buf: &mut Buf<'_>, kind: LineKind, text: &str, width: usize) {
     if kind == LineKind::Text {
-        wrap_markdown_into(buf, text, width);
+        wrap_markdown_into(buf, &render_markdown(text), width);
         return;
     }
     for line in format_lines(kind, text) {
@@ -545,9 +545,6 @@ fn wrap_sections_into(
 }
 
 pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
-    if kind == LineKind::Text {
-        return format_markdown_lines(text);
-    }
     let first_prefix = line_prefix(kind);
     let rest_prefix = continuation_prefix(kind, &first_prefix);
     let style = kind.style();
@@ -640,22 +637,6 @@ fn wrap_line_into(buf: &mut Buf<'_>, line: &Line<'static>, width: usize, kind: L
     }
 }
 
-fn format_markdown_lines(text: &str) -> Vec<Line<'static>> {
-    let first = line_prefix(LineKind::Text);
-    let rest = continuation_prefix(LineKind::Text, &first);
-    let style = LineKind::Text.style();
-    render_markdown(text)
-        .into_iter()
-        .enumerate()
-        .map(|(i, md)| {
-            let gutter = if i == 0 { first.clone() } else { rest.clone() };
-            let mut spans = vec![Span::styled(gutter, style)];
-            spans.extend(md.spans);
-            Line::from(spans)
-        })
-        .collect()
-}
-
 struct Glyph {
     ch: char,
     style: Style,
@@ -667,17 +648,17 @@ struct Glyph {
     terminal: usize,
 }
 
-fn wrap_markdown_into(buf: &mut Buf<'_>, text: &str, width: usize) {
+pub(super) fn wrap_markdown_into(buf: &mut Buf<'_>, md_lines: &[MdLine], width: usize) {
     let first = line_prefix(LineKind::Text);
     let rest = continuation_prefix(LineKind::Text, &first);
     let style = LineKind::Text.style();
-    for (i, md) in render_markdown(text).into_iter().enumerate() {
+    for (i, md) in md_lines.iter().enumerate() {
         let gutter = if i == 0 {
             first.as_str()
         } else {
             rest.as_str()
         };
-        wrap_md_line(buf, gutter, style, &md, width);
+        wrap_md_line(buf, gutter, style, md, width);
     }
 }
 

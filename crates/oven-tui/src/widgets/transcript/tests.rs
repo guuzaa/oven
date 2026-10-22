@@ -4031,6 +4031,11 @@ fn main() {}
 > quote
 
 [docs](https://example.com)
+
+| key | value |
+| --- | --- |
+| a | 0123456789abcdef |
+| b | c |
 ";
 
 fn stream_markdown(chunks: &[&str], width: u16) -> Transcript {

@@ -260,34 +260,164 @@ pub(super) fn render_markdown(text: &str) -> Vec<MdLine> {
     if text.is_empty() {
         return vec![blank_line("")];
     }
-    let lines: Vec<&str> = text.lines().collect();
-    let mut out = Vec::with_capacity(lines.len());
-    let mut fence: Option<Fence> = None;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        if let Some(open) = fence.as_ref() {
-            let closed = closes_fence(line, open);
-            let style = if closed { theme::dim() } else { theme::code() };
-            out.push(verbatim(line, style, leading_width(line)));
-            if closed {
-                fence = None;
-            }
-        } else if let Some(open) = opening_fence(line) {
-            fence = Some(open);
-            out.push(verbatim(line, theme::dim(), leading_width(line)));
-        } else if let Some(n) = table_len(&lines[i..]) {
-            out.extend(render_table(&lines[i..i + n]));
-            i += n;
-            continue;
-        } else {
-            out.push(render_flow(line));
-        }
-        i += 1;
-    }
-    out
+    let mut stream = MarkdownStream::new();
+    stream.render(text).to_vec()
 }
 
+/// A markdown body that grows as a reply streams in.
+///
+/// The lines that are already final are kept, so a growing reply is parsed
+/// once per line instead of once per frame.
+pub(super) struct MarkdownStream {
+    /// Rendered lines: the settled ones first, then the tail.
+    lines: Vec<MdLine>,
+    /// Source bytes the settled lines cover.
+    settled: usize,
+    /// Lines in `lines` that belong to the settled prefix.
+    settled_len: usize,
+    /// Fence open where the settled prefix ends.
+    fence: Option<Fence>,
+    /// Source length at the last render.
+    seen: usize,
+}
+
+impl MarkdownStream {
+    pub(super) fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            settled: 0,
+            settled_len: 0,
+            fence: None,
+            seen: 0,
+        }
+    }
+
+    /// Forgets the body; the next one starts from scratch.
+    pub(super) fn reset(&mut self) {
+        self.lines.clear();
+        self.settled = 0;
+        self.settled_len = 0;
+        self.fence = None;
+        self.seen = 0;
+    }
+
+    /// Renders `body`, which extends the body of the previous call, and
+    /// returns its lines.
+    pub(super) fn render(&mut self, body: &str) -> &[MdLine] {
+        if body.len() < self.seen {
+            self.reset();
+        }
+        self.seen = body.len();
+
+        let chunks: Vec<&str> = body[self.settled..].split_inclusive('\n').collect();
+
+        let mut fence = self.fence;
+        let (final_lines, final_chunks) = render_units(&chunks, 0, chunks.len(), true, &mut fence);
+        let final_fence = fence;
+        let (tail, _) = render_units(&chunks, final_chunks, chunks.len(), false, &mut fence);
+
+        self.lines.truncate(self.settled_len);
+        self.lines.extend(final_lines);
+        self.settled_len = self.lines.len();
+        self.settled += chunks[..final_chunks]
+            .iter()
+            .map(|c| c.len())
+            .sum::<usize>();
+        self.fence = final_fence;
+        self.lines.extend(tail);
+        &self.lines
+    }
+}
+
+/// Renders the markdown units of `chunks[from..]`.
+///
+/// `settle` asks for the lines that will not change again: a line is only
+/// final once the line after it is complete, because that line decides
+/// whether this one starts a table, and a table that a later row can still
+/// join changes every column width. Returns the lines and the number of
+/// chunks covered.
+fn render_units(
+    chunks: &[&str],
+    from: usize,
+    limit: usize,
+    settle: bool,
+    fence: &mut Option<Fence>,
+) -> (Vec<MdLine>, usize) {
+    let mut out = Vec::new();
+    let mut i = from;
+    while i < limit {
+        let chunk = chunks[i];
+        let text = line_text(chunk);
+        // A line that is still growing may yet close a fence or open a table.
+        if settle && !is_complete(Some(chunk)) {
+            break;
+        }
+        if let Some(open) = *fence {
+            let closed = closes_fence(text, &open);
+            let style = if closed { theme::dim() } else { theme::code() };
+            out.push(verbatim(text, style, leading_width(text)));
+            if closed {
+                *fence = None;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(open) = opening_fence(text) {
+            *fence = Some(open);
+            out.push(verbatim(text, theme::dim(), leading_width(text)));
+            i += 1;
+            continue;
+        }
+        if settle && !is_complete(chunks.get(i + 1).copied()) {
+            break;
+        }
+        match table_len_at(chunks, i) {
+            Some(n) => {
+                if settle && !is_complete(chunks.get(i + n).copied()) {
+                    break;
+                }
+                let rows: Vec<&str> = chunks[i..i + n].iter().map(|c| line_text(c)).collect();
+                out.extend(render_table(&rows));
+                i += n;
+            }
+            None => {
+                out.push(render_flow(text));
+                i += 1;
+            }
+        }
+    }
+    (out, i - from)
+}
+
+/// Whether a line is complete, so the line before it can settle.
+fn is_complete(chunk: Option<&str>) -> bool {
+    chunk.is_some_and(|chunk| chunk.ends_with('\n'))
+}
+
+/// The text of one line, without its terminator. Matches `str::lines`.
+fn line_text(chunk: &str) -> &str {
+    match chunk.strip_suffix('\n') {
+        Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
+        None => chunk,
+    }
+}
+
+/// The number of lines the table at `at` covers, if those lines form one.
+fn table_len_at(chunks: &[&str], at: usize) -> Option<usize> {
+    if chunks.len().saturating_sub(at) < 2 {
+        return None;
+    }
+    if !is_table_row(line_text(chunks[at])) || !is_table_separator(line_text(chunks[at + 1])) {
+        return None;
+    }
+    let mut n = 2;
+    while at + n < chunks.len() && is_table_row(line_text(chunks[at + n])) {
+        n += 1;
+    }
+    Some(n)
+}
+
+#[derive(Clone, Copy)]
 struct Fence {
     marker: u8,
     len: usize,
@@ -853,17 +983,6 @@ fn is_thematic_break(line: &str) -> bool {
     count >= FENCE_MIN
 }
 
-fn table_len(lines: &[&str]) -> Option<usize> {
-    if lines.len() < 2 || !is_table_row(lines[0]) || !is_table_separator(lines[1]) {
-        return None;
-    }
-    let mut n = 2;
-    while n < lines.len() && is_table_row(lines[n]) {
-        n += 1;
-    }
-    Some(n)
-}
-
 fn is_table_row(line: &str) -> bool {
     !line.trim().is_empty() && line.contains('|')
 }
@@ -1347,8 +1466,8 @@ fn paint(atoms: Vec<Atom>) -> (Vec<Span<'static>>, Vec<Run>) {
         let same_style = spans.last().is_some_and(|last| last.style == style);
         if same_style {
             if let Some(last) = spans.last_mut() {
-                let mut content = last.content.to_mut();
-                atom.text.push_into(&mut content);
+                let content = last.content.to_mut();
+                atom.text.push_into(content);
             }
         } else {
             let mut content = String::new();
@@ -1593,5 +1712,22 @@ mod tests {
             ranges.extend(line.copy_window(0, 0, width, true).ranges_between(0, width));
         }
         assert_eq!(emit_ranges(&body.source, &ranges), body.source.as_ref());
+    }
+
+    #[test]
+    fn a_streamed_table_matches_the_whole_body() {
+        const TEXT: &str = "intro\n\n| k | v |\n| --- | --- |\n| 1 | 2 |\n";
+        let mut stream = MarkdownStream::new();
+        let mut acc = String::new();
+        for ch in TEXT.chars() {
+            acc.push(ch);
+            let body = acc.trim_end_matches(['\n', '\r']);
+            let got = stream.render(body);
+            let want = render_markdown(body);
+            assert_eq!(got.len(), want.len(), "line count after {acc:?}");
+            for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(a.spans, b.spans, "line {i} after {acc:?}");
+            }
+        }
     }
 }

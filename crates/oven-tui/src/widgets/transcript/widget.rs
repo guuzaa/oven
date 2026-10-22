@@ -19,14 +19,14 @@ use crate::core::theme;
 use crate::platform::clipboard;
 
 use super::kinds::{Header, LineKind, Row};
-use super::markdown::{CopyBuf, LineCopy};
+use super::markdown::{CopyBuf, LineCopy, MarkdownStream};
 use super::selection::{SelPos, highlight_line};
 use super::wrap::{
     Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, PROMPT_BODY_SLOTS, RESULT_LABEL,
     THINKING_LABEL, THOUGHT_LABEL, apply_hover, apply_shimmer, collect_lines, fits_stream_caret,
     format_elapsed, format_thought, line_display_width, line_has_glyph, paint_rows, paint_visible,
     shimmer_phase, sticky_prompt_window, sticky_row_index, stream_caret_line, tail_lines,
-    trim_message, wrap_body_into, wrap_collapsible_into, wrap_row_into,
+    trim_message, wrap_body_into, wrap_collapsible_into, wrap_markdown_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -48,6 +48,8 @@ pub struct Transcript {
     row_offsets: Vec<usize>,
     streaming: String,
     stream_kind: LineKind,
+    /// The streaming body, parsed once per line instead of once per frame.
+    markdown: MarkdownStream,
     pub(super) wrapped_stream: Vec<Line<'static>>,
     stream_copies: Vec<LineCopy>,
     /// None follows newest content; Some is an anchored wrapped-line index.
@@ -78,6 +80,7 @@ impl Transcript {
             row_offsets: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
+            markdown: MarkdownStream::new(),
             wrapped_stream: Vec::new(),
             stream_copies: Vec::new(),
             top: None,
@@ -736,6 +739,7 @@ impl Transcript {
     fn take_stream(&mut self) -> (LineKind, String) {
         self.wrapped_stream.clear();
         self.stream_copies.clear();
+        self.markdown.reset();
         (
             self.stream_kind,
             trim_message(&std::mem::take(&mut self.streaming)),
@@ -858,15 +862,15 @@ impl Transcript {
         }
         let mut lines = Vec::new();
         let mut copies = Vec::new();
-        wrap_body_into(
-            &mut Buf {
-                lines: &mut lines,
-                copies: &mut copies,
-            },
-            self.stream_kind,
-            body,
-            width,
-        );
+        let mut buf = Buf {
+            lines: &mut lines,
+            copies: &mut copies,
+        };
+        if self.stream_kind == LineKind::Text {
+            wrap_markdown_into(&mut buf, self.markdown.render(body), width);
+        } else {
+            wrap_body_into(&mut buf, self.stream_kind, body, width);
+        }
         if self.stream_kind == LineKind::Text {
             while lines.last().is_some_and(|line| !line_has_glyph(line)) {
                 lines.pop();
