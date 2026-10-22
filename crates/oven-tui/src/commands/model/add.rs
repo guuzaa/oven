@@ -94,7 +94,15 @@ async fn plan(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Plan, 
 
     provider.base_url = resolve_base_url(p, &provider, args, preset)?;
     provider.protocol = resolve_protocol(p, &provider, args, preset)?;
-    provider.api_key = resolve_key(p, &provider, args, preset)?;
+    // The key the user file holds. A key the project file holds stays there:
+    // copying it into the user file would carry it out of the project.
+    let user_key = resolve_key(p, ctx.user_key(&slug), &provider, args, preset)?;
+    // The key that will run: the project file takes precedence over the user one.
+    provider.api_key = provider
+        .api_key
+        .clone()
+        .filter(|key| !key.is_empty())
+        .or_else(|| user_key.clone());
     if let Some(raw) = &args.reasoning_effort {
         provider.reasoning_effort = Some(parse_effort(raw)?);
     }
@@ -126,6 +134,8 @@ async fn plan(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Plan, 
     if !args.no_verify {
         verify_draft(p, &provider, &slug, &id).await?;
     }
+    // The file that is written holds the user's own key.
+    provider.api_key = user_key;
     Ok(Plan {
         slug,
         id,
@@ -287,9 +297,15 @@ fn check_protocol(raw: &str) -> Result<ProviderKind, AppError> {
     })
 }
 
+/// The key to save in the user file.
+///
+/// `saved` is the key the user file already holds and `running` the provider
+/// as it will run: a key the project file holds stays there and is never
+/// copied into the user one.
 fn resolve_key(
     p: &mut dyn Prompter,
-    provider: &ProviderConfig,
+    saved: Option<&str>,
+    running: &ProviderConfig,
     args: &Args,
     preset: bool,
 ) -> Result<Option<String>, AppError> {
@@ -299,7 +315,7 @@ fn resolve_key(
     if let Some(key) = &args.api_key {
         return Ok(Some(check_key(key)));
     }
-    let saved = provider.api_key.clone().filter(|key| !key.is_empty());
+    let saved = saved.filter(|key| !key.is_empty());
     let prompt = if saved.is_some() {
         "api_key (empty keeps the saved key)"
     } else {
@@ -307,9 +323,9 @@ fn resolve_key(
     };
     match p.secret(prompt) {
         Some(entered) if !entered.trim().is_empty() => Ok(Some(check_key(&entered))),
-        Some(_) => Ok(saved),
-        None if saved.is_some() => Ok(saved),
-        None if preset && provider.effective_api_key().is_empty() => Err(AppError::Runtime(
+        Some(_) => Ok(saved.map(str::to_string)),
+        None if saved.is_some() => Ok(saved.map(str::to_string)),
+        None if preset && running.effective_api_key().is_empty() => Err(AppError::Runtime(
             "--api-key is required for a preset vendor (or --api-key-env)".into(),
         )),
         None => Ok(None),
@@ -474,10 +490,12 @@ mod tests {
     use crate::commands::prompt::scripted::Scripted;
 
     fn context(config: &str) -> Context {
+        let config: AppConfig = toml::from_str(config).unwrap();
         Context {
             user_path: Some(PathBuf::from("/tmp/does-not-exist/config.toml")),
             project_path: PathBuf::from("/tmp/does-not-exist/.oven.toml"),
-            config: toml::from_str(config).unwrap(),
+            user_config: config.clone(),
+            config,
         }
     }
 
@@ -686,6 +704,7 @@ mod tests {
         let ctx = Context {
             user_path: Some(user.clone()),
             project_path: tmp.path().join(".oven.toml"),
+            user_config: AppConfig::empty(),
             config: AppConfig::empty(),
         };
         let plan = Plan {
@@ -712,5 +731,53 @@ mod tests {
             Some("my-model")
         );
         assert!(!tmp.path().join(".oven.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn a_project_key_stays_in_the_project_file() {
+        let tmp = tempdir::TempDir::new("oven-add").unwrap();
+        let user = tmp.path().join("config.toml");
+        let ctx = Context {
+            user_path: Some(user.clone()),
+            project_path: tmp.path().join(".oven.toml"),
+            user_config: AppConfig::empty(),
+            config: toml::from_str("[providers.openai]\napi_key = \"sk-project\"\n").unwrap(),
+        };
+        let mut args = args("openai");
+        args.model = Some("gpt-4".into());
+        let mut p = Scripted::silent();
+        let plan = plan(&mut p, &ctx, &args).await.unwrap();
+        assert_eq!(
+            plan.provider.api_key, None,
+            "the project key must not be saved"
+        );
+
+        apply(&ctx, &plan).await.unwrap();
+        let written = AppConfig::load_file(&user).await.unwrap().unwrap();
+        assert_eq!(written.providers["openai"].api_key, None);
+    }
+
+    #[tokio::test]
+    async fn the_user_key_survives_a_project_that_declares_the_same_provider() {
+        let tmp = tempdir::TempDir::new("oven-add").unwrap();
+        let user = tmp.path().join("config.toml");
+        let ctx = Context {
+            user_path: Some(user.clone()),
+            project_path: tmp.path().join(".oven.toml"),
+            user_config: toml::from_str("[providers.openai]\napi_key = \"sk-user\"\n").unwrap(),
+            config: toml::from_str("[providers.openai]\napi_key = \"sk-project\"\n").unwrap(),
+        };
+        let mut args = args("openai");
+        args.model = Some("gpt-4".into());
+        let mut p = Scripted::silent();
+        let plan = plan(&mut p, &ctx, &args).await.unwrap();
+        assert_eq!(plan.provider.api_key.as_deref(), Some("sk-user"));
+
+        apply(&ctx, &plan).await.unwrap();
+        let written = AppConfig::load_file(&user).await.unwrap().unwrap();
+        assert_eq!(
+            written.providers["openai"].api_key.as_deref(),
+            Some("sk-user")
+        );
     }
 }

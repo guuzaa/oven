@@ -203,6 +203,7 @@ mod tests {
         let ctx = Context {
             user_path: Some(user),
             project_path: tmp.path().join(".oven.toml"),
+            user_config: toml::from_str(config).unwrap(),
             config: toml::from_str(config).unwrap(),
         };
         (tmp, ctx)

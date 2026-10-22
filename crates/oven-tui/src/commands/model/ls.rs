@@ -487,10 +487,12 @@ mod tests {
     use super::*;
 
     fn context(config: &str) -> Context {
+        let config: AppConfig = toml::from_str(config).unwrap();
         Context {
             user_path: Some(PathBuf::from("/tmp/does-not-exist/config.toml")),
             project_path: PathBuf::from("/tmp/does-not-exist/.oven.toml"),
-            config: toml::from_str(config).unwrap(),
+            user_config: config.clone(),
+            config,
         }
     }
 
@@ -597,6 +599,7 @@ mod tests {
         let ctx = Context {
             user_path: None,
             project_path: PathBuf::from("/tmp/does-not-exist/.oven.toml"),
+            user_config: AppConfig::empty(),
             config: AppConfig::empty(),
         };
         let text = plain(&ctx);
