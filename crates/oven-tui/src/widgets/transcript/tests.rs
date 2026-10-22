@@ -3387,12 +3387,22 @@ fn draw_repaints_every_cell_after_shorter_cjk_line() {
             .all(|c| c == ' '),
         "shorter CJK line must not leave previous glyphs: {row:?}"
     );
-    for x in 0..20 {
-        assert_eq!(
-            frame.buffer[(x, 0)].diff_option,
-            CellDiffOption::AlwaysUpdate
-        );
-    }
+    // The cell after the wide glyph is forced to repaint, and so is the edge.
+    // Every other cell is left to the diff, which skips what did not change.
+    let forced: Vec<usize> = (0..20u16)
+        .filter(|x| frame.buffer[(*x, 0)].diff_option == CellDiffOption::AlwaysUpdate)
+        .map(|x| x as usize)
+        .collect();
+    assert!(
+        forced.contains(&4),
+        "wide glyph must repaint its trailing cell: {forced:?}"
+    );
+    assert!(forced.contains(&19), "the edge must repaint: {forced:?}");
+    assert_eq!(
+        forced.len(),
+        2,
+        "only the wide glyph and the edge: {forced:?}"
+    );
 }
 
 #[test]

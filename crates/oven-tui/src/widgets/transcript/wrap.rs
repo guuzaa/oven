@@ -143,19 +143,27 @@ pub(crate) fn paint_rows(
     write_last_column: bool,
 ) {
     f.render_widget(Paragraph::new(lines), area);
-    // Wide CJK glyphs leave a stale trailing cell on Windows; force a full paint.
     let buf = f.buffer_mut();
     let area = area.intersection(*buf.area());
-    let last = area.right().saturating_sub(1);
+    if area.width == 0 {
+        return;
+    }
+    let last = area.right() - 1;
     for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            let option = if !write_last_column && x == last {
-                CellDiffOption::Skip
-            } else {
-                CellDiffOption::AlwaysUpdate
-            };
-            buf[(x, y)].set_diff_option(option);
+        // Wide CJK glyphs leave a stale trailing cell on Windows, so the cell
+        // after each of them is forced to repaint. The rest of the area is
+        // left to the diff, which skips the cells that did not change.
+        for x in area.left()..last {
+            if UnicodeWidthStr::width(buf[(x, y)].symbol()) > 1 {
+                buf[(x + 1, y)].set_diff_option(CellDiffOption::AlwaysUpdate);
+            }
         }
+        let edge = &mut buf[(last, y)];
+        edge.set_diff_option(if write_last_column {
+            CellDiffOption::AlwaysUpdate
+        } else {
+            CellDiffOption::Skip
+        });
     }
 }
 
