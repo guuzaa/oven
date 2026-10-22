@@ -21,11 +21,19 @@ const MAIN: &str = "main";
 
 /// Rows the strip wants: the driver, then one per subagent shown.
 pub fn height(agents: &[NodeInfo], show_settled: bool) -> u16 {
-    let subs = rows(agents, show_settled).len();
+    let subs = row_count(agents, show_settled);
     if subs == 0 {
         return 0;
     }
     u16::try_from(subs + 1).unwrap_or(u16::MAX)
+}
+
+/// How many rows the strip keeps, without building the rows themselves.
+fn row_count(agents: &[NodeInfo], show_settled: bool) -> usize {
+    if !show_settled && !agents.iter().any(|agent| agent.status.is_active()) {
+        return 0;
+    }
+    agents.len().min(MAX_ROWS)
 }
 
 pub fn draw(
