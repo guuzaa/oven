@@ -26,6 +26,7 @@ const BOLD_LEN: usize = 2;
 const FENCE_MIN: usize = 3;
 const HEADING_MAX: usize = 6;
 const TAB_WIDTH: usize = 4;
+const TAB_SPACES: &str = "    ";
 const TABLE_GAP: usize = 2;
 const MIN_COL_WIDTH: usize = 1;
 const TASK_BOX_LEN: usize = 3;
@@ -44,13 +45,55 @@ struct Run {
 /// reach zero width when a run has no visible glyph at all.
 #[derive(Clone)]
 struct Atom {
-    text: String,
+    text: Glyph,
     style: Style,
     width: usize,
     start: usize,
     end: usize,
 }
 
+/// The characters an atom draws. An atom is usually one character of the
+/// source, so the glyph stays a `char` and only becomes owned text when it
+/// does not fit that shape.
+#[derive(Clone)]
+enum Glyph {
+    /// One character.
+    Char(char),
+    /// A fixed run of characters: a tab draws as spaces.
+    Fixed(&'static str),
+    /// Characters that joined a neighbour, such as a zero-width joiner.
+    Text(String),
+}
+
+impl Glyph {
+    /// Appends the glyph to `text`.
+    fn push_into(&self, text: &mut String) {
+        match self {
+            Glyph::Char(ch) => text.push(*ch),
+            Glyph::Fixed(fixed) => text.push_str(fixed),
+            Glyph::Text(owned) => text.push_str(owned),
+        }
+    }
+}
+
+/// A glyph for text that is not one character of the source.
+fn fixed_glyph(text: &str) -> Glyph {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => Glyph::Char(ch),
+        _ => Glyph::Text(text.to_string()),
+    }
+}
+
+/// Joins two glyphs into one owned run.
+fn append_glyph(target: &mut Glyph, extra: &Glyph) {
+    let mut joined = String::new();
+    target.push_into(&mut joined);
+    extra.push_into(&mut joined);
+    *target = Glyph::Text(joined);
+}
+
+#[derive(Clone)]
 pub(super) struct MdLine {
     pub spans: Vec<Span<'static>>,
     pub hang: usize,
@@ -293,7 +336,7 @@ fn render_heading(line: &str, level: usize, content_at: usize) -> MdLine {
     let hang = leading_width(&line[..indent_at]);
     let (shown, hidden) = strip_atx_closer(&line[content_at..]);
     if shown.is_empty() {
-        return md_line(line, &source_atoms(line, theme::dim()), hang);
+        return md_line(line, source_atoms(line, theme::dim()), hang);
     }
     let mut atoms = source_atoms(&line[..indent_at], Style::default());
     atoms.extend(piece_atoms(
@@ -310,7 +353,7 @@ fn render_heading(line: &str, level: usize, content_at: usize) -> MdLine {
     {
         last.end = line.len();
     }
-    md_line(line, &atoms, hang)
+    md_line(line, atoms, hang)
 }
 
 fn render_marked(line: &str) -> MdLine {
@@ -345,7 +388,7 @@ fn render_marked(line: &str) -> MdLine {
         };
         atoms.extend(piece_atoms(content, inline_pieces(content, base), i));
     }
-    md_line(line, &atoms, hang)
+    md_line(line, atoms, hang)
 }
 
 fn marker_atoms(marker: &str, src_at: usize) -> Vec<Atom> {
@@ -694,12 +737,12 @@ fn display_atoms(
         if atom.width == 0 {
             match atoms.last_mut() {
                 Some(last) => {
-                    last.text.push_str(&atom.text);
+                    append_glyph(&mut last.text, &atom.text);
                     last.end = last.end.max(atom.end);
                 }
                 None => match leading.as_mut() {
                     Some(lead) => {
-                        lead.text.push_str(&atom.text);
+                        append_glyph(&mut lead.text, &atom.text);
                         lead.end = atom.end;
                     }
                     None => leading = Some(atom),
@@ -709,7 +752,7 @@ fn display_atoms(
         }
         match leading.take() {
             Some(mut lead) => {
-                lead.text.push_str(&atom.text);
+                append_glyph(&mut lead.text, &atom.text);
                 lead.width = atom.width;
                 lead.end = atom.end;
                 atoms.push(lead);
@@ -735,9 +778,9 @@ fn source_atoms(line: &str, style: Style) -> Vec<Atom> {
 fn glyph_atom(ch: char, start: usize, end: usize, style: Style) -> Atom {
     Atom {
         text: if ch == '\t' {
-            "    ".to_string()
+            Glyph::Fixed(TAB_SPACES)
         } else {
-            ch.to_string()
+            Glyph::Char(ch)
         },
         style,
         width: width_of(ch),
@@ -746,7 +789,7 @@ fn glyph_atom(ch: char, start: usize, end: usize, style: Style) -> Atom {
     }
 }
 
-fn md_line(source: impl Into<Arc<str>>, atoms: &[Atom], hang: usize) -> MdLine {
+fn md_line(source: impl Into<Arc<str>>, atoms: Vec<Atom>, hang: usize) -> MdLine {
     let (spans, runs) = paint(atoms);
     MdLine {
         spans,
@@ -758,11 +801,11 @@ fn md_line(source: impl Into<Arc<str>>, atoms: &[Atom], hang: usize) -> MdLine {
 }
 
 fn verbatim(line: &str, style: Style, hang: usize) -> MdLine {
-    md_line(line, &source_atoms(line, style), hang)
+    md_line(line, source_atoms(line, style), hang)
 }
 
 fn blank_line(line: &str) -> MdLine {
-    md_line(line, &[], 0)
+    md_line(line, Vec::new(), 0)
 }
 
 fn atx_heading(line: &str) -> Option<(usize, usize)> {
@@ -841,6 +884,7 @@ fn is_table_separator(line: &str) -> bool {
     dashes >= FENCE_MIN
 }
 
+#[derive(Clone)]
 struct TableMeta {
     separator: bool,
     style: Style,
@@ -966,7 +1010,7 @@ fn compose_row(
         .iter()
         .map(|(at, len, counts)| resplit(flat[*at..*at + len].to_vec(), counts))
         .collect();
-    let (spans, runs) = paint(&flat);
+    let (spans, runs) = paint(flat);
     MdLine {
         spans,
         hang,
@@ -1044,7 +1088,7 @@ pub(super) fn layout_table(md: &MdLine, avail: usize) -> Option<Vec<MdLine>> {
                 atoms.extend(fill_atoms(" ", pad, at, at, table.style));
             }
         }
-        lines.push(md_line(Arc::clone(&md.source), &atoms, 0));
+        lines.push(md_line(Arc::clone(&md.source), atoms, 0));
     }
     Some(lines)
 }
@@ -1258,7 +1302,7 @@ fn fill_atoms(
             src_start + span * (i + 1) / count
         };
         atoms.push(Atom {
-            text: unit.to_string(),
+            text: fixed_glyph(unit),
             style,
             width,
             start: pos,
@@ -1285,7 +1329,7 @@ fn indent_atoms(line: &str) -> (usize, Vec<Atom>) {
     (atom_width(&atoms), atoms)
 }
 
-fn paint(atoms: &[Atom]) -> (Vec<Span<'static>>, Vec<Run>) {
+fn paint(atoms: Vec<Atom>) -> (Vec<Span<'static>>, Vec<Run>) {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut runs = Vec::new();
     let mut col = 0;
@@ -1299,16 +1343,17 @@ fn paint(atoms: &[Atom]) -> (Vec<Span<'static>>, Vec<Run>) {
             });
             col += atom.width;
         }
-        if let Some(last) = spans.last_mut()
-            && last.style == atom.style
-        {
-            last.content.to_mut().push_str(&atom.text);
+        let style = atom.style;
+        let same_style = spans.last().is_some_and(|last| last.style == style);
+        if same_style {
+            if let Some(last) = spans.last_mut() {
+                let mut content = last.content.to_mut();
+                atom.text.push_into(&mut content);
+            }
         } else {
-            spans.push(if atom.style == Style::default() {
-                Span::raw(atom.text.clone())
-            } else {
-                Span::styled(atom.text.clone(), atom.style)
-            });
+            let mut content = String::new();
+            atom.text.push_into(&mut content);
+            spans.push(Span::styled(content, style));
         }
     }
     if spans.is_empty() {
