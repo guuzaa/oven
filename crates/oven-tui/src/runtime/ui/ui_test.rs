@@ -6,7 +6,7 @@ use crate::widgets::input::{InputView, Overlay};
 use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
 use crate::widgets::slash_command_popup::SlashCommandPopup;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use oven_app::config::ProviderConfig;
+use oven_app::ProviderView;
 use oven_app::{
     AgentEvent, AppEventKind, NodeStatus, ToolCallId, ToolEvent, ToolResult, TurnEvent, TurnId,
 };
@@ -47,7 +47,7 @@ async fn the_open_popup_states_its_keys_on_the_composer_border() {
 #[test]
 fn composer_hint_follows_focus_then_state() {
     fn input() -> InputView {
-        InputView::new(Vec::new(), ProviderConfig::default())
+        InputView::new(Vec::new(), ProviderView::default())
     }
 
     assert_eq!(
@@ -204,14 +204,16 @@ async fn an_open_prompt_closes_when_its_request_resolves() {
     let mut ui = test_ui(&root).await;
     ui.prompt = Some(answering_prompt());
 
-    ui.apply_event(&AppEvent::agent(AgentEvent::Tool(ToolEvent::Finished {
-        call_id: ToolCallId(1),
-        result: ToolResult::Cancelled,
-        detail: None,
-    })));
-    ui.apply_event(&AppEvent::agent(AgentEvent::Turn(TurnEvent::Cancelled {
-        duration_ms: 1,
-    })));
+    ui.apply_event(&crate::core::component::app_event(AgentEvent::Tool(
+        ToolEvent::Finished {
+            call_id: ToolCallId(1),
+            result: ToolResult::Cancelled,
+            detail: None,
+        },
+    )));
+    ui.apply_event(&crate::core::component::app_event(AgentEvent::Turn(
+        TurnEvent::Cancelled { duration_ms: 1 },
+    )));
     assert!(ui.prompt.is_some());
 
     ui.apply_event(&AppEvent::new(AppEventKind::RequestResolved {

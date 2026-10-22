@@ -10,6 +10,7 @@ oven-llm = { workspace = true }
 oven-agent = { workspace = true }
 oven-host = { workspace = true }
 oven-mem = { workspace = true }
+oven-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

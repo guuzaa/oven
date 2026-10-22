@@ -1,8 +1,7 @@
 use crate::capabilities::subagent::{SubagentParts, Subagents};
 use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
-use crate::core::event::{AppEvent, AppEventKind, AppId, CompactionEvent, EventBus, ShellEvent};
+use crate::core::event::EventBus;
 use crate::core::session::{Session, canonical_root};
-use crate::core::state::{AppPhase, AppState, HistoryChangeReason};
 use crate::memory::{
     AMBIGUOUS_MEMORY, DESCRIPTION_LABEL, KIND_LABEL, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY,
     SOURCE_LABEL,
@@ -10,6 +9,8 @@ use crate::memory::{
 use crate::{App, AppBuilder, NOTICE_MARK, NodeStatus};
 use crate::{LocalShell, runtime::*};
 use oven_mem::NOT_FOUND;
+use oven_proto::{AppEvent, AppEventKind, AppId, CompactionEvent, ShellEvent};
+use oven_proto::{AppPhase, AppState, Command, CommandResult, HistoryChangeReason};
 use std::borrow::Borrow;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -374,7 +375,11 @@ async fn wait_state(handle: &App, ready: impl FnMut(&AppState) -> bool) {
 
 async fn wait_for_active_subagent(handle: &App) {
     wait_state(handle, |state| {
-        state.subagents.iter().any(|agent| agent.status.is_active())
+        state
+            .levels
+            .subagents
+            .iter()
+            .any(|agent| agent.status.is_active())
     })
     .await;
 }
@@ -446,7 +451,7 @@ async fn spawn_prompt_emits_done_and_idle() {
         }
     }
     assert!(saw_completed);
-    assert!(matches!(handle.state().phase, AppPhase::Idle));
+    assert!(matches!(handle.state().levels.phase, AppPhase::Idle));
 
     handle.shutdown().await;
 }
@@ -483,7 +488,7 @@ async fn plan_slash_on_idle_switches() {
     assert!(status.contains("0 todos"));
 
     let _ = handle.prompt("/plan on").await.unwrap();
-    assert_eq!(handle.state().mode, AgentMode::Plan);
+    assert_eq!(handle.state().levels.mode, AgentMode::Plan);
 
     let status = handle.prompt("/plan").await.unwrap();
     assert!(status.contains("current mode: plan"));
@@ -1064,11 +1069,11 @@ async fn setup_persists_multiple_vendors_and_reuses_saved_key() {
     assert!(saved.contains("[providers.xai]"));
     assert!(saved.contains("sk-ds"));
     assert!(saved.contains("xai-key"));
-    assert_eq!(handle.provider_config().name.as_deref(), Some("xai"));
+    assert_eq!(handle.provider_view().name.as_deref(), Some("xai"));
 
     let out = wait_setup(&handle, "/setup name=deepseek").await;
     assert!(out.contains("name=deepseek"));
-    assert_eq!(handle.provider_config().name.as_deref(), Some("deepseek"));
+    assert_eq!(handle.provider_view().name.as_deref(), Some("deepseek"));
     let saved = std::fs::read_to_string(&cfg_path).unwrap();
     assert!(saved.contains("sk-ds"));
     assert!(saved.contains("xai-key"));
@@ -2210,7 +2215,7 @@ async fn model_slash_switches_immediately_during_turn() {
         !completed_before_switch,
         "the switch must apply before the in-flight turn completes"
     );
-    assert_eq!(handle.state().model, "mock/gpt-4o-turbo");
+    assert_eq!(handle.state().levels.model, "mock/gpt-4o-turbo");
 
     drop(release_tx);
     handle.shutdown().await;
@@ -2340,9 +2345,9 @@ async fn mid_turn_model_switch_publishes_the_new_context_window() {
         }
     }
     let state = handle.state();
-    assert!(state.phase.is_active(), "the turn is still running");
+    assert!(state.levels.phase.is_active(), "the turn is still running");
     assert_eq!(
-        state.context_window,
+        state.levels.context_window,
         Some(LARGE_WINDOW),
         "the switch must publish the new model's window while the turn runs"
     );
@@ -2355,7 +2360,7 @@ async fn mid_turn_model_switch_publishes_the_new_context_window() {
         }
     }
     assert_eq!(
-        handle.state().context_window,
+        handle.state().levels.context_window,
         Some(LARGE_WINDOW),
         "the switched model's window holds for the rest of the turn"
     );
@@ -2426,10 +2431,10 @@ async fn set_mode_applies_during_in_flight_turn() {
 
     let state = handle.state();
     assert!(
-        state.phase.is_active(),
+        state.levels.phase.is_active(),
         "set_mode did not wait for the turn"
     );
-    assert_eq!(state.mode, AgentMode::Plan);
+    assert_eq!(state.levels.mode, AgentMode::Plan);
     drop(release_tx);
     handle.shutdown().await;
 }
@@ -2504,9 +2509,9 @@ async fn repro_ask_mode_bash_requests_approval() {
     }
     let request_id = request_id.expect("approval requested");
     assert!(
-        matches!(handle.state().phase, AppPhase::Awaiting { .. }),
+        matches!(handle.state().levels.phase, AppPhase::Awaiting { .. }),
         "phase: {:?}",
-        handle.state().phase
+        handle.state().levels.phase
     );
     handle.respond(
         request_id,
@@ -2523,6 +2528,52 @@ async fn repro_ask_mode_bash_requests_approval() {
     assert_eq!(
         std::fs::read_to_string(tmp.path().join(APPROVED_FILE)).unwrap(),
         APPROVED_CONTENT
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn answering_a_closed_request_is_refused() {
+    let tmp = tempdir::TempDir::new("app-runtime-respond-refused").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "c1",
+            "bash",
+            serde_json::json!({"command": write_approved_command()}),
+        ),
+        text_response("done"),
+    ]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+    let mut rx = handle.subscribe();
+    handle.set_mode(AgentMode::Ask);
+    handle.submit("run it").await.unwrap();
+
+    let mut request_id = None;
+    while let Some(ev) = rx.recv().await {
+        if let AppEventKind::Agent(env) = &ev.kind
+            && let AgentEvent::Tool(oven_agent::ToolEvent::ApprovalRequested {
+                request_id: id, ..
+            }) = &env.event
+        {
+            request_id = Some(*id);
+            break;
+        }
+    }
+    let request_id = request_id.expect("approval requested");
+    let approval = || Command::Respond {
+        request_id,
+        response: oven_agent::UserResponse::Approval(oven_agent::ApprovalDecision::Approved),
+    };
+
+    let applied = handle.apply(approval()).await.unwrap();
+    assert_eq!(applied, CommandResult::Applied);
+
+    let refused = handle.apply(approval()).await.unwrap();
+    assert_eq!(
+        refused,
+        CommandResult::Refused,
+        "the request was closed by the first answer"
     );
     handle.shutdown().await;
 }
@@ -2568,9 +2619,9 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
     }
     let request_id = request_id.expect("question asked");
     assert!(
-        matches!(handle.state().phase, AppPhase::Awaiting { .. }),
+        matches!(handle.state().levels.phase, AppPhase::Awaiting { .. }),
         "phase: {:?}",
-        handle.state().phase
+        handle.state().levels.phase
     );
 
     handle.respond(
@@ -2646,9 +2697,9 @@ async fn loop_limit_continue_completes_turn() {
     }
     let request_id = request_id.expect("loop limit requested");
     assert!(
-        matches!(handle.state().phase, AppPhase::Awaiting { .. }),
+        matches!(handle.state().levels.phase, AppPhase::Awaiting { .. }),
         "phase: {:?}",
-        handle.state().phase
+        handle.state().levels.phase
     );
     handle.respond(
         request_id,
@@ -2662,7 +2713,7 @@ async fn loop_limit_continue_completes_turn() {
             break;
         }
     }
-    assert!(handle.state().phase.is_idle());
+    assert!(handle.state().levels.phase.is_idle());
     handle.shutdown().await;
 }
 
@@ -2672,7 +2723,7 @@ async fn prompt_exits_loop_limit_without_hanging() {
     let handle = spawn_loop_limit_app(&tmp).await;
     let err = handle.prompt("read it").await.unwrap_err();
     assert_eq!(err.to_string(), oven_agent::MAX_ITERS_EXCEEDED);
-    assert!(handle.state().phase.is_idle());
+    assert!(handle.state().levels.phase.is_idle());
     handle.shutdown().await;
 }
 
@@ -2828,7 +2879,7 @@ async fn cancel_does_not_roll_back_todos() {
             Err(_) => panic!("timeout waiting for the checklist"),
         }
     }
-    let turn_id = turn_id.unwrap_or_else(|| match handle.state().phase {
+    let turn_id = turn_id.unwrap_or_else(|| match handle.state().levels.phase {
         AppPhase::Running { turn_id } | AppPhase::Cancelling { turn_id } => turn_id,
         _ => panic!("expected a running turn"),
     });
@@ -3089,11 +3140,11 @@ async fn successful_turn_lifecycle_matches_invariants() {
     let app = AppBuilder::new(tmp.path());
     let mock = MockProvider::new(vec![text_response("hello")]);
     let handle = spawn_app(&app, Box::new(mock)).await;
-    assert!(handle.state().phase.is_idle());
+    assert!(handle.state().levels.phase.is_idle());
 
     let mut rx = handle.subscribe();
     assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
-    assert!(handle.state().phase.is_idle());
+    assert!(handle.state().levels.phase.is_idle());
 
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -3165,7 +3216,7 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
                     && matches!(env.event, AgentEvent::Turn(TurnEvent::Started))
                 {
                     assert!(matches!(
-                        handle.state().phase,
+                        handle.state().levels.phase,
                         AppPhase::Running { turn_id } if turn_id == env.turn_id
                     ));
                     handle.cancel(env.turn_id);
@@ -3184,7 +3235,7 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
     drop(tx);
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            if handle.state().phase.is_idle() {
+            if handle.state().levels.phase.is_idle() {
                 break;
             }
             tokio::task::yield_now().await;
@@ -3211,7 +3262,7 @@ async fn bang_shell_does_not_call_provider() {
     let out = handle.prompt("!echo hi").await.unwrap();
     assert!(out.contains("hi"), "{out}");
     assert!(
-        handle.state().phase.is_idle(),
+        handle.state().levels.phase.is_idle(),
         "shell should return to idle"
     );
 
@@ -3234,8 +3285,8 @@ async fn ask_mode_bang_shell_runs_without_approval() {
 
     let out = handle.prompt("!echo hi").await.unwrap();
     assert!(out.contains("hi"), "{out}");
-    assert!(handle.state().phase.is_idle());
-    assert_eq!(handle.state().mode, AgentMode::Ask);
+    assert!(handle.state().levels.phase.is_idle());
+    assert_eq!(handle.state().levels.mode, AgentMode::Ask);
     let parsed = LocalShell::try_parse(&user_texts(&history(&handle))[0]).expect("envelope");
     assert_eq!(parsed.command, "echo hi");
     assert_eq!(parsed.exit_code, Some(0));
@@ -3284,7 +3335,7 @@ async fn bang_shell_cancel_commits_cancelled_envelope() {
             match rx.recv().await {
                 Some(ev) => {
                     if let AppEventKind::Shell(ShellEvent::Started { .. }) = ev.kind {
-                        return handle.state().phase.turn_id().expect("running");
+                        return handle.state().levels.phase.turn_id().expect("running");
                     }
                 }
                 None => panic!("channel closed before shell started"),
@@ -3300,7 +3351,7 @@ async fn bang_shell_cancel_commits_cancelled_envelope() {
     let parsed = LocalShell::try_parse(&user_texts(&history(&handle))[0]).unwrap();
     assert_eq!(parsed.command, "sleep 60");
     assert_eq!(parsed.error.as_deref(), Some("cancelled"));
-    assert!(handle.state().phase.is_idle());
+    assert!(handle.state().levels.phase.is_idle());
     handle.shutdown().await;
 }
 
@@ -3727,7 +3778,7 @@ async fn a_finished_subagent_notifies_the_driver() {
 
     // The driver holds its first request at the gate, so the notice is in its
     // inbox before it has asked the provider anything.
-    while !matches!(phase.borrow().phase, AppPhase::Running { .. }) {
+    while !matches!(phase.borrow().levels.phase, AppPhase::Running { .. }) {
         phase.changed().await.unwrap();
     }
     inbox.push(PendingInput::Notice {
@@ -3828,7 +3879,12 @@ async fn a_background_subagent_notice_reaches_a_later_turn() {
     // The subagent outlived the turn that asked for it, so its notice is
     // parked with nothing running to read it.
     wait_state(&handle, |state| {
-        !state.subagents.is_empty() && state.subagents.iter().all(|node| !node.status.is_active())
+        !state.levels.subagents.is_empty()
+            && state
+                .levels
+                .subagents
+                .iter()
+                .all(|node| !node.status.is_active())
     })
     .await;
 
@@ -3882,11 +3938,11 @@ async fn a_subagent_usage_does_not_become_the_drivers_context() {
 
     let state = handle.state();
     assert_eq!(
-        state.last_turn_usage.input_tokens, 10,
+        state.levels.last_turn_usage.input_tokens, 10,
         "published usage is the driver's last response"
     );
     assert_eq!(
-        state.subagents[0].usage, CHILD_USAGE,
+        state.levels.subagents[0].usage, CHILD_USAGE,
         "the subagent keeps its own"
     );
     handle.shutdown().await;
@@ -3986,7 +4042,7 @@ async fn agents_applies_mid_turn_while_clear_waits() {
 
     wait_for_active_subagent(&handle).await;
     assert!(
-        handle.state().phase.is_active(),
+        handle.state().levels.phase.is_active(),
         "the turn is still running"
     );
     handle.submit("/agents").await.unwrap();
@@ -4184,9 +4240,14 @@ async fn cancelling_a_turn_cancels_its_subagent() {
     handle.submit("delegate it").await.unwrap();
 
     wait_for_active_subagent(&handle).await;
-    let turn_id = handle.state().phase.turn_id().expect("turn is running");
+    let turn_id = handle
+        .state()
+        .levels
+        .phase
+        .turn_id()
+        .expect("turn is running");
     handle.cancel(turn_id);
-    wait_state(&handle, |state| state.phase.is_idle()).await;
+    wait_state(&handle, |state| state.levels.phase.is_idle()).await;
 
     let subagents = handle.subagents();
     assert!(
@@ -4450,7 +4511,7 @@ async fn wait_cancelled(sub: &mut mpsc::UnboundedReceiver<AppEvent>, handle: &Ap
     })
     .await
     .expect("timeout waiting for cancel");
-    wait_state(handle, |state| state.phase.is_idle()).await;
+    wait_state(handle, |state| state.levels.phase.is_idle()).await;
 }
 
 async fn session_records(dir: &Path, id: &str) -> Vec<Record> {
@@ -5009,7 +5070,7 @@ async fn wait_compaction_cancelled(
     let mut state = handle.watch_state();
     tokio::time::timeout(settle_timeout(), async {
         loop {
-            if state.borrow().phase.is_idle() && report.cancel_count > 0 {
+            if state.borrow().levels.phase.is_idle() && report.cancel_count > 0 {
                 while let Ok(ev) = rx.try_recv() {
                     report.note(&ev);
                 }
@@ -5291,7 +5352,7 @@ async fn cancel_compaction_leaves_the_session(kind: CompactKind, point: CompactP
     );
 
     handle.cancel_compaction();
-    assert!(handle.state().phase.is_idle());
+    assert!(handle.state().levels.phase.is_idle());
     assert_eq!(replay_shape(&history(&handle)), kept_history());
     handle.shutdown().await;
 }

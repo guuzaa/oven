@@ -1,135 +1,14 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+//! The bus every event a frontend can see travels on.
+//!
+//! The event vocabulary itself belongs to `oven-proto`; what stays here is
+//! the fan-out: one bus, many subscribers, and the sink a turn publishes
+//! through.
+
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oven_agent::{AgentEvent, AgentEventEnvelope, AgentId, EventSink, TurnId, UserRequestId};
+use oven_agent::{AgentEvent, AgentId, EventSink, TurnId};
+use oven_proto::{AppEvent, AppEventKind};
 use tokio::sync::mpsc;
-
-use crate::core::state::HistoryChangeReason;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct AppId(pub u64);
-
-impl AppId {
-    pub(crate) fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AppEvent {
-    pub kind: AppEventKind,
-}
-
-#[derive(Debug, Clone)]
-pub enum AppEventKind {
-    Agent(AgentEventEnvelope),
-    /// The user request announced earlier is closed: it was answered, or the
-    /// turn dropped it. A frontend closes the prompt it opened for this id.
-    RequestResolved {
-        request_id: UserRequestId,
-    },
-    Subagent(SubagentEvent),
-    /// The history was replaced wholesale, so a view rebuilds itself from
-    /// the state instead of following per-message events.
-    HistoryChanged {
-        reason: HistoryChangeReason,
-    },
-    Shell(ShellEvent),
-    Compaction(CompactionEvent),
-    Notification {
-        text: String,
-    },
-    Error {
-        message: String,
-    },
-    Exited,
-}
-
-/// Something a frontend should do about subagents, as opposed to what they
-/// are, which is `AppState::subagents`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubagentEvent {
-    /// Open a view on one subagent.
-    Focus { id: AgentId },
-}
-
-pub const COMPACTION_CANCELLED: &str = "compaction cancelled";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompactionEvent {
-    Started,
-    Completed {
-        before_tokens: u32,
-        after_tokens: u32,
-    },
-    Failed {
-        error: String,
-    },
-    /// The summary request was aborted. History and the session file are unchanged.
-    Cancelled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ShellEvent {
-    Started {
-        command: String,
-    },
-    Finished {
-        command: String,
-        output: String,
-        exit_code: i32,
-    },
-    Failed {
-        command: String,
-        error: String,
-        output: String,
-    },
-}
-
-impl AppEvent {
-    pub fn new(kind: AppEventKind) -> Self {
-        Self { kind }
-    }
-
-    pub fn notification(text: impl Into<String>) -> Self {
-        Self::new(AppEventKind::Notification { text: text.into() })
-    }
-
-    pub fn error(message: impl Into<String>) -> Self {
-        Self::new(AppEventKind::Error {
-            message: message.into(),
-        })
-    }
-
-    pub fn exited() -> Self {
-        Self::new(AppEventKind::Exited)
-    }
-
-    pub fn shell(event: ShellEvent) -> Self {
-        Self::new(AppEventKind::Shell(event))
-    }
-
-    pub fn subagent(event: SubagentEvent) -> Self {
-        Self::new(AppEventKind::Subagent(event))
-    }
-
-    pub fn compaction(event: CompactionEvent) -> Self {
-        Self::new(AppEventKind::Compaction(event))
-    }
-
-    pub fn agent(event: AgentEvent) -> Self {
-        Self::agent_with(AgentId(1), TurnId(1), event)
-    }
-
-    pub fn agent_with(agent_id: AgentId, turn_id: TurnId, event: AgentEvent) -> Self {
-        Self::new(AppEventKind::Agent(AgentEventEnvelope {
-            agent_id,
-            turn_id,
-            event,
-        }))
-    }
-}
 
 pub(crate) type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<AppEvent>>>>;
 

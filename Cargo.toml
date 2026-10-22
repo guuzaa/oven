@@ -5,6 +5,7 @@ members = [
     "crates/oven-host",
     "crates/oven-llm",
     "crates/oven-mem",
+    "crates/oven-proto",
     "crates/oven-tui",
 ]
 resolver = "3"
@@ -20,6 +21,7 @@ oven-app = { path = "./crates/oven-app" }
 oven-agent = { path = "./crates/oven-agent" }
 oven-host = { path = "./crates/oven-host" }
 oven-mem = { path = "./crates/oven-mem" }
+oven-proto = { path = "./crates/oven-proto" }
 oven-tui = { path = "./crates/oven-tui" }
 oven-llm = { path = "./crates/oven-llm" }
 

@@ -12,8 +12,7 @@ use oven_host::now_ms;
 use oven_llm::{Message, Role, Usage};
 
 use crate::core::subagent::is_notice;
-
-pub use record::{Record, SessionMeta};
+use oven_proto::{Record, SessionMeta};
 
 type Timestamp = u64;
 

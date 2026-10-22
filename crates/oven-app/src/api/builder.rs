@@ -21,13 +21,14 @@ use crate::capabilities::subagent::{Role as SubagentRole, SubagentParts, Subagen
 use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
-use crate::core::event::{AppId, EventBus};
+use crate::core::event::EventBus;
 use crate::core::provider::RouterCatalog;
 use crate::core::session::{Session, SessionStore, canonical_root, session_span};
 use crate::platform::dirs;
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
 use crate::{SkillRegistry, ToolRegistry};
+use oven_proto::AppId;
 
 /// Tools a subagent never mounts: the ones that speak to the user, manage
 /// the caller's plan, or would nest delegation.

@@ -2,9 +2,9 @@ use std::time::{Duration, Instant};
 
 use oven_host::{as_ms, now_ms};
 
-use crate::core::event::{AgentEvent, StreamEvent, ToolResult};
-use crate::core::identity::ToolCallId;
-use crate::core::sink::EventSink;
+use oven_proto::EventSink;
+use oven_proto::ToolCallId;
+use oven_proto::{AgentEvent, StreamEvent, ToolResult};
 
 /// Cap on a tool's output as it enters the conversation, keeping a single
 /// huge `file_read`/`bash` result from being carried (and re-encoded on

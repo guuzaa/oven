@@ -5,7 +5,7 @@
 
 use serde_json::Value;
 
-use crate::core::view::ToolView;
+use oven_proto::ToolView;
 
 use super::{
     AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,

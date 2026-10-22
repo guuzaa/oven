@@ -11,18 +11,22 @@ Message  ←──────────────→  History / Session
 
 | Concept | Meaning |
 | --- | --- |
-| **Command** | A request to do something |
+| **Command** | A request to do something (`oven_proto::Command`) |
 | **Message** | What is in the LLM conversation |
-| **Event** | What happened while running |
-| **State** | What the system is now |
+| **Event** | What happened while running (`oven_proto::AppEvent`) |
+| **State** | What the system is now (`oven_proto::AppState`) |
 
 Commands never contain events. Events never contain commands. Turn streaming is not the same as session history.
+
+The vocabulary behind all four is named in one crate, `oven-proto`, so a
+frontend can depend on the protocol without the runtime behind it. It is
+documented in [`oven-proto.md`](./oven-proto.md).
 
 ```text
                         ┌──────────────┐
                         │   oven-tui   │
                         └──────┬───────┘
-                               │ App::submit · cancel · set_mode · respond
+                               │ App::apply(Command) · cancel · set_mode · respond
                                ▼
                      ┌──────────────────┐
                      │   App Runtime    │
@@ -43,11 +47,18 @@ Commands never contain events. Events never contain commands. Turn streaming is 
 | Crate | Owns |
 | --- | --- |
 | `oven-llm` | `Message`, `Usage`, provider I/O |
-| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `AgentEvent`, `EventSink`, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, history/todo domain models, the `SubagentSpawner` protocol and its `NodeInfo`/`NodeStatus` vocabulary, provider retry decoration |
+| `oven-proto` | the protocol vocabulary: `Command`, `AppEvent`, `AppState`, `AgentEvent`, and the nouns they carry — a leaf crate on `oven-llm` and serde alone |
+| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, the history buffer and its projection rules, the `SubagentSpawner` protocol, provider retry decoration |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
 | `oven-mem` | Durable memory: `Memory`, limits, id validation, file format, `MemoryStore`, catalog rendering |
-| `oven-app` | `App`, `AppBuilder`, `Input`, `AppEvent`, `AppState`, app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install |
+| `oven-app` | `App`, `AppBuilder`, the app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install |
 | `oven-tui` | render events and state; send commands; `oven mem` |
+
+`oven-proto` is the protocol layer: the vocabulary a frontend and the app
+runtime share. It is a leaf — `oven-llm` for messages and tokens, serde for
+the wire format, and nothing else. No runtime, no filesystem, no clock. A
+frontend that speaks it can be written without the agent runtime in its
+dependency tree. It is documented in [`oven-proto.md`](./oven-proto.md).
 
 `oven-host` is infrastructure, not the app actor. The app runtime owns application state and command dispatch; `oven-host` only provides reusable capabilities with no dependency on Agent or App domain types.
 
@@ -72,15 +83,17 @@ core           nouns and their pure rules: identity, events, history and its
 | | `runtime/compact.rs` | compaction: replace the history with an LLM-written summary |
 | `capabilities` | `capabilities/tools/` | the `Tool` protocol, the built-in tools, `present_tool` |
 | | `capabilities/skills.rs` | skills: named guidance merged into the system prompt |
-| `core` | `core/event.rs` | `AgentEvent`, `ToolResult` |
-| | `core/history/` | the message buffer, and the records it persists as |
+| `core` | `core/history/` | the message buffer, and the rules that project it into records |
 | | `core/turn.rs` | `TurnContext`, `RunPolicy`, `Step`, `TurnOutput` |
 | | `core/interaction.rs` | the user-request protocol: one request out, one reply back |
-| | `core/subagent.rs`, `core/retry.rs` | the subagent vocabulary; `RetryingProvider` |
+| | `core/subagent.rs`, `core/retry.rs` | the spawner protocol; `RetryingProvider` |
 
-A noun a lower layer needs lives in the lower layer: `ToolView`, `ToolPermission`
-and `ToolCaps` are core vocabulary that the event, turn and request types carry,
-so they sit in `core` rather than beside the tools that produce them. The
+A noun a lower layer needs lives in the lower layer: `ToolCaps` is core
+vocabulary that a tool declares, so it sits in `core` rather than beside the
+tools that produce it. The nouns a **frontend** needs live one layer lower
+still, in `oven-proto`: `AgentEvent`, `ToolView`, `ToolPermission`,
+`AgentMode`, `TodoList` and `NodeInfo` are all part of the protocol, so the
+crate that speaks it owns them. The
 public surface is pinned by `crates/oven-agent/tests/public_api.rs`, so moving
 a module behind a layer cannot move a path.
 
@@ -119,10 +132,16 @@ The dependency direction is:
 
 ```text
 oven-tui ──► oven-app ──► oven-agent ──► oven-llm
-                   │          │
-                   ├──────────┴──► oven-host
-                   └──► oven-mem ──► oven-host
+                │             │                ▲
+                │             └──► oven-proto ┘
+                ├─────────────┴──► oven-host
+                └──► oven-mem ──► oven-host
 ```
+
+`oven-proto` sits below `oven-agent` and below `oven-app`: the agent reports
+its events through it, and the app publishes its state and its commands
+through it. Nothing above it re-implements the vocabulary — `oven-agent` and
+`oven-app` re-export what they used to own, so no public path moved.
 
 `oven-host` may depend on operating-system and third-party implementation crates such as Tokio and `ignore`, but those types do not appear in its public API. Consumers use host-owned types such as `WalkEntry`, `PathError`, and `CommandError`. Pattern matching remains an Agent concern.
 
@@ -165,12 +184,16 @@ instance each, so spawning never reconnects an MCP server.
 `App` is the only public app-runtime handle. `AppHandle` is gone. `AppBuilder` loads config, skills, tools, and MCP, then `open()` / `open_session()` spawns the actor. This app runtime is distinct from the `oven-host` infrastructure crate: the former coordinates commands and state, while the latter performs isolated filesystem and process operations.
 
 ```text
-AppBuilder ──open──► App ──submit()──► inbox ──► Runtime
+AppBuilder ──open──► App ──apply(Command)──► inbox ──► Runtime
                      │
                      ├── cancel() · set_mode() · respond() · stop_subagent(s)()  → Shared
                      ├── subscribe()    → AppEvent
                      └── watch_state()  → AppState
 ```
+
+`App::apply` is the one entry a transport needs: it takes a protocol
+`Command` and reports what it did. The methods beside it are the same
+commands spelled out, for callers that stay in Rust.
 
 ## IDs
 

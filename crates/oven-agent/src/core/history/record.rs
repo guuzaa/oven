@@ -1,51 +1,13 @@
-//! The persisted shape of a conversation.
+//! The rules for projecting a conversation into records.
 //!
 //! One [`Record`] per JSONL line, so a session file appends without rewriting
-//! what came before. Here are the rules for projecting a [`History`] into
-//! records: which message closes a turn, where that turn's usage lands and
-//! when a thinking span is worth a line of its own.
+//! what came before. The record shape itself belongs to `oven-proto`: it is
+//! part of the protocol a reloaded session reads back.
 
-use oven_llm::{Message, Role, Usage};
-use serde::{Deserialize, Serialize};
+use oven_llm::{Role, Usage};
+use oven_proto::Record;
 
 use super::History;
-use crate::core::todo::TodoItem;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Record {
-    Message {
-        /// Unix milliseconds when the message was created.
-        timestamp: u64,
-        #[serde(flatten)]
-        message: Message,
-    },
-    TokenUsage {
-        /// Unix milliseconds; the timestamp of the assistant message this
-        /// usage belongs to.
-        timestamp: u64,
-        #[serde(flatten)]
-        usage: Usage,
-    },
-    /// Thinking span for the preceding assistant message. `timestamp` is when
-    /// thinking started; `duration_ms` is wall time until thinking ended.
-    Thinking { timestamp: u64, duration_ms: u64 },
-    /// Session-level metadata, written as the first line of a session file.
-    SessionMeta(SessionMeta),
-    TodoList {
-        timestamp: u64,
-        items: Vec<TodoItem>,
-    },
-}
-
-/// Where and when a session was created. Written as the first JSONL record so
-/// the workspace root survives a resume.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SessionMeta {
-    pub root: String,
-    /// Unix milliseconds when the session first got content.
-    pub created_at: u64,
-}
 
 impl History {
     /// The conversation as persistence-ready records: every message plus a

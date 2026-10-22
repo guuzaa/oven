@@ -1,62 +1,19 @@
-//! Everything a running turn asks of the user, and the one sink that
-//! receives it. A tool approval, the loop-limit prompt and a tool's question
-//! are the same exchange — a request out, exactly one reply back — so they
-//! share one id type, one sink and one response enum.
+//! What a running turn asks of the user, and the one sink that receives it.
+//!
+//! The exchange itself — the request, the reply, the id that ties them
+//! together — belongs to `oven-proto`; what stays here is the machinery that
+//! carries the reply back to the turn that is waiting for it.
 
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::core::identity::{ToolCallId, TurnId};
-use crate::core::view::ToolView;
+use oven_proto::{
+    AnswerResponse, ApprovalDecision, LoopLimitDecision, Question, ToolCallId, TurnId,
+    UserRequestId, UserResponse,
+};
 
 pub const NO_USER_TO_ANSWER: &str = "no user is available to answer the question";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct UserRequestId(pub u64);
-
-impl UserRequestId {
-    pub fn next() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct QuestionOption {
-    pub label: String,
-    pub description: Option<String>,
-}
-
-/// A question the model wants the user to answer before it continues.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Question {
-    pub question: String,
-    pub options: Vec<QuestionOption>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalDecision {
-    Approved,
-    Rejected,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoopLimitDecision {
-    Continue,
-    Exit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AnswerResponse {
-    Answered {
-        answer: String,
-    },
-    /// The user dismissed the question: the model learns nothing from it.
-    Declined,
-}
 
 /// What a turn asks of the user. The reply channel rides along with the
 /// request, so the reply needs no id lookup on its way back.
@@ -64,7 +21,7 @@ pub enum UserRequest {
     ApproveTool {
         call_id: ToolCallId,
         name: String,
-        view: ToolView,
+        view: oven_proto::ToolView,
         responder: oneshot::Sender<ApprovalDecision>,
     },
     LoopLimit {
@@ -94,14 +51,6 @@ impl RequestSink for mpsc::UnboundedSender<PendingRequest> {
     fn submit(&self, _turn_id: TurnId, request: PendingRequest) -> bool {
         self.send(request).is_ok()
     }
-}
-
-/// What the user answered with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UserResponse {
-    Approval(ApprovalDecision),
-    LoopLimit(LoopLimitDecision),
-    Answer(AnswerResponse),
 }
 
 impl PendingRequest {

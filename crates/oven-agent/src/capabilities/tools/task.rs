@@ -14,12 +14,11 @@ use serde_json::{Value, json};
 use crate::capabilities::tools::{
     Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, require_str,
 };
-use crate::core::error::AgentError;
-use crate::core::mode::AgentMode;
-use crate::core::subagent::{
-    NodeOutcome, NodeReport, NodeStatus, READ_RESULT_HINT, RoleSpec, SpawnRequest, SubagentSpawner,
-};
+use crate::core::subagent::{NodeOutcome, NodeReport, RoleSpec, SpawnRequest, SubagentSpawner};
 use crate::core::turn::TurnContext;
+use oven_proto::AgentError;
+use oven_proto::AgentMode;
+use oven_proto::{NodeStatus, READ_RESULT_HINT};
 
 const NO_SUBAGENTS: &str = "no subagents have run in this session";
 const PLAN_MODE_NOTE: &str = " In plan mode only the read-only roles may run.";
@@ -316,7 +315,12 @@ fn render_reports(reports: &[NodeReport]) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
-        let _ = write!(out, "{} · {}", report.info.name, report.info.progress());
+        let _ = write!(
+            out,
+            "{} · {}",
+            report.info.name,
+            report.info.progress(oven_host::now_ms())
+        );
         match &report.report {
             Some(report) if !report.trim().is_empty() => {
                 let _ = write!(out, "\n  {}", clamp(report.trim(), MAX_REPORT_BYTES));
@@ -340,10 +344,11 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::identity::{AgentId, TurnId};
-    use crate::core::subagent::{NodeHandle, NodeInfo};
+    use crate::core::subagent::NodeHandle;
     use crate::core::turn::TurnContext;
     use oven_llm::Usage;
+    use oven_proto::NodeInfo;
+    use oven_proto::{AgentId, TurnId};
     use serde_json::json;
     use std::sync::Mutex;
     use tokio::sync::oneshot;

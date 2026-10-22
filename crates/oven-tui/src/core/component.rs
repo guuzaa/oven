@@ -54,25 +54,21 @@ pub trait Component {
 }
 
 #[cfg(test)]
-pub(crate) fn idle_state() -> oven_app::AppState {
+pub(crate) fn idle_levels() -> oven_app::AppLevels {
     use std::sync::Arc;
 
-    use oven_app::config::ProviderConfig;
-    use oven_app::{AgentId, AppPhase, AppState, SessionState, TodoList};
+    use oven_app::{AgentId, AppLevels, AppPhase, ProviderView, SessionState, TodoList};
     use oven_llm::Usage;
 
-    AppState {
+    AppLevels {
         phase: AppPhase::Idle,
         agent_id: AgentId(1),
         subagents: Arc::default(),
         mode: AgentMode::default(),
         model: String::new(),
         reasoning_effort: None,
-        provider: ProviderConfig::default(),
+        provider: ProviderView::default(),
         configured_providers: Vec::new(),
-        history: Vec::new(),
-        history_timestamps: Vec::new(),
-        history_thinking_ms: Vec::new(),
         todos: TodoList::default(),
         last_turn_usage: Usage::default(),
         context_tokens: 0,
@@ -80,4 +76,9 @@ pub(crate) fn idle_state() -> oven_app::AppState {
         session: SessionState::default(),
         models: Vec::new(),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn app_event(event: oven_app::AgentEvent) -> oven_app::AppEvent {
+    oven_app::AppEvent::agent_with(oven_app::AgentId(1), oven_app::TurnId(1), event)
 }

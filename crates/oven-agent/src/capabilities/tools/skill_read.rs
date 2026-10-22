@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::capabilities::tools::{Tool, ToolOutcome};
-use crate::core::error::AgentError;
+use oven_proto::AgentError;
 
 use crate::core::turn::TurnContext;
 

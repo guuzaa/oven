@@ -9,8 +9,8 @@ use oven_llm::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::core::error::AgentError;
 use crate::runtime::agent::Agent;
+use oven_proto::AgentError;
 
 pub const NOTHING_TO_COMPACT: &str = "nothing to compact";
 const EMPTY_SUMMARY: &str = "provider returned an empty summary";

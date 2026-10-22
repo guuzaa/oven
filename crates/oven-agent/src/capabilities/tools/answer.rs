@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 use crate::core::turn::TurnContext;
 
 use super::{Tool, ToolCaps, ToolOutcome, ToolView, labeled};
-use crate::core::error::AgentError;
-use crate::core::interaction::{AnswerResponse, Question, QuestionOption};
+use oven_proto::AgentError;
+use oven_proto::{AnswerResponse, Question, QuestionOption};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";
 const USER_SKIPPED: &str = "the user skipped the question without answering";

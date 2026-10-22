@@ -8,6 +8,7 @@ use std::time::Duration;
 use oven_agent::{Agent, AgentError, CancellationToken, CompactStats, Record, RunPolicy, TodoList};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
 use oven_mem::MemoryStore;
+use oven_proto::{AppPhase, HistoryChangeReason, Input, ProviderView, SessionState};
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
@@ -15,20 +16,16 @@ use crate::App;
 use crate::capabilities::subagent::Subagents;
 use crate::commands::{CommandOutcome, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
-use crate::core::event::{
-    AppEventKind, AppId, COMPACTION_CANCELLED, CompactionEvent, EventBus, SubagentEvent,
-};
-use crate::core::input::Input;
+use crate::core::event::EventBus;
 use crate::core::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,
 };
-use crate::core::state::{
-    AppPhase, AppState, HistoryChangeReason, SessionState, context_tokens, context_window,
-};
+use crate::core::state::{app_state, context_tokens, context_window};
 use crate::runtime::inbox::InboxReceiver;
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::shared::{GOODBYE, Shared, save_provider_overlay};
+use oven_proto::{AppEventKind, AppId, COMPACTION_CANCELLED, CompactionEvent, SubagentEvent};
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
 
@@ -177,7 +174,9 @@ impl Runtime {
         let router = self.agent.router();
         let config = self.shared.config().clone();
         let (models, _) = refresh_model_choices(router.as_ref(), &model, &config).await;
-        self.shared.state.send_modify(|state| state.models = models);
+        self.shared
+            .state
+            .send_modify(|state| state.levels.models = models);
     }
 
     fn shutdown(&self, inbox: &InboxReceiver) {
@@ -340,17 +339,17 @@ impl Runtime {
         let agent = &self.agent;
         let session_id = self.session_id();
         self.shared.state.send_modify(|state| {
-            state.mode = agent.mode();
-            state.model = agent.model().to_string();
-            state.reasoning_effort = agent.reasoning_effort();
+            state.levels.mode = agent.mode();
+            state.levels.model = agent.model().to_string();
+            state.levels.reasoning_effort = agent.reasoning_effort();
             state.history = agent.shared_history();
             state.history_timestamps = agent.history_timed().map(|(_, ts, _)| ts).collect();
             state.history_thinking_ms = agent.history_timed().map(|(_, _, th)| th).collect();
-            state.todos = agent.todos().clone();
-            state.last_turn_usage = agent.last_turn_usage();
-            state.context_tokens = context_tokens(agent);
-            state.context_window = context_window(agent);
-            state.session.id = session_id;
+            state.levels.todos = agent.todos().clone();
+            state.levels.last_turn_usage = agent.last_turn_usage();
+            state.levels.context_tokens = context_tokens(agent);
+            state.levels.context_window = context_window(agent);
+            state.levels.session.id = session_id;
         });
     }
 
@@ -480,13 +479,15 @@ impl Runtime {
         );
         let configured_providers = next.configured_providers();
         self.shared.state.send_modify(|state| {
-            state.provider = provider;
-            state.configured_providers = configured_providers;
+            state.levels.provider = provider;
+            state.levels.configured_providers = configured_providers;
         });
         self.sync_state();
         let router = self.agent.router();
         let (models, auth_error) = refresh_model_choices(router.as_ref(), &model, &next).await;
-        self.shared.state.send_modify(|state| state.models = models);
+        self.shared
+            .state
+            .send_modify(|state| state.levels.models = models);
         self.emit(AppEventKind::Notification {
             text: summarize_setup(&overlay, saved.as_deref()),
         });
@@ -597,7 +598,7 @@ pub(crate) fn spawn_runtime(
             None => (None, SessionState { id: None }),
         }
     };
-    let state = AppState::from_agent(&agents.main, provider, configured_providers, session_state);
+    let state = app_state(&agents.main, provider, configured_providers, session_state);
     let (state_tx, _) = watch::channel(state);
     let shared = Arc::new(Shared::new(
         state_tx,
@@ -641,11 +642,10 @@ pub(crate) async fn record_recent_path(store: &SessionStore) -> Result<(), Sessi
     record_recent(&store.dir, Path::new(&store.root), &id).await
 }
 
-fn public_provider(provider: &ProviderConfig) -> ProviderConfig {
-    ProviderConfig {
-        api_key: None,
-        ..provider.clone()
-    }
+/// The provider as a frontend may see it: the credential stays in the app
+/// layer, and only whether one is configured crosses the protocol.
+fn public_provider(provider: &ProviderConfig) -> ProviderView {
+    provider.view()
 }
 
 fn summarize_setup(overlay: &ProviderConfig, saved: Option<&Path>) -> String {

@@ -1,6 +1,6 @@
 use crate::commands::SlashRegistry;
-use crate::core::input::Input;
 use crate::platform::shell::ShellInput;
+use oven_proto::Input;
 
 pub(crate) fn classify(text: &str, slash: &SlashRegistry) -> Input {
     if let Some(shell) = ShellInput::parse(text) {

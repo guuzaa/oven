@@ -5,8 +5,6 @@ use crate::TurnId;
 use crate::capabilities::tools::{
     AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool, ToolOutcome,
 };
-use crate::core::identity::ToolCallId;
-use crate::core::sink::{NullSink, VecEventSink};
 use crate::core::subagent::NOTICE_MARK;
 use crate::core::turn::{PendingInbox, PendingInput, TurnContext};
 use async_trait::async_trait;
@@ -15,14 +13,16 @@ use oven_llm::{
     Delta, ModelId, ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason,
     StreamEvent as LlmStreamEvent,
 };
+use oven_proto::ToolCallId;
+use oven_proto::{NullSink, VecEventSink};
 use std::time::Duration;
 
 use oven_llm::{ContentBlock, Message, Provider, Request, Response, Role, Usage};
 
-use crate::core::error::AgentError;
-use crate::core::event::{StreamEvent, ToolEvent, ToolResult, TurnEvent};
-use crate::core::interaction::{ApprovalDecision, LoopLimitDecision};
 use crate::core::turn::TurnOutput;
+use oven_proto::AgentError;
+use oven_proto::{ApprovalDecision, LoopLimitDecision};
+use oven_proto::{StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use serde_json::json;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 use tokio::sync::oneshot;
 
-use crate::core::interaction::{AnswerResponse, PendingRequest, Question, UserRequest};
+use crate::core::interaction::{PendingRequest, UserRequest};
+use oven_proto::{AnswerResponse, Question};
 
 const APPROVED_FILE: &str = "approved.txt";
 const APPROVED_CONTENT: &str = "approved";
@@ -1863,11 +1864,11 @@ async fn todo_write_error_leaves_sot_unchanged() {
         text_response("done"),
     ]);
     let mut agent = agent_with_todo_write(Box::new(mock));
-    agent.set_todos(crate::core::todo::TodoList {
-        items: vec![crate::core::todo::TodoItem {
+    agent.set_todos(oven_proto::TodoList {
+        items: vec![oven_proto::TodoItem {
             id: "keep".into(),
             content: "old".into(),
-            status: crate::core::todo::TodoStatus::Pending,
+            status: oven_proto::TodoStatus::Pending,
         }],
     });
     let mut sink = VecEventSink::default();
@@ -1967,19 +1968,19 @@ fn tool_names(req: &Request) -> Vec<&str> {
     req.tools.iter().map(|t| t.name.as_str()).collect()
 }
 
-fn pending_item() -> crate::core::todo::TodoItem {
-    crate::core::todo::TodoItem {
+fn pending_item() -> oven_proto::TodoItem {
+    oven_proto::TodoItem {
         id: "a".into(),
         content: "one".into(),
-        status: crate::core::todo::TodoStatus::Pending,
+        status: oven_proto::TodoStatus::Pending,
     }
 }
 
-fn completed_item() -> crate::core::todo::TodoItem {
-    crate::core::todo::TodoItem {
+fn completed_item() -> oven_proto::TodoItem {
+    oven_proto::TodoItem {
         id: "a".into(),
         content: "one".into(),
-        status: crate::core::todo::TodoStatus::Completed,
+        status: oven_proto::TodoStatus::Completed,
     }
 }
 
@@ -2213,7 +2214,7 @@ fn set_todos_shows_checklist_without_todo_write() {
         router_with(Box::new(MockProvider::new(Vec::new()))),
         Vec::new(),
     );
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     let req = agent.build_request();
@@ -2222,7 +2223,7 @@ fn set_todos_shows_checklist_without_todo_write() {
     assert!(content_has(last, TODO_LIST_HEADING));
     assert!(!agent.history().any(|m| content_has(m, TODO_LIST_HEADING)));
 
-    agent.set_todos(crate::core::todo::TodoList::default());
+    agent.set_todos(oven_proto::TodoList::default());
     let req = agent.build_request();
     assert!(!has_todo_list(&req));
 }
@@ -2232,7 +2233,7 @@ async fn compact_reshows_todo_list_on_the_next_request_only() {
     let (mock, _) = CaptureRequests::new(vec![text_response("the summary"), text_response("ok")]);
     let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
     agent.push_history(Message::user_text("do the thing"));
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     agent.compact(&CancellationToken::new()).await.unwrap();
@@ -2251,7 +2252,7 @@ async fn compact_reshows_todo_list_on_the_next_request_only() {
 async fn next_turn_clears_finished_todos() {
     let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
     let mut agent = agent_with_todo_write(Box::new(mock));
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![completed_item()],
     });
     let mut sink = VecEventSink::default();
@@ -2271,7 +2272,7 @@ async fn next_turn_clears_finished_todos() {
 async fn next_turn_keeps_open_todos() {
     let (mock, seen) = CaptureRequests::new(vec![text_response("ok")]);
     let mut agent = agent_with_todo_write(Box::new(mock));
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "next").await;
@@ -2295,7 +2296,7 @@ async fn completing_turn_keeps_finished_list() {
     assert_eq!(agent.todos().items.len(), 1);
     assert_eq!(
         agent.todos().items[0].status,
-        crate::core::todo::TodoStatus::Completed
+        oven_proto::TodoStatus::Completed
     );
 }
 
@@ -2349,7 +2350,7 @@ async fn one_tool_round_without_todo_write_does_not_remind() {
     ]);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
     agent.set_mode(AgentMode::Plan);
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "read it").await;
@@ -2380,7 +2381,7 @@ async fn reminder_clears_after_successful_todo_write() {
     ]);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
     agent.set_mode(AgentMode::Plan);
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "do it").await;
@@ -2423,7 +2424,7 @@ async fn leaving_plan_keeps_list_drops_prompt_and_reminder() {
     ]);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
     agent.set_mode(AgentMode::Plan);
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "read it").await;
@@ -2452,7 +2453,7 @@ async fn rewind_clears_todo_notice() {
     ]);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
     agent.set_mode(AgentMode::Plan);
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "read it").await;
@@ -2479,12 +2480,12 @@ async fn clear_history_clears_todo_misses() {
     ]);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
     agent.set_mode(AgentMode::Plan);
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "read it").await;
     agent.clear_history();
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "fresh").await;
@@ -2535,7 +2536,7 @@ async fn reminder_waits_for_the_miss_threshold() {
     let (mock, seen) = CaptureRequests::new(responses);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
     agent.set_mode(AgentMode::Plan);
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "read it").await;
@@ -2568,7 +2569,7 @@ async fn todo_write_resets_the_reminder_streak() {
     let (mock, seen) = CaptureRequests::new(responses);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
     agent.set_mode(AgentMode::Plan);
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "read it").await;
@@ -2595,7 +2596,7 @@ async fn rewind_clears_a_reminder_streak() {
     let (mock, seen) = CaptureRequests::new(responses);
     let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
     agent.set_mode(AgentMode::Plan);
-    agent.set_todos(crate::core::todo::TodoList {
+    agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
     });
     run_text(&mut agent, "read it").await;

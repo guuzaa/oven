@@ -1,4 +1,4 @@
-use oven_app::{AgentEvent, AppEvent, AppEventKind, AppState, TodoList, TodoStatus};
+use oven_app::{AgentEvent, AppEvent, AppEventKind, AppLevels, TodoList, TodoStatus};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -42,9 +42,9 @@ impl TodosWidget {
     /// Between turns the app's checklist is the truth, which is how a rewind
     /// or `/clear` reaches the widget. While a turn runs it writes its own,
     /// and the snapshot lags behind until the turn ends.
-    pub fn sync(&mut self, state: &AppState) {
-        if state.phase.is_idle() && self.list != state.todos {
-            self.list.clone_from(&state.todos);
+    pub fn sync(&mut self, levels: &AppLevels) {
+        if levels.phase.is_idle() && self.list != levels.todos {
+            self.list.clone_from(&levels.todos);
         }
     }
 
@@ -80,7 +80,7 @@ fn item_line(status: TodoStatus, content: &str, width: usize) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::idle_state;
+    use crate::core::component::idle_levels;
     use oven_app::{AppPhase, TodoItem, TurnId};
 
     fn item(id: &str, content: &str, status: TodoStatus) -> TodoItem {
@@ -104,15 +104,15 @@ mod tests {
     }
 
     fn written(items: Vec<TodoItem>) -> AppEvent {
-        AppEvent::agent(AgentEvent::TodosChanged {
+        crate::core::component::app_event(AgentEvent::TodosChanged {
             todos: TodoList { items },
         })
     }
 
     fn synced(widget: &mut TodosWidget, items: Vec<TodoItem>) {
-        widget.sync(&AppState {
+        widget.sync(&AppLevels {
             todos: TodoList { items },
-            ..idle_state()
+            ..idle_levels()
         });
     }
 
@@ -203,11 +203,11 @@ mod tests {
     fn a_running_turn_keeps_its_own_checklist() {
         let mut widget = TodosWidget::new(TodoList::default());
         widget.on_event(&written(vec![item("n", "next task", TodoStatus::Pending)]));
-        widget.sync(&AppState {
+        widget.sync(&AppLevels {
             phase: AppPhase::Running {
                 turn_id: TurnId::next(),
             },
-            ..idle_state()
+            ..idle_levels()
         });
         assert_eq!(widget.height(), 1, "the snapshot lags behind the turn");
     }

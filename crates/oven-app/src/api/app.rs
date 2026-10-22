@@ -1,31 +1,37 @@
 use std::path::{Path, PathBuf};
 use std::string::String;
-use std::sync::{Arc, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use oven_agent::{
-    AgentEvent, AgentId, AgentMode, LoopLimitDecision, TodoList, TurnEvent, TurnId, UserRequestId,
-    UserResponse,
+    AgentId, AgentMode, LoopLimitDecision, TodoList, TurnId, UserRequestId, UserResponse,
 };
 use oven_llm::{Message, Usage};
+use oven_proto::{
+    AgentEvent, AppEvent, AppEventKind, AppId, AppState, Command, CommandResult, Input,
+    ProviderView, ShellEvent, TurnEvent,
+};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::api::builder::AppBuilder;
 use crate::api::input;
 use crate::commands::SlashRegistry;
-use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
-use crate::core::event::{AppEvent, AppEventKind, AppId, ShellEvent, Subscribers};
-use crate::core::input::Input;
-use crate::core::state::AppState;
+use crate::core::event::Subscribers;
 use crate::runtime::inbox::InboxSender;
 use crate::runtime::shared::{Shared, queued_notice};
 
+/// The handle a frontend talks to.
+///
+/// Cloneable, so a server can hand the same session to several
+/// connections; the runtime behind it is shut down once, by whoever owns
+/// the last handle.
+#[derive(Clone)]
 pub struct App {
     id: AppId,
     inbox: InboxSender,
     subscribers: Subscribers,
-    join: JoinHandle<()>,
+    join: Arc<Mutex<Option<JoinHandle<()>>>>,
     slash: Arc<SlashRegistry>,
     root: PathBuf,
     shared: Arc<Shared>,
@@ -57,7 +63,7 @@ impl App {
             id,
             inbox,
             subscribers,
-            join,
+            join: Arc::new(Mutex::new(Some(join))),
             slash,
             root,
             state: shared.state.subscribe(),
@@ -71,12 +77,12 @@ impl App {
 
     /// The conversation driver. Anything else a view sees is a subagent.
     pub fn agent_id(&self) -> oven_agent::AgentId {
-        self.state.borrow().agent_id
+        self.state.borrow().levels.agent_id
     }
 
     /// Subagents in spawn order, mirrored from the registry.
     pub fn subagents(&self) -> Vec<oven_agent::NodeInfo> {
-        self.state.borrow().subagents.as_ref().clone()
+        self.state.borrow().levels.subagents.as_ref().clone()
     }
 
     /// Classifies `text` and hands it to the runtime, returning what it was
@@ -142,9 +148,10 @@ impl App {
         self.shared.set_mode(mode);
     }
 
-    /// Answers the request the running turn is waiting on.
-    pub fn respond(&self, request_id: UserRequestId, response: UserResponse) {
-        self.shared.respond(request_id, response);
+    /// Answers the request the running turn is waiting on. `false` when the
+    /// request was already closed, or the answer did not fit it.
+    pub fn respond(&self, request_id: UserRequestId, response: UserResponse) -> bool {
+        self.shared.respond(request_id, response)
     }
 
     pub fn stop_subagent(&self, id: AgentId) {
@@ -177,15 +184,18 @@ impl App {
     }
 
     pub fn model(&self) -> String {
-        self.state.borrow().model.clone()
+        self.state.borrow().levels.model.clone()
     }
 
-    pub fn provider_config(&self) -> ProviderConfig {
-        self.state.borrow().provider.clone()
+    /// The active provider as a frontend may see it: the credential stays in
+    /// the app layer, so a frontend is told whether one is configured, never
+    /// which.
+    pub fn provider_view(&self) -> ProviderView {
+        self.state.borrow().levels.provider.clone()
     }
 
     pub fn configured_providers(&self) -> Vec<String> {
-        self.state.borrow().configured_providers.clone()
+        self.state.borrow().levels.configured_providers.clone()
     }
 
     pub fn root(&self) -> &Path {
@@ -197,20 +207,20 @@ impl App {
     }
 
     pub fn todos(&self) -> TodoList {
-        self.state.borrow().todos.clone()
+        self.state.borrow().levels.todos.clone()
     }
 
     pub fn last_turn_usage(&self) -> Usage {
-        self.state.borrow().last_turn_usage
+        self.state.borrow().levels.last_turn_usage
     }
 
     pub fn session_id(&self) -> Option<String> {
-        self.state.borrow().session.id.clone()
+        self.state.borrow().levels.session.id.clone()
     }
 
     pub async fn prompt(&self, input: impl Into<String>) -> Result<String, AppError> {
         let mut rx = self.subscribe();
-        let main = self.state().agent_id;
+        let main = self.state().levels.agent_id;
         self.submit(input.into()).await?;
 
         let mut text = String::new();
@@ -288,7 +298,7 @@ impl App {
     async fn wait_until_idle(&self) {
         let mut state = self.state.clone();
         loop {
-            if state.borrow().phase.is_idle() {
+            if state.borrow().levels.phase.is_idle() {
                 return;
             }
             if state.changed().await.is_err() {
@@ -297,11 +307,68 @@ impl App {
         }
     }
 
+    /// Applies one protocol command. The single entry a frontend needs: a
+    /// transport turns what it received into a [`Command`] and hands it here.
+    pub async fn apply(&self, command: Command) -> Result<CommandResult, AppError> {
+        let outcome = match command {
+            Command::Submit { text } => CommandResult::Submitted(self.submit(text).await?),
+            Command::Steer { text } => {
+                if self.steer(&text) {
+                    CommandResult::Applied
+                } else {
+                    CommandResult::Refused
+                }
+            }
+            Command::Rewind => {
+                self.rewind().await?;
+                CommandResult::Applied
+            }
+            Command::Cancel { turn_id } => {
+                self.cancel(turn_id);
+                CommandResult::Applied
+            }
+            Command::CancelCompaction => {
+                self.cancel_compaction();
+                CommandResult::Applied
+            }
+            Command::SetMode { mode } => {
+                self.set_mode(mode);
+                CommandResult::Applied
+            }
+            Command::Respond {
+                request_id,
+                response,
+            } => {
+                if self.respond(request_id, response) {
+                    CommandResult::Applied
+                } else {
+                    CommandResult::Refused
+                }
+            }
+            Command::StopSubagent { id } => {
+                self.stop_subagent(id);
+                CommandResult::Applied
+            }
+            Command::StopSubagents => {
+                self.stop_subagents();
+                CommandResult::Applied
+            }
+        };
+        Ok(outcome)
+    }
+
     /// Shuts the runtime down and reports how many queued prompts were
     /// dropped without ever running, so a frontend can say so.
-    pub async fn shutdown(self) -> usize {
+    pub async fn shutdown(&self) -> usize {
         self.shared.shutdown.cancel();
-        let _ = self.join.await;
+        let join = self
+            .join
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(join) = join {
+            let _ = join.await;
+        }
         self.inbox.unsent()
     }
 }

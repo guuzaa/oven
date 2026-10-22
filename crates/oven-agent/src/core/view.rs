@@ -1,27 +1,6 @@
-//! What a tool call looks like to a frontend, and what it may do.
-//!
-//! These are the nouns the rest of the crate reasons about — an event carries
-//! a [`ToolView`], a turn's gate reads [`ToolPermission`], a tool declares
-//! [`ToolCaps`] — so they sit below the tools that produce them. The built-in
-//! presentation table lives in [`crate::capabilities::tools`].
+//! What a tool hands back, and what it asks of the turn it runs in.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolView {
-    pub summary: String,
-    pub collapse: bool,
-    /// Nested body rendered under the summary, e.g. a file diff.
-    pub detail: Option<String>,
-}
-
-impl ToolView {
-    pub fn named(name: impl Into<String>) -> Self {
-        Self {
-            summary: name.into(),
-            collapse: true,
-            detail: None,
-        }
-    }
-}
+use oven_proto::ToolPermission;
 
 /// What a tool hands back: the text the history keeps, and the body a
 /// frontend shows under the call once it has landed.
@@ -51,16 +30,6 @@ impl From<String> for ToolOutcome {
             detail: None,
         }
     }
-}
-
-/// What a tool may do to the workspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ToolPermission {
-    #[default]
-    Read,
-    Write,
-    Execute,
-    External,
 }
 
 /// What a tool asks of the turn it runs in.

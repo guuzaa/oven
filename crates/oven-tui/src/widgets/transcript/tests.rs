@@ -444,7 +444,7 @@ fn seed_mirrors_empty_tool_result_handling() {
 }
 
 fn agent(event: AgentEvent) -> AppEvent {
-    AppEvent::agent(event)
+    crate::core::component::app_event(event)
 }
 
 fn tool_start(call_id: u64, name: &str, input: serde_json::Value) -> AppEvent {

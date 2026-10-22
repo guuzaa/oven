@@ -63,16 +63,17 @@ impl Ui {
             .canonicalize()
             .unwrap_or_else(|_| app.root().to_owned());
         let mut input =
-            InputView::new(app.slash_commands(), snapshot.provider.clone()).with_root(&root);
-        input.sync(&snapshot);
-        if snapshot.configured_providers.is_empty() && snapshot.provider.needs_setup() {
+            InputView::new(app.slash_commands(), snapshot.levels.provider.clone()).with_root(&root);
+        input.sync(&snapshot.levels);
+        if snapshot.levels.configured_providers.is_empty() && snapshot.levels.provider.needs_setup()
+        {
             input.open_setup();
         }
-        let mut views = Views::new(snapshot.agent_id);
+        let mut views = Views::new(snapshot.levels.agent_id);
         let state = State {
-            busy: snapshot.phase.is_active(),
-            agents: views.mirror(&snapshot.subagents),
-            mode: snapshot.mode,
+            busy: snapshot.levels.phase.is_active(),
+            agents: views.mirror(&snapshot.levels.subagents),
+            mode: snapshot.levels.mode,
             ..State::new()
         };
         Self {
@@ -89,11 +90,18 @@ impl Ui {
             transcript: Transcript::new(),
             views,
             agents_area: None,
-            status: StatusBar::new(snapshot.model.clone(), &root, snapshot.last_turn_usage)
-                .with_effort(snapshot.reasoning_effort)
-                .with_context(snapshot.context_tokens, snapshot.context_window),
+            status: StatusBar::new(
+                snapshot.levels.model.clone(),
+                &root,
+                snapshot.levels.last_turn_usage,
+            )
+            .with_effort(snapshot.levels.reasoning_effort)
+            .with_context(
+                snapshot.levels.context_tokens,
+                snapshot.levels.context_window,
+            ),
             input,
-            todos: TodosWidget::new(snapshot.todos.clone()),
+            todos: TodosWidget::new(snapshot.levels.todos.clone()),
             prompt: None,
         }
     }
@@ -205,12 +213,12 @@ impl Ui {
     async fn sync_state(&mut self) {
         let subagents = {
             let state = self.state_rx.borrow_and_update();
-            self.state.busy = state.phase.is_active();
-            self.state.mode = state.mode;
-            self.status.sync(&state);
-            self.input.sync(&state);
-            self.todos.sync(&state);
-            Arc::clone(&state.subagents)
+            self.state.busy = state.levels.phase.is_active();
+            self.state.mode = state.levels.mode;
+            self.status.sync(&state.levels);
+            self.input.sync(&state.levels);
+            self.todos.sync(&state.levels);
+            Arc::clone(&state.levels.subagents)
         };
         self.state.agents = self.views.mirror(&subagents);
         self.maybe_flush().await;
@@ -283,7 +291,7 @@ impl Ui {
     }
 
     pub(super) fn send_cancel(&self) {
-        let phase = self.state_rx.borrow().phase.clone();
+        let phase = self.state_rx.borrow().levels.phase.clone();
         if let Some(turn_id) = phase.turn_id() {
             self.app.cancel(turn_id);
             return;

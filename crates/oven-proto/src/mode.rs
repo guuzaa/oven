@@ -1,13 +1,21 @@
-use crate::core::view::ToolPermission;
+//! The mode a turn runs in, and what it may do there.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+use crate::ToolPermission;
+
+/// What a tool may do while the turn runs in a given mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolAccess {
     Hidden,
     Allowed,
     RequiresApproval,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The mode the conversation driver runs in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentMode {
     #[default]
     Agent,
@@ -65,5 +73,15 @@ mod tests {
         assert_eq!(AgentMode::Agent.label(), "agent");
         assert_eq!(AgentMode::Plan.label(), "plan");
         assert_eq!(AgentMode::Ask.label(), "ask");
+    }
+
+    #[test]
+    fn the_mode_survives_the_wire() {
+        let json = serde_json::to_string(&AgentMode::Plan).unwrap();
+        assert_eq!(json, "\"plan\"");
+        assert_eq!(
+            serde_json::from_str::<AgentMode>(&json).unwrap(),
+            AgentMode::Plan
+        );
     }
 }

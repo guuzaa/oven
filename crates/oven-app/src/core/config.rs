@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use oven_agent::DEFAULT_MAX_ITERS;
 use oven_llm::{ModelId, ModelInfo, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
+use oven_proto::ProviderView;
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::SerializeMap as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -296,6 +297,19 @@ impl Serialize for ProviderConfig {
 }
 
 impl ProviderConfig {
+    /// The provider as a frontend may see it: the same fields, minus the
+    /// credential. The key never leaves the app layer, so what crosses the
+    /// protocol boundary is only whether one is configured.
+    pub fn view(&self) -> ProviderView {
+        ProviderView {
+            name: self.name.clone(),
+            model: self.model.clone(),
+            base_url: self.base_url.clone(),
+            protocol: self.protocol,
+            has_api_key: !self.effective_api_key().is_empty(),
+            reasoning_effort: self.reasoning_effort,
+        }
+    }
     /// Model used when neither `model` nor `OVEN_MODEL` is set.
     pub const DEFAULT_MODEL: &str = match ProviderName::DeepSeek.default_model() {
         Some(model) => model,

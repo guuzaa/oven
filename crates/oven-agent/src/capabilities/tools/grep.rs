@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 use crate::core::turn::TurnContext;
 
 use super::{Tool, ToolOutcome, ToolView, parse_limit, require_str, resolve_within};
-use crate::core::error::AgentError;
 use crate::core::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
 use oven_host::walk_dir_stream;
+use oven_proto::AgentError;
 
 pub struct GrepTool {
     root: PathBuf,

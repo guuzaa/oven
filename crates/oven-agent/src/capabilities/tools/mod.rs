@@ -18,10 +18,10 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
+use oven_proto::AgentError;
 
-pub use crate::core::view::{ToolCaps, ToolOutcome, ToolPermission, ToolView};
+pub use crate::core::view::{ToolCaps, ToolOutcome};
 pub use answer::AnswerTool;
 pub use bash::BashTool;
 pub use catalog::{BUILTIN_TOOLS, BuiltinTool};
@@ -31,6 +31,7 @@ pub use file_write::FileWriteTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list_models::ListModelsTool;
+pub use oven_proto::{ToolPermission, ToolView};
 pub use skill_read::SkillReadTool;
 pub use task::{TaskOutputTool, TaskTool};
 pub use todo_write::TodoWriteTool;

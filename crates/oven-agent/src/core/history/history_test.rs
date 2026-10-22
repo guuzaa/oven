@@ -448,7 +448,7 @@ fn shared_messages_alias_the_stored_messages() {
 
 #[test]
 fn records_never_emit_todo_list() {
-    use crate::core::todo::{TodoItem, TodoStatus};
+    use oven_proto::{TodoItem, TodoStatus};
 
     let records = vec![
         Record::Message {

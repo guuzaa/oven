@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `oven-proto`: the protocol vocabulary moves into a crate of its own — the events, the state and the commands a frontend shares with the runtime. It is a leaf, on `oven-llm` and serde alone, so a frontend can be written without the agent runtime in its dependency tree. Documented in [`docs/oven-proto.md`](docs/oven-proto.md)
+- `Command` is one enum for every request a frontend can make, and `App::apply` applies one: `Submit`, `Steer`, `Rewind`, `Cancel`, `CancelCompaction`, `SetMode`, `Respond`, `StopSubagent`, `StopSubagents`. A transport turns what it received into a `Command` and nothing else, and `CommandResult::Refused` says the request did not apply — the driver was idle, or the request it answered was already closed
+- `AppState` splits in two: `levels` holds the phase, the mode, the model, the provider, the checklist and the usage — small, and cheap enough to forward on every change — and the conversation stays beside it, read once when a frontend connects
+- `App` is cloneable and shuts down by reference, so a server can hand one session to several connections
+- Every protocol type has a serde form, and the wire format is pinned by tests
+
+### Changed
+- **Breaking:** `AppState` is `{ levels, history }` rather than one flat struct, and `AppState::provider` is a `ProviderView` — the API key stays in the app layer, and a frontend is told only whether a credential is configured
+- **Breaking:** `App::provider_config` is gone; `App::provider_view` hands out the credential-free view instead, so no public method on the facade returns the key
+- **Breaking:** `App::respond` returns whether the answer was delivered — `false` when the request was already closed, or the answer did not fit it
+- `AppState` and `AppLevels` have a serde form, so a transport forwards them as bytes
+- **Breaking:** `NodeInfo::elapsed_ms`, `NodeInfo::progress` and `NodeInfo::notice` take the current time (`elapsed_ms(now_ms)`): a protocol crate does not read the clock
+- `oven-agent` and `oven-app` re-export what they used to own, so `oven_app::AppEvent` and `oven_agent::AgentEvent` still resolve and no public path moved
+
 ## [0.1.1] - 2026-10-22
 
 ### Added

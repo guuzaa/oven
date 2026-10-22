@@ -7,8 +7,8 @@ use super::{
     Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, labeled, require_str, resolve_within,
 };
 
-use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
+use oven_proto::AgentError;
 
 pub struct FileEditTool {
     root: PathBuf,

@@ -1,11 +1,15 @@
+//! The failure a turn reports.
+
 use std::fmt;
 
-pub use oven_llm::ProviderError;
+use oven_llm::ProviderError;
+use serde::{Deserialize, Serialize};
 
 pub const MAX_ITERS_EXCEEDED: &str = "agent loop exceeded max iterations";
 const CANCELLED: &str = "cancelled";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A turn failed, and the frontend is told why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentError {
     pub message: String,
 }
@@ -83,5 +87,24 @@ impl From<serde_json::Error> for AgentError {
         Self {
             message: format!("json: {err}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cancelled_error_says_so() {
+        assert!(AgentError::cancelled().is_cancelled());
+        assert!(!AgentError::new("boom").is_cancelled());
+    }
+
+    #[test]
+    fn the_error_survives_the_wire() {
+        let error = AgentError::new("boom");
+        let json = serde_json::to_string(&error).unwrap();
+        assert_eq!(json, r#"{"message":"boom"}"#);
+        assert_eq!(serde_json::from_str::<AgentError>(&json).unwrap(), error);
     }
 }

@@ -8,6 +8,7 @@ rust-version = { workspace = true }
 [dependencies]
 oven-llm = { workspace = true }
 oven-host = { workspace = true }
+oven-proto = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 

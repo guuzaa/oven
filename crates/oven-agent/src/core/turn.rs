@@ -7,17 +7,15 @@ use oven_llm::{Message, Usage};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::core::error::AgentError;
-use crate::core::event::{CallOutcome, StepStop};
-use crate::core::identity::ToolCallId;
-use crate::core::identity::TurnId;
-use crate::core::interaction::{
-    AnswerResponse, ApprovalDecision, LoopLimitDecision, NO_USER_TO_ANSWER, PendingRequest,
-    Question, RequestSink, UserRequest, UserRequestId,
-};
-use crate::core::mode::AgentMode;
+use crate::core::interaction::{NO_USER_TO_ANSWER, PendingRequest, RequestSink, UserRequest};
 use crate::core::selection::{ModelSelection, Selection};
-use crate::core::view::ToolView;
+use oven_proto::AgentError;
+use oven_proto::AgentMode;
+use oven_proto::ToolCallId;
+use oven_proto::ToolView;
+use oven_proto::TurnId;
+use oven_proto::{AnswerResponse, ApprovalDecision, LoopLimitDecision, Question, UserRequestId};
+use oven_proto::{CallOutcome, StepStop};
 
 pub const DEFAULT_MAX_ITERS: usize = 200;
 

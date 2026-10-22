@@ -1,0 +1,11 @@
+[package]
+name = "oven-proto"
+description = "Protocol layer: the vocabulary a frontend and the app runtime share"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+
+[dependencies]
+oven-llm = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }

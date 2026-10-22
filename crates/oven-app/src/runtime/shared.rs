@@ -15,9 +15,10 @@ use tokio::sync::watch;
 
 use crate::capabilities::subagent::Subagents;
 use crate::core::config::AppConfig;
-use crate::core::event::{AppEventKind, EventBus};
-use crate::core::state::{AppPhase, AppState};
+use crate::core::event::EventBus;
 use crate::runtime::pending::TurnInbox;
+use oven_proto::AppEventKind;
+use oven_proto::{AppPhase, AppState};
 
 /// The turn that is running now: how to stop it, and the one request it is
 /// waiting on the user for.
@@ -110,14 +111,14 @@ impl Shared {
     }
 
     pub(crate) fn set_phase(&self, phase: AppPhase) {
-        self.state.send_modify(|state| state.phase = phase);
+        self.state.send_modify(|state| state.levels.phase = phase);
     }
 
     fn move_phase(&self, from: AppPhase, to: AppPhase) {
         self.state.send_if_modified(|state| {
-            let moves = state.phase == from;
+            let moves = state.levels.phase == from;
             if moves {
-                state.phase = to;
+                state.levels.phase = to;
             }
             moves
         });
@@ -174,16 +175,18 @@ impl Shared {
         }
     }
 
-    pub(crate) fn respond(&self, request_id: UserRequestId, response: UserResponse) {
+    /// Delivers the answer to the request the turn is waiting on. `false` when
+    /// no such request is open, or when the answer does not fit it.
+    pub(crate) fn respond(&self, request_id: UserRequestId, response: UserResponse) -> bool {
         let mut turn = self.active_turn();
         let Some(active) = turn.as_mut() else {
-            return;
+            return false;
         };
         let Some(request) = active
             .awaiting
             .take_if(|request| request.request_id == request_id)
         else {
-            return;
+            return false;
         };
         let turn_id = active.turn_id;
         match request.respond(response) {
@@ -193,8 +196,12 @@ impl Shared {
                     AppPhase::Running { turn_id },
                 );
                 self.emit_resolved(request_id);
+                true
             }
-            Err(request) => active.awaiting = Some(request),
+            Err(request) => {
+                active.awaiting = Some(request);
+                false
+            }
         }
     }
 
@@ -205,7 +212,7 @@ impl Shared {
 
     pub(crate) fn set_mode(&self, mode: AgentMode) {
         self.selection.set_mode(mode);
-        self.state.send_modify(|state| state.mode = mode);
+        self.state.send_modify(|state| state.levels.mode = mode);
     }
 
     pub(crate) fn stop_subagent(&self, id: AgentId) {
@@ -240,7 +247,8 @@ impl Shared {
         }
         *revision = current;
         let snapshot = Arc::new(self.subagents.snapshot());
-        self.state.send_modify(|state| state.subagents = snapshot);
+        self.state
+            .send_modify(|state| state.levels.subagents = snapshot);
     }
 }
 
@@ -262,7 +270,7 @@ impl RequestSink for Shared {
         if let Some(request_id) = replaced {
             self.emit_resolved(request_id);
         }
-        let agent_id = self.state.borrow().agent_id;
+        let agent_id = self.state.borrow().levels.agent_id;
         self.events.emit_agent(agent_id, turn_id, event);
         true
     }
@@ -300,15 +308,17 @@ mod tests {
     use super::*;
     use std::sync::PoisonError;
 
-    use crate::core::event::{AppEvent, AppEventKind};
-    use crate::core::state::SessionState;
+    use oven_proto::SessionState;
+    use oven_proto::{AppEvent, AppEventKind};
+
+    use crate::core::state::app_state;
     use oven_agent::{Agent, AnswerResponse, ApprovalDecision, LoopLimitDecision};
     use oven_llm::Router;
     use tokio::sync::{mpsc, oneshot};
 
     fn shared() -> Shared {
         let agent = Agent::new(Router::new(), Vec::new());
-        let state = AppState::from_agent(
+        let state = app_state(
             &agent,
             Default::default(),
             Vec::new(),
@@ -327,7 +337,7 @@ mod tests {
     }
 
     fn phase(shared: &Shared) -> AppPhase {
-        shared.state.borrow().phase.clone()
+        shared.state.borrow().levels.phase.clone()
     }
 
     fn subscribe(shared: &Shared) -> mpsc::UnboundedReceiver<AppEvent> {

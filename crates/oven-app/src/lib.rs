@@ -11,6 +11,9 @@
 //!
 //! One edge moves the other way: the runtime also assembles the `App`
 //! handle the facade hands out.
+//!
+//! Below all of them sits `oven-proto`: the events, state and commands a
+//! frontend shares with the runtime. This crate speaks it; it does not own it.
 
 mod api;
 mod capabilities;
@@ -25,21 +28,18 @@ pub use capabilities::tools::ToolRegistry;
 pub use capabilities::view::present_tool;
 pub use core::config::McpServerConfig;
 pub use core::error::AppError;
-pub use core::event::{
-    AppEvent, AppEventKind, AppId, COMPACTION_CANCELLED, CompactionEvent, ShellEvent, SubagentEvent,
-};
-pub use core::input::Input;
 pub use core::mention::FileMentions;
 pub use core::provider::{provider_catalog, provider_models, verify};
 pub use core::session;
-pub use core::state::{AppPhase, AppState, HistoryChangeReason, SessionState};
 pub use core::{complete, config};
-pub use oven_agent::{
-    AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AnswerTool,
-    ApprovalDecision, CallOutcome, CancellationToken, LoopLimitDecision, NOTICE_MARK, NodeInfo,
-    NodeStatus, Question, QuestionOption, RoleSpec, Skill, SkillRegistry, StepStop, StreamEvent,
-    TodoItem, TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
-    UserRequestId, UserResponse,
+pub use oven_agent::{AnswerTool, CancellationToken, NOTICE_MARK, RoleSpec, Skill, SkillRegistry};
+pub use oven_proto::{
+    AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AppEvent, AppEventKind,
+    AppId, AppLevels, AppPhase, AppState, ApprovalDecision, COMPACTION_CANCELLED, CallOutcome,
+    Command, CommandResult, CompactionEvent, HistoryChangeReason, Input, LoopLimitDecision,
+    NodeInfo, NodeStatus, ProviderView, Question, QuestionOption, SessionState, ShellEvent,
+    StepStop, StreamEvent, SubagentEvent, TodoItem, TodoList, TodoStatus, ToolCallId, ToolEvent,
+    ToolResult, ToolView, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
 pub use platform::shell::{LocalShell, ShellInput, display_shell_line};
 pub use platform::{dirs, log};

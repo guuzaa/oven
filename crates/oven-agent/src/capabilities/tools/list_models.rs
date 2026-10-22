@@ -9,9 +9,9 @@ use oven_llm::ModelInfo;
 use serde_json::{Value, json};
 
 use crate::capabilities::tools::{Tool, ToolOutcome};
-use crate::core::error::AgentError;
 use crate::core::models::ModelCatalog;
 use crate::core::turn::TurnContext;
+use oven_proto::AgentError;
 
 const NO_MODELS: &str = "no models are available; configure a provider with /setup";
 const UNKNOWN: &str = "unknown";

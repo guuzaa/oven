@@ -8,8 +8,8 @@ use reqwest::{Client, StatusCode, Url};
 use serde_json::{Value, json};
 
 use super::{Tool, ToolOutcome, ToolView, labeled, require_str};
-use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
+use oven_proto::AgentError;
 
 const SCHEME_HTTP: &str = "http";
 const SCHEME_HTTPS: &str = "https";

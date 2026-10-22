@@ -2227,6 +2227,7 @@ dependencies = [
  "mockall",
  "oven-host",
  "oven-llm",
+ "oven-proto",
  "regex",
  "reqwest 0.12.28",
  "serde",
@@ -2255,6 +2256,7 @@ dependencies = [
  "oven-host",
  "oven-llm",
  "oven-mem",
+ "oven-proto",
  "rmcp",
  "serde",
  "serde_json",
@@ -2313,6 +2315,15 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "oven-proto"
+version = "0.1.1"
+dependencies = [
+ "oven-llm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

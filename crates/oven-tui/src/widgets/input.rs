@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use oven_app::AgentMode;
-use oven_app::AppState;
+use oven_app::AppLevels;
 use oven_app::FileMentions;
-use oven_app::config::ProviderConfig;
+use oven_app::ProviderView;
 use ratatui::Frame;
 use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
@@ -49,7 +49,7 @@ pub struct InputView {
 }
 
 impl InputView {
-    pub fn new(commands: Vec<(String, String)>, provider: ProviderConfig) -> Self {
+    pub fn new(commands: Vec<(String, String)>, provider: ProviderView) -> Self {
         Self {
             textarea: new_textarea(),
             slash_command: SlashCommandPopup::new(commands),
@@ -68,10 +68,10 @@ impl InputView {
     }
 
     /// Follows the providers and models the app reports.
-    pub fn sync(&mut self, state: &AppState) {
-        self.model_picker.update_models(&state.models);
-        self.setup.set_current(&state.provider);
-        self.setup.set_configured(&state.configured_providers);
+    pub fn sync(&mut self, levels: &AppLevels) {
+        self.model_picker.update_models(&levels.models);
+        self.setup.set_current(&levels.provider);
+        self.setup.set_configured(&levels.configured_providers);
     }
 
     #[cfg(test)]
@@ -576,7 +576,7 @@ fn new_textarea() -> TextArea<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::component::idle_state;
+    use crate::core::component::idle_levels;
     use crossterm::event::KeyCode;
 
     fn commands() -> Vec<(String, String)> {
@@ -597,7 +597,7 @@ mod tests {
     }
 
     fn view() -> InputView {
-        let mut view = InputView::new(commands(), ProviderConfig::default());
+        let mut view = InputView::new(commands(), ProviderView::default());
         view.model_picker.update_models(&models());
         view
     }
@@ -961,10 +961,10 @@ mod tests {
 
     #[test]
     fn update_models_refreshes_picker() {
-        let mut view = InputView::new(commands(), ProviderConfig::default());
-        view.sync(&AppState {
+        let mut view = InputView::new(commands(), ProviderView::default());
+        view.sync(&AppLevels {
             models: vec![("kimi-k2".into(), "Moonshot".into())],
-            ..idle_state()
+            ..idle_levels()
         });
         type_text(&mut view, "/model");
         view.handle_key(key(KeyCode::Enter), &State::new());
@@ -1006,7 +1006,7 @@ mod tests {
     fn syncing_state_does_not_touch_the_draft() {
         let mut view = view();
         type_text(&mut view, "draft");
-        view.sync(&idle_state());
+        view.sync(&idle_levels());
         assert_eq!(view.textarea.lines()[0], "draft");
     }
 

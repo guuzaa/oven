@@ -14,15 +14,15 @@ use serde_json::Value;
 use super::Agent;
 use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
 use crate::capabilities::tools::{TodoWriteTool, Tool, ToolOutcome, present_tool};
-use crate::core::error::{AgentError, MAX_ITERS_EXCEEDED};
-use crate::core::event::{AgentEvent, CallOutcome, ToolEvent, ToolResult, TurnEvent};
-use crate::core::identity::ToolCallId;
-use crate::core::interaction::{ApprovalDecision, LoopLimitDecision};
-use crate::core::mode::{AgentMode, ToolAccess};
-use crate::core::sink::EventSink;
 use crate::core::subagent::notice_message;
-use crate::core::todo::TodoList;
 use crate::core::turn::{PendingInput, Step, StepCall, TurnContext, TurnOutput};
+use oven_proto::EventSink;
+use oven_proto::TodoList;
+use oven_proto::ToolCallId;
+use oven_proto::{AgentError, MAX_ITERS_EXCEEDED};
+use oven_proto::{AgentEvent, CallOutcome, ToolEvent, ToolResult, TurnEvent};
+use oven_proto::{AgentMode, ToolAccess};
+use oven_proto::{ApprovalDecision, LoopLimitDecision};
 
 /// Prefix of the tool error returned when a call's arguments are not JSON.
 pub(super) const INVALID_JSON_ARGUMENTS: &str = "invalid JSON arguments";

@@ -11,14 +11,15 @@ use std::sync::Arc;
 use oven_llm::{Client, Message, ModelId, ReasoningEffort, Router, RouterHandle};
 
 use crate::capabilities::tools::Tool;
-use crate::core::event::AgentEvent;
-use crate::core::history::{History, Record};
-use crate::core::identity::AgentId;
-use crate::core::mode::AgentMode;
+use crate::core::history::History;
 use crate::core::prompt_template::PLAN_REMINDER_AFTER_MISSES;
 use crate::core::selection::Selection;
-use crate::core::sink::EventSink;
-use crate::core::todo::TodoList;
+use oven_proto::AgentEvent;
+use oven_proto::AgentId;
+use oven_proto::AgentMode;
+use oven_proto::EventSink;
+use oven_proto::Record;
+use oven_proto::TodoList;
 
 mod notify;
 mod request;

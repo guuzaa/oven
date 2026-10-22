@@ -11,8 +11,8 @@ use oven_llm::{
 use crate::AppBuilder;
 use crate::capabilities::mcp::{McpRegistry, client::*};
 use crate::core::config::AppConfig;
-use crate::core::event::AppId;
 use crate::runtime::spawn_runtime;
+use oven_proto::AppId;
 
 #[test]
 fn tool_name_sanitizes_server_id() {

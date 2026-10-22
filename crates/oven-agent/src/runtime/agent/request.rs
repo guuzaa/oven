@@ -13,11 +13,11 @@ use oven_host::as_ms;
 
 use super::Agent;
 use super::notify::{ThinkingSpan, thinking_span};
-use crate::core::error::AgentError;
-use crate::core::event::{AgentEvent, StreamEvent};
-use crate::core::mode::{AgentMode, ToolAccess};
 use crate::core::prompt_template;
-use crate::core::sink::EventSink;
+use oven_proto::AgentError;
+use oven_proto::EventSink;
+use oven_proto::{AgentEvent, StreamEvent};
+use oven_proto::{AgentMode, ToolAccess};
 
 /// Some models write a tool call as text instead of a structured call. The
 /// markup is not prose, so the transcript drops it; the call itself still

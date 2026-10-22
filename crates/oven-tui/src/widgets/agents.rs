@@ -198,7 +198,10 @@ fn line_text(agent: &NodeInfo) -> String {
 }
 
 fn elapsed(agent: &NodeInfo) -> String {
-    format!("{:.1}s", agent.elapsed_ms() as f64 / 1000.0)
+    format!(
+        "{:.1}s",
+        agent.elapsed_ms(oven_host::now_ms()) as f64 / 1000.0
+    )
 }
 
 /// A running subagent fixture. `started_at` is now, so a drawn elapsed time

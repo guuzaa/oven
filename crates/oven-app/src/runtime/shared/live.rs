@@ -10,9 +10,11 @@ use tokio::sync::watch;
 
 use crate::commands::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
-use crate::core::event::{AppEventKind, EventBus, SubagentEvent};
-use crate::core::input::Input;
-use crate::core::state::{AppState, context_window_of};
+use crate::core::event::EventBus;
+use crate::core::state::context_window_of;
+use oven_proto::AppState;
+use oven_proto::Input;
+use oven_proto::{AppEventKind, SubagentEvent};
 
 use super::Shared;
 
@@ -26,7 +28,7 @@ impl Shared {
     }
 
     pub(crate) fn is_busy(&self) -> bool {
-        self.state.borrow().phase.is_active()
+        self.state.borrow().levels.phase.is_active()
     }
 
     fn router_snapshot(&self) -> Arc<Client> {
@@ -111,8 +113,8 @@ impl Shared {
             outcome.reasoning_effort,
         );
         self.state.send_modify(|state| {
-            state.model.clone_from(&outcome.model);
-            state.reasoning_effort = outcome.reasoning_effort;
+            state.levels.model.clone_from(&outcome.model);
+            state.levels.reasoning_effort = outcome.reasoning_effort;
         });
         set_context_window(&self.state, context_window_of(&router, &outcome.model));
         let saved = save_provider_overlay(
@@ -149,8 +151,8 @@ struct ModelSwitchOutcome {
 /// frontend already holding the window learns nothing from a repeat.
 pub(crate) fn set_context_window(state_tx: &watch::Sender<AppState>, window: Option<u32>) {
     state_tx.send_if_modified(|state| {
-        let moved = state.context_window != window;
-        state.context_window = window;
+        let moved = state.levels.context_window != window;
+        state.levels.context_window = window;
         moved
     });
 }

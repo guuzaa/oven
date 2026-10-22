@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
 use crate::core::error::AppError;
-use crate::core::input::Input;
+use oven_proto::Input;
 
 /// The queue of inputs waiting for the conversation driver, which handles
 /// them one at a time. It counts the prompts nobody has taken yet, so a
@@ -21,6 +21,7 @@ pub(crate) fn channel() -> (InboxSender, InboxReceiver) {
     )
 }
 
+#[derive(Clone)]
 pub(crate) struct InboxSender {
     tx: mpsc::UnboundedSender<Input>,
     queued: Arc<AtomicUsize>,

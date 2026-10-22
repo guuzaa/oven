@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use super::{Tool, ToolOutcome, ToolView, labeled, require_str, resolve_within};
 
-use crate::core::error::AgentError;
 use crate::core::turn::TurnContext;
+use oven_proto::AgentError;
 
 pub struct FileReadTool {
     root: PathBuf,

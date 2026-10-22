@@ -91,7 +91,10 @@ fn list(subagents: &[NodeInfo]) -> String {
 }
 
 fn elapsed(info: &NodeInfo) -> String {
-    format!("{:.1}s", info.elapsed_ms() as f64 / 1000.0)
+    format!(
+        "{:.1}s",
+        info.elapsed_ms(oven_host::now_ms()) as f64 / 1000.0
+    )
 }
 
 #[cfg(test)]

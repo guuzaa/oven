@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use oven_app::ProviderView;
 use oven_app::complete;
 use oven_app::config::ProviderConfig;
 use oven_llm::canonical_vendor;
@@ -45,7 +46,7 @@ enum Stage {
 }
 
 pub(crate) struct SetupWizard {
-    current: ProviderConfig,
+    current: ProviderView,
     configured: Vec<String>,
     draft: ProviderConfig,
     stage: Stage,
@@ -55,11 +56,11 @@ pub(crate) struct SetupWizard {
 }
 
 impl SetupWizard {
-    pub(crate) fn new(current: ProviderConfig) -> Self {
+    pub(crate) fn new(current: ProviderView) -> Self {
         Self::with_configured(current, Vec::new())
     }
 
-    pub(crate) fn with_configured(current: ProviderConfig, configured: Vec<String>) -> Self {
+    pub(crate) fn with_configured(current: ProviderView, configured: Vec<String>) -> Self {
         Self {
             current,
             configured,
@@ -75,7 +76,7 @@ impl SetupWizard {
         self.open
     }
 
-    pub(crate) fn set_current(&mut self, current: &ProviderConfig) {
+    pub(crate) fn set_current(&mut self, current: &ProviderView) {
         self.current.clone_from(current);
     }
 
@@ -399,7 +400,7 @@ fn nonempty(value: &str) -> Option<String> {
     }
 }
 
-fn preselect_name(current: &ProviderConfig) -> usize {
+fn preselect_name(current: &ProviderView) -> usize {
     let Some(slug) = current
         .name
         .as_deref()
@@ -437,14 +438,14 @@ mod tests {
     }
 
     fn open() -> SetupWizard {
-        let mut w = SetupWizard::new(ProviderConfig::default());
+        let mut w = SetupWizard::new(ProviderView::default());
         w.open();
         w
     }
 
     #[test]
     fn enter_on_deepseek_composes_command_without_kind() {
-        let mut w = SetupWizard::new(ProviderConfig {
+        let mut w = SetupWizard::new(ProviderView {
             name: Some("deepseek".into()),
             ..Default::default()
         });
@@ -468,7 +469,7 @@ mod tests {
 
     #[test]
     fn keep_current_with_empty_key_closes() {
-        let mut w = SetupWizard::new(ProviderConfig {
+        let mut w = SetupWizard::new(ProviderView {
             name: Some("openai".into()),
             model: Some("openai/gpt-4o".into()),
             ..Default::default()
@@ -487,7 +488,7 @@ mod tests {
 
     #[test]
     fn keep_current_only_sends_api_key() {
-        let mut w = SetupWizard::new(ProviderConfig {
+        let mut w = SetupWizard::new(ProviderView {
             name: Some("openai".into()),
             ..Default::default()
         });
@@ -510,7 +511,7 @@ mod tests {
     #[test]
     fn switching_to_configured_provider_keeps_saved_key() {
         let mut w = SetupWizard::with_configured(
-            ProviderConfig {
+            ProviderView {
                 name: Some("deepseek".into()),
                 ..Default::default()
             },
@@ -530,9 +531,9 @@ mod tests {
 
     #[test]
     fn switching_provider_requires_api_key() {
-        let mut w = SetupWizard::new(ProviderConfig {
+        let mut w = SetupWizard::new(ProviderView {
             name: Some("deepseek".into()),
-            api_key: Some("sk-old".into()),
+            has_api_key: true,
             ..Default::default()
         });
         w.open();
@@ -558,7 +559,7 @@ mod tests {
 
     #[test]
     fn grok_writes_canonical_xai() {
-        let mut w = SetupWizard::new(ProviderConfig {
+        let mut w = SetupWizard::new(ProviderView {
             name: Some("grok".into()),
             ..Default::default()
         });

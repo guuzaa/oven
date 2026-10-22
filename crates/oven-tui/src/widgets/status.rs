@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
 use oven_app::{
-    AgentEvent, AgentMode, AppEvent, AppEventKind, AppState, CompactionEvent, TurnEvent,
+    AgentEvent, AgentMode, AppEvent, AppEventKind, AppLevels, CompactionEvent, TurnEvent,
 };
 use oven_llm::{ReasoningEffort, Usage};
 use ratatui::Frame;
@@ -76,13 +76,13 @@ impl StatusBar {
     /// Follows the app's state. The usage readout is only taken between
     /// turns: while one runs it reports its own usage as it goes, and the
     /// snapshot lags behind until the turn ends.
-    pub fn sync(&mut self, state: &AppState) {
-        self.model.clone_from(&state.model);
-        self.effort = state.reasoning_effort;
-        self.context_window = state.context_window;
-        if state.phase.is_idle() {
-            self.usage = state.last_turn_usage;
-            self.context_tokens = state.context_tokens;
+    pub fn sync(&mut self, levels: &AppLevels) {
+        self.model.clone_from(&levels.model);
+        self.effort = levels.reasoning_effort;
+        self.context_window = levels.context_window;
+        if levels.phase.is_idle() {
+            self.usage = levels.last_turn_usage;
+            self.context_tokens = levels.context_tokens;
         }
     }
 
@@ -363,7 +363,7 @@ mod tests {
     use ratatui::style::Color;
 
     use super::*;
-    use crate::core::component::idle_state;
+    use crate::core::component::idle_levels;
 
     const MODEL: &str = "deepseek-chat";
     const ROOT: &str = "rust/oven";
@@ -388,7 +388,7 @@ mod tests {
     }
 
     fn agent_event(event: AgentEvent) -> AppEvent {
-        AppEvent::agent(event)
+        crate::core::component::app_event(event)
     }
 
     fn row(width: u16, bar: &StatusBar, state: &State) -> String {
@@ -495,9 +495,9 @@ mod tests {
         let mut bar = bar();
         assert_eq!(bar.model_label(), format!("{MODEL} high"));
 
-        bar.sync(&AppState {
+        bar.sync(&AppLevels {
             model: "mini".into(),
-            ..idle_state()
+            ..idle_levels()
         });
         assert_eq!(bar.model_label(), "mini");
     }
@@ -518,9 +518,9 @@ mod tests {
             cache_read_tokens: 0,
             reasoning_tokens: 0,
         };
-        bar.sync(&AppState {
+        bar.sync(&AppLevels {
             last_turn_usage: rewound,
-            ..idle_state()
+            ..idle_levels()
         });
         assert_eq!(bar.usage, rewound);
     }
@@ -529,12 +529,12 @@ mod tests {
     fn a_running_turn_keeps_reporting_its_own_usage() {
         let mut bar = bar();
         bar.usage = usage();
-        bar.sync(&AppState {
+        bar.sync(&AppLevels {
             phase: AppPhase::Running {
                 turn_id: TurnId::next(),
             },
             last_turn_usage: Usage::default(),
-            ..idle_state()
+            ..idle_levels()
         });
         assert_eq!(bar.usage, usage());
     }
@@ -549,10 +549,10 @@ mod tests {
             "the response's input and its own output are the context (1256 of 100k)"
         );
 
-        bar.sync(&AppState {
+        bar.sync(&AppLevels {
             context_window: Some(1_989),
             context_tokens: 1_989,
-            ..idle_state()
+            ..idle_levels()
         });
         assert_eq!(
             bar.context_label().as_deref(),
@@ -575,7 +575,7 @@ mod tests {
     fn syncing_state_keeps_the_reply() {
         let mut bar = bar();
         bar.on_event(&AppEvent::notification("Copied!"));
-        bar.sync(&idle_state());
+        bar.sync(&idle_levels());
         assert!(bar.has_reply());
     }
 

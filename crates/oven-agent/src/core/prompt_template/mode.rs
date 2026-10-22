@@ -1,4 +1,4 @@
-use crate::core::mode::AgentMode;
+use oven_proto::AgentMode;
 
 pub const PLAN_MODE_PROMPT: &str = include_str!("plan.md");
 pub const ASK_MODE_PROMPT: &str = include_str!("ask.md");

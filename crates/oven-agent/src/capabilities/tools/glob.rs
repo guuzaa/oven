@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 use crate::core::turn::TurnContext;
 
 use super::{Tool, ToolOutcome, ToolView, parse_limit, require_str, resolve_within};
-use crate::core::error::AgentError;
 use crate::core::matching::compile_glob;
 use oven_host::walk_dir_stream;
+use oven_proto::AgentError;
 
 pub struct GlobTool {
     root: PathBuf,

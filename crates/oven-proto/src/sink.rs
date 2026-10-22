@@ -1,5 +1,10 @@
-use crate::core::event::AgentEvent;
+//! Where a turn reports what it did.
 
+use crate::AgentEvent;
+
+/// Where an agent puts what it did. The driver owns the sink for the length
+/// of a turn; a frontend that also wants the events subscribes to the app
+/// runtime's bus instead.
 pub trait EventSink {
     fn emit(&mut self, event: AgentEvent);
 }

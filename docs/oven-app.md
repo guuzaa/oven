@@ -34,10 +34,9 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 | File | Role |
 | --- | --- |
 | `src/lib.rs` | re-exports the public surface. |
-| `src/api/app.rs` | the `App` handle: `submit`, control methods, event subscriptions, state accessors. |
+| `src/api/app.rs` | the `App` handle: `apply(Command)`, control methods, event subscriptions, state accessors. |
 | `src/api/input.rs` | classifies submitted text into an `Input`. |
 | `src/api/builder.rs` | service composition: config → tools, MCP servers, skills, memory, agent. |
-| `src/core/input.rs` | `Input`: what the user submitted. |
 | `src/runtime/mod.rs` | the runtime actor — input loop, dispatch, persistence. |
 | `src/runtime/turn.rs` | what happens while a turn or a `!` command runs. |
 | `src/runtime/shared.rs` | what `App` and the runtime both reach: state, events, the running turn, its pending request, the router, config, shutdown. |
@@ -51,6 +50,8 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 | `src/capabilities/view.rs` | how a tool call renders when only its name and input survive. |
 | `src/core/config.rs` | the merged `AppConfig` and its file format. |
 | `src/core/session.rs` | JSONL persistence and the recent-session index. |
+| `src/core/event.rs` | the bus every event a frontend can see travels on. |
+| `src/core/state.rs` | the rule that reads the published state off the agent and the router. |
 | `src/core/provider.rs` | routers, clients and the credential-free listings. |
 | `src/core/complete.rs` | the one prefix rule every completion list shares. |
 | `src/memory.rs` | the memory operations `/memory` and `oven mem` share. |
@@ -80,7 +81,7 @@ Control that never needs the driver is a method on `App`, not an input:
 `cancel(turn_id)`, `set_mode`, `respond`, `stop_subagent`, `stop_subagents`,
 `rewind`. Reading the published state is either a snapshot (`state()`) or a
 `watch::Receiver` (`watch_state()`), plus the common projections — `model`,
-`provider_config`, `configured_providers`, `agent_id`, `subagents`, `todos`,
+`provider_view`, `configured_providers`, `agent_id`, `subagents`, `todos`,
 `last_turn_usage`, `session_id`, `history_timed_shared`, `slash_commands`.
 
 `App::shutdown` cancels the running turn and returns how many queued prompts
@@ -189,7 +190,9 @@ turn. The phase returns to `Idle` when the driver is free, and stays
 
 `core/state.rs` mirrors the agent into a cloneable `AppState` published on a
 `watch` channel, so a frontend renders progress by diffing one small struct
-instead of buffering the whole history itself:
+instead of buffering the whole history itself. The state is split in two:
+`AppState::levels` holds everything but the conversation, and the
+conversation itself sits beside it:
 
 ```rust
 pub enum AppPhase {
@@ -213,10 +216,18 @@ out as `HistoryChanged { reason }` (`Rewound`, `Cleared`, `Compacted`,
 `External`): a view rebuilds itself from the state and tells a rewind from a
 `/clear`.
 
-`AppState` also carries the conversation itself: `history` as `Arc<Message>`
-handles with the parallel `history_timestamps` and `history_thinking_ms`, so
-publishing state costs refcounts rather than a copy of every turn. It names the
-driver (`agent_id`) so an event can be routed to the transcript it belongs to.
+The levels are small and change constantly, so a transport can forward them
+on every change; the conversation changes when the talk does, and a frontend
+reads it once — when it connects — rather than on every update. It is held as
+`Arc<Message>` handles with the parallel `history_timestamps` and
+`history_thinking_ms`, so publishing state costs refcounts rather than a copy
+of every turn. The levels name the driver (`agent_id`) so an event can be
+routed to the transcript it belongs to.
+
+The levels' `provider` is a `ProviderView`, not the app's `ProviderConfig`:
+the API key stays in this layer, and a frontend is told only whether a
+credential is configured. `App::provider_view` hands out that same view; the
+configuration that carries the key never leaves the app layer.
 
 `context_tokens` is the input of the last response (cache reads included) plus the
 output it added to the history, and `context_window` comes from the router's model

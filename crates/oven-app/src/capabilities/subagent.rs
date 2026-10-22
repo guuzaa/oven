@@ -232,7 +232,10 @@ impl Subagents {
             entry.report = Some(report);
             // A foreground subagent is being awaited by the `task` call that
             // spawned it, whose result says all of this already.
-            let notice = entry.info.background.then(|| entry.info.notice());
+            let notice = entry
+                .info
+                .background
+                .then(|| entry.info.notice(oven_host::now_ms()));
             registry.revision += 1;
             registry.prune();
             notice

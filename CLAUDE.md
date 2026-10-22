@@ -32,6 +32,7 @@
 - `cargo fmt` to format code style
 
 # Architectures
+- `oven-proto`: protocol vocabulary; events, state, commands
 - `oven-agent`: agent loop and tools
 - `oven-host`: host system interaction infrastructure
 - `oven-mem`: durable memory; files, index, catalog

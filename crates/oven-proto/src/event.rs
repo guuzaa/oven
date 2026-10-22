@@ -1,19 +1,22 @@
+//! What happened while a turn ran.
+//!
+//! Every event names the agent and the turn it belongs to, so a frontend
+//! can route it to the conversation it belongs to and ignore the rest.
+
 use oven_llm::Usage;
+use serde::{Deserialize, Serialize};
 
-use crate::core::error::AgentError;
-use crate::core::identity::{AgentId, ToolCallId, TurnId};
-use crate::core::interaction::{Question, UserRequestId};
-use crate::core::todo::TodoList;
-use crate::core::view::ToolView;
+use crate::{AgentError, AgentId, Question, TodoList, ToolCallId, ToolView, TurnId, UserRequestId};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentEventEnvelope {
     pub agent_id: AgentId,
     pub turn_id: TurnId,
     pub event: AgentEvent,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum AgentEvent {
     Turn(TurnEvent),
     Stream(StreamEvent),
@@ -22,7 +25,8 @@ pub enum AgentEvent {
     Usage { usage: Usage },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TurnEvent {
     Started,
     /// A provider round trip begins. `index` counts from 1 within the turn,
@@ -63,7 +67,8 @@ pub enum TurnEvent {
 }
 
 /// Why a step ended, which is also what the loop does next.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StepStop {
     /// The assistant asked for tools; the loop runs them and continues.
     ToolUse,
@@ -71,7 +76,8 @@ pub enum StepStop {
     FinalAnswer,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamEvent {
     TextDelta {
         text: String,
@@ -89,7 +95,8 @@ pub enum StreamEvent {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolEvent {
     ApprovalRequested {
         request_id: UserRequestId,
@@ -122,7 +129,8 @@ pub enum ToolEvent {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolOutputStream {
     Stdout,
     Stderr,
@@ -130,7 +138,8 @@ pub enum ToolOutputStream {
 
 /// How a tool call ended, without its output: the output is the tool-result
 /// message the step appended to the history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallOutcome {
     Success,
     Failed,
@@ -138,7 +147,8 @@ pub enum CallOutcome {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolResult {
     Success {
         output: String,
@@ -179,5 +189,35 @@ impl ToolResult {
             Self::Rejected { reason } => reason,
             Self::Cancelled => "",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tool_event_survives_the_wire() {
+        let event = AgentEvent::Tool(ToolEvent::Started {
+            call_id: ToolCallId(7),
+            name: "read".into(),
+            view: ToolView::named("Read src/lib.rs"),
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentEvent>(&json).unwrap(),
+            event,
+            "the wire form must round-trip"
+        );
+    }
+
+    #[test]
+    fn a_turn_event_survives_the_wire() {
+        let event = AgentEvent::Turn(TurnEvent::StepFinished {
+            index: 2,
+            stop: StepStop::ToolUse,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), event);
     }
 }
