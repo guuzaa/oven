@@ -403,28 +403,35 @@ impl Transcript {
 
     fn prompt_row_at(&self, column: u16, row: u16) -> Option<usize> {
         let line = self.pos_at(column, row).line;
+        self.prompt_row_containing(line)
+    }
+
+    /// The prompt row whose wrapped lines hold `line`.
+    fn prompt_row_containing(&self, line: usize) -> Option<usize> {
         self.rows.iter().enumerate().find_map(|(idx, row)| {
             if !row.kind.is_prompt() {
                 return None;
             }
-            let (start, end) = self.row_span(idx);
+            let (start, end) = self.row_span(idx)?;
             (start <= line && line < end).then_some(idx)
         })
     }
 
-    fn row_span(&self, idx: usize) -> (usize, usize) {
-        let start = self.row_offsets[idx];
+    /// The wrapped lines of one row, from its first line to the start of the
+    /// next one.
+    fn row_span(&self, idx: usize) -> Option<(usize, usize)> {
+        let start = *self.row_offsets.get(idx)?;
         let end = self
             .row_offsets
             .get(idx + 1)
             .copied()
             .unwrap_or(self.wrapped.len());
-        (start, end)
+        Some((start, end))
     }
 
     /// Body lines of a framed prompt, excluding its borders and any leading blank.
     fn prompt_body_span(&self, idx: usize) -> Option<(usize, usize)> {
-        let (start, end) = self.row_span(idx);
+        let (start, end) = self.row_span(idx)?;
         let frame_start = (start..end).find(|&line| {
             self.wrapped
                 .get(line)
@@ -457,17 +464,9 @@ impl Transcript {
 
     fn sticky_wrapped_line(&self, start: usize, sticky_height: u16, rel_y: usize) -> usize {
         let end = self
-            .rows
-            .iter()
-            .enumerate()
-            .find_map(|(idx, row)| {
-                if !row.kind.is_prompt() {
-                    return None;
-                }
-                let (row_start, row_end) = self.row_span(idx);
-                (row_start <= start && start < row_end).then_some(row_end)
-            })
-            .unwrap_or(start);
+            .prompt_row_containing(start)
+            .and_then(|idx| self.row_span(idx))
+            .map_or(start, |(_, end)| end);
         let frame_len = end.saturating_sub(start).max(1);
         start + sticky_row_index(frame_len, usize::from(sticky_height), rel_y)
     }
@@ -790,12 +789,9 @@ impl Transcript {
     /// single row — a retitled burst, a thinking delta — pays for that row
     /// instead of the whole conversation.
     fn rewrap_row(&mut self, idx: usize) {
-        let start = self.row_offsets[idx];
-        let end = self
-            .row_offsets
-            .get(idx + 1)
-            .copied()
-            .unwrap_or(self.wrapped.len());
+        let Some((start, end)) = self.row_span(idx) else {
+            return;
+        };
         let mut lines = Vec::new();
         let mut copies = Vec::new();
         let (mut headers, body) = match self.width() {
@@ -1080,32 +1076,14 @@ impl Transcript {
     /// Raw wrapped span of a prompt, including its frame, so scrolling can
     /// step over the whole header.
     fn prompt_bounds_containing(&self, line: usize) -> Option<(usize, usize)> {
-        for (idx, row) in self.rows.iter().enumerate() {
-            if !row.kind.is_prompt() {
-                continue;
-            }
-            let start = *self.row_offsets.get(idx)?;
-            let end = self
-                .row_offsets
-                .get(idx + 1)
-                .copied()
-                .unwrap_or(self.wrapped.len());
-            if start <= line && line < end {
-                return Some((start, end));
-            }
-        }
-        None
+        self.prompt_row_containing(line)
+            .and_then(|idx| self.row_span(idx))
     }
 
     /// Wrapped-line range of one row, from its first non-empty line to the
     /// start of the next row.
     fn row_wrapped_range(&self, row: usize) -> Option<(usize, usize)> {
-        let start = *self.row_offsets.get(row)?;
-        let end = self
-            .row_offsets
-            .get(row + 1)
-            .copied()
-            .unwrap_or(self.wrapped.len());
+        let (start, end) = self.row_span(row)?;
         if start >= end {
             return None;
         }
