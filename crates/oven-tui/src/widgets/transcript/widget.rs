@@ -34,6 +34,10 @@ const MOUSE_SCROLL_STEP: u16 = 3;
 const PROMPT_WHEEL_STEP: isize = 1;
 pub(super) const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
+/// The caret blinks on every other tick of that length.
+const CARET_BLINK: u64 = 2;
+/// How often the viewport is laid out before it is taken to be settled.
+const LAYOUT_PASSES: usize = 2;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 pub(super) use super::wrap::MAX_STICKY_PROMPT_ROWS;
 const NO_OUTPUT: &str = "(no output)";
@@ -1017,7 +1021,7 @@ impl Transcript {
             return (None, 0);
         }
         let mut prompt = None;
-        for _ in 0..2 {
+        for _ in 0..LAYOUT_PASSES {
             let next = self.prompt_for_focus(self.top, total);
             let before = self.top;
             self.clamp_top(total, Self::content_rows(area_height, next));
@@ -1160,21 +1164,21 @@ impl Transcript {
     /// Settles the live thinking row on the label, for reasoning the agent
     /// never reported a span for (a cancelled or interrupted window).
     fn stop_live_thinking(&mut self) {
-        self.retire_thinking(THOUGHT_LABEL.to_string());
+        self.retire_thinking(THOUGHT_LABEL);
     }
 
     /// The agent owns the thinking clock; the transcript only renders the
     /// duration it reports. Reporting retires the row so nothing settles it
     /// back onto the bare label.
     fn report_thinking_done(&mut self, duration_ms: u64) {
-        self.retire_thinking(format_thought(Some(duration_ms)));
+        self.retire_thinking(&format_thought(Some(duration_ms)));
     }
 
     /// Settles the live thought on the label it is given: a thought beside
     /// calls folds into its own header, while a thought on its own keeps its
     /// body until the row is sealed.
-    fn retire_thinking(&mut self, title: String) {
-        if !self.activity.retire_thinking(&title) {
+    fn retire_thinking(&mut self, title: &str) {
+        if !self.activity.retire_thinking(title) {
             return;
         }
         self.sync_activity();
@@ -1520,7 +1524,10 @@ impl Transcript {
         {
             *line = apply_hover(line, self.width());
         }
-        if self.is_live_text() && end == total && (state.frame / CARET_FRAMES).is_multiple_of(2) {
+        if self.is_live_text()
+            && end == total
+            && (state.frame / CARET_FRAMES).is_multiple_of(CARET_BLINK)
+        {
             place_stream_caret(
                 &mut visible,
                 self.width(),
