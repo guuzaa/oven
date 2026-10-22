@@ -10,7 +10,7 @@ use oven_app::{AppError, provider_catalog, provider_models, verify};
 use oven_llm::{ModelInfo, ProviderKind, ReasoningEffort, canonical_vendor};
 
 use super::Context;
-use crate::commands::prompt::{Prompter, Stdin, choose, required_text};
+use crate::commands::prompt::{PromptError, Prompter, Stdin, choose, required_text};
 
 /// How long the endpoint's model list and the verification request may take.
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -322,13 +322,20 @@ fn resolve_key(
         "api_key (empty uses OVEN_API_KEY)"
     };
     match p.secret(prompt) {
-        Some(entered) if !entered.trim().is_empty() => Ok(Some(check_key(&entered))),
-        Some(_) => Ok(saved.map(str::to_string)),
-        None if saved.is_some() => Ok(saved.map(str::to_string)),
-        None if preset && running.effective_api_key().is_empty() => Err(AppError::Runtime(
-            "--api-key is required for a preset vendor (or --api-key-env)".into(),
-        )),
-        None => Ok(None),
+        Ok(Some(entered)) if !entered.trim().is_empty() => Ok(Some(check_key(&entered))),
+        Ok(_) => Ok(saved.map(str::to_string)),
+        Err(PromptError::Cancelled) => Err(AppError::Runtime("cancelled".into())),
+        Err(_) => {
+            if saved.is_some() {
+                Ok(saved.map(str::to_string))
+            } else if preset && running.effective_api_key().is_empty() {
+                Err(AppError::Runtime(
+                    "--api-key is required for a preset vendor (or --api-key-env)".into(),
+                ))
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -422,12 +429,12 @@ fn resolve_metadata(
     // would only invite a wrong answer. A script answers nothing.
     if shipped.is_none() && p.interactive() {
         if metadata.context_window.is_none()
-            && let Some(raw) = optional(p, "context_window (empty = unknown)")
+            && let Some(raw) = optional(p, "context_window (empty = unknown)")?
         {
             metadata.context_window = Some(parse_tokens(&raw)?);
         }
         if metadata.max_output_tokens.is_none()
-            && let Some(raw) = optional(p, "max_output_tokens (empty = unknown)")
+            && let Some(raw) = optional(p, "max_output_tokens (empty = unknown)")?
         {
             metadata.max_output_tokens = Some(parse_tokens(&raw)?);
         }
@@ -448,8 +455,14 @@ fn resolve_metadata(
     Ok((full != ModelMetadata::from_info(info)).then_some(full))
 }
 
-fn optional(p: &mut dyn Prompter, prompt: &str) -> Option<String> {
-    p.text(prompt, None).filter(|value| !value.is_empty())
+fn optional(p: &mut dyn Prompter, prompt: &str) -> Result<Option<String>, AppError> {
+    match p.text(prompt, None) {
+        Ok(Some(value)) => Ok(Some(value).filter(|value| !value.is_empty())),
+        Ok(None) => Ok(None),
+        // No more input means no more answers, not a failure of the walk.
+        Err(PromptError::Ended) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn parse_tokens(raw: &str) -> Result<u32, AppError> {

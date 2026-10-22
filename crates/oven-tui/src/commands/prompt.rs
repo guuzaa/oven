@@ -17,9 +17,47 @@ pub(crate) trait Prompter {
     /// Whether a person is actually there to answer.
     fn interactive(&self) -> bool;
     fn say(&mut self, line: &str);
-    fn text(&mut self, prompt: &str, default: Option<&str>) -> Option<String>;
-    fn secret(&mut self, prompt: &str) -> Option<String>;
+    /// Asks for a line. `Ok(None)` is an empty answer with no default to
+    /// fall back on, which is not the same as not being able to ask.
+    fn text(&mut self, prompt: &str, default: Option<&str>) -> Result<Option<String>, PromptError>;
+    /// Asks for a secret, which is not echoed.
+    fn secret(&mut self, prompt: &str) -> Result<Option<String>, PromptError>;
     fn confirm(&mut self, prompt: &str, default: bool) -> bool;
+}
+
+/// Why a prompt did not answer. The reasons are kept apart so the error a
+/// person reads names the real cause.
+#[derive(Debug)]
+pub(crate) enum PromptError {
+    /// The user pressed Ctrl-C.
+    Cancelled,
+    /// There is no terminal to ask on.
+    NotInteractive,
+    /// The input ended before an answer came.
+    Ended,
+    /// The terminal could not be read.
+    Io(io::Error),
+}
+
+impl PromptError {
+    /// The reason in words a person reading the error can act on.
+    pub(crate) fn message(&self) -> String {
+        match self {
+            PromptError::Cancelled => "cancelled".into(),
+            PromptError::NotInteractive => "stdin is not a terminal".into(),
+            PromptError::Ended => "input ended before an answer came".into(),
+            PromptError::Io(err) => err.to_string(),
+        }
+    }
+}
+
+impl From<PromptError> for AppError {
+    fn from(error: PromptError) -> Self {
+        match error {
+            PromptError::Cancelled => AppError::Runtime("cancelled".into()),
+            other => AppError::Runtime(other.message()),
+        }
+    }
 }
 
 /// The prompts of a session bound to the terminal.
@@ -44,9 +82,9 @@ impl Prompter for Stdin {
         println!("{line}");
     }
 
-    fn text(&mut self, prompt: &str, default: Option<&str>) -> Option<String> {
+    fn text(&mut self, prompt: &str, default: Option<&str>) -> Result<Option<String>, PromptError> {
         if !self.interactive {
-            return None;
+            return Err(PromptError::NotInteractive);
         }
         match default {
             Some(value) => print!("{prompt} [{value}]: "),
@@ -54,26 +92,33 @@ impl Prompter for Stdin {
         }
         let _ = io::stdout().flush();
         let mut line = String::new();
-        if io::stdin().read_line(&mut line).ok()? == 0 {
-            return None;
+        let read = io::stdin().read_line(&mut line).map_err(PromptError::Io)?;
+        if read == 0 {
+            return Err(PromptError::Ended);
         }
         let value = line.trim();
         if value.is_empty() {
-            default.map(str::to_string)
+            Ok(default.map(str::to_string))
         } else {
-            Some(value.to_string())
+            Ok(Some(value.to_string()))
         }
     }
 
-    fn secret(&mut self, prompt: &str) -> Option<String> {
+    fn secret(&mut self, prompt: &str) -> Result<Option<String>, PromptError> {
         if !self.interactive {
-            return None;
+            return Err(PromptError::NotInteractive);
         }
         print!("{prompt}: ");
         let _ = io::stdout().flush();
-        let value = terminal::read_secret_line().ok();
+        let value = terminal::read_secret_line().map_err(|err| {
+            if err.kind() == io::ErrorKind::Interrupted {
+                PromptError::Cancelled
+            } else {
+                PromptError::Io(err)
+            }
+        })?;
         println!();
-        value
+        Ok(Some(value))
     }
 
     fn confirm(&mut self, prompt: &str, default: bool) -> bool {
@@ -106,11 +151,15 @@ pub(crate) fn required_text(
 ) -> Result<String, AppError> {
     loop {
         match p.text(prompt, default) {
-            Some(value) if !value.is_empty() => return Ok(value),
-            Some(_) => continue,
-            None => {
+            Ok(Some(value)) if !value.is_empty() => return Ok(value),
+            // An empty answer is asked again: the field is required, and the
+            // terminal is there to answer on.
+            Ok(_) => continue,
+            Err(PromptError::Cancelled) => return Err(AppError::Runtime("cancelled".into())),
+            Err(error) => {
                 return Err(AppError::Runtime(format!(
-                    "{flag} is required (stdin is not a terminal)"
+                    "{flag} is required ({})",
+                    error.message()
                 )));
             }
         }
@@ -143,7 +192,7 @@ pub(crate) fn choose(
 pub(crate) mod scripted {
     use std::collections::VecDeque;
 
-    use super::Prompter;
+    use super::{PromptError, Prompter};
 
     /// Answers a test hands the wizard in advance. An empty queue panics: the
     /// flow asked one question more than the test expected.
@@ -198,22 +247,28 @@ pub(crate) mod scripted {
             self.said.push(line.to_string());
         }
 
-        fn text(&mut self, _prompt: &str, _default: Option<&str>) -> Option<String> {
+        fn text(
+            &mut self,
+            _prompt: &str,
+            _default: Option<&str>,
+        ) -> Result<Option<String>, PromptError> {
             if !self.interactive {
-                return None;
+                return Err(PromptError::NotInteractive);
             }
-            self.texts
+            Ok(self
+                .texts
                 .pop_front()
-                .expect("the flow asked for more text than the test scripted")
+                .expect("the flow asked for more text than the test scripted"))
         }
 
-        fn secret(&mut self, _prompt: &str) -> Option<String> {
+        fn secret(&mut self, _prompt: &str) -> Result<Option<String>, PromptError> {
             if !self.interactive {
-                return None;
+                return Err(PromptError::NotInteractive);
             }
-            self.secrets
+            Ok(self
+                .secrets
                 .pop_front()
-                .expect("the flow asked for more secrets than the test scripted")
+                .expect("the flow asked for more secrets than the test scripted"))
         }
 
         fn confirm(&mut self, _prompt: &str, default: bool) -> bool {
@@ -224,5 +279,61 @@ pub(crate) mod scripted {
                 .pop_front()
                 .expect("the flow asked for more confirmations than the test scripted")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A prompter that answers the way a person who gave up would.
+    struct Cancelled;
+
+    impl Prompter for Cancelled {
+        fn interactive(&self) -> bool {
+            true
+        }
+
+        fn say(&mut self, _line: &str) {}
+
+        fn text(
+            &mut self,
+            _prompt: &str,
+            _default: Option<&str>,
+        ) -> Result<Option<String>, PromptError> {
+            Err(PromptError::Cancelled)
+        }
+
+        fn secret(&mut self, _prompt: &str) -> Result<Option<String>, PromptError> {
+            Err(PromptError::Cancelled)
+        }
+
+        fn confirm(&mut self, _prompt: &str, default: bool) -> bool {
+            default
+        }
+    }
+
+    #[test]
+    fn an_empty_answer_asks_again() {
+        let mut p = scripted::Scripted::new().texts(["", "grok-4.6"]);
+        let answer = required_text(&mut p, "model id", None, "--model").unwrap();
+        assert_eq!(answer, "grok-4.6");
+    }
+
+    #[test]
+    fn a_cancelled_prompt_says_so() {
+        let mut p = Cancelled;
+        let error = required_text(&mut p, "model id", None, "--model").unwrap_err();
+        assert_eq!(error.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn a_prompt_without_a_terminal_names_the_flag() {
+        let mut p = scripted::Scripted::silent();
+        let error = required_text(&mut p, "model id", None, "--model").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--model is required (stdin is not a terminal)"
+        );
     }
 }
