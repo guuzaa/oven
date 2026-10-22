@@ -11,6 +11,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use oven_app::AppError;
 use oven_app::config::AppConfig;
 
+use crate::commands::report;
+
 /// The config a subcommand reads, and the files it could come from. Only the
 /// user file is ever written; the project file is reported when it overrides.
 pub(crate) struct Context {
@@ -86,16 +88,7 @@ enum ModelCommand {
 }
 
 pub(crate) async fn run(args: &Args, root: &Path) -> ExitCode {
-    match execute(args, root).await {
-        Ok(text) => {
-            println!("{text}");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("error: {error}");
-            ExitCode::FAILURE
-        }
-    }
+    report(execute(args, root).await)
 }
 
 /// `oven model` with no subcommand is `oven model ls`.

@@ -20,6 +20,9 @@ const VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
 const VENDORS: [&str; 5] = ["deepseek", "openai", "moonshot", "zhipu", "xai"];
 const CUSTOM: &str = "custom";
 const DEFAULT_PROTOCOL: ProviderKind = ProviderKind::Completions;
+const DEFAULT_PROTOCOL_TEXT: &str = "completions";
+/// The wire protocols a provider can speak.
+const PROTOCOLS: [&str; 3] = ["completions", "responses", "messages"];
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
@@ -219,9 +222,9 @@ fn resolve_slug(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Stri
         }
     }
     items.push(CUSTOM.to_string());
-    let answer = choose(p, "provider", &items, Some(VENDORS[0]), "--provider")?;
+    let answer = choose(p, "provider", &items, Some(VENDORS[0]), "provider")?;
     if answer == CUSTOM {
-        return check_slug(&required_text(p, "provider name", None, "--provider")?);
+        return check_slug(&required_text(p, "provider name", None, "provider")?);
     }
     check_slug(&answer)
 }
@@ -272,27 +275,40 @@ fn resolve_protocol(
     args: &Args,
     preset: bool,
 ) -> Result<Option<ProviderKind>, AppError> {
-    if preset {
-        return Ok(None);
-    }
     if let Some(raw) = &args.protocol {
+        if preset {
+            let name = provider.name.as_deref().unwrap_or("a known vendor");
+            return Err(AppError::Runtime(format!(
+                "--protocol does not apply to '{name}': a known vendor speaks its own protocol"
+            )));
+        }
         return Ok(Some(check_protocol(raw)?));
     }
     if let Some(kind) = provider.protocol {
         return Ok(Some(kind));
     }
+    if preset {
+        return Ok(None);
+    }
     if !p.interactive() {
         return Ok(Some(DEFAULT_PROTOCOL));
     }
-    let items = vec!["completions".to_string(), "responses".to_string()];
-    let answer = choose(p, "protocol", &items, Some("completions"), "--protocol")?;
+    let items: Vec<String> = PROTOCOLS.iter().map(|kind| kind.to_string()).collect();
+    let answer = choose(
+        p,
+        "protocol",
+        &items,
+        Some(DEFAULT_PROTOCOL_TEXT),
+        "--protocol",
+    )?;
     Ok(Some(check_protocol(&answer)?))
 }
 
 fn check_protocol(raw: &str) -> Result<ProviderKind, AppError> {
     ProviderConfig::parse_protocol(raw).ok_or_else(|| {
         AppError::Runtime(format!(
-            "invalid protocol '{raw}'; expected completions or responses"
+            "invalid protocol '{raw}'; expected {}",
+            PROTOCOLS.join(", ")
         ))
     })
 }
@@ -744,6 +760,58 @@ mod tests {
             Some("my-model")
         );
         assert!(!tmp.path().join(".oven.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn a_missing_provider_names_the_argument() {
+        let ctx = context("");
+        let mut args = args("openai");
+        args.provider = None;
+        let mut p = Scripted::silent();
+        let error = resolve_slug(&mut p, &ctx, &args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider is required (stdin is not a terminal)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_protocol_flag_is_refused_for_a_known_vendor() {
+        let ctx = context("");
+        let mut args = args("grok");
+        args.model = Some("grok-4.6".into());
+        args.protocol = Some("responses".into());
+        args.api_key = Some("sk-user".into());
+        let mut p = Scripted::silent();
+        let error = plan(&mut p, &ctx, &args).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--protocol does not apply to 'xai'"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_protocol_flag_reaches_a_custom_vendor() {
+        let ctx = context("");
+        let mut args = args("my-proxy");
+        args.model = Some("my-model".into());
+        args.base_url = Some("https://proxy.example/v1".into());
+        args.protocol = Some("responses".into());
+        args.api_key = Some("sk-user".into());
+        let mut p = Scripted::silent();
+        let plan = plan(&mut p, &ctx, &args).await.unwrap();
+        assert_eq!(plan.provider.protocol, Some(ProviderKind::Responses));
+    }
+
+    #[test]
+    fn an_unknown_protocol_names_the_ones_that_work() {
+        let error = check_protocol("chat").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid protocol 'chat'; expected completions, responses, messages"
+        );
     }
 
     #[tokio::test]

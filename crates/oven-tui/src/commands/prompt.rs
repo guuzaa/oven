@@ -175,16 +175,29 @@ pub(crate) fn choose(
     default: Option<&str>,
     flag: &str,
 ) -> Result<String, AppError> {
-    for (index, item) in items.iter().take(MAX_LISTED).enumerate() {
-        p.say(&format!("  {}) {item}", index + 1));
-    }
-    if items.len() > MAX_LISTED {
-        p.say(&format!("  … {} more", items.len() - MAX_LISTED));
-    }
+    numbered(p, items);
     let answer = required_text(p, prompt, default, flag)?;
+    Ok(match picked_index(&answer, items.len()) {
+        Some(index) => items[index].clone(),
+        None => answer,
+    })
+}
+
+/// Prints the entries a pick can name, numbered from one.
+pub(crate) fn numbered(p: &mut dyn Prompter, labels: &[String]) {
+    for (index, label) in labels.iter().take(MAX_LISTED).enumerate() {
+        p.say(&format!("  {}) {label}", index + 1));
+    }
+    if labels.len() > MAX_LISTED {
+        p.say(&format!("  … {} more", labels.len() - MAX_LISTED));
+    }
+}
+
+/// The entry a pick names, if it named one by number.
+pub(crate) fn picked_index(answer: &str, len: usize) -> Option<usize> {
     match answer.parse::<usize>() {
-        Ok(index) if (1..=items.len()).contains(&index) => Ok(items[index - 1].clone()),
-        _ => Ok(answer),
+        Ok(index) if (1..=len).contains(&index) => Some(index - 1),
+        _ => None,
     }
 }
 

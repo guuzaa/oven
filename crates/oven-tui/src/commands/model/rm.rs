@@ -8,7 +8,7 @@ use oven_app::config::{AppConfig, ProviderConfig};
 use oven_llm::canonical_vendor;
 
 use super::Context;
-use crate::commands::prompt::{Prompter, Stdin, required_text};
+use crate::commands::prompt::{Prompter, Stdin, numbered, picked_index, required_text};
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
@@ -130,47 +130,40 @@ async fn not_saved(ctx: &Context, slug: &str) -> AppError {
 }
 
 fn choose_target(p: &mut dyn Prompter, ctx: &Context) -> Result<Target, AppError> {
-    let mut items: Vec<(String, Target)> = Vec::new();
+    let mut labels: Vec<String> = Vec::new();
+    let mut targets: Vec<Target> = Vec::new();
     for (slug, provider) in &ctx.config.providers {
-        items.push((
-            format!("{slug} (provider)"),
-            Target {
-                provider: slug.clone(),
-                model: None,
-            },
-        ));
+        labels.push(format!("{slug} (provider)"));
+        targets.push(Target {
+            provider: slug.clone(),
+            model: None,
+        });
         for id in provider.models.keys() {
-            items.push((
-                format!("{slug}/{id} (model)"),
-                Target {
-                    provider: slug.clone(),
-                    model: Some(id.clone()),
-                },
-            ));
+            labels.push(format!("{slug}/{id} (model)"));
+            targets.push(Target {
+                provider: slug.clone(),
+                model: Some(id.clone()),
+            });
         }
         if let Some(id) = provider.model.clone()
             && !provider.models.contains_key(&id)
         {
-            items.push((
-                format!("{slug}/{id} (model in use)"),
-                Target {
-                    provider: slug.clone(),
-                    model: Some(id),
-                },
-            ));
+            labels.push(format!("{slug}/{id} (model in use)"));
+            targets.push(Target {
+                provider: slug.clone(),
+                model: Some(id),
+            });
         }
     }
-    if items.is_empty() {
+    if targets.is_empty() {
         return Err(AppError::Runtime("no providers are configured".into()));
     }
-    for (index, (label, _)) in items.iter().enumerate() {
-        p.say(&format!("  {}) {label}", index + 1));
-    }
+    numbered(p, &labels);
     let answer = required_text(p, "remove (number or target)", None, "<provider>[/<model>]")?;
-    match answer.parse::<usize>() {
-        Ok(index) if (1..=items.len()).contains(&index) => Ok(items[index - 1].1.clone()),
-        _ => parse_target(&answer),
-    }
+    Ok(match picked_index(&answer, targets.len()) {
+        Some(index) => targets[index].clone(),
+        None => parse_target(&answer)?,
+    })
 }
 
 fn parse_target(raw: &str) -> Result<Target, AppError> {

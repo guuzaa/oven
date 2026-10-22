@@ -9,6 +9,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use oven_app::AppError;
 use oven_app::memory;
 
+use crate::commands::report;
+
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
     #[command(subcommand)]
@@ -36,16 +38,7 @@ enum MemCommand {
 }
 
 pub(crate) async fn run(args: &Args, root: &Path) -> ExitCode {
-    match execute(args, root).await {
-        Ok(text) => {
-            println!("{text}");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("error: {error}");
-            ExitCode::FAILURE
-        }
-    }
+    report(execute(args, root).await)
 }
 
 async fn execute(args: &Args, root: &Path) -> Result<String, AppError> {
