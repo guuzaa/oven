@@ -7,10 +7,10 @@ members = [
     "crates/oven-mem",
     "crates/oven-tui",
 ]
-resolver = "2"
+resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.92"
 description = "A toy coding agent for joy only."

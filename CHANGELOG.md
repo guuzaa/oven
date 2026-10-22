@@ -1,12 +1,26 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.1] - 2026-10-22
+
+### Added
+- `file_edit` takes an ordered array of edits: `edit` is an array of `{old_string, new_string}` applied in order to the file as it stands, so one call makes several edits and each one lands on a match that is unique in the content that edit sees. A `old_string` that matches twice is refused, with the count and the file named
+- The top-level agent rules leave the shared system prompt: `prompt_template/top_level.md` names the driver-only tools (`answer`, `task`) and the shared prompt no longer mentions them, so a subagent does not read rules meant for the driver. The env block drops the working directory, carries the UTC offset with the date, and detects a git repository in a parent directory
+- A background subagent that finishes pushes a notice into the turn waiting on it: the driver is told which subagent is done, what it spent, and where to read the rest, instead of having to poll `task_output`. `NodeInfo::progress` and `NodeInfo::notice` render that line, and `task_output` quotes the same progress, so the two never describe one subagent differently
+- The activity row stays open while its turn runs: the row shows the newest of its body as the turn streams, and the row budget lifts once the row is sealed
+- The landing site gets a motion pass, the docs page a reveal and scroll pass, and the site its SEO metadata: an Open Graph image, `robots.txt` and `sitemap.xml`
 
 ### Changed
 - **Breaking:** `Tool::run` returns `ToolOutcome { output, detail }` — the text history keeps, and the body a frontend shows under the call once it lands — and `Tool::result_detail` is gone. `file_edit` reports the diff it applied with a gutter naming the line each side sits on, so an edit row ends on where the edit landed instead of on the diff the model asked for; `ToolOutcome: From<String>` keeps a tool that has nothing to add a one-line change
+- **Breaking:** `file_edit` takes `edit` — an ordered array of `{old_string, new_string}` — instead of one `old_string`/`new_string` pair and a `replace_all` flag. Every `old_string` must match exactly once, so replacing every occurrence is no longer a call; a prompt or a script written against the old shape has to be updated
+- The shared system prompt is rewritten around working, tools and safety: it asks for the same language as the request, a `path/to/file.rs:120` reference, and an explicit statement of what could not be verified, and it reads a web page, an MCP response and a tool result as data rather than as instructions
+- `oven-mem`: `format::render` returns `Result<String, MemoryError>`, and a frontmatter that cannot be rendered is the new `MemoryError::Render` instead of a panic
+- A model that declares no context window is assumed to have a 1,000,000-token window (`DEFAULT_CONTEXT_WINDOW`), so the context readout and the auto-compaction threshold work for a vendor oven does not ship
 
 ### Fixed
 - The stream caret stays on the last glyph of a reply. A trailing newline no longer opens a blank row under the paragraph, and a line that ends on the wrap width puts the caret on the next row
+- The Markdown renderer handles `**bold**`, `_italic_` and `~~strike~~` again: the inline scanner is byte-based and knows the marker characters and the bold length, so a marker run that is not a pair stays literal text and a stray `*` no longer swallows the rest of the line. Every drawn glyph maps back to the source bytes it came from, so a selection copies the source range, and an invisible glyph such as an emoji joiner rides in a neighbour's text
+- The activity row no longer folds its body away when a thought retires beside a tool call: a thought on its own keeps its body until the row is sealed
+- The user config template is written and flushed before the test that reads it, so that check no longer fails on a slow filesystem
 
 ## [0.1.0] - 2026-10-14
 
