@@ -23,7 +23,14 @@ const UNDERSCORE: char = '_';
 const TILDE: char = '~';
 const MARKER_CHARS: [char; 3] = [ASTERISK, UNDERSCORE, TILDE];
 const BOLD_LEN: usize = 2;
+/// The markers a code fence needs to open.
 const FENCE_MIN: usize = 3;
+/// The markers a thematic break needs.
+const BREAK_MIN: usize = 3;
+/// The dashes a table cell separator needs.
+const TABLE_SEP_MIN: usize = 1;
+/// The digits an ordered list marker may have.
+const LIST_DIGITS: usize = 9;
 const HEADING_MAX: usize = 6;
 const TAB_WIDTH: usize = 4;
 const TAB_SPACES: &str = "    ";
@@ -549,7 +556,7 @@ fn list_marker_end(rest: &str) -> Option<usize> {
         _ => {
             let digits = bytes
                 .iter()
-                .take(9)
+                .take(LIST_DIGITS)
                 .take_while(|b| b.is_ascii_digit())
                 .count();
             if digits == 0 || !matches!(bytes.get(digits), Some(b'.' | b')')) {
@@ -980,7 +987,7 @@ fn is_thematic_break(line: &str) -> bool {
         }
         count += 1;
     }
-    count >= FENCE_MIN
+    count >= BREAK_MIN
 }
 
 fn is_table_row(line: &str) -> bool {
@@ -1000,7 +1007,7 @@ fn is_table_separator(line: &str) -> bool {
             _ => return false,
         }
     }
-    dashes >= FENCE_MIN
+    dashes >= TABLE_SEP_MIN
 }
 
 #[derive(Clone)]
@@ -1676,6 +1683,13 @@ mod tests {
         assert!(!copied.contains("right"), "{copied}");
         let all = emit_ranges(&header.source, &copy.ranges_between(0, width));
         assert_eq!(all, "| left | right |");
+    }
+
+    #[test]
+    fn a_table_separator_needs_only_one_dash() {
+        let lines = render_markdown("| k | v |\n| - |\n| 1 | 2 |");
+        assert_eq!(show(&lines[0]), "k  v");
+        assert_eq!(show(&lines[2]), "1  2");
     }
 
     #[test]
