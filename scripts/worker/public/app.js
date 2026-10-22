@@ -49,6 +49,9 @@ const SIZE_UNITS = ["B", "KiB", "MiB", "GiB"];
 const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)");
 const REVEAL_STAGGER_MS = 70;
 const REVEAL_STAGGER_STEPS = 6;
+const SKELETON_PLATFORMS = 3;
+const SKELETON_ASSETS = 2;
+const SKELETON_ENTRIES = 3;
 const SCROLL_OFFSET_PX = 480;
 const SCROLL_BEHAVIOR = () => (REDUCED_MOTION.matches ? "auto" : "smooth");
 
@@ -63,8 +66,50 @@ function el(tag, className, text) {
   return node;
 }
 
-function loadingNote(text) {
-  return el("p", "release-empty is-loading", text);
+function skeleton(className) {
+  const node = el("span", `skeleton ${className}`);
+  node.setAttribute("aria-hidden", "true");
+  return node;
+}
+
+function skeletonLine(width) {
+  const line = skeleton("skeleton-line");
+  line.style.width = width;
+  return line;
+}
+
+function releaseSkeleton() {
+  const head = el("div", "release-head");
+  head.append(skeleton("skeleton-badge"), skeletonLine("8rem"));
+
+  const cards = [];
+  for (let index = 0; index < SKELETON_PLATFORMS; index += 1) {
+    const card = el("section", "platform");
+    const cardHead = el("div", "platform-head");
+    cardHead.append(skeleton("skeleton-icon"), skeletonLine("6rem"));
+    card.append(cardHead);
+    for (let row = 0; row < SKELETON_ASSETS; row += 1) {
+      const asset = el("div", "asset");
+      asset.append(skeletonLine("9.5rem"), skeletonLine("12rem"), skeleton("skeleton-button"));
+      card.append(asset);
+    }
+    cards.push(card);
+  }
+  return [head, ...cards];
+}
+
+function changelogSkeleton() {
+  const entries = [];
+  for (let index = 0; index < SKELETON_ENTRIES; index += 1) {
+    const entry = el("div", "entry skeleton-entry");
+    const head = el("div", "entry-head");
+    head.append(skeleton("skeleton-badge"), skeletonLine("7rem"), skeletonLine("9rem"));
+    const body = el("div", "entry-body");
+    body.append(skeletonLine("100%"), skeletonLine("86%"), skeletonLine("52%"));
+    entry.append(head, body);
+    entries.push(entry);
+  }
+  return entries;
 }
 
 function stagger(nodes) {
@@ -361,7 +406,7 @@ async function renderRelease() {
   if (!host) {
     return;
   }
-  host.replaceChildren(loadingNote("loading latest release…"));
+  host.replaceChildren(...releaseSkeleton());
 
   let release;
   try {
@@ -524,7 +569,7 @@ async function renderChangelog() {
   if (!host) {
     return;
   }
-  host.replaceChildren(loadingNote("loading changelog…"));
+  host.replaceChildren(...changelogSkeleton());
 
   let releases;
   try {
