@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::Args as ClapArgs;
 use oven_app::config::{AppConfig, ModelMetadata, ProviderConfig};
 use oven_app::{AppError, provider_catalog, provider_models, verify};
-use oven_llm::{ModelInfo, ProviderKind, ReasoningEffort, canonical_vendor};
+use oven_llm::{ModelInfo, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
 
 use super::Context;
 use crate::commands::prompt::{PromptError, Prompter, Stdin, choose, required_text};
@@ -17,7 +17,6 @@ const REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Preset vendors the walk offers, in menu order.
-const VENDORS: [&str; 5] = ["deepseek", "openai", "moonshot", "zhipu", "xai"];
 const CUSTOM: &str = "custom";
 const DEFAULT_PROTOCOL: ProviderKind = ProviderKind::Completions;
 const DEFAULT_PROTOCOL_TEXT: &str = "completions";
@@ -215,14 +214,18 @@ fn resolve_slug(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Stri
     if let Some(raw) = &args.provider {
         return check_slug(raw);
     }
-    let mut items: Vec<String> = VENDORS.iter().map(|slug| (*slug).to_string()).collect();
+    let mut items: Vec<String> = ProviderName::known()
+        .iter()
+        .map(|name| name.slug().to_string())
+        .collect();
+    let default = items.first().cloned();
     for slug in ctx.config.providers.keys() {
         if !items.contains(slug) {
             items.push(slug.clone());
         }
     }
     items.push(CUSTOM.to_string());
-    let answer = choose(p, "provider", &items, Some(VENDORS[0]), "provider")?;
+    let answer = choose(p, "provider", &items, default.as_deref(), "provider")?;
     if answer == CUSTOM {
         return check_slug(&required_text(p, "provider name", None, "provider")?);
     }

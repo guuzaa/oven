@@ -119,7 +119,23 @@ pub enum ProviderName {
     Custom(String),
 }
 
+/// The vendors oven ships, in the order they are offered.
+const KNOWN_VENDORS: [ProviderName; 6] = [
+    ProviderName::DeepSeek,
+    ProviderName::OpenAI,
+    ProviderName::Moonshot,
+    ProviderName::Zhipu,
+    ProviderName::Anthropic,
+    ProviderName::Grok,
+];
+
 impl ProviderName {
+    /// The vendors oven ships, in the order they are offered. A vendor added
+    /// to the enum belongs here too.
+    pub fn known() -> &'static [ProviderName] {
+        &KNOWN_VENDORS
+    }
+
     /// slug 用的规范 vendor 名（`xai` 而不是 `grok`）。
     pub fn slug(&self) -> &str {
         match self {
@@ -473,5 +489,30 @@ mod tests {
         assert!(ids.iter().any(|id| id == "deepseek-v4-flash"), "{ids:?}");
         assert!(ProviderName::Custom("gw".into()).known_models().is_empty());
         assert!(ProviderName::Anthropic.known_models().is_empty());
+    }
+
+    /// Every vendor the enum names. The match is exhaustive on purpose: a new
+    /// variant fails to compile here until it is listed.
+    fn every_variant() -> Vec<ProviderName> {
+        match ProviderName::Custom(String::new()) {
+            ProviderName::OpenAI => vec![ProviderName::OpenAI],
+            ProviderName::DeepSeek => vec![ProviderName::DeepSeek],
+            ProviderName::Moonshot => vec![ProviderName::Moonshot],
+            ProviderName::Zhipu => vec![ProviderName::Zhipu],
+            ProviderName::Anthropic => vec![ProviderName::Anthropic],
+            ProviderName::Grok => vec![ProviderName::Grok],
+            ProviderName::Custom(_) => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn every_vendor_is_offered() {
+        for vendor in every_variant() {
+            assert!(
+                ProviderName::known().contains(&vendor),
+                "{} is not offered",
+                vendor.slug()
+            );
+        }
     }
 }
