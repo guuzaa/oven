@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use isahc::http::header::HeaderMap;
+use reqwest::header::HeaderMap;
 use secrecy::SecretString;
 
 use crate::domain::{ModelId, Request};
@@ -20,7 +20,7 @@ pub(crate) struct Endpoint {
     pub api_key: SecretString,
     pub extra_headers: HeaderMap,
     model_catalog: HashMap<ModelId, ModelInfo>,
-    client: isahc::HttpClient,
+    client: reqwest::Client,
 }
 
 impl Endpoint {
@@ -41,7 +41,7 @@ impl Endpoint {
             api_key: api_key.into(),
             extra_headers,
             model_catalog,
-            client: isahc::HttpClient::new().expect("isahc HttpClient::new() should succeed"),
+            client: reqwest::Client::new(),
         }
     }
 
@@ -87,11 +87,11 @@ impl Endpoint {
         path: &str,
         body: &serde_json::Value,
         encode_error: impl FnOnce(String) -> ProviderError,
-    ) -> Result<isahc::Response<isahc::AsyncBody>, ProviderError> {
+    ) -> Result<reqwest::Response, ProviderError> {
         let body_bytes = serde_json::to_vec(body).map_err(|err| encode_error(err.to_string()))?;
         let headers = http::build_headers(&self.api_key, &self.extra_headers);
         let url = http::endpoint(&self.base_url, path);
-        http::post_json(&self.client, &headers, url, body_bytes).await
+        http::post_json(&self.client, headers, url, body_bytes).await
     }
 
     pub(crate) async fn list_models(
@@ -101,7 +101,7 @@ impl Endpoint {
         let headers = http::build_headers(&self.api_key, &self.extra_headers);
         http::list_models(
             &self.client,
-            &headers,
+            headers,
             &self.base_url,
             &self.provider_name,
             map_json_err,

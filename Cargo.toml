@@ -29,9 +29,6 @@ oven-llm = { path = "./crates/oven-llm" }
 anyhow = "1"
 async-trait = "0.1"
 eventsource-stream = "=0.2.3"
-futures-lite = "2"
-futures-timer = "3"
-isahc = "2.0"
 proptest = "1"
 pulldown-cmark = "0.13"
 secrecy = "0.10"
@@ -60,7 +57,7 @@ serde_yaml = "0.9"
 toml = "1.1"
 tempdir = "0.3.7"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "rt", "time"] }
 tokio-util = "0.7"
 tokio-stream = "0.1"
 mockall = "0.15.0"

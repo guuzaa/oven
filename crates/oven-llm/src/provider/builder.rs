@@ -8,7 +8,7 @@
 //! [`ProviderError::UnsupportedProvider`]，配置缺失或冲突返回
 //! [`ProviderError::InvalidProviderConfig`]。
 
-use isahc::http::header::HeaderMap;
+use reqwest::header::HeaderMap;
 use secrecy::SecretString;
 
 use crate::provider::catalog;

@@ -16,6 +16,7 @@
 - `AppState` and `AppLevels` have a serde form, so a transport forwards them as bytes
 - **Breaking:** `NodeInfo::elapsed_ms`, `NodeInfo::progress` and `NodeInfo::notice` take the current time (`elapsed_ms(now_ms)`): a protocol crate does not read the clock
 - `oven-agent` and `oven-app` re-export what they used to own, so `oven_app::AppEvent` and `oven_agent::AgentEvent` still resolve and no public path moved
+- `oven-llm` talks HTTP over `reqwest` instead of `isahc` (0.6.0): the crate now needs a Tokio runtime, `ProviderError::Transport` carries a `reqwest::Error`, and `ProviderError::Io` is gone. The `curl-sys`, `libz-sys` and `libnghttp2-sys` builds leave the tree, so a build needs no C toolchain and no CMake
 
 ## [0.1.1] - 2026-10-22
 

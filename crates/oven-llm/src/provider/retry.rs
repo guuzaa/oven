@@ -109,25 +109,14 @@ where
 }
 
 async fn sleep(duration: Duration) {
-    futures_timer::Delay::new(duration).await;
+    tokio::time::sleep(duration).await;
 }
 
 async fn with_timeout<Fut, T>(limit: Duration, fut: Fut) -> Result<T, ()>
 where
     Fut: Future<Output = T>,
 {
-    futures_lite::pin!(fut);
-    futures_lite::future::or(
-        async {
-            let value = fut.await;
-            Ok(value)
-        },
-        async {
-            sleep(limit).await;
-            Err(())
-        },
-    )
-    .await
+    tokio::time::timeout(limit, fut).await.map_err(|_| ())
 }
 
 fn exhausted(err: Option<ProviderError>) -> ProviderError {

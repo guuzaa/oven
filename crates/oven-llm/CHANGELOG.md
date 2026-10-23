@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.0] - 2026-10-23
+
+### Changed
+- **Breaking:** the HTTP transport is `reqwest` instead of `isahc`, and the crate now needs a
+  Tokio runtime. The client is built on Tokio's reactor, so a request issued outside a Tokio
+  runtime panics instead of returning an error; backoff and timeouts wait on the Tokio timer. A
+  `base_url` that is not a valid `http`/`https` URL is still reported as
+  `ProviderError::InvalidProviderConfig` rather than as a transport error.
+- **Breaking:** `ProviderError::Transport` carries a `reqwest::Error` instead of an `isahc::Error`.
+
+### Removed
+- `ProviderError::Io`. The isahc response body was an `AsyncRead` and its I/O errors were the
+  only source for this variant; a `reqwest` response body is a byte stream.
+- The `isahc`, `futures-lite` and `futures-timer` dependencies. The crate no longer pulls
+  `curl-sys`, `libz-sys` or `libnghttp2-sys`, so it needs no C toolchain and no CMake.
+
 ## [0.5.0] - 2026-10-05
 
 ### Changed

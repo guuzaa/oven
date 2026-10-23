@@ -16,12 +16,9 @@ pub type Result<T> = std::result::Result<T, ProviderError>;
 /// 所有 `Provider` 方法（`complete` / `stream` / `list_models`）共用的错误类型。
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    /// HTTP 请求/传输层失败，由 `isahc::Error` 自动转换。
+    /// HTTP 请求/传输层失败，由 `reqwest::Error` 自动转换。
     #[error("transport error: {0}")]
-    Transport(#[from] isahc::Error),
-    /// 流式 / 响应体读取 I/O 错误。
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Transport(#[from] reqwest::Error),
     /// HTTP 401/403，携带响应体。
     #[error("authentication failed: {0}")]
     Auth(String),

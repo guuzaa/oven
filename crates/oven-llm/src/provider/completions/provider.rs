@@ -14,8 +14,7 @@ use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use isahc::http::header::HeaderMap;
-use isahc::prelude::*;
+use reqwest::header::HeaderMap;
 use secrecy::SecretString;
 
 use super::decoder::{self, StreamDecoder};
@@ -25,7 +24,6 @@ use crate::ProviderName;
 use crate::domain::{ModelId, Request, Response, StreamEvent};
 use crate::provider::catalog;
 use crate::provider::endpoint::Endpoint;
-use crate::provider::http;
 use crate::provider::model::ModelInfo;
 use crate::provider::{
     DEEPSEEK_BASE_URL, MOONSHOT_BASE_URL, OPENAI_BASE_URL, Provider, ProviderError, ProviderKind,
@@ -175,7 +173,7 @@ impl CompletionsProvider {
     async fn post_chat_completions(
         &self,
         body: &serde_json::Value,
-    ) -> Result<isahc::Response<isahc::AsyncBody>, ProviderError> {
+    ) -> Result<reqwest::Response, ProviderError> {
         self.endpoint
             .post("chat/completions", body, |reason| {
                 ProviderError::CompletionsEncode(
@@ -192,7 +190,7 @@ impl Provider for CompletionsProvider {
     async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
         self.endpoint.validate_known_model(req, false)?;
         let body = self.build_body(req, false)?;
-        let mut response = self.post_chat_completions(&body).await?;
+        let response = self.post_chat_completions(&body).await?;
 
         let body_bytes = response.bytes().await?;
         let wire: ChatCompletionResponse = serde_json::from_slice(&body_bytes).map_err(|e| {
@@ -214,7 +212,7 @@ impl Provider for CompletionsProvider {
         let body = self.build_body(req, true)?;
         let response = self.post_chat_completions(&body).await?;
 
-        let byte_stream = Box::pin(http::body_to_stream(response.into_body()));
+        let byte_stream = Box::pin(response.bytes_stream());
         let mut sse_stream = byte_stream.eventsource();
 
         let stream = async_stream::stream! {
@@ -308,6 +306,7 @@ mod tests {
     use super::*;
     use crate::domain::message::{ContentBlock, Message};
     use crate::domain::{StopReason, StreamCollector, Usage};
+    use crate::provider::http;
 
     fn deepseek_models() -> Vec<ModelInfo> {
         catalog::models_for(&ProviderName::DeepSeek, ProviderKind::Completions)
@@ -320,7 +319,7 @@ mod tests {
     fn zhipu_models() -> Vec<ModelInfo> {
         catalog::models_for(&ProviderName::Zhipu, ProviderKind::Completions)
     }
-    use isahc::http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
+    use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
