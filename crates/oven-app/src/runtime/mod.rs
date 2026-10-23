@@ -8,7 +8,7 @@ use std::time::Duration;
 use oven_agent::{Agent, AgentError, CancellationToken, CompactStats, Record, RunPolicy, TodoList};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
 use oven_mem::MemoryStore;
-use oven_proto::{AppPhase, HistoryChangeReason, Input, ProviderView, SessionState};
+use oven_proto::{AppPhase, HistoryChangeReason, Input, SessionState};
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
@@ -24,8 +24,8 @@ use crate::core::session::{
 use crate::core::state::{app_state, context_tokens, context_window};
 use crate::runtime::inbox::InboxReceiver;
 use crate::runtime::pending::TurnInbox;
-use crate::runtime::shared::{GOODBYE, Shared, save_provider_overlay};
-use oven_proto::{AppEventKind, AppId, COMPACTION_CANCELLED, CompactionEvent, SubagentEvent};
+use crate::runtime::shared::{Shared, apply_without_driver, save_provider_overlay};
+use oven_proto::{AppEventKind, AppId, COMPACTION_CANCELLED, CompactionEvent};
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
 
@@ -358,18 +358,8 @@ impl Runtime {
 
     pub(crate) async fn apply_slash(&mut self, outcome: CommandOutcome) {
         match outcome {
-            CommandOutcome::Passthrough => {}
-            CommandOutcome::Reply(text) => {
-                self.emit(AppEventKind::Notification { text });
-            }
             CommandOutcome::Cleared => self.clear_session().await,
             CommandOutcome::Compact => self.compact_history().await,
-            CommandOutcome::Exit => {
-                self.emit(AppEventKind::Notification {
-                    text: GOODBYE.into(),
-                });
-                self.emit(AppEventKind::Exited);
-            }
             CommandOutcome::ModelChanged {
                 model,
                 reasoning_effort,
@@ -381,15 +371,15 @@ impl Runtime {
                     text: format!("mode switched to {}", mode.label()),
                 });
             }
-            CommandOutcome::FocusSubagent { id } => {
-                self.emit(AppEventKind::Subagent(SubagentEvent::Focus { id }));
-            }
             CommandOutcome::Memory(action) => {
                 let text = match &self.memory {
                     Some(store) => crate::memory::apply(store, action).await,
                     None => crate::memory::MEMORY_DISABLED.to_owned(),
                 };
                 self.emit(AppEventKind::Notification { text });
+            }
+            other => {
+                apply_without_driver(&self.shared, &other);
             }
         }
     }
@@ -476,10 +466,10 @@ impl Runtime {
                 .and_then(|provider| provider.reasoning_effort),
         );
         let saved = self.save_provider_overlay(&overlay).await;
-        let provider = public_provider(
-            next.active_provider_config()
-                .expect("active provider exists after update"),
-        );
+        let provider = next
+            .active_provider_config()
+            .expect("active provider exists after update")
+            .view();
         let configured_providers = next.configured_providers();
         self.shared.state.send_modify(|state| {
             state.levels.provider = provider;
@@ -574,7 +564,7 @@ pub(crate) fn spawn_runtime(
     let slash = Arc::new(SlashRegistry::with_builtin());
     let provider = config
         .active_provider_config()
-        .map(public_provider)
+        .map(ProviderConfig::view)
         .unwrap_or_default();
     let configured_providers = config.configured_providers();
     let attached = agents.session.clone();
@@ -643,12 +633,6 @@ pub(crate) fn should_persist_todos(todos: &TodoList, written_this_turn: bool) ->
 pub(crate) async fn record_recent_path(store: &SessionStore) -> Result<(), SessionError> {
     let id = store.current().id().to_string();
     record_recent(&store.dir, Path::new(&store.root), &id).await
-}
-
-/// The provider as a frontend may see it: the credential stays in the app
-/// layer, and only whether one is configured crosses the protocol.
-fn public_provider(provider: &ProviderConfig) -> ProviderView {
-    provider.view()
 }
 
 fn summarize_setup(overlay: &ProviderConfig, saved: Option<&Path>) -> String {

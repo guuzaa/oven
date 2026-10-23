@@ -1,6 +1,6 @@
 mod live;
 
-pub(crate) use live::{GOODBYE, queued_notice, save_provider_overlay};
+pub(crate) use live::{apply_without_driver, queued_notice, save_provider_overlay};
 
 use std::fmt;
 use std::path::{Path, PathBuf};
