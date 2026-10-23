@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::io::{self, ErrorKind};
@@ -22,6 +22,8 @@ pub mod mcp;
 
 pub use mcp::McpServerConfig;
 
+/// The vendor the app falls back to when no other one is configured.
+const DEFAULT_PROVIDER: &str = "deepseek";
 const DEFAULT_SUBAGENT_CONCURRENT: usize = 4;
 const DEFAULT_SUBAGENT_ITERS: usize = 60;
 const CONFIG_TMP_EXTENSION: &str = "tmp";
@@ -363,7 +365,7 @@ impl ProviderConfig {
         }
         qualify_model(
             Self::DEFAULT_MODEL,
-            self.name.as_deref().or(Some("deepseek")),
+            self.name.as_deref().or(Some(DEFAULT_PROVIDER)),
         )
     }
 
@@ -406,7 +408,7 @@ impl ProviderConfig {
                     owned = model;
                     owned.as_str()
                 }
-                Err(_) => return ProviderName::from("deepseek"),
+                Err(_) => return ProviderName::from(DEFAULT_PROVIDER),
             },
         };
         match ModelId::from(raw).vendor() {
@@ -781,28 +783,26 @@ fn default_max_iters() -> usize {
     DEFAULT_MAX_ITERS
 }
 
+/// Take the incoming value when it is not the default one: a config file
+/// that leaves a field out does not override it.
+fn take_non_default<T: PartialEq>(slot: &mut T, incoming: T, default: T) {
+    if incoming != default {
+        *slot = incoming;
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
-        Self {
-            active_provider: ProviderSelection {
-                name: "deepseek".into(),
+        let mut config = Self::empty();
+        config.providers.insert(
+            DEFAULT_PROVIDER.into(),
+            ProviderConfig {
+                name: Some(DEFAULT_PROVIDER.into()),
+                ..Default::default()
             },
-            providers: BTreeMap::from([(
-                "deepseek".into(),
-                ProviderConfig {
-                    name: Some("deepseek".into()),
-                    ..Default::default()
-                },
-            )]),
-            request_timeout_secs: default_request_timeout_secs(),
-            max_retries: default_max_retries(),
-            base_backoff_ms: default_base_backoff_ms(),
-            compact_threshold: default_compact_threshold(),
-            max_iters: default_max_iters(),
-            tools: Vec::new(),
-            subagents: SubagentConfig::default(),
-            mcps: BTreeMap::new(),
-        }
+        );
+        config.active_provider.name = DEFAULT_PROVIDER.into();
+        config
     }
 }
 
@@ -823,31 +823,38 @@ impl AppConfig {
         for (name, provider) in overlay.providers {
             self.merge_provider(&canonical_vendor(&name), &provider);
         }
-        if overlay.request_timeout_secs != default_request_timeout_secs() {
-            self.request_timeout_secs = overlay.request_timeout_secs;
-        }
-        if overlay.max_retries != default_max_retries() {
-            self.max_retries = overlay.max_retries;
-        }
-        if overlay.base_backoff_ms != default_base_backoff_ms() {
-            self.base_backoff_ms = overlay.base_backoff_ms;
-        }
-        #[allow(
-            clippy::float_cmp,
-            reason = "overlay values only override when non-default"
-        )]
-        if overlay.compact_threshold != default_compact_threshold() {
-            self.compact_threshold = overlay.compact_threshold;
-        }
-        if overlay.max_iters != default_max_iters() {
-            self.max_iters = overlay.max_iters;
-        }
+        take_non_default(
+            &mut self.request_timeout_secs,
+            overlay.request_timeout_secs,
+            default_request_timeout_secs(),
+        );
+        take_non_default(
+            &mut self.max_retries,
+            overlay.max_retries,
+            default_max_retries(),
+        );
+        take_non_default(
+            &mut self.base_backoff_ms,
+            overlay.base_backoff_ms,
+            default_base_backoff_ms(),
+        );
+        take_non_default(
+            &mut self.compact_threshold,
+            overlay.compact_threshold,
+            default_compact_threshold(),
+        );
+        take_non_default(&mut self.max_iters, overlay.max_iters, default_max_iters());
         self.subagents.merge_fields(&overlay.subagents);
+        // The tools already mounted, so the ones the overlay adds are looked
+        // up once instead of once per name.
+        let mounted: BTreeSet<&str> = self.tools.iter().map(String::as_str).collect();
+        let mut added: Vec<String> = Vec::new();
         for name in overlay.tools {
-            if !self.tools.contains(&name) {
-                self.tools.push(name);
+            if !mounted.contains(name.as_str()) && !added.contains(&name) {
+                added.push(name);
             }
         }
+        self.tools.extend(added);
         for (id, server) in overlay.mcps {
             self.mcps.entry(id).or_default().merge_fields(&server);
         }
@@ -874,19 +881,20 @@ impl AppConfig {
         self.providers.values().all(ProviderConfig::needs_setup)
     }
 
-    /// Canonical slugs that already have a saved (non-empty) API key.
-    pub fn configured_providers(&self) -> Vec<String> {
+    /// The saved vendors that already have a key.
+    fn configured(&self) -> impl Iterator<Item = (&String, &ProviderConfig)> {
         self.providers
             .iter()
             .filter(|(_, provider)| !provider.needs_setup())
-            .map(|(name, _)| name.clone())
-            .collect()
+    }
+
+    /// Canonical slugs that already have a saved (non-empty) API key.
+    pub fn configured_providers(&self) -> Vec<String> {
+        self.configured().map(|(name, _)| name.clone()).collect()
     }
 
     pub fn registerable_providers(&self) -> impl Iterator<Item = &ProviderConfig> {
-        self.providers
-            .values()
-            .filter(|provider| !provider.needs_setup())
+        self.configured().map(|(_, provider)| provider)
     }
 
     pub fn select_provider(&mut self, name: &str) -> Result<(), ConfigError> {
@@ -1025,9 +1033,16 @@ impl AppConfig {
     /// `deepseek` entry, which must not be baked into a new file.
     pub fn empty() -> Self {
         Self {
-            providers: BTreeMap::new(),
             active_provider: ProviderSelection::default(),
-            ..Self::default()
+            providers: BTreeMap::new(),
+            request_timeout_secs: default_request_timeout_secs(),
+            max_retries: default_max_retries(),
+            base_backoff_ms: default_base_backoff_ms(),
+            compact_threshold: default_compact_threshold(),
+            max_iters: default_max_iters(),
+            tools: Vec::new(),
+            subagents: SubagentConfig::default(),
+            mcps: BTreeMap::new(),
         }
     }
 
