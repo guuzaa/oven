@@ -97,7 +97,9 @@ pub struct McpTool {
     remote_name: String,
     name: String,
     description: String,
-    schema: Value,
+    /// The remote schema, shared: it never changes after the handshake, so
+    /// every request may use the same one instead of copying the tree.
+    schema: Arc<Value>,
     caller: Arc<dyn McpCaller>,
 }
 
@@ -106,7 +108,7 @@ impl McpTool {
         server_id: impl Into<String>,
         remote_name: impl Into<String>,
         description: impl Into<String>,
-        schema: Value,
+        schema: Arc<Value>,
         caller: Arc<dyn McpCaller>,
     ) -> Self {
         let server_id = server_id.into();
@@ -187,7 +189,7 @@ async fn collect_tools(
     let mut tools = Vec::with_capacity(remote_tools.len());
     for remote in remote_tools {
         let remote_name = remote.name.clone().into_owned();
-        let schema = remote.schema_as_json_value();
+        let schema = Arc::new(remote.schema_as_json_value());
         let description = remote
             .description
             .as_deref()
@@ -235,8 +237,8 @@ impl Tool for McpTool {
         &self.description
     }
 
-    fn schema(&self) -> Value {
-        self.schema.clone()
+    fn schema(&self) -> Arc<Value> {
+        Arc::clone(&self.schema)
     }
 
     fn caps(&self) -> ToolCaps {

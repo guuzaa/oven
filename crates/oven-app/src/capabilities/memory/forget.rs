@@ -43,8 +43,8 @@ impl Tool for MemoryForgetTool {
         "Delete a saved memory by scope and id. Fails when the id is unknown."
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "scope": {
@@ -55,7 +55,7 @@ impl Tool for MemoryForgetTool {
                 "id": { "type": "string", "description": "Memory id to delete." }
             },
             "required": ["scope", "id"]
-        })
+        }))
     }
 
     fn caps(&self) -> ToolCaps {

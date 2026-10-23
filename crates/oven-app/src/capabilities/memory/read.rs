@@ -45,8 +45,8 @@ impl Tool for MemoryReadTool {
          this returns its kind, description and body."
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "scope": {
@@ -57,7 +57,7 @@ impl Tool for MemoryReadTool {
                 "id": { "type": "string", "description": "Memory id, e.g. \"proxy-requires-http2\"." }
             },
             "required": ["scope", "id"]
-        })
+        }))
     }
 
     fn caps(&self) -> ToolCaps {

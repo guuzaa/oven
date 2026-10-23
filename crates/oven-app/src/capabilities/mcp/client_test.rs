@@ -155,7 +155,7 @@ async fn mcp_tools_mounted_on_agent() {
             "test",
             "echo",
             "Echo the given text back",
-            serde_json::json!({"type": "object"}),
+            Arc::new(serde_json::json!({"type": "object"})),
             Arc::new(caller),
         )])
     });

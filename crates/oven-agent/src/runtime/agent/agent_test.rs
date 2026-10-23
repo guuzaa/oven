@@ -725,8 +725,8 @@ impl Tool for PairedTool {
         "test tool"
     }
 
-    fn schema(&self) -> serde_json::Value {
-        json!({"type": "object"})
+    fn schema(&self) -> std::sync::Arc<serde_json::Value> {
+        std::sync::Arc::new(json!({"type": "object"}))
     }
 
     async fn run(
@@ -765,8 +765,8 @@ impl Tool for ExclusiveTool {
         "test tool"
     }
 
-    fn schema(&self) -> serde_json::Value {
-        json!({"type": "object"})
+    fn schema(&self) -> std::sync::Arc<serde_json::Value> {
+        std::sync::Arc::new(json!({"type": "object"}))
     }
 
     fn caps(&self) -> crate::capabilities::tools::ToolCaps {

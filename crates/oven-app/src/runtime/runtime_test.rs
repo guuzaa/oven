@@ -4673,8 +4673,8 @@ impl Tool for HoldTool {
         "block until the turn is cancelled"
     }
 
-    fn schema(&self) -> serde_json::Value {
-        serde_json::json!({ "type": "object", "properties": {} })
+    fn schema(&self) -> std::sync::Arc<serde_json::Value> {
+        std::sync::Arc::new(serde_json::json!({ "type": "object", "properties": {} }))
     }
 
     async fn run(

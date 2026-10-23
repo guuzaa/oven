@@ -1,5 +1,6 @@
 use std::fmt::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -54,14 +55,14 @@ impl Tool for BashTool {
     fn description(&self) -> &'static str {
         "Execute a command with the host shell in the workspace root and return stdout/stderr. Uses PowerShell on Windows and bash (falling back to sh) elsewhere. Use for builds, tests, git, etc."
     }
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The command to execute with the host shell." }
             },
             "required": ["command"]
-        })
+        }))
     }
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let command = require_str(args, "command", Self::NAME)?;

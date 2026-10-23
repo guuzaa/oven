@@ -1,5 +1,6 @@
 use std::fmt::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -59,8 +60,8 @@ impl Tool for GlobTool {
          Results are paths relative to the workspace root, usable directly by \
          file_read/file_edit. Respects .gitignore."
     }
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "Glob pattern, e.g. \"**/*.rs\" or \"src/**/*.md\"." },
@@ -68,7 +69,7 @@ impl Tool for GlobTool {
                 "limit": { "type": "integer", "description": "Maximum number of results to return. Defaults to 100." }
             },
             "required": ["pattern"]
-        })
+        }))
     }
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;

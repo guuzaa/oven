@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use super::{Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView};
 
@@ -50,8 +51,8 @@ impl Tool for TodoWriteTool {
          again after each step's status changes."
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "required": ["todos"],
             "additionalProperties": false,
@@ -74,7 +75,7 @@ impl Tool for TodoWriteTool {
                     }
                 }
             }
-        })
+        }))
     }
 
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {

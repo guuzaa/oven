@@ -65,8 +65,8 @@ impl Tool for MemoryWriteTool {
         Self::view_input(input)
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "scope": {
@@ -80,7 +80,7 @@ impl Tool for MemoryWriteTool {
                 "body": { "type": "string", "description": "The fact itself." }
             },
             "required": ["scope", "id", "kind", "description", "body"]
-        })
+        }))
     }
 
     fn caps(&self) -> ToolCaps {

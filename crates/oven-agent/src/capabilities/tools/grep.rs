@@ -1,5 +1,6 @@
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -68,8 +69,8 @@ impl Tool for GrepTool {
          path:line:content (paths relative to the workspace root). Respects \
          .gitignore; skips binary files."
     }
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "pattern": { "type": "string", "description": "Regex pattern to search for." },
@@ -79,7 +80,7 @@ impl Tool for GrepTool {
                 "limit": { "type": "integer", "description": "Maximum number of matching lines to return. Defaults to 200." }
             },
             "required": ["pattern"]
-        })
+        }))
     }
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;

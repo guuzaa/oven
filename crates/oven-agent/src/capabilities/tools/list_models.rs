@@ -39,8 +39,8 @@ impl Tool for ListModelsTool {
          model id, its context window and its maximum output."
     }
 
-    fn schema(&self) -> Value {
-        json!({"type": "object", "properties": {}})
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({"type": "object", "properties": {}}))
     }
 
     async fn run(&self, _args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {

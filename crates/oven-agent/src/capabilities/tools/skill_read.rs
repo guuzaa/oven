@@ -38,14 +38,14 @@ impl Tool for SkillReadTool {
          the system prompt only lists their descriptions."
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "skill_id": { "type": "string", "description": "Skill id, e.g. \"files\"." }
             },
             "required": ["skill_id"]
-        })
+        }))
     }
 
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
