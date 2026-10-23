@@ -48,7 +48,9 @@ while ($mirror.EndsWith('/')) {
 $procArch = $env:PROCESSOR_ARCHITECTURE
 $procArchWow = $env:PROCESSOR_ARCHITEW6432
 if ($procArch -eq 'AMD64' -or $procArchWow -eq 'AMD64') {
-    $target = 'x86_64-pc-windows-gnu'
+    $target = 'x86_64-pc-windows-msvc'
+} elseif ($procArch -eq 'ARM64' -or $procArchWow -eq 'ARM64') {
+    $target = 'aarch64-pc-windows-msvc'
 } else {
     throw "error: no prebuilt binary for $procArch"
 }
@@ -136,7 +138,6 @@ if (-not $pinnedTag) {
 $Tag = $resolvedTag
 if ($Tag -notlike 'v*') { $Tag = "v$Tag" }
 
-$asset = "oven-$Tag-$target.zip"
 $downloadBases = @()
 if ($mirror) { $downloadBases += "$mirror/dl/$Tag" }
 $downloadBases += "https://github.com/$repo/releases/download/$Tag"
@@ -145,18 +146,21 @@ $downloadBases += "https://github.com/$repo/releases/download/$Tag"
 # trustworthy as its digest. Refusing without one keeps a stale or tampered
 # archive from reaching the disk.
 function Test-AssetDigest {
-    param([Parameter(Mandatory)][string]$File)
-    $digest = ($release.assets | Where-Object { $_.name -eq $asset } | Select-Object -First 1).digest
-    if (-not $digest) {
-        throw "error: $Tag publishes no digest for $asset; refusing to install it"
+    param(
+        [Parameter(Mandatory)][string]$File,
+        [Parameter(Mandatory)][string]$Asset,
+        [Parameter(Mandatory)][string]$Expected
+    )
+    if (-not $Expected) {
+        throw "error: $Asset has no digest to verify against"
     }
 
-    $expected = ($digest -replace '^sha256:', '').ToLowerInvariant()
+    $expected = ($Expected -replace '^sha256:', '').ToLowerInvariant()
     $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $expected) {
-        throw "error: $asset does not match the digest published with $Tag`n  expected: $expected`n  actual:   $actual`n  The mirror may still serve an earlier build of this tag."
+        throw "error: $Asset does not match the digest published with $Tag`n  expected: $expected`n  actual:   $actual`n  The mirror may still serve an earlier build of this tag."
     }
-    Write-Host "Verified $asset"
+    Write-Host "Verified $Asset"
 }
 
 # --- Download and extract -------------------------------------------------
@@ -165,6 +169,14 @@ try {
     New-Item -ItemType Directory -Path $tmp | Out-Null
 
     $archive = $null
+    $asset = "oven-$Tag-$target.zip"
+    $published = @($release.assets) | Where-Object { $_.name -eq $asset } | Select-Object -First 1
+    if (-not $published) {
+        throw "error: $Tag publishes no $asset"
+    }
+    if (-not $published.digest) {
+        throw "error: $Tag publishes no digest for $asset; refusing to install it"
+    }
     foreach ($base in $downloadBases) {
         $url = "$base/$asset"
         try {
@@ -181,6 +193,7 @@ try {
             if ($read -ne 2 -or $magic[0] -ne 0x50 -or $magic[1] -ne 0x4B) {
                 throw "response is not a zip archive"
             }
+            Test-AssetDigest -File $downloaded -Asset $asset -Expected $published.digest
             $archive = $downloaded
             break
         } catch {
@@ -188,10 +201,8 @@ try {
         }
     }
     if (-not $archive) {
-        throw "error: failed to download $asset from any mirror"
+        throw "error: failed to download $asset for $Tag from any mirror"
     }
-
-    Test-AssetDigest -File $archive
 
     Write-Host 'Extracting...'
     Expand-Archive -Path $archive -DestinationPath $tmp -Force

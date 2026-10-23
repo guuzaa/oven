@@ -17,6 +17,7 @@
 - **Breaking:** `NodeInfo::elapsed_ms`, `NodeInfo::progress` and `NodeInfo::notice` take the current time (`elapsed_ms(now_ms)`): a protocol crate does not read the clock
 - `oven-agent` and `oven-app` re-export what they used to own, so `oven_app::AppEvent` and `oven_agent::AgentEvent` still resolve and no public path moved
 - `oven-llm` talks HTTP over `reqwest` instead of `isahc` (0.6.0): the crate now needs a Tokio runtime, `ProviderError::Transport` carries a `reqwest::Error`, and `ProviderError::Io` is gone. The `curl-sys`, `libz-sys` and `libnghttp2-sys` builds leave the tree, so a build needs no C toolchain and no CMake
+- The Windows release artifact is built with the MSVC toolchain and is named `oven-<tag>-x86_64-pc-windows-msvc.zip`; an ARM64 build (`aarch64-pc-windows-msvc`) ships beside it. The `x86_64-pc-windows-gnu` target is dropped, and the PowerShell installer picks the MSVC build the machine needs
 
 ## [0.1.1] - 2026-10-22
 

@@ -24,10 +24,14 @@ env:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ startsWith(matrix.os, 'windows') && '-C target-feature=+crt-static' || '' }}
+      CFLAGS_x86_64_pc_windows_msvc: /MT
+      CFLAGS_aarch64_pc_windows_msvc: /MT
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v7
 
@@ -41,9 +45,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-              ${{ runner.os }}-cargo-
+              ${{ matrix.os }}-cargo-
 
       - name: Check formatting
         if: matrix.os == 'ubuntu-latest'

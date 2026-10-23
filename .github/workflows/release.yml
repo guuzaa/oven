@@ -20,7 +20,6 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
           - loongarch64-unknown-linux-musl
-          - x86_64-pc-windows-gnu
           - aarch64-apple-darwin
           - x86_64-apple-darwin
           - x86_64-unknown-linux-gnu
@@ -59,33 +58,75 @@ jobs:
         run: |
           set -euo pipefail
           target="${{ matrix.target }}"
-          if [[ "${target}" == *windows* ]]; then
-            exe="oven.exe"
-          else
-            exe="oven"
-          fi
-          src="target/${target}/release/${exe}"
+          src="target/${target}/release/oven"
           test -f "${src}"
           mkdir -p "dist/oven-${target}"
-          cp "${src}" "dist/oven-${target}/${exe}"
-          if [[ "${target}" == *windows* ]]; then
-            python -c "import shutil; shutil.make_archive('oven-${{ github.ref_name }}-${target}', 'zip', 'dist', 'oven-${target}')"
-          else
-            tar -C dist -czf "oven-${{ github.ref_name }}-${target}.tar.gz" "oven-${target}"
-          fi
+          cp "${src}" "dist/oven-${target}/oven"
+          tar -C dist -czf "oven-${{ github.ref_name }}-${target}.tar.gz" "oven-${target}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: oven-${{ matrix.target }}
-          path: |
-            oven-*.tar.gz
-            oven-*.zip
+          path: oven-*.tar.gz
+          if-no-files-found: error
+
+  build-msvc:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+      CFLAGS_x86_64_pc_windows_msvc: /MT
+      CFLAGS_aarch64_pc_windows_msvc: /MT
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92.0"
+          targets: ${{ matrix.target }}
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+              release-${{ matrix.target }}-
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $target = "${{ matrix.target }}"
+          $src = "target/$target/release/oven.exe"
+          if (-not (Test-Path $src)) { throw "build artifact not found: $src" }
+          $dir = "dist/oven-$target"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item $src "$dir/oven.exe"
+          Compress-Archive -Path $dir -DestinationPath "oven-${{ github.ref_name }}-$target.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oven-${{ matrix.target }}
+          path: oven-*.zip
           if-no-files-found: error
 
   release:
     name: Publish release
-    needs: build
+    needs: [build, build-msvc]
     runs-on: ubuntu-latest
     permissions:
       contents: write
