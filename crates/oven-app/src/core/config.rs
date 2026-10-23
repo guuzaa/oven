@@ -628,6 +628,23 @@ pub struct SubagentConfig {
     pub max_iters: usize,
 }
 
+impl SubagentConfig {
+    /// Overlay the fields `incoming` sets on this one; the ones it leaves at
+    /// their default keep what was stored.
+    fn merge_fields(&mut self, incoming: &SubagentConfig) {
+        let default = SubagentConfig::default();
+        if incoming.enabled != default.enabled {
+            self.enabled = incoming.enabled;
+        }
+        if incoming.max_concurrent != default.max_concurrent {
+            self.max_concurrent = incoming.max_concurrent;
+        }
+        if incoming.max_iters != default.max_iters {
+            self.max_iters = incoming.max_iters;
+        }
+    }
+}
+
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
@@ -768,12 +785,18 @@ impl AppConfig {
         if overlay.compact_threshold != default_compact_threshold() {
             self.compact_threshold = overlay.compact_threshold;
         }
+        if overlay.max_iters != default_max_iters() {
+            self.max_iters = overlay.max_iters;
+        }
+        self.subagents.merge_fields(&overlay.subagents);
         for name in overlay.tools {
             if !self.tools.contains(&name) {
                 self.tools.push(name);
             }
         }
-        self.mcps.extend(overlay.mcps);
+        for (id, server) in overlay.mcps {
+            self.mcps.entry(id).or_default().merge_fields(&server);
+        }
     }
 
     /// Merge one provider table into the saved vendors under `name`, and hand
@@ -1270,6 +1293,61 @@ supports_vision = true
             toml::from_str("compact_threshold = 0.5\n[provider]\nname = \"deepseek\"\n").unwrap();
         base.merge(overlay);
         assert_eq!(base.compact_threshold, 0.5);
+    }
+
+    #[test]
+    fn merge_keeps_max_iters_and_subagents() {
+        let mut base = AppConfig::default();
+        let overlay: AppConfig =
+            toml::from_str("max_iters = 7\n[subagents]\nmax_concurrent = 2\n").unwrap();
+        base.merge(overlay);
+        assert_eq!(base.max_iters, 7);
+        assert_eq!(base.subagents.max_concurrent, 2);
+        assert_eq!(base.subagents.max_iters, SubagentConfig::default().max_iters);
+    }
+
+    #[test]
+    fn merge_keeps_the_subagents_the_project_does_not_set() {
+        let mut base = AppConfig::default();
+        let user: AppConfig = toml::from_str("[subagents]\nenabled = false\n").unwrap();
+        base.merge(user);
+        let project: AppConfig = toml::from_str("[subagents]\nmax_iters = 9\n").unwrap();
+        base.merge(project);
+        assert!(!base.subagents.enabled);
+        assert_eq!(base.subagents.max_iters, 9);
+    }
+
+    #[test]
+    fn merge_keeps_an_mcp_entry_the_project_only_partly_overrides() {
+        let mut base = AppConfig::default();
+        let user: AppConfig = toml::from_str(
+            "[mcps.filesystem]\ncommand = \"npx\"\nargs = [\"-y\", \"server\"]\n[mcps.filesystem.env]\nFOO = \"bar\"\n",
+        )
+        .unwrap();
+        base.merge(user);
+        let project: AppConfig =
+            toml::from_str("[mcps.filesystem]\nargs = [\"-y\", \"server\", \"--root\"]\n").unwrap();
+        base.merge(project);
+
+        let server = &base.mcps["filesystem"];
+        assert_eq!(server.command, "npx");
+        assert_eq!(server.args, ["-y", "server", "--root"]);
+        assert_eq!(server.env["FOO"], "bar");
+    }
+
+    #[test]
+    fn merge_replaces_an_mcp_entry_that_changes_transport() {
+        let mut base = AppConfig::default();
+        let user: AppConfig =
+            toml::from_str("[mcps.remote]\nurl = \"https://example.com/mcp\"\n").unwrap();
+        base.merge(user);
+        let project: AppConfig =
+            toml::from_str("[mcps.remote]\ncommand = \"npx\"\nargs = [\"server\"]\n").unwrap();
+        base.merge(project);
+
+        let server = &base.mcps["remote"];
+        assert_eq!(server.command, "npx");
+        assert_eq!(server.url, None);
     }
 
     #[test]
