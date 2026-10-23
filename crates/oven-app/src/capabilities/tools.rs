@@ -6,7 +6,7 @@
 //! while a tool is something the agent can actually call. [`ToolRegistry`]
 //! owns the mounted set and resolves the user's `tools:` config list.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::string::String;
 use std::sync::Arc;
@@ -42,12 +42,13 @@ impl ToolRegistry {
     /// silently skipped.
     pub fn from_config(root: impl Into<PathBuf>, requested: &[String]) -> Self {
         let root = root.into();
+        let requested: BTreeSet<&str> = requested.iter().map(String::as_str).collect();
         let selected: Vec<&oven_agent::BuiltinTool> = if requested.is_empty() {
             BUILTIN_TOOLS.iter().collect()
         } else {
             BUILTIN_TOOLS
                 .iter()
-                .filter(|t| requested.iter().any(|n| n == t.name))
+                .filter(|tool| requested.contains(tool.name))
                 .collect()
         };
         let mut registry = Self::new();
