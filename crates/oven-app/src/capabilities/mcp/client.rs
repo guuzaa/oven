@@ -114,9 +114,9 @@ impl McpTool {
         let server_id = server_id.into();
         let remote_name = remote_name.into();
         let name = mcp_tool_name(&server_id, &remote_name);
-        let description = format!("[mcp:{server_id}] {}", description.into())
-            .trim()
-            .to_string();
+        let mut description = format!("[mcp:{server_id}] {}", description.into());
+        let trimmed = description.trim_end().len();
+        description.truncate(trimmed);
         Self {
             server_id,
             remote_name,
@@ -187,6 +187,9 @@ async fn collect_tools(
         .map_err(|e| format!("list_tools: {e}"))?;
 
     let mut tools = Vec::with_capacity(remote_tools.len());
+    let caller: Arc<dyn McpCaller> = Arc::new(RmcpCaller {
+        client: client.clone(),
+    });
     for remote in remote_tools {
         let remote_name = remote.name.clone().into_owned();
         let schema = Arc::new(remote.schema_as_json_value());
@@ -200,9 +203,7 @@ async fn collect_tools(
             remote_name,
             description,
             schema,
-            Arc::new(RmcpCaller {
-                client: client.clone(),
-            }),
+            Arc::clone(&caller),
         ));
     }
     Ok(tools)
