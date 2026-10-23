@@ -8,7 +8,7 @@ use crossterm::event::{
 use oven_app::AppEvent;
 use ratatui::layout::Rect;
 
-use crate::core::component::{Action, Component, KeyResult};
+use crate::core::component::{Action, KeyResult};
 use crate::core::esc::{ESC_CONFIRM_WINDOW, EscAction};
 use crate::core::hint;
 use crate::core::keys::is_mode_toggle;
@@ -133,10 +133,11 @@ impl Ui {
             }
             KeyResult::Action(Action::Queue(text)) => {
                 self.views.release();
-                if !self.answer_question_with(&text) {
-                    let steered = self.app.steer(&text);
-                    self.pending.push(Queued::held(text, steered));
+                if self.answer_question_with(&text) {
+                    return false;
                 }
+                let steered = self.app.steer(&text);
+                self.pending.push(Queued::held(text, steered));
                 false
             }
             KeyResult::Action(Action::Submit(text)) => {
@@ -150,9 +151,10 @@ impl Ui {
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
-                if !self.answer_question_with(&text) {
-                    self.pending.push(Queued::now(text, false));
+                if self.answer_question_with(&text) {
+                    return false;
                 }
+                self.pending.push(Queued::now(text, false));
                 false
             }
             KeyResult::Action(Action::Notify(text)) => {
@@ -285,7 +287,7 @@ impl Ui {
             }
             EscAction::PopQueue => {
                 if let Some(queued) = self.pending.pop()
-                    && (!queued.steered || self.app.claim_steer(&queued.text))
+                    && (!queued.is_steered() || self.app.claim_steer(&queued.text))
                 {
                     self.input.set_text(&queued.text);
                 }

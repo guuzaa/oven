@@ -14,19 +14,19 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
-use crate::core::component::{Action, Component, KeyResult, State};
+use crate::core::component::{Action, KeyResult, State};
 use crate::core::theme;
 use crate::platform::clipboard;
 
 use super::kinds::{Header, LineKind, Row};
-use super::markdown::{CopyBuf, LineCopy};
+use super::markdown::{CopyBuf, LineCopy, MarkdownStream};
 use super::selection::{SelPos, highlight_line};
 use super::wrap::{
     Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, PROMPT_BODY_SLOTS, RESULT_LABEL,
     THINKING_LABEL, THOUGHT_LABEL, apply_hover, apply_shimmer, collect_lines, fits_stream_caret,
     format_elapsed, format_thought, line_display_width, line_has_glyph, paint_rows, paint_visible,
     shimmer_phase, sticky_prompt_window, sticky_row_index, stream_caret_line, tail_lines,
-    trim_message, wrap_body_into, wrap_collapsible_into, wrap_row_into,
+    trim_message, wrap_body_into, wrap_collapsible_into, wrap_markdown_into, wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -34,6 +34,10 @@ const MOUSE_SCROLL_STEP: u16 = 3;
 const PROMPT_WHEEL_STEP: isize = 1;
 pub(super) const STREAM_CARET: &str = "▊";
 const CARET_FRAMES: u64 = 5;
+/// The caret blinks on every other tick of that length.
+const CARET_BLINK: u64 = 2;
+/// How often the viewport is laid out before it is taken to be settled.
+const LAYOUT_PASSES: usize = 2;
 const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 pub(super) use super::wrap::MAX_STICKY_PROMPT_ROWS;
 const NO_OUTPUT: &str = "(no output)";
@@ -48,6 +52,8 @@ pub struct Transcript {
     row_offsets: Vec<usize>,
     streaming: String,
     stream_kind: LineKind,
+    /// The streaming body, parsed once per line instead of once per frame.
+    markdown: MarkdownStream,
     pub(super) wrapped_stream: Vec<Line<'static>>,
     stream_copies: Vec<LineCopy>,
     /// None follows newest content; Some is an anchored wrapped-line index.
@@ -78,6 +84,7 @@ impl Transcript {
             row_offsets: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
+            markdown: MarkdownStream::new(),
             wrapped_stream: Vec::new(),
             stream_copies: Vec::new(),
             top: None,
@@ -400,28 +407,35 @@ impl Transcript {
 
     fn prompt_row_at(&self, column: u16, row: u16) -> Option<usize> {
         let line = self.pos_at(column, row).line;
+        self.prompt_row_containing(line)
+    }
+
+    /// The prompt row whose wrapped lines hold `line`.
+    fn prompt_row_containing(&self, line: usize) -> Option<usize> {
         self.rows.iter().enumerate().find_map(|(idx, row)| {
             if !row.kind.is_prompt() {
                 return None;
             }
-            let (start, end) = self.row_span(idx);
+            let (start, end) = self.row_span(idx)?;
             (start <= line && line < end).then_some(idx)
         })
     }
 
-    fn row_span(&self, idx: usize) -> (usize, usize) {
-        let start = self.row_offsets[idx];
+    /// The wrapped lines of one row, from its first line to the start of the
+    /// next one.
+    fn row_span(&self, idx: usize) -> Option<(usize, usize)> {
+        let start = *self.row_offsets.get(idx)?;
         let end = self
             .row_offsets
             .get(idx + 1)
             .copied()
             .unwrap_or(self.wrapped.len());
-        (start, end)
+        Some((start, end))
     }
 
     /// Body lines of a framed prompt, excluding its borders and any leading blank.
     fn prompt_body_span(&self, idx: usize) -> Option<(usize, usize)> {
-        let (start, end) = self.row_span(idx);
+        let (start, end) = self.row_span(idx)?;
         let frame_start = (start..end).find(|&line| {
             self.wrapped
                 .get(line)
@@ -454,17 +468,9 @@ impl Transcript {
 
     fn sticky_wrapped_line(&self, start: usize, sticky_height: u16, rel_y: usize) -> usize {
         let end = self
-            .rows
-            .iter()
-            .enumerate()
-            .find_map(|(idx, row)| {
-                if !row.kind.is_prompt() {
-                    return None;
-                }
-                let (row_start, row_end) = self.row_span(idx);
-                (row_start <= start && start < row_end).then_some(row_end)
-            })
-            .unwrap_or(start);
+            .prompt_row_containing(start)
+            .and_then(|idx| self.row_span(idx))
+            .map_or(start, |(_, end)| end);
         let frame_len = end.saturating_sub(start).max(1);
         start + sticky_row_index(frame_len, usize::from(sticky_height), rel_y)
     }
@@ -736,6 +742,7 @@ impl Transcript {
     fn take_stream(&mut self) -> (LineKind, String) {
         self.wrapped_stream.clear();
         self.stream_copies.clear();
+        self.markdown.reset();
         (
             self.stream_kind,
             trim_message(&std::mem::take(&mut self.streaming)),
@@ -786,12 +793,9 @@ impl Transcript {
     /// single row — a retitled burst, a thinking delta — pays for that row
     /// instead of the whole conversation.
     fn rewrap_row(&mut self, idx: usize) {
-        let start = self.row_offsets[idx];
-        let end = self
-            .row_offsets
-            .get(idx + 1)
-            .copied()
-            .unwrap_or(self.wrapped.len());
+        let Some((start, end)) = self.row_span(idx) else {
+            return;
+        };
         let mut lines = Vec::new();
         let mut copies = Vec::new();
         let (mut headers, body) = match self.width() {
@@ -858,15 +862,15 @@ impl Transcript {
         }
         let mut lines = Vec::new();
         let mut copies = Vec::new();
-        wrap_body_into(
-            &mut Buf {
-                lines: &mut lines,
-                copies: &mut copies,
-            },
-            self.stream_kind,
-            body,
-            width,
-        );
+        let mut buf = Buf {
+            lines: &mut lines,
+            copies: &mut copies,
+        };
+        if self.stream_kind == LineKind::Text {
+            wrap_markdown_into(&mut buf, self.markdown.render(body), width);
+        } else {
+            wrap_body_into(&mut buf, self.stream_kind, body, width);
+        }
         if self.stream_kind == LineKind::Text {
             while lines.last().is_some_and(|line| !line_has_glyph(line)) {
                 lines.pop();
@@ -1017,7 +1021,7 @@ impl Transcript {
             return (None, 0);
         }
         let mut prompt = None;
-        for _ in 0..2 {
+        for _ in 0..LAYOUT_PASSES {
             let next = self.prompt_for_focus(self.top, total);
             let before = self.top;
             self.clamp_top(total, Self::content_rows(area_height, next));
@@ -1076,32 +1080,14 @@ impl Transcript {
     /// Raw wrapped span of a prompt, including its frame, so scrolling can
     /// step over the whole header.
     fn prompt_bounds_containing(&self, line: usize) -> Option<(usize, usize)> {
-        for (idx, row) in self.rows.iter().enumerate() {
-            if !row.kind.is_prompt() {
-                continue;
-            }
-            let start = *self.row_offsets.get(idx)?;
-            let end = self
-                .row_offsets
-                .get(idx + 1)
-                .copied()
-                .unwrap_or(self.wrapped.len());
-            if start <= line && line < end {
-                return Some((start, end));
-            }
-        }
-        None
+        self.prompt_row_containing(line)
+            .and_then(|idx| self.row_span(idx))
     }
 
     /// Wrapped-line range of one row, from its first non-empty line to the
     /// start of the next row.
     fn row_wrapped_range(&self, row: usize) -> Option<(usize, usize)> {
-        let start = *self.row_offsets.get(row)?;
-        let end = self
-            .row_offsets
-            .get(row + 1)
-            .copied()
-            .unwrap_or(self.wrapped.len());
+        let (start, end) = self.row_span(row)?;
         if start >= end {
             return None;
         }
@@ -1178,21 +1164,21 @@ impl Transcript {
     /// Settles the live thinking row on the label, for reasoning the agent
     /// never reported a span for (a cancelled or interrupted window).
     fn stop_live_thinking(&mut self) {
-        self.retire_thinking(THOUGHT_LABEL.to_string());
+        self.retire_thinking(THOUGHT_LABEL);
     }
 
     /// The agent owns the thinking clock; the transcript only renders the
     /// duration it reports. Reporting retires the row so nothing settles it
     /// back onto the bare label.
     fn report_thinking_done(&mut self, duration_ms: u64) {
-        self.retire_thinking(format_thought(Some(duration_ms)));
+        self.retire_thinking(&format_thought(Some(duration_ms)));
     }
 
     /// Settles the live thought on the label it is given: a thought beside
     /// calls folds into its own header, while a thought on its own keeps its
     /// body until the row is sealed.
-    fn retire_thinking(&mut self, title: String) {
-        if !self.activity.retire_thinking(&title) {
+    fn retire_thinking(&mut self, title: &str) {
+        if !self.activity.retire_thinking(title) {
             return;
         }
         self.sync_activity();
@@ -1265,8 +1251,8 @@ impl Transcript {
     }
 }
 
-impl Component for Transcript {
-    fn handle_key(&mut self, key: KeyEvent, _state: &State) -> KeyResult {
+impl Transcript {
+    pub(crate) fn handle_key(&mut self, key: KeyEvent, _state: &State) -> KeyResult {
         match key.code {
             KeyCode::PageUp => {
                 let page = u16::try_from(self.height().max(1)).unwrap_or(u16::MAX);
@@ -1282,7 +1268,7 @@ impl Component for Transcript {
         }
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
         let in_area = self.area.contains(ratatui::layout::Position {
             x: mouse.column,
             y: mouse.row,
@@ -1354,7 +1340,7 @@ impl Component for Transcript {
         }
     }
 
-    fn on_event(&mut self, ev: &AppEvent) {
+    pub(crate) fn on_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Stream(StreamEvent::ThinkingDelta { text }) => {
@@ -1484,7 +1470,7 @@ impl Component for Transcript {
         }
     }
 
-    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
+    pub(crate) fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
         let resized = area.width != self.area.width;
         self.area = area;
         if resized {
@@ -1538,7 +1524,10 @@ impl Component for Transcript {
         {
             *line = apply_hover(line, self.width());
         }
-        if self.is_live_text() && end == total && (state.frame / CARET_FRAMES).is_multiple_of(2) {
+        if self.is_live_text()
+            && end == total
+            && (state.frame / CARET_FRAMES).is_multiple_of(CARET_BLINK)
+        {
             place_stream_caret(
                 &mut visible,
                 self.width(),

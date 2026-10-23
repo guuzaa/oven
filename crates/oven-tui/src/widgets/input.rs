@@ -25,7 +25,7 @@ use super::file_mention_popup::{FileMentionPopup, FileMentionPopupAction};
 use super::model_picker::{ModelPicker, ModelPickerAction};
 use super::setup_wizard::{SetupWizard, SetupWizardAction};
 use super::slash_command_popup::{SlashCommandPopup, SlashCommandPopupAction};
-use crate::core::component::{Action, Component, KeyResult, State};
+use crate::core::component::{Action, KeyResult, State};
 use crate::core::shell;
 use crate::core::theme;
 
@@ -277,10 +277,8 @@ impl InputView {
     }
 }
 
-impl Component for InputView {
-    fn handle_key(&mut self, key: KeyEvent, state: &State) -> KeyResult {
-        self.refresh_popups();
-
+impl InputView {
+    pub(crate) fn handle_key(&mut self, key: KeyEvent, state: &State) -> KeyResult {
         if self.setup.is_open() {
             return match self.setup.handle_key(key) {
                 SetupWizardAction::Handled => KeyResult::Handled,
@@ -365,6 +363,7 @@ impl Component for InputView {
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.textarea.insert_newline();
+                self.refresh_popups();
                 KeyResult::Handled
             }
             KeyCode::Enter => {
@@ -388,11 +387,7 @@ impl Component for InputView {
         }
     }
 
-    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        self.draw_composer(f, area, state, None);
-    }
-
-    fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
+    pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent, _state: &State) -> KeyResult {
         let direction = match mouse.kind {
             MouseEventKind::ScrollUp => CursorMove::Up,
             MouseEventKind::ScrollDown => CursorMove::Down,
@@ -1334,7 +1329,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                view.draw(f, f.area(), state);
+                view.draw_composer(f, f.area(), state, None);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -1355,7 +1350,9 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| view.draw(f, f.area(), state)).unwrap();
+        terminal
+            .draw(|f| view.draw_composer(f, f.area(), state, None))
+            .unwrap();
         terminal.backend().cursor_position()
     }
 

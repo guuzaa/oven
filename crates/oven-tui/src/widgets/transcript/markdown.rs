@@ -23,9 +23,17 @@ const UNDERSCORE: char = '_';
 const TILDE: char = '~';
 const MARKER_CHARS: [char; 3] = [ASTERISK, UNDERSCORE, TILDE];
 const BOLD_LEN: usize = 2;
+/// The markers a code fence needs to open.
 const FENCE_MIN: usize = 3;
+/// The markers a thematic break needs.
+const BREAK_MIN: usize = 3;
+/// The dashes a table cell separator needs.
+const TABLE_SEP_MIN: usize = 1;
+/// The digits an ordered list marker may have.
+const LIST_DIGITS: usize = 9;
 const HEADING_MAX: usize = 6;
 const TAB_WIDTH: usize = 4;
+const TAB_SPACES: &str = "    ";
 const TABLE_GAP: usize = 2;
 const MIN_COL_WIDTH: usize = 1;
 const TASK_BOX_LEN: usize = 3;
@@ -44,13 +52,55 @@ struct Run {
 /// reach zero width when a run has no visible glyph at all.
 #[derive(Clone)]
 struct Atom {
-    text: String,
+    text: Glyph,
     style: Style,
     width: usize,
     start: usize,
     end: usize,
 }
 
+/// The characters an atom draws. An atom is usually one character of the
+/// source, so the glyph stays a `char` and only becomes owned text when it
+/// does not fit that shape.
+#[derive(Clone)]
+enum Glyph {
+    /// One character.
+    Char(char),
+    /// A fixed run of characters: a tab draws as spaces.
+    Fixed(&'static str),
+    /// Characters that joined a neighbour, such as a zero-width joiner.
+    Text(String),
+}
+
+impl Glyph {
+    /// Appends the glyph to `text`.
+    fn push_into(&self, text: &mut String) {
+        match self {
+            Glyph::Char(ch) => text.push(*ch),
+            Glyph::Fixed(fixed) => text.push_str(fixed),
+            Glyph::Text(owned) => text.push_str(owned),
+        }
+    }
+}
+
+/// A glyph for text that is not one character of the source.
+fn fixed_glyph(text: &str) -> Glyph {
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => Glyph::Char(ch),
+        _ => Glyph::Text(text.to_string()),
+    }
+}
+
+/// Joins two glyphs into one owned run.
+fn append_glyph(target: &mut Glyph, extra: &Glyph) {
+    let mut joined = String::new();
+    target.push_into(&mut joined);
+    extra.push_into(&mut joined);
+    *target = Glyph::Text(joined);
+}
+
+#[derive(Clone)]
 pub(super) struct MdLine {
     pub spans: Vec<Span<'static>>,
     pub hang: usize,
@@ -217,34 +267,164 @@ pub(super) fn render_markdown(text: &str) -> Vec<MdLine> {
     if text.is_empty() {
         return vec![blank_line("")];
     }
-    let lines: Vec<&str> = text.lines().collect();
-    let mut out = Vec::with_capacity(lines.len());
-    let mut fence: Option<Fence> = None;
-    let mut i = 0;
-    while i < lines.len() {
-        let line = lines[i];
-        if let Some(open) = fence.as_ref() {
-            let closed = closes_fence(line, open);
-            let style = if closed { theme::dim() } else { theme::code() };
-            out.push(verbatim(line, style, leading_width(line)));
-            if closed {
-                fence = None;
-            }
-        } else if let Some(open) = opening_fence(line) {
-            fence = Some(open);
-            out.push(verbatim(line, theme::dim(), leading_width(line)));
-        } else if let Some(n) = table_len(&lines[i..]) {
-            out.extend(render_table(&lines[i..i + n]));
-            i += n;
-            continue;
-        } else {
-            out.push(render_flow(line));
-        }
-        i += 1;
-    }
-    out
+    let mut stream = MarkdownStream::new();
+    stream.render(text).to_vec()
 }
 
+/// A markdown body that grows as a reply streams in.
+///
+/// The lines that are already final are kept, so a growing reply is parsed
+/// once per line instead of once per frame.
+pub(super) struct MarkdownStream {
+    /// Rendered lines: the settled ones first, then the tail.
+    lines: Vec<MdLine>,
+    /// Source bytes the settled lines cover.
+    settled: usize,
+    /// Lines in `lines` that belong to the settled prefix.
+    settled_len: usize,
+    /// Fence open where the settled prefix ends.
+    fence: Option<Fence>,
+    /// Source length at the last render.
+    seen: usize,
+}
+
+impl MarkdownStream {
+    pub(super) fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            settled: 0,
+            settled_len: 0,
+            fence: None,
+            seen: 0,
+        }
+    }
+
+    /// Forgets the body; the next one starts from scratch.
+    pub(super) fn reset(&mut self) {
+        self.lines.clear();
+        self.settled = 0;
+        self.settled_len = 0;
+        self.fence = None;
+        self.seen = 0;
+    }
+
+    /// Renders `body`, which extends the body of the previous call, and
+    /// returns its lines.
+    pub(super) fn render(&mut self, body: &str) -> &[MdLine] {
+        if body.len() < self.seen {
+            self.reset();
+        }
+        self.seen = body.len();
+
+        let chunks: Vec<&str> = body[self.settled..].split_inclusive('\n').collect();
+
+        let mut fence = self.fence;
+        let (final_lines, final_chunks) = render_units(&chunks, 0, chunks.len(), true, &mut fence);
+        let final_fence = fence;
+        let (tail, _) = render_units(&chunks, final_chunks, chunks.len(), false, &mut fence);
+
+        self.lines.truncate(self.settled_len);
+        self.lines.extend(final_lines);
+        self.settled_len = self.lines.len();
+        self.settled += chunks[..final_chunks]
+            .iter()
+            .map(|c| c.len())
+            .sum::<usize>();
+        self.fence = final_fence;
+        self.lines.extend(tail);
+        &self.lines
+    }
+}
+
+/// Renders the markdown units of `chunks[from..]`.
+///
+/// `settle` asks for the lines that will not change again: a line is only
+/// final once the line after it is complete, because that line decides
+/// whether this one starts a table, and a table that a later row can still
+/// join changes every column width. Returns the lines and the number of
+/// chunks covered.
+fn render_units(
+    chunks: &[&str],
+    from: usize,
+    limit: usize,
+    settle: bool,
+    fence: &mut Option<Fence>,
+) -> (Vec<MdLine>, usize) {
+    let mut out = Vec::new();
+    let mut i = from;
+    while i < limit {
+        let chunk = chunks[i];
+        let text = line_text(chunk);
+        // A line that is still growing may yet close a fence or open a table.
+        if settle && !is_complete(Some(chunk)) {
+            break;
+        }
+        if let Some(open) = *fence {
+            let closed = closes_fence(text, &open);
+            let style = if closed { theme::dim() } else { theme::code() };
+            out.push(verbatim(text, style, leading_width(text)));
+            if closed {
+                *fence = None;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(open) = opening_fence(text) {
+            *fence = Some(open);
+            out.push(verbatim(text, theme::dim(), leading_width(text)));
+            i += 1;
+            continue;
+        }
+        if settle && !is_complete(chunks.get(i + 1).copied()) {
+            break;
+        }
+        match table_len_at(chunks, i) {
+            Some(n) => {
+                if settle && !is_complete(chunks.get(i + n).copied()) {
+                    break;
+                }
+                let rows: Vec<&str> = chunks[i..i + n].iter().map(|c| line_text(c)).collect();
+                out.extend(render_table(&rows));
+                i += n;
+            }
+            None => {
+                out.push(render_flow(text));
+                i += 1;
+            }
+        }
+    }
+    (out, i - from)
+}
+
+/// Whether a line is complete, so the line before it can settle.
+fn is_complete(chunk: Option<&str>) -> bool {
+    chunk.is_some_and(|chunk| chunk.ends_with('\n'))
+}
+
+/// The text of one line, without its terminator. Matches `str::lines`.
+fn line_text(chunk: &str) -> &str {
+    match chunk.strip_suffix('\n') {
+        Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
+        None => chunk,
+    }
+}
+
+/// The number of lines the table at `at` covers, if those lines form one.
+fn table_len_at(chunks: &[&str], at: usize) -> Option<usize> {
+    if chunks.len().saturating_sub(at) < 2 {
+        return None;
+    }
+    if !is_table_row(line_text(chunks[at])) || !is_table_separator(line_text(chunks[at + 1])) {
+        return None;
+    }
+    let mut n = 2;
+    while at + n < chunks.len() && is_table_row(line_text(chunks[at + n])) {
+        n += 1;
+    }
+    Some(n)
+}
+
+#[derive(Clone, Copy)]
 struct Fence {
     marker: u8,
     len: usize,
@@ -293,7 +473,7 @@ fn render_heading(line: &str, level: usize, content_at: usize) -> MdLine {
     let hang = leading_width(&line[..indent_at]);
     let (shown, hidden) = strip_atx_closer(&line[content_at..]);
     if shown.is_empty() {
-        return md_line(line, &source_atoms(line, theme::dim()), hang);
+        return md_line(line, source_atoms(line, theme::dim()), hang);
     }
     let mut atoms = source_atoms(&line[..indent_at], Style::default());
     atoms.extend(piece_atoms(
@@ -310,7 +490,7 @@ fn render_heading(line: &str, level: usize, content_at: usize) -> MdLine {
     {
         last.end = line.len();
     }
-    md_line(line, &atoms, hang)
+    md_line(line, atoms, hang)
 }
 
 fn render_marked(line: &str) -> MdLine {
@@ -345,7 +525,7 @@ fn render_marked(line: &str) -> MdLine {
         };
         atoms.extend(piece_atoms(content, inline_pieces(content, base), i));
     }
-    md_line(line, &atoms, hang)
+    md_line(line, atoms, hang)
 }
 
 fn marker_atoms(marker: &str, src_at: usize) -> Vec<Atom> {
@@ -376,7 +556,7 @@ fn list_marker_end(rest: &str) -> Option<usize> {
         _ => {
             let digits = bytes
                 .iter()
-                .take(9)
+                .take(LIST_DIGITS)
                 .take_while(|b| b.is_ascii_digit())
                 .count();
             if digits == 0 || !matches!(bytes.get(digits), Some(b'.' | b')')) {
@@ -694,12 +874,12 @@ fn display_atoms(
         if atom.width == 0 {
             match atoms.last_mut() {
                 Some(last) => {
-                    last.text.push_str(&atom.text);
+                    append_glyph(&mut last.text, &atom.text);
                     last.end = last.end.max(atom.end);
                 }
                 None => match leading.as_mut() {
                     Some(lead) => {
-                        lead.text.push_str(&atom.text);
+                        append_glyph(&mut lead.text, &atom.text);
                         lead.end = atom.end;
                     }
                     None => leading = Some(atom),
@@ -709,7 +889,7 @@ fn display_atoms(
         }
         match leading.take() {
             Some(mut lead) => {
-                lead.text.push_str(&atom.text);
+                append_glyph(&mut lead.text, &atom.text);
                 lead.width = atom.width;
                 lead.end = atom.end;
                 atoms.push(lead);
@@ -735,9 +915,9 @@ fn source_atoms(line: &str, style: Style) -> Vec<Atom> {
 fn glyph_atom(ch: char, start: usize, end: usize, style: Style) -> Atom {
     Atom {
         text: if ch == '\t' {
-            "    ".to_string()
+            Glyph::Fixed(TAB_SPACES)
         } else {
-            ch.to_string()
+            Glyph::Char(ch)
         },
         style,
         width: width_of(ch),
@@ -746,7 +926,7 @@ fn glyph_atom(ch: char, start: usize, end: usize, style: Style) -> Atom {
     }
 }
 
-fn md_line(source: impl Into<Arc<str>>, atoms: &[Atom], hang: usize) -> MdLine {
+fn md_line(source: impl Into<Arc<str>>, atoms: Vec<Atom>, hang: usize) -> MdLine {
     let (spans, runs) = paint(atoms);
     MdLine {
         spans,
@@ -758,11 +938,11 @@ fn md_line(source: impl Into<Arc<str>>, atoms: &[Atom], hang: usize) -> MdLine {
 }
 
 fn verbatim(line: &str, style: Style, hang: usize) -> MdLine {
-    md_line(line, &source_atoms(line, style), hang)
+    md_line(line, source_atoms(line, style), hang)
 }
 
 fn blank_line(line: &str) -> MdLine {
-    md_line(line, &[], 0)
+    md_line(line, Vec::new(), 0)
 }
 
 fn atx_heading(line: &str) -> Option<(usize, usize)> {
@@ -807,18 +987,7 @@ fn is_thematic_break(line: &str) -> bool {
         }
         count += 1;
     }
-    count >= FENCE_MIN
-}
-
-fn table_len(lines: &[&str]) -> Option<usize> {
-    if lines.len() < 2 || !is_table_row(lines[0]) || !is_table_separator(lines[1]) {
-        return None;
-    }
-    let mut n = 2;
-    while n < lines.len() && is_table_row(lines[n]) {
-        n += 1;
-    }
-    Some(n)
+    count >= BREAK_MIN
 }
 
 fn is_table_row(line: &str) -> bool {
@@ -838,9 +1007,10 @@ fn is_table_separator(line: &str) -> bool {
             _ => return false,
         }
     }
-    dashes >= FENCE_MIN
+    dashes >= TABLE_SEP_MIN
 }
 
+#[derive(Clone)]
 struct TableMeta {
     separator: bool,
     style: Style,
@@ -966,7 +1136,7 @@ fn compose_row(
         .iter()
         .map(|(at, len, counts)| resplit(flat[*at..*at + len].to_vec(), counts))
         .collect();
-    let (spans, runs) = paint(&flat);
+    let (spans, runs) = paint(flat);
     MdLine {
         spans,
         hang,
@@ -1044,7 +1214,7 @@ pub(super) fn layout_table(md: &MdLine, avail: usize) -> Option<Vec<MdLine>> {
                 atoms.extend(fill_atoms(" ", pad, at, at, table.style));
             }
         }
-        lines.push(md_line(Arc::clone(&md.source), &atoms, 0));
+        lines.push(md_line(Arc::clone(&md.source), atoms, 0));
     }
     Some(lines)
 }
@@ -1258,7 +1428,7 @@ fn fill_atoms(
             src_start + span * (i + 1) / count
         };
         atoms.push(Atom {
-            text: unit.to_string(),
+            text: fixed_glyph(unit),
             style,
             width,
             start: pos,
@@ -1285,7 +1455,7 @@ fn indent_atoms(line: &str) -> (usize, Vec<Atom>) {
     (atom_width(&atoms), atoms)
 }
 
-fn paint(atoms: &[Atom]) -> (Vec<Span<'static>>, Vec<Run>) {
+fn paint(atoms: Vec<Atom>) -> (Vec<Span<'static>>, Vec<Run>) {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut runs = Vec::new();
     let mut col = 0;
@@ -1299,16 +1469,17 @@ fn paint(atoms: &[Atom]) -> (Vec<Span<'static>>, Vec<Run>) {
             });
             col += atom.width;
         }
-        if let Some(last) = spans.last_mut()
-            && last.style == atom.style
-        {
-            last.content.to_mut().push_str(&atom.text);
+        let style = atom.style;
+        let same_style = spans.last().is_some_and(|last| last.style == style);
+        if same_style {
+            if let Some(last) = spans.last_mut() {
+                let content = last.content.to_mut();
+                atom.text.push_into(content);
+            }
         } else {
-            spans.push(if atom.style == Style::default() {
-                Span::raw(atom.text.clone())
-            } else {
-                Span::styled(atom.text.clone(), atom.style)
-            });
+            let mut content = String::new();
+            atom.text.push_into(&mut content);
+            spans.push(Span::styled(content, style));
         }
     }
     if spans.is_empty() {
@@ -1515,6 +1686,13 @@ mod tests {
     }
 
     #[test]
+    fn a_table_separator_needs_only_one_dash() {
+        let lines = render_markdown("| k | v |\n| - |\n| 1 | 2 |");
+        assert_eq!(show(&lines[0]), "k  v");
+        assert_eq!(show(&lines[2]), "1  2");
+    }
+
+    #[test]
     fn wide_table_wraps_inside_the_column() {
         let lines = render_markdown("| k | value |\n| --- | --- |\n| a | 0123456789abcdef |");
         let body = lines
@@ -1548,5 +1726,22 @@ mod tests {
             ranges.extend(line.copy_window(0, 0, width, true).ranges_between(0, width));
         }
         assert_eq!(emit_ranges(&body.source, &ranges), body.source.as_ref());
+    }
+
+    #[test]
+    fn a_streamed_table_matches_the_whole_body() {
+        const TEXT: &str = "intro\n\n| k | v |\n| --- | --- |\n| 1 | 2 |\n";
+        let mut stream = MarkdownStream::new();
+        let mut acc = String::new();
+        for ch in TEXT.chars() {
+            acc.push(ch);
+            let body = acc.trim_end_matches(['\n', '\r']);
+            let got = stream.render(body);
+            let want = render_markdown(body);
+            assert_eq!(got.len(), want.len(), "line count after {acc:?}");
+            for (i, (a, b)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(a.spans, b.spans, "line {i} after {acc:?}");
+            }
+        }
     }
 }

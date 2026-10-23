@@ -1,6 +1,5 @@
 use ratatui::Frame;
 
-use crate::core::component::Component;
 use crate::core::hint::{self, Prompt};
 use crate::core::layout;
 use crate::widgets::input::InputView;

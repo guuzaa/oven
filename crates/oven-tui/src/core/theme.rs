@@ -1,6 +1,12 @@
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::BorderType;
 
+/// The colour of what is shown but not read: thinking, tool names, dimmed
+/// text and idle borders.
+const MUTED: Color = Color::DarkGray;
+/// The colour of what went wrong.
+const FAILED: Color = Color::Red;
+
 pub fn user() -> Style {
     Style::default()
         .fg(Color::Cyan)
@@ -15,14 +21,6 @@ pub fn assistant() -> Style {
     Style::default().fg(Color::Green)
 }
 
-pub fn thinking() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-pub fn tool() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
 pub fn diff_added() -> Style {
     Style::default().fg(Color::Black).bg(Color::LightGreen)
 }
@@ -31,20 +29,16 @@ pub fn diff_removed() -> Style {
     Style::default().fg(Color::Black).bg(Color::LightRed)
 }
 
-pub fn ok() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
 pub fn fail() -> Style {
-    Style::default().fg(Color::Red)
+    Style::default().fg(FAILED)
 }
 
 pub fn error() -> Style {
-    Style::default().fg(Color::Red)
+    Style::default().fg(FAILED)
 }
 
 pub fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
+    Style::default().fg(MUTED)
 }
 
 pub fn accent() -> Style {

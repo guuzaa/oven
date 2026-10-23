@@ -7,19 +7,21 @@ use std::time::Duration;
 use clap::Args as ClapArgs;
 use oven_app::config::{AppConfig, ModelMetadata, ProviderConfig};
 use oven_app::{AppError, provider_catalog, provider_models, verify};
-use oven_llm::{ModelInfo, ProviderKind, ReasoningEffort, canonical_vendor};
+use oven_llm::{ModelInfo, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
 
-use super::Context;
-use crate::commands::prompt::{Prompter, Stdin, choose, required_text};
+use super::{Context, MILLION, THOUSAND};
+use crate::commands::prompt::{PromptError, Prompter, Stdin, choose, required_text};
 
 /// How long the endpoint's model list and the verification request may take.
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Preset vendors the walk offers, in menu order.
-const VENDORS: [&str; 5] = ["deepseek", "openai", "moonshot", "zhipu", "xai"];
 const CUSTOM: &str = "custom";
 const DEFAULT_PROTOCOL: ProviderKind = ProviderKind::Completions;
+const DEFAULT_PROTOCOL_TEXT: &str = "completions";
+/// The wire protocols a provider can speak.
+const PROTOCOLS: [&str; 3] = ["completions", "responses", "messages"];
 
 #[derive(Debug, ClapArgs)]
 pub(crate) struct Args {
@@ -67,10 +69,17 @@ pub(crate) struct Args {
 /// A provider table ready to write, and whether writing it also selects it.
 #[derive(Debug)]
 struct Plan {
-    slug: String,
-    id: String,
+    /// The provider table. Its own name is the slug it is filed under.
     provider: ProviderConfig,
+    id: String,
     activate: bool,
+}
+
+impl Plan {
+    /// The slug the table is filed under.
+    fn slug(&self) -> &str {
+        self.provider.name.as_deref().unwrap_or_default()
+    }
 }
 
 pub(crate) async fn run(ctx: &Context, args: &Args) -> Result<String, AppError> {
@@ -94,7 +103,15 @@ async fn plan(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Plan, 
 
     provider.base_url = resolve_base_url(p, &provider, args, preset)?;
     provider.protocol = resolve_protocol(p, &provider, args, preset)?;
-    provider.api_key = resolve_key(p, &provider, args, preset)?;
+    // The key the user file holds. A key the project file holds stays there:
+    // copying it into the user file would carry it out of the project.
+    let user_key = resolve_key(p, ctx.user_key(&slug), &provider, args, preset)?;
+    // The key that will run: the project file takes precedence over the user one.
+    provider.api_key = provider
+        .api_key
+        .clone()
+        .filter(|key| !key.is_empty())
+        .or_else(|| user_key.clone());
     if let Some(raw) = &args.reasoning_effort {
         provider.reasoning_effort = Some(parse_effort(raw)?);
     }
@@ -126,8 +143,9 @@ async fn plan(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Plan, 
     if !args.no_verify {
         verify_draft(p, &provider, &slug, &id).await?;
     }
+    // The file that is written holds the user's own key.
+    provider.api_key = user_key;
     Ok(Plan {
-        slug,
         id,
         provider,
         activate,
@@ -163,29 +181,28 @@ async fn verify_draft(
 
 async fn apply(ctx: &Context, plan: &Plan) -> Result<String, AppError> {
     let path = ctx.user_path()?;
+    let slug = plan.slug().to_string();
     let mut config = AppConfig::load_file(path)
         .await?
         .unwrap_or_else(AppConfig::empty);
-    config
-        .providers
-        .insert(plan.slug.clone(), plan.provider.clone());
+    config.providers.insert(slug.clone(), plan.provider.clone());
     if plan.activate {
-        config.active_provider.name.clone_from(&plan.slug);
+        config.active_provider.name = slug.clone();
     }
     AppConfig::save_at(path, &config).await?;
 
-    let mut text = format!("saved {}/{} to {}", plan.slug, plan.id, path.display());
+    let mut text = format!("saved {slug}/{} to {}", plan.id, path.display());
     if plan.activate {
         let _ = write!(text, "\nactive model is now {}", active_model(&config));
     } else {
         let _ = write!(text, "\nactive model unchanged: {}", active_model(&config));
     }
-    if ctx.project_declares(&plan.slug).await {
+    if ctx.project_declares(&slug).await {
         let _ = write!(
             text,
             "\nnote: {} also declares {} and takes precedence",
             ctx.project_path.display(),
-            plan.slug
+            slug
         );
     }
     Ok(text)
@@ -202,16 +219,20 @@ fn resolve_slug(p: &mut dyn Prompter, ctx: &Context, args: &Args) -> Result<Stri
     if let Some(raw) = &args.provider {
         return check_slug(raw);
     }
-    let mut items: Vec<String> = VENDORS.iter().map(|slug| (*slug).to_string()).collect();
+    let mut items: Vec<String> = ProviderName::known()
+        .iter()
+        .map(|name| name.slug().to_string())
+        .collect();
+    let default = items.first().cloned();
     for slug in ctx.config.providers.keys() {
         if !items.contains(slug) {
             items.push(slug.clone());
         }
     }
     items.push(CUSTOM.to_string());
-    let answer = choose(p, "provider", &items, Some(VENDORS[0]), "--provider")?;
+    let answer = choose(p, "provider", &items, default.as_deref(), "provider")?;
     if answer == CUSTOM {
-        return check_slug(&required_text(p, "provider name", None, "--provider")?);
+        return check_slug(&required_text(p, "provider name", None, "provider")?);
     }
     check_slug(&answer)
 }
@@ -262,34 +283,53 @@ fn resolve_protocol(
     args: &Args,
     preset: bool,
 ) -> Result<Option<ProviderKind>, AppError> {
-    if preset {
-        return Ok(None);
-    }
     if let Some(raw) = &args.protocol {
+        if preset {
+            let name = provider.name.as_deref().unwrap_or("a known vendor");
+            return Err(AppError::Runtime(format!(
+                "--protocol does not apply to '{name}': a known vendor speaks its own protocol"
+            )));
+        }
         return Ok(Some(check_protocol(raw)?));
     }
     if let Some(kind) = provider.protocol {
         return Ok(Some(kind));
     }
+    if preset {
+        return Ok(None);
+    }
     if !p.interactive() {
         return Ok(Some(DEFAULT_PROTOCOL));
     }
-    let items = vec!["completions".to_string(), "responses".to_string()];
-    let answer = choose(p, "protocol", &items, Some("completions"), "--protocol")?;
+    let items: Vec<String> = PROTOCOLS.iter().map(|kind| kind.to_string()).collect();
+    let answer = choose(
+        p,
+        "protocol",
+        &items,
+        Some(DEFAULT_PROTOCOL_TEXT),
+        "--protocol",
+    )?;
     Ok(Some(check_protocol(&answer)?))
 }
 
 fn check_protocol(raw: &str) -> Result<ProviderKind, AppError> {
     ProviderConfig::parse_protocol(raw).ok_or_else(|| {
         AppError::Runtime(format!(
-            "invalid protocol '{raw}'; expected completions or responses"
+            "invalid protocol '{raw}'; expected {}",
+            PROTOCOLS.join(", ")
         ))
     })
 }
 
+/// The key to save in the user file.
+///
+/// `saved` is the key the user file already holds and `running` the provider
+/// as it will run: a key the project file holds stays there and is never
+/// copied into the user one.
 fn resolve_key(
     p: &mut dyn Prompter,
-    provider: &ProviderConfig,
+    saved: Option<&str>,
+    running: &ProviderConfig,
     args: &Args,
     preset: bool,
 ) -> Result<Option<String>, AppError> {
@@ -299,20 +339,27 @@ fn resolve_key(
     if let Some(key) = &args.api_key {
         return Ok(Some(check_key(key)));
     }
-    let saved = provider.api_key.clone().filter(|key| !key.is_empty());
+    let saved = saved.filter(|key| !key.is_empty());
     let prompt = if saved.is_some() {
         "api_key (empty keeps the saved key)"
     } else {
         "api_key (empty uses OVEN_API_KEY)"
     };
     match p.secret(prompt) {
-        Some(entered) if !entered.trim().is_empty() => Ok(Some(check_key(&entered))),
-        Some(_) => Ok(saved),
-        None if saved.is_some() => Ok(saved),
-        None if preset && provider.effective_api_key().is_empty() => Err(AppError::Runtime(
-            "--api-key is required for a preset vendor (or --api-key-env)".into(),
-        )),
-        None => Ok(None),
+        Ok(Some(entered)) if !entered.trim().is_empty() => Ok(Some(check_key(&entered))),
+        Ok(_) => Ok(saved.map(str::to_string)),
+        Err(PromptError::Cancelled) => Err(AppError::Runtime("cancelled".into())),
+        Err(_) => {
+            if saved.is_some() {
+                Ok(saved.map(str::to_string))
+            } else if preset && running.effective_api_key().is_empty() {
+                Err(AppError::Runtime(
+                    "--api-key is required for a preset vendor (or --api-key-env)".into(),
+                ))
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -406,12 +453,12 @@ fn resolve_metadata(
     // would only invite a wrong answer. A script answers nothing.
     if shipped.is_none() && p.interactive() {
         if metadata.context_window.is_none()
-            && let Some(raw) = optional(p, "context_window (empty = unknown)")
+            && let Some(raw) = optional(p, "context_window (empty = unknown)")?
         {
             metadata.context_window = Some(parse_tokens(&raw)?);
         }
         if metadata.max_output_tokens.is_none()
-            && let Some(raw) = optional(p, "max_output_tokens (empty = unknown)")
+            && let Some(raw) = optional(p, "max_output_tokens (empty = unknown)")?
         {
             metadata.max_output_tokens = Some(parse_tokens(&raw)?);
         }
@@ -432,16 +479,22 @@ fn resolve_metadata(
     Ok((full != ModelMetadata::from_info(info)).then_some(full))
 }
 
-fn optional(p: &mut dyn Prompter, prompt: &str) -> Option<String> {
-    p.text(prompt, None).filter(|value| !value.is_empty())
+fn optional(p: &mut dyn Prompter, prompt: &str) -> Result<Option<String>, AppError> {
+    match p.text(prompt, None) {
+        Ok(Some(value)) => Ok(Some(value).filter(|value| !value.is_empty())),
+        Ok(None) => Ok(None),
+        // No more input means no more answers, not a failure of the walk.
+        Err(PromptError::Ended) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn parse_tokens(raw: &str) -> Result<u32, AppError> {
     let raw = raw.trim().to_ascii_lowercase();
     let (digits, scale) = match raw.strip_suffix('k') {
-        Some(head) => (head, 1_000),
+        Some(head) => (head, u64::from(THOUSAND)),
         None => match raw.strip_suffix('m') {
-            Some(head) => (head, 1_000_000),
+            Some(head) => (head, u64::from(MILLION)),
             None => (raw.as_str(), 1),
         },
     };
@@ -474,10 +527,12 @@ mod tests {
     use crate::commands::prompt::scripted::Scripted;
 
     fn context(config: &str) -> Context {
+        let config: AppConfig = toml::from_str(config).unwrap();
         Context {
             user_path: Some(PathBuf::from("/tmp/does-not-exist/config.toml")),
             project_path: PathBuf::from("/tmp/does-not-exist/.oven.toml"),
-            config: toml::from_str(config).unwrap(),
+            user_config: config.clone(),
+            config,
         }
     }
 
@@ -507,7 +562,7 @@ mod tests {
         args.model = Some("grok-4.6".into());
         let mut p = Scripted::new().secrets(["xai-key"]);
         let plan = plan(&mut p, &ctx, &args).await.unwrap();
-        assert_eq!(plan.slug, "xai");
+        assert_eq!(plan.slug(), "xai");
         assert_eq!(plan.provider.name.as_deref(), Some("xai"));
         assert_eq!(plan.provider.api_key.as_deref(), Some("xai-key"));
         assert_eq!(plan.provider.model.as_deref(), Some("grok-4.6"));
@@ -686,10 +741,10 @@ mod tests {
         let ctx = Context {
             user_path: Some(user.clone()),
             project_path: tmp.path().join(".oven.toml"),
+            user_config: AppConfig::empty(),
             config: AppConfig::empty(),
         };
         let plan = Plan {
-            slug: "my-proxy".into(),
             id: "my-model".into(),
             provider: ProviderConfig {
                 name: Some("my-proxy".into()),
@@ -712,5 +767,105 @@ mod tests {
             Some("my-model")
         );
         assert!(!tmp.path().join(".oven.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn a_missing_provider_names_the_argument() {
+        let ctx = context("");
+        let mut args = args("openai");
+        args.provider = None;
+        let mut p = Scripted::silent();
+        let error = resolve_slug(&mut p, &ctx, &args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider is required (stdin is not a terminal)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_protocol_flag_is_refused_for_a_known_vendor() {
+        let ctx = context("");
+        let mut args = args("grok");
+        args.model = Some("grok-4.6".into());
+        args.protocol = Some("responses".into());
+        args.api_key = Some("sk-user".into());
+        let mut p = Scripted::silent();
+        let error = plan(&mut p, &ctx, &args).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("--protocol does not apply to 'xai'"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_protocol_flag_reaches_a_custom_vendor() {
+        let ctx = context("");
+        let mut args = args("my-proxy");
+        args.model = Some("my-model".into());
+        args.base_url = Some("https://proxy.example/v1".into());
+        args.protocol = Some("responses".into());
+        args.api_key = Some("sk-user".into());
+        let mut p = Scripted::silent();
+        let plan = plan(&mut p, &ctx, &args).await.unwrap();
+        assert_eq!(plan.provider.protocol, Some(ProviderKind::Responses));
+    }
+
+    #[test]
+    fn an_unknown_protocol_names_the_ones_that_work() {
+        let error = check_protocol("chat").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid protocol 'chat'; expected completions, responses, messages"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_project_key_stays_in_the_project_file() {
+        let tmp = tempdir::TempDir::new("oven-add").unwrap();
+        let user = tmp.path().join("config.toml");
+        let ctx = Context {
+            user_path: Some(user.clone()),
+            project_path: tmp.path().join(".oven.toml"),
+            user_config: AppConfig::empty(),
+            config: toml::from_str("[providers.openai]\napi_key = \"sk-project\"\n").unwrap(),
+        };
+        let mut args = args("openai");
+        args.model = Some("gpt-4".into());
+        let mut p = Scripted::silent();
+        let plan = plan(&mut p, &ctx, &args).await.unwrap();
+        assert_eq!(
+            plan.provider.api_key, None,
+            "the project key must not be saved"
+        );
+
+        apply(&ctx, &plan).await.unwrap();
+        let written = AppConfig::load_file(&user).await.unwrap().unwrap();
+        assert_eq!(written.providers["openai"].api_key, None);
+    }
+
+    #[tokio::test]
+    async fn the_user_key_survives_a_project_that_declares_the_same_provider() {
+        let tmp = tempdir::TempDir::new("oven-add").unwrap();
+        let user = tmp.path().join("config.toml");
+        let ctx = Context {
+            user_path: Some(user.clone()),
+            project_path: tmp.path().join(".oven.toml"),
+            user_config: toml::from_str("[providers.openai]\napi_key = \"sk-user\"\n").unwrap(),
+            config: toml::from_str("[providers.openai]\napi_key = \"sk-project\"\n").unwrap(),
+        };
+        let mut args = args("openai");
+        args.model = Some("gpt-4".into());
+        let mut p = Scripted::silent();
+        let plan = plan(&mut p, &ctx, &args).await.unwrap();
+        assert_eq!(plan.provider.api_key.as_deref(), Some("sk-user"));
+
+        apply(&ctx, &plan).await.unwrap();
+        let written = AppConfig::load_file(&user).await.unwrap().unwrap();
+        assert_eq!(
+            written.providers["openai"].api_key.as_deref(),
+            Some("sk-user")
+        );
     }
 }

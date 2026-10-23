@@ -1,6 +1,5 @@
 use oven_app::{AgentEvent, AppEvent, AppEventKind, Input, SubagentEvent, ToolEvent, TurnEvent};
 
-use crate::core::component::Component;
 use crate::widgets::choice_popup::ChoicePopup;
 use crate::widgets::input::display_user_input;
 use crate::widgets::question_prompt::QuestionPrompt;

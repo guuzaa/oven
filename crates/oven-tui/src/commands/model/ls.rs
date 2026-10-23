@@ -11,7 +11,7 @@ use oven_app::{provider_catalog, provider_models};
 use oven_llm::{ModelCapabilities, ModelInfo, ProviderName, canonical_vendor};
 use unicode_width::UnicodeWidthStr;
 
-use super::Context;
+use super::{Context, MILLION, THOUSAND};
 use crate::platform::style::{Ink, Palette};
 
 /// Endpoint ids, or why the endpoint could not be asked, per provider.
@@ -472,8 +472,10 @@ fn non_zero(value: u32) -> Option<u32> {
 fn tokens(value: Option<u32>) -> String {
     match value {
         None => UNKNOWN.to_string(),
-        Some(value) if value >= 1_000_000 => format!("{:.1}M", f64::from(value) / 1_000_000.0),
-        Some(value) if value >= 1_000 => format!("{}k", value / 1_000),
+        Some(value) if value >= MILLION => {
+            format!("{:.1}M", f64::from(value) / f64::from(MILLION))
+        }
+        Some(value) if value >= THOUSAND => format!("{}k", value / THOUSAND),
         Some(value) => value.to_string(),
     }
 }
@@ -487,10 +489,12 @@ mod tests {
     use super::*;
 
     fn context(config: &str) -> Context {
+        let config: AppConfig = toml::from_str(config).unwrap();
         Context {
             user_path: Some(PathBuf::from("/tmp/does-not-exist/config.toml")),
             project_path: PathBuf::from("/tmp/does-not-exist/.oven.toml"),
-            config: toml::from_str(config).unwrap(),
+            user_config: config.clone(),
+            config,
         }
     }
 
@@ -597,6 +601,7 @@ mod tests {
         let ctx = Context {
             user_path: None,
             project_path: PathBuf::from("/tmp/does-not-exist/.oven.toml"),
+            user_config: AppConfig::empty(),
             config: AppConfig::empty(),
         };
         let text = plain(&ctx);

@@ -88,6 +88,7 @@ impl Cli {
             }
             Err(err) => {
                 tracing::error!(error = %err, "query failed");
+                eprintln!("error: {err}");
                 ExitCode::FAILURE
             }
         }

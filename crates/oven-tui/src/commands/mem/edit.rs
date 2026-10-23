@@ -2,23 +2,17 @@
 
 use std::process::Command;
 
-use clap::Args as ClapArgs;
 use oven_app::AppError;
 use oven_app::memory::{self, MemoryStore};
+
+use super::RefArg;
 
 const VISUAL: &str = "VISUAL";
 const EDITOR: &str = "EDITOR";
 const EDITOR_FAILED: &str = "editor exited unsuccessfully";
 
-#[derive(Debug, ClapArgs)]
-pub(crate) struct Args {
-    /// `workspace/<id>`, `user/<id>`, or a bare id when it is unique
-    #[arg(value_name = "REF")]
-    memory_ref: String,
-}
-
-pub(crate) async fn run(store: &MemoryStore, args: &Args) -> Result<String, AppError> {
-    let path = memory::file_path(store, &args.memory_ref).await?;
+pub(crate) async fn run(store: &MemoryStore, reference: &RefArg) -> Result<String, AppError> {
+    let path = memory::file_path(store, &reference.memory_ref).await?;
     let visual = std::env::var(VISUAL).ok();
     let editor = std::env::var(EDITOR).ok();
     let program = memory::editor_program(visual.as_deref(), editor.as_deref())?;

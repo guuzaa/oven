@@ -1,7 +1,6 @@
 use std::path::{Component as PathComponent, Path};
 use std::time::{Duration, Instant};
 
-use crossterm::event::KeyEvent;
 use oven_app::{
     AgentEvent, AgentMode, AppEvent, AppEventKind, AppLevels, CompactionEvent, TurnEvent,
 };
@@ -14,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::core::component::{Component, KeyResult, State};
+use crate::core::component::State;
 use crate::core::theme;
 
 const SPIN_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -232,12 +231,8 @@ impl StatusBar {
     }
 }
 
-impl Component for StatusBar {
-    fn handle_key(&mut self, _key: KeyEvent, _state: &State) -> KeyResult {
-        KeyResult::Ignored
-    }
-
-    fn on_event(&mut self, ev: &AppEvent) {
+impl StatusBar {
+    pub(crate) fn on_event(&mut self, ev: &AppEvent) {
         match &ev.kind {
             AppEventKind::Agent(env) => match &env.event {
                 AgentEvent::Turn(TurnEvent::Completed { usage, .. })
@@ -256,10 +251,6 @@ impl Component for StatusBar {
             }
             _ => {}
         }
-    }
-
-    fn draw(&mut self, f: &mut Frame<'_>, area: Rect, state: &State) {
-        self.draw_bar(f, area, state);
     }
 }
 
