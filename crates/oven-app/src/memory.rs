@@ -8,16 +8,13 @@ pub use oven_mem::MemoryStore;
 use oven_mem::{Memory, MemoryError, MemoryId, MemoryScope, NOT_FOUND};
 
 use crate::core::error::AppError;
+use crate::core::memory::{SOURCE_LABEL, header, parse_id, parse_scope};
 
 pub(crate) const NO_MEMORIES: &str = "no memories";
 pub(crate) const MEMORY_DISABLED: &str = "memory is disabled";
 pub(crate) const USAGE: &str = "usage: /memory [show <ref> | rm <ref>]";
 pub(crate) const AMBIGUOUS_MEMORY: &str = "memory id is in both scopes; qualify it";
 pub(crate) const REMOVED_MEMORY: &str = "removed memory";
-pub(crate) const UNKNOWN_SCOPE: &str = "unknown memory scope";
-pub(crate) const KIND_LABEL: &str = "kind";
-pub(crate) const DESCRIPTION_LABEL: &str = "description";
-pub(crate) const SOURCE_LABEL: &str = "source";
 pub(crate) const NO_EDITOR: &str = "neither VISUAL nor EDITOR is set";
 
 const SHOW: &str = "show";
@@ -49,10 +46,10 @@ pub(crate) fn parse_command(args: &str) -> Result<MemoryAction, AppError> {
 pub(crate) fn parse_ref(raw: &str) -> Result<MemoryRef, AppError> {
     match raw.split_once('/') {
         Some((scope, id)) => Ok(MemoryRef::Scoped {
-            scope: parse_scope(scope)?,
-            id: parse_id(id)?,
+            scope: parse_scope(scope).map_err(AppError::Runtime)?,
+            id: parse_id(id).map_err(AppError::Runtime)?,
         }),
-        None => Ok(MemoryRef::Bare(parse_id(raw)?)),
+        None => Ok(MemoryRef::Bare(parse_id(raw).map_err(AppError::Runtime)?)),
     }
 }
 
@@ -94,20 +91,6 @@ pub(crate) async fn apply(store: &MemoryStore, action: MemoryAction) -> String {
         MemoryAction::Show(memory_ref) => show_ref(store, &memory_ref).await,
         MemoryAction::Remove(memory_ref) => remove_ref(store, &memory_ref).await,
     }
-}
-
-fn parse_scope(raw: &str) -> Result<MemoryScope, AppError> {
-    if raw == MemoryScope::Workspace.as_str() {
-        return Ok(MemoryScope::Workspace);
-    }
-    if raw == MemoryScope::User.as_str() {
-        return Ok(MemoryScope::User);
-    }
-    Err(AppError::Runtime(format!("{UNKNOWN_SCOPE} '{raw}'")))
-}
-
-fn parse_id(raw: &str) -> Result<MemoryId, AppError> {
-    MemoryId::new(raw).map_err(|err| AppError::Runtime(err.to_string()))
 }
 
 fn render_list(store: &MemoryStore) -> String {
@@ -192,9 +175,7 @@ fn locate_bare(store: &MemoryStore, id: &MemoryId) -> Result<(MemoryScope, Memor
 }
 
 fn render_show(memory: &Memory) -> String {
-    let mut out = String::new();
-    let _ = writeln!(out, "{KIND_LABEL}: {}", memory.kind.as_str());
-    let _ = writeln!(out, "{DESCRIPTION_LABEL}: {}", memory.description);
+    let mut out = header(memory);
     if let Some(source) = &memory.source {
         let _ = writeln!(out, "{SOURCE_LABEL}: {source}");
     }
@@ -213,6 +194,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL, UNKNOWN_SCOPE};
 
     const PROXY_ID: &str = "proxy-requires-http2";
     const PROXY_DESCRIPTION: &str = "The internal proxy only speaks HTTP/2.";

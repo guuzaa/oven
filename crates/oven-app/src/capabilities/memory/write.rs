@@ -1,19 +1,13 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, TurnContext};
 use oven_mem::{Memory, MemoryScope, MemoryStore, PutOutcome};
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use super::view::memory_view;
-use super::{parse_id, parse_kind, parse_scope};
+use super::{parse_id, parse_kind, parse_scope, required_str, scope_property};
 use crate::core::session::SessionStore;
 
-const MISSING_SCOPE: &str = "memory_write: missing 'scope' string argument";
-const MISSING_ID: &str = "memory_write: missing 'id' string argument";
-const MISSING_KIND: &str = "memory_write: missing 'kind' string argument";
-const MISSING_DESCRIPTION: &str = "memory_write: missing 'description' string argument";
-const MISSING_BODY: &str = "memory_write: missing 'body' string argument";
 const CREATED_MEMORY: &str = "created memory";
 const REPLACED_MEMORY: &str = "replaced memory";
 const PREVIOUS_DESCRIPTION: &str = "previous description";
@@ -42,10 +36,6 @@ instead of writing a memory.";
         Self { store, sessions }
     }
 
-    pub fn view_input(input: &Value) -> ToolView {
-        memory_view(Self::VERB, input)
-    }
-
     fn source(&self) -> Option<String> {
         self.sessions.as_ref().map(SessionStore::current_id)
     }
@@ -62,18 +52,14 @@ impl Tool for MemoryWriteTool {
     }
 
     fn view(&self, input: &Value) -> ToolView {
-        Self::view_input(input)
+        memory_view(Self::VERB, input)
     }
 
     fn schema(&self) -> Arc<Value> {
         Arc::new(json!({
             "type": "object",
             "properties": {
-                "scope": {
-                    "type": "string",
-                    "enum": ["workspace", "user"],
-                    "description": "workspace for this repository, user for personal preferences"
-                },
+                "scope": scope_property(),
                 "id": { "type": "string", "description": "Slug to create or replace, e.g. \"proxy-requires-http2\"." },
                 "kind": { "type": "string", "enum": ["fact", "preference"] },
                 "description": { "type": "string", "description": "One line shown in the catalog." },
@@ -91,11 +77,11 @@ impl Tool for MemoryWriteTool {
     }
 
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
-        let scope_raw = required_str(args, "scope", MISSING_SCOPE)?;
-        let id_raw = required_str(args, "id", MISSING_ID)?;
-        let kind_raw = required_str(args, "kind", MISSING_KIND)?;
-        let description = required_str(args, "description", MISSING_DESCRIPTION)?;
-        let body = required_str(args, "body", MISSING_BODY)?;
+        let scope_raw = required_str(args, "scope", Self::NAME)?;
+        let id_raw = required_str(args, "id", Self::NAME)?;
+        let kind_raw = required_str(args, "kind", Self::NAME)?;
+        let description = required_str(args, "description", Self::NAME)?;
+        let body = required_str(args, "body", Self::NAME)?;
         let id = parse_id(id_raw)?;
         let scope = parse_scope(Self::NAME, scope_raw)?;
         let kind = parse_kind(kind_raw)?;
@@ -113,16 +99,6 @@ impl Tool for MemoryWriteTool {
             .map_err(|err| AgentError::from(err.to_string()))?;
         Ok(outcome_text(scope, id.as_str(), outcome).into())
     }
-}
-
-fn required_str<'a>(
-    args: &'a Value,
-    key: &str,
-    missing: &'static str,
-) -> Result<&'a str, AgentError> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| AgentError::from(missing))
 }
 
 fn outcome_text(scope: MemoryScope, id: &str, outcome: PutOutcome) -> String {

@@ -1,11 +1,9 @@
 use crate::capabilities::subagent::{SubagentParts, Subagents};
 use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::core::event::EventBus;
+use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL};
 use crate::core::session::{Session, canonical_root};
-use crate::memory::{
-    AMBIGUOUS_MEMORY, DESCRIPTION_LABEL, KIND_LABEL, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY,
-    SOURCE_LABEL,
-};
+use crate::memory::{AMBIGUOUS_MEMORY, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY};
 use crate::{App, AppBuilder, NOTICE_MARK, NodeStatus};
 use crate::{LocalShell, runtime::*};
 use oven_mem::NOT_FOUND;

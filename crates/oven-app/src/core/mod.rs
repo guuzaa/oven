@@ -5,6 +5,7 @@ pub mod complete;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod memory;
 pub mod mention;
 pub mod provider;
 pub mod session;

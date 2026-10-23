@@ -4,12 +4,13 @@ use serde_json::Value;
 use super::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
 
 pub(crate) fn present_memory_tool(name: &str, input: &Value) -> Option<ToolView> {
-    match name {
-        MemoryWriteTool::NAME => Some(MemoryWriteTool::view_input(input)),
-        MemoryReadTool::NAME => Some(MemoryReadTool::view_input(input)),
-        MemoryForgetTool::NAME => Some(MemoryForgetTool::view_input(input)),
-        _ => None,
-    }
+    let verb = match name {
+        MemoryWriteTool::NAME => MemoryWriteTool::VERB,
+        MemoryReadTool::NAME => MemoryReadTool::VERB,
+        MemoryForgetTool::NAME => MemoryForgetTool::VERB,
+        _ => return None,
+    };
+    Some(memory_view(verb, input))
 }
 
 pub(super) fn memory_view(verb: &str, input: &Value) -> ToolView {

@@ -1,17 +1,12 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, TurnContext};
 use oven_mem::MemoryStore;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use super::view::memory_view;
-use super::{parse_id, parse_scope};
-
-const MISSING_SCOPE: &str = "memory_read: missing 'scope' string argument";
-const MISSING_ID: &str = "memory_read: missing 'id' string argument";
-const KIND_LABEL: &str = "kind";
-const DESCRIPTION_LABEL: &str = "description";
+use super::{parse_id, parse_scope, required_str, scope_property};
+use crate::core::memory::header;
 
 pub struct MemoryReadTool {
     store: Arc<MemoryStore>,
@@ -24,10 +19,6 @@ impl MemoryReadTool {
     pub fn new(store: Arc<MemoryStore>) -> Self {
         Self { store }
     }
-
-    pub fn view_input(input: &Value) -> ToolView {
-        memory_view(Self::VERB, input)
-    }
 }
 
 #[async_trait]
@@ -37,7 +28,7 @@ impl Tool for MemoryReadTool {
     }
 
     fn view(&self, input: &Value) -> ToolView {
-        Self::view_input(input)
+        memory_view(Self::VERB, input)
     }
 
     fn description(&self) -> &'static str {
@@ -49,11 +40,7 @@ impl Tool for MemoryReadTool {
         Arc::new(json!({
             "type": "object",
             "properties": {
-                "scope": {
-                    "type": "string",
-                    "enum": ["workspace", "user"],
-                    "description": "workspace for this repository, user for personal preferences"
-                },
+                "scope": scope_property(),
                 "id": { "type": "string", "description": "Memory id, e.g. \"proxy-requires-http2\"." }
             },
             "required": ["scope", "id"]
@@ -68,14 +55,8 @@ impl Tool for MemoryReadTool {
     }
 
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
-        let scope_raw = args
-            .get("scope")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AgentError::from(MISSING_SCOPE))?;
-        let id_raw = args
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AgentError::from(MISSING_ID))?;
+        let scope_raw = required_str(args, "scope", Self::NAME)?;
+        let id_raw = required_str(args, "id", Self::NAME)?;
         let id = parse_id(id_raw)?;
         let scope = parse_scope(Self::NAME, scope_raw)?;
         let memory = self
@@ -83,13 +64,10 @@ impl Tool for MemoryReadTool {
             .read(scope, &id)
             .await
             .map_err(|err| AgentError::from(err.to_string()))?;
-        Ok(format!(
-            "{KIND_LABEL}: {}\n{DESCRIPTION_LABEL}: {}\n\n{}",
-            memory.kind.as_str(),
-            memory.description,
-            memory.body
-        )
-        .into())
+        let mut out = header(&memory);
+        out.push('\n');
+        out.push_str(&memory.body);
+        Ok(out.into())
     }
 }
 
@@ -102,7 +80,8 @@ mod tests {
     use oven_mem::{INVALID_ID, MemoryRoots, MemoryStore, USER_SCOPE_UNAVAILABLE};
     use serde_json::json;
 
-    use super::{DESCRIPTION_LABEL, KIND_LABEL, MemoryReadTool};
+    use super::MemoryReadTool;
+    use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL};
 
     fn turn() -> TurnContext {
         TurnContext::new(
