@@ -17,6 +17,10 @@ pub(crate) fn app_state(
     configured_providers: Vec<String>,
     session: SessionState,
 ) -> AppState {
+    let (history_timestamps, history_thinking_ms): (Vec<u64>, Vec<Option<u64>>) = agent
+        .history_timed()
+        .map(|(_, timestamp, thinking_ms)| (timestamp, thinking_ms))
+        .unzip();
     AppState {
         levels: AppLevels {
             phase: AppPhase::Idle,
@@ -35,8 +39,8 @@ pub(crate) fn app_state(
             models: Vec::new(),
         },
         history: agent.shared_history(),
-        history_timestamps: agent.history_timed().map(|(_, ts, _)| ts).collect(),
-        history_thinking_ms: agent.history_timed().map(|(_, _, th)| th).collect(),
+        history_timestamps,
+        history_thinking_ms,
     }
 }
 

@@ -166,7 +166,6 @@ impl Runtime {
         for error in errors {
             self.emit_error(error);
         }
-        self.sync_state();
     }
 
     async fn bootstrap(&mut self) {
@@ -338,13 +337,17 @@ impl Runtime {
     pub(crate) fn sync_state(&self) {
         let agent = &self.agent;
         let session_id = self.session_id();
+        let (history_timestamps, history_thinking_ms): (Vec<u64>, Vec<Option<u64>>) = agent
+            .history_timed()
+            .map(|(_, timestamp, thinking_ms)| (timestamp, thinking_ms))
+            .unzip();
         self.shared.state.send_modify(|state| {
             state.levels.mode = agent.mode();
             state.levels.model = agent.model().to_string();
             state.levels.reasoning_effort = agent.reasoning_effort();
             state.history = agent.shared_history();
-            state.history_timestamps = agent.history_timed().map(|(_, ts, _)| ts).collect();
-            state.history_thinking_ms = agent.history_timed().map(|(_, _, th)| th).collect();
+            state.history_timestamps = history_timestamps;
+            state.history_thinking_ms = history_thinking_ms;
             state.levels.todos = agent.todos().clone();
             state.levels.last_turn_usage = agent.last_turn_usage();
             state.levels.context_tokens = context_tokens(agent);
