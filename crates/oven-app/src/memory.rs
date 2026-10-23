@@ -165,11 +165,7 @@ async fn load(store: &MemoryStore, memory_ref: &MemoryRef) -> Result<Memory, Str
 fn resolve(store: &MemoryStore, memory_ref: &MemoryRef) -> Result<(MemoryScope, MemoryId), String> {
     match memory_ref {
         MemoryRef::Scoped { scope, id } => {
-            if store
-                .entries()
-                .iter()
-                .any(|entry| entry.scope == *scope && &entry.id == id)
-            {
+            if store.contains(*scope, id) {
                 Ok((*scope, id.clone()))
             } else {
                 Err(MemoryError::NotFound {
@@ -184,14 +180,9 @@ fn resolve(store: &MemoryStore, memory_ref: &MemoryRef) -> Result<(MemoryScope, 
 }
 
 fn locate_bare(store: &MemoryStore, id: &MemoryId) -> Result<(MemoryScope, MemoryId), String> {
-    let hits: Vec<_> = store
-        .entries()
-        .into_iter()
-        .filter(|entry| &entry.id == id)
-        .collect();
-    match hits.len() {
-        0 => Err(format!("{NOT_FOUND}: {id}")),
-        1 => Ok((hits[0].scope, hits[0].id.clone())),
+    match store.scopes_of(id).as_slice() {
+        [] => Err(format!("{NOT_FOUND}: {id}")),
+        [scope] => Ok((*scope, id.clone())),
         _ => Err(format!(
             "{AMBIGUOUS_MEMORY}: {}/{id} or {}/{id}",
             MemoryScope::Workspace,
