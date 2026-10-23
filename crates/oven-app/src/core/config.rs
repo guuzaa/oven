@@ -306,7 +306,7 @@ impl ProviderConfig {
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             protocol: self.protocol,
-            has_api_key: !self.effective_api_key().is_empty(),
+            has_api_key: self.has_api_key(),
             reasoning_effort: self.reasoning_effort,
         }
     }
@@ -324,19 +324,29 @@ impl ProviderConfig {
         if let Some(model) = self.model.take() {
             self.model = Some(wire_model(&model));
         }
-        for (id, metadata) in mem::take(&mut self.models) {
-            self.models.entry(wire_model(&id)).or_insert(metadata);
-        }
-        if self.protocol.is_some() && !self.is_custom_vendor() {
+        self.normalize_models();
+        if self.protocol.is_some() && !is_custom_vendor_name(self.name.as_deref()) {
             self.protocol = None;
         }
     }
 
+    /// The model ids as wire ids. An id that already is one keeps its key, so
+    /// normalizing a provider again does not rebuild its whole map.
+    fn normalize_models(&mut self) {
+        if self.models.keys().all(|id| is_wire_model(id)) {
+            return;
+        }
+        let models = mem::take(&mut self.models);
+        let mut renamed: BTreeMap<String, ModelMetadata> = BTreeMap::new();
+        for (id, metadata) in models {
+            renamed.entry(wire_model(&id)).or_insert(metadata);
+        }
+        self.models = renamed;
+    }
+
     pub fn is_custom_vendor(&self) -> bool {
-        self.name
-            .as_deref()
-            .and_then(canonical_name)
-            .is_none_or(|name| matches!(ProviderName::from(name.as_str()), ProviderName::Custom(_)))
+        let name = self.name.as_deref().and_then(canonical_name);
+        is_custom_vendor_name(name.as_deref())
     }
 
     /// The effective model slug: `model` config wins, then the `OVEN_MODEL` env
@@ -385,7 +395,21 @@ impl ProviderConfig {
         if let Some(name) = self.name.as_deref().and_then(canonical_name) {
             return ProviderName::from(name.as_str());
         }
-        match ModelId::from(self.effective_model().as_str()).vendor() {
+        // Without a name the vendor is the model's own: the effective model
+        // is the configured one, the environment's, or the default one, whose
+        // vendor is the builtin `deepseek`.
+        let owned;
+        let raw = match self.model.as_deref() {
+            Some(model) => model,
+            None => match env::var("OVEN_MODEL") {
+                Ok(model) => {
+                    owned = model;
+                    owned.as_str()
+                }
+                Err(_) => return ProviderName::from("deepseek"),
+            },
+        };
+        match ModelId::from(raw).vendor() {
             Some(vendor) => ProviderName::from(vendor),
             None => ProviderName::Custom("unknown".into()),
         }
@@ -426,10 +450,19 @@ impl ProviderConfig {
         env::var("OVEN_API_KEY").unwrap_or_default()
     }
 
+    /// Whether an API key is configured, without copying the secret to find
+    /// out.
+    pub fn has_api_key(&self) -> bool {
+        match &self.api_key {
+            Some(key) => !key.is_empty(),
+            None => env::var("OVEN_API_KEY").is_ok_and(|key| !key.is_empty()),
+        }
+    }
+
     /// True when no API key is configured, so interactive sessions should
     /// open `/setup` instead of failing at startup.
     pub fn needs_setup(&self) -> bool {
-        self.effective_api_key().is_empty()
+        !self.has_api_key()
     }
 
     /// Each declared model with [`metadata`](Self::metadata) filled in, keyed
@@ -460,9 +493,13 @@ impl ProviderConfig {
             prefer,
         );
         self.metadata.merge(&incoming.metadata, prefer);
+        // The stored ids are wire ids already, so the incoming ones are
+        // turned into wire ids before they are merged: a model declared
+        // under its full slug then lands on the same entry.
+        self.normalize_models();
         for (id, metadata) in &incoming.models {
             self.models
-                .entry(id.clone())
+                .entry(wire_model(id))
                 .or_default()
                 .merge(metadata, prefer);
         }
@@ -504,6 +541,21 @@ fn wire_model(raw: &str) -> String {
     match id.variant() {
         Some(variant) => format!("{}:{variant}", id.wire_id()),
         None => id.wire_id().to_string(),
+    }
+}
+
+/// Whether `raw` already is a wire id: a wire id names no vendor and no
+/// variant, so it carries neither separator.
+fn is_wire_model(raw: &str) -> bool {
+    !raw.contains('/') && !raw.contains(':')
+}
+
+/// Whether a canonical vendor slug names a custom vendor. A provider with no
+/// name at all is one: nothing declares which vendor would serve it.
+fn is_custom_vendor_name(name: Option<&str>) -> bool {
+    match name {
+        Some(name) => matches!(ProviderName::from(name), ProviderName::Custom(_)),
+        None => true,
     }
 }
 
@@ -675,10 +727,10 @@ impl<'de> Deserialize<'de> for AppConfig {
         };
 
         for (key, mut provider) in raw.providers {
-            provider.normalize();
             let name = provider
                 .name
-                .clone()
+                .as_deref()
+                .and_then(canonical_name)
                 .unwrap_or_else(|| canonical_vendor(&key));
             provider.name = Some(name.clone());
             config.merge_provider(&name, &provider);
@@ -687,8 +739,11 @@ impl<'de> Deserialize<'de> for AppConfig {
         // Legacy `[provider]` block: its `name` was the selection and its
         // other fields an override on top of the matching saved vendor.
         let legacy = raw.provider.map(|mut provider| {
-            provider.normalize();
-            let name = provider.name.clone().unwrap_or_default();
+            let name = provider
+                .name
+                .as_deref()
+                .and_then(canonical_name)
+                .unwrap_or_default();
             provider.name = Some(name.clone());
             config.merge_provider(&name, &provider);
             name
@@ -765,8 +820,7 @@ impl AppConfig {
         if !overlay.active_provider.name.is_empty() {
             self.active_provider = overlay.active_provider;
         }
-        for (name, mut provider) in overlay.providers {
-            provider.normalize();
+        for (name, provider) in overlay.providers {
             self.merge_provider(&canonical_vendor(&name), &provider);
         }
         if overlay.request_timeout_secs != default_request_timeout_secs() {
@@ -1241,6 +1295,52 @@ supports_vision = true
     }
 
     #[test]
+    fn a_model_declared_under_its_full_slug_merges_onto_the_wire_id() {
+        let mut stored = ProviderConfig {
+            name: Some("xai".into()),
+            models: BTreeMap::from([(
+                "grok-4.6".to_string(),
+                ModelMetadata {
+                    context_window: Some(200_000),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        stored.normalize();
+        let overlay = ProviderConfig {
+            name: Some("xai".into()),
+            models: BTreeMap::from([(
+                "xai/grok-4.6".to_string(),
+                ModelMetadata {
+                    max_output_tokens: Some(8_192),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        stored.merge_fields(&overlay);
+
+        let model = &stored.models["grok-4.6"];
+        assert_eq!(model.context_window, Some(200_000));
+        assert_eq!(model.max_output_tokens, Some(8_192));
+        assert_eq!(stored.models.len(), 1);
+    }
+
+    #[test]
+    fn the_vendor_of_an_unnamed_provider_comes_from_its_model() {
+        let provider = ProviderConfig {
+            model: Some("xai/grok-4.6".into()),
+            ..Default::default()
+        };
+        assert_eq!(provider.effective_provider_name(), ProviderName::Grok);
+
+        let unnamed = ProviderConfig::default();
+        assert_eq!(unnamed.effective_provider_name(), ProviderName::DeepSeek);
+    }
+
+    #[test]
     fn merging_and_filling_are_mirrors() {
         let overlay = ProviderConfig {
             model: Some("overlay".into()),
@@ -1303,7 +1403,10 @@ supports_vision = true
         base.merge(overlay);
         assert_eq!(base.max_iters, 7);
         assert_eq!(base.subagents.max_concurrent, 2);
-        assert_eq!(base.subagents.max_iters, SubagentConfig::default().max_iters);
+        assert_eq!(
+            base.subagents.max_iters,
+            SubagentConfig::default().max_iters
+        );
     }
 
     #[test]
