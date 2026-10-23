@@ -140,10 +140,14 @@ impl SlashRegistry {
             Some((name, rest)) => (name, rest.trim()),
             None => (body, ""),
         };
+        self.find(name).is_some().then_some((name, args))
+    }
+
+    /// The position of the registered command `name`, if there is one.
+    fn find(&self, name: &str) -> Option<usize> {
         self.commands
             .iter()
-            .any(|c| c.name() == name)
-            .then_some((name, args))
+            .position(|command| command.name() == name)
     }
 
     pub fn run(
@@ -152,8 +156,8 @@ impl SlashRegistry {
         name: &str,
         args: &str,
     ) -> Result<CommandOutcome, AppError> {
-        match self.commands.iter().find(|c| c.name() == name) {
-            Some(command) => command.execute(cx, args),
+        match self.find(name) {
+            Some(index) => self.commands[index].execute(cx, args),
             None => Ok(CommandOutcome::Passthrough),
         }
     }

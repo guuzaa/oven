@@ -73,10 +73,6 @@ impl McpRegistry {
             .ok_or_else(|| McpError::Unknown(id.to_string()))
     }
 
-    pub fn ids(&self) -> Vec<&str> {
-        self.servers.keys().map(String::as_str).collect()
-    }
-
     pub fn len(&self) -> usize {
         self.servers.len()
     }

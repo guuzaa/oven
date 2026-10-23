@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -95,7 +97,7 @@ pub(crate) struct WireFunction {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub parameters: serde_json::Value,
+    pub parameters: Arc<serde_json::Value>,
 }
 
 /// 请求侧（`assistant` 消息内）的工具调用。
@@ -324,7 +326,7 @@ mod tests {
             function: WireFunction {
                 name: "get_weather".to_string(),
                 description: None,
-                parameters: serde_json::json!({}),
+                parameters: Arc::new(serde_json::json!({})),
             },
         };
         let json = serde_json::to_value(&tool).unwrap();

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::core::turn::TurnContext;
 
@@ -100,8 +101,8 @@ impl Tool for AnswerTool {
          for permission to run a tool."
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "required": ["question"],
             "additionalProperties": false,
@@ -134,7 +135,7 @@ impl Tool for AnswerTool {
                     }
                 }
             }
-        })
+        }))
     }
 
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {

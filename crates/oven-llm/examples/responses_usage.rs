@@ -17,6 +17,8 @@
 //! 打印错误并继续，而不会 panic，因此即使没有真实 API key/网络也能演示完整的
 //! 调用流程。
 
+use std::sync::Arc;
+
 use std::io::{self, Write};
 
 use futures::StreamExt;
@@ -174,7 +176,7 @@ fn weather_tool() -> Tool {
     Tool {
         name: "get_weather".to_string(),
         description: Some("查询指定城市的当前天气。".to_string()),
-        input_schema: json!({
+        input_schema: Arc::new(json!({
             "type": "object",
             "properties": {
                 "location": {
@@ -184,7 +186,7 @@ fn weather_tool() -> Tool {
             },
             "required": ["location"],
             "additionalProperties": false
-        }),
+        })),
     }
 }
 

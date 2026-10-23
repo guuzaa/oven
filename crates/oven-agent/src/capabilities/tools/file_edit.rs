@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -165,8 +166,8 @@ impl Tool for FileEditTool {
          edit. Each old_string must match exactly once, so include enough \
          surrounding context to make it unique."
     }
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "File path relative to the workspace root." },
@@ -184,7 +185,7 @@ impl Tool for FileEditTool {
                 }
             },
             "required": ["path", "edit"]
-        })
+        }))
     }
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;

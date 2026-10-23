@@ -66,20 +66,9 @@ impl Shared {
     /// fallback keeps a command that forgot its `cx.agent()` guard from
     /// doing more than waiting.
     fn apply_shared_outcome(&self, name: &str, outcome: CommandOutcome) {
-        match outcome {
-            CommandOutcome::Reply(text) => self.notify(text),
-            CommandOutcome::FocusSubagent { id } => {
-                self.events
-                    .emit(AppEventKind::Subagent(SubagentEvent::Focus { id }));
-            }
-            CommandOutcome::Exit => {
-                self.subagents.shutdown();
-                self.notify(GOODBYE.into());
-                self.events.emit(AppEventKind::Exited);
-            }
-            _ => self
-                .events
-                .emit_error(format!("/{name} has to wait for the current reply")),
+        if !apply_without_driver(self, &outcome) {
+            self.events
+                .emit_error(format!("/{name} has to wait for the current reply"));
         }
     }
 
@@ -128,6 +117,31 @@ impl Shared {
             let _ = write!(text, "\nsaved to {}", path.display());
         }
         self.notify(text);
+    }
+}
+
+/// Applies the outcomes that need nothing from the conversation driver: the
+/// reply, the focused subagent and the exit. `false` when the outcome needs
+/// the driver and has to wait for the running turn.
+pub(crate) fn apply_without_driver(shared: &Shared, outcome: &CommandOutcome) -> bool {
+    match outcome {
+        CommandOutcome::Reply(text) => {
+            shared.notify(text.clone());
+            true
+        }
+        CommandOutcome::FocusSubagent { id } => {
+            shared
+                .events
+                .emit(AppEventKind::Subagent(SubagentEvent::Focus { id: *id }));
+            true
+        }
+        CommandOutcome::Exit => {
+            shared.subagents.shutdown();
+            shared.notify(GOODBYE.into());
+            shared.events.emit(AppEventKind::Exited);
+            true
+        }
+        _ => false,
     }
 }
 

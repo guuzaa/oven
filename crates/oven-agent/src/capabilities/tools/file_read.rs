@@ -1,5 +1,6 @@
 use std::fmt::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -39,8 +40,8 @@ impl Tool for FileReadTool {
          line numbers in the format `L<line>→<content>`, along with the file path \
          and returned line range. Optionally restrict the range with `offset` and `limit`."
     }
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "File path relative to the workspace root." },
@@ -48,7 +49,7 @@ impl Tool for FileReadTool {
                 "limit": { "type": "integer", "description": "Maximum number of lines to read. Defaults to all." }
             },
             "required": ["path"]
-        })
+        }))
     }
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;

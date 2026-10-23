@@ -164,6 +164,8 @@ pub fn validate_request(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::domain::message::{ImageSource, Message};
     use crate::domain::request::{ModelId, SamplingParams};
@@ -284,7 +286,7 @@ mod tests {
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: None,
-                input_schema: serde_json::json!({}),
+                input_schema: Arc::new(serde_json::json!({})),
             }],
             ..base_request()
         };
@@ -301,7 +303,7 @@ mod tests {
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: None,
-                input_schema: serde_json::json!({}),
+                input_schema: Arc::new(serde_json::json!({})),
             }],
             tool_choice: ToolChoice::Auto,
             ..base_request()
@@ -441,7 +443,7 @@ mod tests {
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: Some("查询天气".to_string()),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: Arc::new(serde_json::json!({"type": "object"})),
             }],
             sampling: SamplingParams {
                 max_tokens: Some(model.max_output_tokens),
@@ -481,7 +483,7 @@ mod tests {
             tools: vec![Tool {
                 name: "ghi".to_string(), // 3 chars
                 description: None,
-                input_schema: serde_json::json!({}), // "{}" -> 2 chars
+                input_schema: Arc::new(serde_json::json!({})), // "{}" -> 2 chars
             }],
             ..Default::default()
         };

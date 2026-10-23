@@ -5,6 +5,8 @@
 //!
 //! 默认将当前目录视为工作区；可通过 `CODING_AGENT_ROOT` 限制 agent 可读写的根目录。
 
+use std::sync::Arc;
+
 use std::{
     env,
     error::Error,
@@ -124,21 +126,21 @@ fn coding_tools() -> Vec<Tool> {
         Tool {
             name: "read_file".to_string(),
             description: Some("Read a UTF-8 text file from the coding workspace.".to_string()),
-            input_schema: json!({
+            input_schema: Arc::new(json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Relative path from the workspace root" }
                 },
                 "required": ["path"],
                 "additionalProperties": false
-            }),
+            })),
         },
         Tool {
             name: "write_file".to_string(),
             description: Some(
                 "Create or replace a UTF-8 text file in the coding workspace.".to_string(),
             ),
-            input_schema: json!({
+            input_schema: Arc::new(json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Relative path from the workspace root" },
@@ -146,7 +148,7 @@ fn coding_tools() -> Vec<Tool> {
                 },
                 "required": ["path", "content"],
                 "additionalProperties": false
-            }),
+            })),
         },
     ]
 }

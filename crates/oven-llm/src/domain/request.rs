@@ -431,6 +431,8 @@ impl Request {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::domain::message::{ContentBlock, Role};
 
@@ -623,7 +625,7 @@ mod tests {
             .tool(Tool {
                 name: "search".into(),
                 description: Some("Search the web".into()),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: Arc::new(serde_json::json!({"type": "object"})),
             })
             .tool_choice(ToolChoice::Auto)
             .temperature(0.7)
@@ -726,12 +728,12 @@ mod tests {
         req.tool(Tool {
             name: "a".into(),
             description: None,
-            input_schema: serde_json::json!({}),
+            input_schema: Arc::new(serde_json::json!({})),
         })
         .tool(Tool {
             name: "b".into(),
             description: None,
-            input_schema: serde_json::json!({}),
+            input_schema: Arc::new(serde_json::json!({})),
         });
 
         assert_eq!(req.tools.len(), 2);
@@ -745,12 +747,12 @@ mod tests {
         req.tool(Tool {
             name: "old".into(),
             description: None,
-            input_schema: serde_json::json!({}),
+            input_schema: Arc::new(serde_json::json!({})),
         })
         .tools(vec![Tool {
             name: "new".into(),
             description: None,
-            input_schema: serde_json::json!({}),
+            input_schema: Arc::new(serde_json::json!({})),
         }]);
 
         assert_eq!(req.tools.len(), 1);
@@ -780,7 +782,7 @@ mod tests {
             .tool(Tool {
                 name: "run_code".into(),
                 description: Some("Execute code".into()),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: Arc::new(serde_json::json!({"type": "object"})),
             })
             .temperature(0.0)
             .thinking(ThinkingMode::Enabled)

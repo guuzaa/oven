@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::io::{self, ErrorKind};
@@ -22,6 +22,8 @@ pub mod mcp;
 
 pub use mcp::McpServerConfig;
 
+/// The vendor the app falls back to when no other one is configured.
+const DEFAULT_PROVIDER: &str = "deepseek";
 const DEFAULT_SUBAGENT_CONCURRENT: usize = 4;
 const DEFAULT_SUBAGENT_ITERS: usize = 60;
 const CONFIG_TMP_EXTENSION: &str = "tmp";
@@ -306,7 +308,7 @@ impl ProviderConfig {
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             protocol: self.protocol,
-            has_api_key: !self.effective_api_key().is_empty(),
+            has_api_key: self.has_api_key(),
             reasoning_effort: self.reasoning_effort,
         }
     }
@@ -324,19 +326,29 @@ impl ProviderConfig {
         if let Some(model) = self.model.take() {
             self.model = Some(wire_model(&model));
         }
-        for (id, metadata) in mem::take(&mut self.models) {
-            self.models.entry(wire_model(&id)).or_insert(metadata);
-        }
-        if self.protocol.is_some() && !self.is_custom_vendor() {
+        self.normalize_models();
+        if self.protocol.is_some() && !is_custom_vendor_name(self.name.as_deref()) {
             self.protocol = None;
         }
     }
 
+    /// The model ids as wire ids. An id that already is one keeps its key, so
+    /// normalizing a provider again does not rebuild its whole map.
+    fn normalize_models(&mut self) {
+        if self.models.keys().all(|id| is_wire_model(id)) {
+            return;
+        }
+        let models = mem::take(&mut self.models);
+        let mut renamed: BTreeMap<String, ModelMetadata> = BTreeMap::new();
+        for (id, metadata) in models {
+            renamed.entry(wire_model(&id)).or_insert(metadata);
+        }
+        self.models = renamed;
+    }
+
     pub fn is_custom_vendor(&self) -> bool {
-        self.name
-            .as_deref()
-            .and_then(canonical_name)
-            .is_none_or(|name| matches!(ProviderName::from(name.as_str()), ProviderName::Custom(_)))
+        let name = self.name.as_deref().and_then(canonical_name);
+        is_custom_vendor_name(name.as_deref())
     }
 
     /// The effective model slug: `model` config wins, then the `OVEN_MODEL` env
@@ -353,7 +365,7 @@ impl ProviderConfig {
         }
         qualify_model(
             Self::DEFAULT_MODEL,
-            self.name.as_deref().or(Some("deepseek")),
+            self.name.as_deref().or(Some(DEFAULT_PROVIDER)),
         )
     }
 
@@ -385,7 +397,21 @@ impl ProviderConfig {
         if let Some(name) = self.name.as_deref().and_then(canonical_name) {
             return ProviderName::from(name.as_str());
         }
-        match ModelId::from(self.effective_model().as_str()).vendor() {
+        // Without a name the vendor is the model's own: the effective model
+        // is the configured one, the environment's, or the default one, whose
+        // vendor is the builtin `deepseek`.
+        let owned;
+        let raw = match self.model.as_deref() {
+            Some(model) => model,
+            None => match env::var("OVEN_MODEL") {
+                Ok(model) => {
+                    owned = model;
+                    owned.as_str()
+                }
+                Err(_) => return ProviderName::from(DEFAULT_PROVIDER),
+            },
+        };
+        match ModelId::from(raw).vendor() {
             Some(vendor) => ProviderName::from(vendor),
             None => ProviderName::Custom("unknown".into()),
         }
@@ -426,10 +452,19 @@ impl ProviderConfig {
         env::var("OVEN_API_KEY").unwrap_or_default()
     }
 
+    /// Whether an API key is configured, without copying the secret to find
+    /// out.
+    pub fn has_api_key(&self) -> bool {
+        match &self.api_key {
+            Some(key) => !key.is_empty(),
+            None => env::var("OVEN_API_KEY").is_ok_and(|key| !key.is_empty()),
+        }
+    }
+
     /// True when no API key is configured, so interactive sessions should
     /// open `/setup` instead of failing at startup.
     pub fn needs_setup(&self) -> bool {
-        self.effective_api_key().is_empty()
+        !self.has_api_key()
     }
 
     /// Each declared model with [`metadata`](Self::metadata) filled in, keyed
@@ -460,9 +495,13 @@ impl ProviderConfig {
             prefer,
         );
         self.metadata.merge(&incoming.metadata, prefer);
+        // The stored ids are wire ids already, so the incoming ones are
+        // turned into wire ids before they are merged: a model declared
+        // under its full slug then lands on the same entry.
+        self.normalize_models();
         for (id, metadata) in &incoming.models {
             self.models
-                .entry(id.clone())
+                .entry(wire_model(id))
                 .or_default()
                 .merge(metadata, prefer);
         }
@@ -504,6 +543,21 @@ fn wire_model(raw: &str) -> String {
     match id.variant() {
         Some(variant) => format!("{}:{variant}", id.wire_id()),
         None => id.wire_id().to_string(),
+    }
+}
+
+/// Whether `raw` already is a wire id: a wire id names no vendor and no
+/// variant, so it carries neither separator.
+fn is_wire_model(raw: &str) -> bool {
+    !raw.contains('/') && !raw.contains(':')
+}
+
+/// Whether a canonical vendor slug names a custom vendor. A provider with no
+/// name at all is one: nothing declares which vendor would serve it.
+fn is_custom_vendor_name(name: Option<&str>) -> bool {
+    match name {
+        Some(name) => matches!(ProviderName::from(name), ProviderName::Custom(_)),
+        None => true,
     }
 }
 
@@ -628,6 +682,23 @@ pub struct SubagentConfig {
     pub max_iters: usize,
 }
 
+impl SubagentConfig {
+    /// Overlay the fields `incoming` sets on this one; the ones it leaves at
+    /// their default keep what was stored.
+    fn merge_fields(&mut self, incoming: &SubagentConfig) {
+        let default = SubagentConfig::default();
+        if incoming.enabled != default.enabled {
+            self.enabled = incoming.enabled;
+        }
+        if incoming.max_concurrent != default.max_concurrent {
+            self.max_concurrent = incoming.max_concurrent;
+        }
+        if incoming.max_iters != default.max_iters {
+            self.max_iters = incoming.max_iters;
+        }
+    }
+}
+
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
@@ -658,10 +729,10 @@ impl<'de> Deserialize<'de> for AppConfig {
         };
 
         for (key, mut provider) in raw.providers {
-            provider.normalize();
             let name = provider
                 .name
-                .clone()
+                .as_deref()
+                .and_then(canonical_name)
                 .unwrap_or_else(|| canonical_vendor(&key));
             provider.name = Some(name.clone());
             config.merge_provider(&name, &provider);
@@ -670,8 +741,11 @@ impl<'de> Deserialize<'de> for AppConfig {
         // Legacy `[provider]` block: its `name` was the selection and its
         // other fields an override on top of the matching saved vendor.
         let legacy = raw.provider.map(|mut provider| {
-            provider.normalize();
-            let name = provider.name.clone().unwrap_or_default();
+            let name = provider
+                .name
+                .as_deref()
+                .and_then(canonical_name)
+                .unwrap_or_default();
             provider.name = Some(name.clone());
             config.merge_provider(&name, &provider);
             name
@@ -709,28 +783,26 @@ fn default_max_iters() -> usize {
     DEFAULT_MAX_ITERS
 }
 
+/// Take the incoming value when it is not the default one: a config file
+/// that leaves a field out does not override it.
+fn take_non_default<T: PartialEq>(slot: &mut T, incoming: T, default: T) {
+    if incoming != default {
+        *slot = incoming;
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
-        Self {
-            active_provider: ProviderSelection {
-                name: "deepseek".into(),
+        let mut config = Self::empty();
+        config.providers.insert(
+            DEFAULT_PROVIDER.into(),
+            ProviderConfig {
+                name: Some(DEFAULT_PROVIDER.into()),
+                ..Default::default()
             },
-            providers: BTreeMap::from([(
-                "deepseek".into(),
-                ProviderConfig {
-                    name: Some("deepseek".into()),
-                    ..Default::default()
-                },
-            )]),
-            request_timeout_secs: default_request_timeout_secs(),
-            max_retries: default_max_retries(),
-            base_backoff_ms: default_base_backoff_ms(),
-            compact_threshold: default_compact_threshold(),
-            max_iters: default_max_iters(),
-            tools: Vec::new(),
-            subagents: SubagentConfig::default(),
-            mcps: BTreeMap::new(),
-        }
+        );
+        config.active_provider.name = DEFAULT_PROVIDER.into();
+        config
     }
 }
 
@@ -748,32 +820,44 @@ impl AppConfig {
         if !overlay.active_provider.name.is_empty() {
             self.active_provider = overlay.active_provider;
         }
-        for (name, mut provider) in overlay.providers {
-            provider.normalize();
+        for (name, provider) in overlay.providers {
             self.merge_provider(&canonical_vendor(&name), &provider);
         }
-        if overlay.request_timeout_secs != default_request_timeout_secs() {
-            self.request_timeout_secs = overlay.request_timeout_secs;
-        }
-        if overlay.max_retries != default_max_retries() {
-            self.max_retries = overlay.max_retries;
-        }
-        if overlay.base_backoff_ms != default_base_backoff_ms() {
-            self.base_backoff_ms = overlay.base_backoff_ms;
-        }
-        #[allow(
-            clippy::float_cmp,
-            reason = "overlay values only override when non-default"
-        )]
-        if overlay.compact_threshold != default_compact_threshold() {
-            self.compact_threshold = overlay.compact_threshold;
-        }
+        take_non_default(
+            &mut self.request_timeout_secs,
+            overlay.request_timeout_secs,
+            default_request_timeout_secs(),
+        );
+        take_non_default(
+            &mut self.max_retries,
+            overlay.max_retries,
+            default_max_retries(),
+        );
+        take_non_default(
+            &mut self.base_backoff_ms,
+            overlay.base_backoff_ms,
+            default_base_backoff_ms(),
+        );
+        take_non_default(
+            &mut self.compact_threshold,
+            overlay.compact_threshold,
+            default_compact_threshold(),
+        );
+        take_non_default(&mut self.max_iters, overlay.max_iters, default_max_iters());
+        self.subagents.merge_fields(&overlay.subagents);
+        // The tools already mounted, so the ones the overlay adds are looked
+        // up once instead of once per name.
+        let mounted: BTreeSet<&str> = self.tools.iter().map(String::as_str).collect();
+        let mut added: Vec<String> = Vec::new();
         for name in overlay.tools {
-            if !self.tools.contains(&name) {
-                self.tools.push(name);
+            if !mounted.contains(name.as_str()) && !added.contains(&name) {
+                added.push(name);
             }
         }
-        self.mcps.extend(overlay.mcps);
+        self.tools.extend(added);
+        for (id, server) in overlay.mcps {
+            self.mcps.entry(id).or_default().merge_fields(&server);
+        }
     }
 
     /// Merge one provider table into the saved vendors under `name`, and hand
@@ -797,19 +881,20 @@ impl AppConfig {
         self.providers.values().all(ProviderConfig::needs_setup)
     }
 
-    /// Canonical slugs that already have a saved (non-empty) API key.
-    pub fn configured_providers(&self) -> Vec<String> {
+    /// The saved vendors that already have a key.
+    fn configured(&self) -> impl Iterator<Item = (&String, &ProviderConfig)> {
         self.providers
             .iter()
             .filter(|(_, provider)| !provider.needs_setup())
-            .map(|(name, _)| name.clone())
-            .collect()
+    }
+
+    /// Canonical slugs that already have a saved (non-empty) API key.
+    pub fn configured_providers(&self) -> Vec<String> {
+        self.configured().map(|(name, _)| name.clone()).collect()
     }
 
     pub fn registerable_providers(&self) -> impl Iterator<Item = &ProviderConfig> {
-        self.providers
-            .values()
-            .filter(|provider| !provider.needs_setup())
+        self.configured().map(|(_, provider)| provider)
     }
 
     pub fn select_provider(&mut self, name: &str) -> Result<(), ConfigError> {
@@ -948,9 +1033,16 @@ impl AppConfig {
     /// `deepseek` entry, which must not be baked into a new file.
     pub fn empty() -> Self {
         Self {
-            providers: BTreeMap::new(),
             active_provider: ProviderSelection::default(),
-            ..Self::default()
+            providers: BTreeMap::new(),
+            request_timeout_secs: default_request_timeout_secs(),
+            max_retries: default_max_retries(),
+            base_backoff_ms: default_base_backoff_ms(),
+            compact_threshold: default_compact_threshold(),
+            max_iters: default_max_iters(),
+            tools: Vec::new(),
+            subagents: SubagentConfig::default(),
+            mcps: BTreeMap::new(),
         }
     }
 
@@ -1218,6 +1310,52 @@ supports_vision = true
     }
 
     #[test]
+    fn a_model_declared_under_its_full_slug_merges_onto_the_wire_id() {
+        let mut stored = ProviderConfig {
+            name: Some("xai".into()),
+            models: BTreeMap::from([(
+                "grok-4.6".to_string(),
+                ModelMetadata {
+                    context_window: Some(200_000),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        stored.normalize();
+        let overlay = ProviderConfig {
+            name: Some("xai".into()),
+            models: BTreeMap::from([(
+                "xai/grok-4.6".to_string(),
+                ModelMetadata {
+                    max_output_tokens: Some(8_192),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        stored.merge_fields(&overlay);
+
+        let model = &stored.models["grok-4.6"];
+        assert_eq!(model.context_window, Some(200_000));
+        assert_eq!(model.max_output_tokens, Some(8_192));
+        assert_eq!(stored.models.len(), 1);
+    }
+
+    #[test]
+    fn the_vendor_of_an_unnamed_provider_comes_from_its_model() {
+        let provider = ProviderConfig {
+            model: Some("xai/grok-4.6".into()),
+            ..Default::default()
+        };
+        assert_eq!(provider.effective_provider_name(), ProviderName::Grok);
+
+        let unnamed = ProviderConfig::default();
+        assert_eq!(unnamed.effective_provider_name(), ProviderName::DeepSeek);
+    }
+
+    #[test]
     fn merging_and_filling_are_mirrors() {
         let overlay = ProviderConfig {
             model: Some("overlay".into()),
@@ -1270,6 +1408,64 @@ supports_vision = true
             toml::from_str("compact_threshold = 0.5\n[provider]\nname = \"deepseek\"\n").unwrap();
         base.merge(overlay);
         assert_eq!(base.compact_threshold, 0.5);
+    }
+
+    #[test]
+    fn merge_keeps_max_iters_and_subagents() {
+        let mut base = AppConfig::default();
+        let overlay: AppConfig =
+            toml::from_str("max_iters = 7\n[subagents]\nmax_concurrent = 2\n").unwrap();
+        base.merge(overlay);
+        assert_eq!(base.max_iters, 7);
+        assert_eq!(base.subagents.max_concurrent, 2);
+        assert_eq!(
+            base.subagents.max_iters,
+            SubagentConfig::default().max_iters
+        );
+    }
+
+    #[test]
+    fn merge_keeps_the_subagents_the_project_does_not_set() {
+        let mut base = AppConfig::default();
+        let user: AppConfig = toml::from_str("[subagents]\nenabled = false\n").unwrap();
+        base.merge(user);
+        let project: AppConfig = toml::from_str("[subagents]\nmax_iters = 9\n").unwrap();
+        base.merge(project);
+        assert!(!base.subagents.enabled);
+        assert_eq!(base.subagents.max_iters, 9);
+    }
+
+    #[test]
+    fn merge_keeps_an_mcp_entry_the_project_only_partly_overrides() {
+        let mut base = AppConfig::default();
+        let user: AppConfig = toml::from_str(
+            "[mcps.filesystem]\ncommand = \"npx\"\nargs = [\"-y\", \"server\"]\n[mcps.filesystem.env]\nFOO = \"bar\"\n",
+        )
+        .unwrap();
+        base.merge(user);
+        let project: AppConfig =
+            toml::from_str("[mcps.filesystem]\nargs = [\"-y\", \"server\", \"--root\"]\n").unwrap();
+        base.merge(project);
+
+        let server = &base.mcps["filesystem"];
+        assert_eq!(server.command, "npx");
+        assert_eq!(server.args, ["-y", "server", "--root"]);
+        assert_eq!(server.env["FOO"], "bar");
+    }
+
+    #[test]
+    fn merge_replaces_an_mcp_entry_that_changes_transport() {
+        let mut base = AppConfig::default();
+        let user: AppConfig =
+            toml::from_str("[mcps.remote]\nurl = \"https://example.com/mcp\"\n").unwrap();
+        base.merge(user);
+        let project: AppConfig =
+            toml::from_str("[mcps.remote]\ncommand = \"npx\"\nargs = [\"server\"]\n").unwrap();
+        base.merge(project);
+
+        let server = &base.mcps["remote"];
+        assert_eq!(server.command, "npx");
+        assert_eq!(server.url, None);
     }
 
     #[test]

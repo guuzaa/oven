@@ -4,6 +4,8 @@
 //! 本模块是纯函数集合，不做任何 I/O；不读取或处理
 //! `Request.provider_options` 字段（该字段的合并逻辑位于 transport 层）。
 
+use std::sync::Arc;
+
 use thiserror::Error;
 
 use super::types::{
@@ -310,7 +312,7 @@ fn encode_tool(tool: &Tool) -> ResponseTool {
         kind: "function".to_string(),
         name: tool.name.clone(),
         description: tool.description.clone(),
-        parameters: tool.input_schema.clone(),
+        parameters: Arc::clone(&tool.input_schema),
     }
 }
 
@@ -688,7 +690,7 @@ mod tests {
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: Some("query weather".to_string()),
-                input_schema: serde_json::json!({"type": "object"}),
+                input_schema: Arc::new(serde_json::json!({"type": "object"})),
             }],
             ..Default::default()
         };
@@ -698,7 +700,10 @@ mod tests {
         assert_eq!(tools[0].kind, "function");
         assert_eq!(tools[0].name, "get_weather");
         assert_eq!(tools[0].description.as_deref(), Some("query weather"));
-        assert_eq!(tools[0].parameters, serde_json::json!({"type": "object"}));
+        assert_eq!(
+            tools[0].parameters,
+            Arc::new(serde_json::json!({"type": "object"}))
+        );
 
         let json = serde_json::to_value(&tools[0]).unwrap();
         assert!(json.get("parameters").is_some());

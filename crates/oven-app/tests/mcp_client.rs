@@ -64,11 +64,19 @@ async fn mcp_tool_calls_through_mock_caller() {
         "test",
         "echo",
         "Echo the given text back",
-        serde_json::json!({"type": "object"}),
+        std::sync::Arc::new(serde_json::json!({"type": "object"})),
         Arc::new(caller),
     );
     assert_eq!(tool.name(), "test_echo");
     assert_eq!(tool.description(), "[mcp:test] Echo the given text back");
+    let padded = McpTool::new(
+        "test",
+        "echo",
+        "padded  ",
+        Arc::new(serde_json::json!({})),
+        Arc::new(MockCaller::new()),
+    );
+    assert_eq!(padded.description(), "[mcp:test] padded");
 
     let ToolOutcome { output: out, .. } = tool
         .run(&serde_json::json!({"text": "hi"}), &turn())
@@ -89,7 +97,7 @@ async fn mcp_tool_caller_error_is_surfaced() {
         "test",
         "echo",
         "Echo",
-        serde_json::json!({"type": "object"}),
+        std::sync::Arc::new(serde_json::json!({"type": "object"})),
         Arc::new(caller),
     );
     let err = tool

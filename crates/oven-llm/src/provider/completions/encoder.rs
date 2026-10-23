@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 use thiserror::Error;
 
 use super::types::{
@@ -326,7 +328,7 @@ fn encode_tool(tool: &Tool) -> WireTool {
         function: WireFunction {
             name: tool.name.clone(),
             description: tool.description.clone(),
-            parameters: tool.input_schema.clone(),
+            parameters: Arc::clone(&tool.input_schema),
         },
     }
 }
@@ -758,7 +760,7 @@ mod tests {
         let tool = Tool {
             name: "get_weather".to_string(),
             description: Some("query weather".to_string()),
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: Arc::new(serde_json::json!({"type": "object"})),
         };
         let wire = encode_tool(&tool);
         assert_eq!(wire.kind, "function");
@@ -766,7 +768,7 @@ mod tests {
         assert_eq!(wire.function.description, Some("query weather".to_string()));
         assert_eq!(
             wire.function.parameters,
-            serde_json::json!({"type": "object"})
+            Arc::new(serde_json::json!({"type": "object"}))
         );
     }
 
@@ -777,7 +779,7 @@ mod tests {
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: None,
-                input_schema: serde_json::json!({}),
+                input_schema: Arc::new(serde_json::json!({})),
             }],
             sampling: SamplingParams {
                 temperature: Some(0.5),
@@ -808,7 +810,7 @@ mod tests {
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: None,
-                input_schema: serde_json::json!({}),
+                input_schema: Arc::new(serde_json::json!({})),
             }],
             sampling: SamplingParams {
                 temperature: Some(0.5),

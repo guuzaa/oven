@@ -25,11 +25,18 @@ pub struct IndexEntry {
     pub modified: SystemTime,
 }
 
-pub fn within_catalog_budget(entries: &[IndexEntry]) -> bool {
+pub fn within_catalog_budget(entries: &[&IndexEntry]) -> bool {
     entries.is_empty() || compose(entries, entries.len()).chars().count() <= MAX_CATALOG_CHARS
 }
 
 pub fn render_catalog(entries: &[IndexEntry]) -> Option<String> {
+    let refs: Vec<&IndexEntry> = entries.iter().collect();
+    render_refs(&refs)
+}
+
+/// The catalog text for entries the caller already holds by reference, so a
+/// caller that only reads the index does not have to copy it.
+pub(crate) fn render_refs(entries: &[&IndexEntry]) -> Option<String> {
     if entries.is_empty() {
         return None;
     }
@@ -43,8 +50,8 @@ pub fn render_catalog(entries: &[IndexEntry]) -> Option<String> {
     }
 }
 
-fn compose(entries: &[IndexEntry], shown: usize) -> String {
-    let mut ranked: Vec<&IndexEntry> = entries.iter().collect();
+fn compose(entries: &[&IndexEntry], shown: usize) -> String {
+    let mut ranked = entries.to_vec();
     ranked.sort_by(|a, b| by_recency(a, b));
     let selected = &ranked[..shown];
     let mut out = String::new();

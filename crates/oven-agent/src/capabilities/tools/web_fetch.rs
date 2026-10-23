@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -70,8 +71,8 @@ impl Tool for WebFetchTool {
         "Fetch an http(s) URL and return the page as markdown. Non-HTML responses are \
          returned unchanged. Nothing is written to disk."
     }
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "url": {
@@ -80,7 +81,7 @@ impl Tool for WebFetchTool {
                 }
             },
             "required": ["url"]
-        })
+        }))
     }
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let url = parse_url(require_str(args, "url", Self::NAME)?)?;

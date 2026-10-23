@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -57,15 +58,15 @@ impl Tool for FileWriteTool {
     fn description(&self) -> &'static str {
         "Write text content to a file, creating parent directories as needed. Overwrites."
     }
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "path": { "type": "string", "description": "File path relative to the workspace root." },
                 "content": { "type": "string", "description": "The text content to write." }
             },
             "required": ["path", "content"]
-        })
+        }))
     }
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let path_str = require_str(args, "path", Self::NAME)?;

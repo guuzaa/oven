@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use tokio::fs;
 use tracing::warn;
 
-use crate::catalog::{IndexEntry, render_catalog, within_catalog_budget};
+use crate::catalog::{IndexEntry, render_refs, within_catalog_budget};
 use crate::error::MemoryError;
 use crate::format::{parse, render};
 use crate::model::{MAX_BODY, MAX_DESCRIPTION, Memory, MemoryId, MemoryScope};
@@ -132,12 +132,37 @@ impl MemoryStore {
     }
 
     pub fn catalog(&self) -> Option<String> {
-        let entries = self.entries();
-        render_catalog(&entries)
+        let guard = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entries: Vec<&IndexEntry> = guard.values().collect();
+        render_refs(&entries)
     }
 
     pub fn path(&self, scope: MemoryScope, id: &MemoryId) -> Result<PathBuf, MemoryError> {
         Ok(memory_path(self.scope_root(scope)?, id))
+    }
+
+    /// Whether a memory with this scope and id is in the index.
+    pub fn contains(&self, scope: MemoryScope, id: &MemoryId) -> bool {
+        let guard = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.contains_key(&(scope, id.clone()))
+    }
+
+    /// The scopes a memory id is indexed under, in scope order.
+    pub fn scopes_of(&self, id: &MemoryId) -> Vec<MemoryScope> {
+        let guard = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        [MemoryScope::Workspace, MemoryScope::User]
+            .into_iter()
+            .filter(|scope| guard.contains_key(&(*scope, id.clone())))
+            .collect()
     }
 
     pub fn entries(&self) -> Vec<IndexEntry> {
@@ -149,15 +174,22 @@ impl MemoryStore {
     }
 
     fn budget_allows(&self, memory: &Memory) -> bool {
-        let mut entries = self.entries();
-        entries.retain(|entry| !(entry.scope == memory.scope && entry.id == memory.id));
-        entries.push(IndexEntry {
+        let guard = self
+            .index
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let candidate = IndexEntry {
             scope: memory.scope,
             id: memory.id.clone(),
             kind: memory.kind,
             description: memory.description.clone(),
             modified: SystemTime::now(),
-        });
+        };
+        let mut entries: Vec<&IndexEntry> = guard
+            .values()
+            .filter(|entry| !(entry.scope == memory.scope && entry.id == memory.id))
+            .collect();
+        entries.push(&candidate);
         within_catalog_budget(&entries)
     }
 

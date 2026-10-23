@@ -1,15 +1,12 @@
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, TurnContext};
 use oven_mem::MemoryStore;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use super::view::memory_view;
-use super::{parse_id, parse_scope};
+use super::{parse_id, parse_scope, required_str, scope_property};
 
-const MISSING_SCOPE: &str = "memory_forget: missing 'scope' string argument";
-const MISSING_ID: &str = "memory_forget: missing 'id' string argument";
 const FORGOT_MEMORY: &str = "forgot memory";
 
 pub struct MemoryForgetTool {
@@ -23,10 +20,6 @@ impl MemoryForgetTool {
     pub fn new(store: Arc<MemoryStore>) -> Self {
         Self { store }
     }
-
-    pub fn view_input(input: &Value) -> ToolView {
-        memory_view(Self::VERB, input)
-    }
 }
 
 #[async_trait]
@@ -36,26 +29,22 @@ impl Tool for MemoryForgetTool {
     }
 
     fn view(&self, input: &Value) -> ToolView {
-        Self::view_input(input)
+        memory_view(Self::VERB, input)
     }
 
     fn description(&self) -> &'static str {
         "Delete a saved memory by scope and id. Fails when the id is unknown."
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
-                "scope": {
-                    "type": "string",
-                    "enum": ["workspace", "user"],
-                    "description": "workspace for this repository, user for personal preferences"
-                },
+                "scope": scope_property(),
                 "id": { "type": "string", "description": "Memory id to delete." }
             },
             "required": ["scope", "id"]
-        })
+        }))
     }
 
     fn caps(&self) -> ToolCaps {
@@ -66,14 +55,8 @@ impl Tool for MemoryForgetTool {
     }
 
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
-        let scope_raw = args
-            .get("scope")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AgentError::from(MISSING_SCOPE))?;
-        let id_raw = args
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AgentError::from(MISSING_ID))?;
+        let scope_raw = required_str(args, "scope", Self::NAME)?;
+        let id_raw = required_str(args, "id", Self::NAME)?;
         let id = parse_id(id_raw)?;
         let scope = parse_scope(Self::NAME, scope_raw)?;
         self.store

@@ -155,8 +155,8 @@ impl Tool for TaskTool {
         }
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "description": {
@@ -182,7 +182,7 @@ impl Tool for TaskTool {
                 }
             },
             "required": ["description", "prompt"]
-        })
+        }))
     }
 
     fn view(&self, input: &Value) -> ToolView {
@@ -242,8 +242,8 @@ impl Tool for TaskOutputTool {
         "Report on subagents started with `task`: their status, what they have spent, and the result of a finished one. Omit `name` to list every subagent in this session."
     }
 
-    fn schema(&self) -> Value {
-        json!({
+    fn schema(&self) -> Arc<Value> {
+        Arc::new(json!({
             "type": "object",
             "properties": {
                 "name": {
@@ -251,7 +251,7 @@ impl Tool for TaskOutputTool {
                     "description": "Subagent to report on, e.g. `explore#1`. Omit to list all of them."
                 }
             }
-        })
+        }))
     }
 
     fn view(&self, input: &Value) -> ToolView {

@@ -5,26 +5,23 @@ mod write;
 
 use oven_agent::AgentError;
 use oven_mem::{MemoryError, MemoryId, MemoryKind, MemoryScope};
+use serde_json::{Value, json};
 
 pub(crate) use forget::MemoryForgetTool;
 pub(crate) use read::MemoryReadTool;
 pub(crate) use view::present_memory_tool;
 pub(crate) use write::MemoryWriteTool;
 
-const UNKNOWN_SCOPE: &str = "unknown memory scope";
-
+/// The scope a memory tool's argument names, named after the tool that asked
+/// for it.
 pub(crate) fn parse_scope(tool: &str, raw: &str) -> Result<MemoryScope, AgentError> {
-    if raw == MemoryScope::Workspace.as_str() {
-        return Ok(MemoryScope::Workspace);
-    }
-    if raw == MemoryScope::User.as_str() {
-        return Ok(MemoryScope::User);
-    }
-    Err(AgentError::from(format!("{tool}: {UNKNOWN_SCOPE} '{raw}'")))
+    crate::core::memory::parse_scope(raw)
+        .map_err(|message| AgentError::from(format!("{tool}: {message}")))
 }
 
+/// The id a memory tool's argument names.
 pub(crate) fn parse_id(raw: &str) -> Result<MemoryId, AgentError> {
-    MemoryId::new(raw).map_err(|err| AgentError::from(err.to_string()))
+    crate::core::memory::parse_id(raw).map_err(AgentError::from)
 }
 
 pub(crate) fn parse_kind(raw: &str) -> Result<MemoryKind, AgentError> {
@@ -40,4 +37,25 @@ pub(crate) fn parse_kind(raw: &str) -> Result<MemoryKind, AgentError> {
         }
         .to_string(),
     ))
+}
+
+/// A required string argument, or the message naming the tool that wanted
+/// it.
+pub(crate) fn required_str<'a>(
+    args: &'a Value,
+    key: &str,
+    tool: &str,
+) -> Result<&'a str, AgentError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| AgentError::from(format!("{tool}: missing '{key}' string argument")))
+}
+
+/// The `scope` property every memory tool's schema carries.
+pub(crate) fn scope_property() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["workspace", "user"],
+        "description": "workspace for this repository, user for personal preferences"
+    })
 }

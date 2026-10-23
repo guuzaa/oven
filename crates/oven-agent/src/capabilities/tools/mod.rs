@@ -14,6 +14,7 @@ mod view;
 mod web_fetch;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -47,7 +48,10 @@ pub use web_fetch::WebFetchTool;
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
-    fn schema(&self) -> Value;
+    /// The tool's JSON Schema. Shared, so a caller that keeps it does not
+    /// copy the schema tree, and a tool that never changes it can hand out
+    /// the same one every time.
+    fn schema(&self) -> Arc<Value>;
     fn view(&self, input: &Value) -> ToolView {
         present_tool(self.name(), input)
     }

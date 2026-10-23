@@ -4,6 +4,8 @@
 //! crate 的公开 API 的一部分；字段命名与序列化行为对齐 OpenAI Responses API
 //! 的实际 wire 格式。
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -105,7 +107,7 @@ pub(crate) struct ResponseTool {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub parameters: serde_json::Value,
+    pub parameters: Arc<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +391,7 @@ mod tests {
             kind: "function".to_string(),
             name: "get_weather".to_string(),
             description: Some("query weather".to_string()),
-            parameters: serde_json::json!({"type": "object"}),
+            parameters: Arc::new(serde_json::json!({"type": "object"})),
         };
         let json = serde_json::to_value(&tool).unwrap();
         assert_eq!(json["type"], "function");
