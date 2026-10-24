@@ -12,6 +12,7 @@ use crate::domain::{ModelId, Request};
 use crate::provider::http;
 use crate::provider::model::ModelInfo;
 use crate::provider::validate::validate_request;
+use crate::provider::vendor::{Channels, channels, dialect_for, resolve};
 use crate::provider::{ProviderError, ProviderName};
 
 pub(crate) struct Endpoint {
@@ -64,6 +65,17 @@ impl Endpoint {
             validate_request(req, model, stream)?;
         }
         Ok(())
+    }
+
+    /// 这次请求在 wire 上要发的推理字段：按模型能力归一化，再按厂商方言拆到
+    /// 各通道。模型不在目录里就按"不知道"处理，不干预。
+    pub(crate) fn reasoning_channels(&self, req: &Request) -> Channels {
+        let support = self
+            .resolve_model(&req.model)
+            .map(|model| model.effort_support.clone())
+            .unwrap_or_default();
+        let intent = resolve(req.options.reasoning_effort, &support);
+        channels(intent, dialect_for(&self.provider_name))
     }
 
     pub(crate) fn merge_provider_options(

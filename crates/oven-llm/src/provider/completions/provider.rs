@@ -158,7 +158,8 @@ impl CompletionsProvider {
     /// `encoder` 不读取/处理 `provider_options`（Requirement 7.2）；当
     /// `provider_options` 为空时不会产生任何额外字段（Requirement 7.3）。
     fn build_body(&self, req: &Request, stream: bool) -> Result<serde_json::Value, ProviderError> {
-        let wire = encoder::encode_request(req, stream)?;
+        let reasoning = self.endpoint.reasoning_channels(req);
+        let wire = encoder::encode_request(req, reasoning, stream)?;
         let body = serde_json::to_value(wire).map_err(|err| {
             ProviderError::CompletionsEncode(
                 super::encoder::CompletionsEncodeError::InvalidContent(err.to_string()),
@@ -305,6 +306,7 @@ impl Provider for CompletionsProvider {
 mod tests {
     use super::*;
     use crate::domain::message::{ContentBlock, Message};
+    use crate::domain::reasoning::ReasoningEffort;
     use crate::domain::{StopReason, StreamCollector, Usage};
     use crate::provider::http;
 
@@ -554,6 +556,48 @@ mod tests {
         let object = body.as_object().unwrap();
         assert!(!object.contains_key("top_k"));
         assert_eq!(object["model"], "gpt-4");
+    }
+
+    #[test]
+    fn a_zhipu_request_sends_the_thinking_switch_only() {
+        let provider = CompletionsProvider::zhipu(api_key("k"));
+        let mut req = sample_request();
+        req.model = ModelId::from("glm-5.3");
+        req.options.reasoning_effort = Some(ReasoningEffort::High);
+        let body = provider.build_body(&req, false).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn a_deepseek_request_sends_the_level_only() {
+        let provider = CompletionsProvider::deepseek(api_key("k"));
+        let mut req = sample_request();
+        req.model = ModelId::from("deepseek-v4-flash");
+        req.options.reasoning_effort = Some(ReasoningEffort::High);
+        let body = provider.build_body(&req, false).unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn a_level_the_model_does_not_have_is_clamped_down() {
+        let provider = CompletionsProvider::deepseek(api_key("k"));
+        let mut req = sample_request();
+        req.model = ModelId::from("deepseek-v4-flash");
+        req.options.reasoning_effort = Some(ReasoningEffort::Medium);
+        let body = provider.build_body(&req, false).unwrap();
+        assert_eq!(body["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn an_unset_effort_sends_no_reasoning_field() {
+        let provider = CompletionsProvider::zhipu(api_key("k"));
+        let mut req = sample_request();
+        req.model = ModelId::from("glm-5.3");
+        let body = provider.build_body(&req, false).unwrap();
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]

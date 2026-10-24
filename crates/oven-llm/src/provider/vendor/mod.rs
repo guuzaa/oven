@@ -8,9 +8,11 @@ mod deepseek;
 mod glm;
 mod moonshot;
 mod openai;
+mod resolve;
 mod xai;
 
 pub use capability::EffortSupport;
+pub use resolve::{Channels, channels, resolve};
 
 use crate::ProviderKind;
 use crate::ProviderName;
@@ -82,8 +84,12 @@ mod tests {
     fn openai_family_speaks_the_level_channel() {
         assert_eq!(dialect_for(&ProviderName::OpenAI), Dialect::Level);
         assert_eq!(dialect_for(&ProviderName::DeepSeek), Dialect::Level);
-        assert_eq!(dialect_for(&ProviderName::Moonshot), Dialect::Level);
         assert_eq!(dialect_for(&ProviderName::Grok), Dialect::Level);
+    }
+
+    #[test]
+    fn an_unverified_vendor_keeps_sending_both_channels() {
+        assert_eq!(dialect_for(&ProviderName::Moonshot), Dialect::Both);
     }
 
     #[test]

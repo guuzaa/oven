@@ -17,6 +17,7 @@ use super::types::{
 use crate::domain::message::{ContentBlock, Message, Role};
 use crate::domain::request::Request;
 use crate::domain::tool::{Tool, ToolChoice};
+use crate::provider::vendor::Channels;
 
 /// `encode_request` 及其子函数的编码失败原因。
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
@@ -38,9 +39,10 @@ pub enum CompletionsEncodeError {
 /// - `tools` / `tool_choice` / `sampling.stop` 逐一映射
 /// - `stream = true` 时附带 `stream_options.include_usage = true`
 ///
-/// 不读取或处理 `req.provider_options`（由 transport 层负责合并）。
+/// 不读取或处理 `req.options.provider_options`（由 transport 层负责合并）。
 pub(crate) fn encode_request(
     req: &Request,
+    reasoning: Channels,
     stream: bool,
 ) -> Result<ChatCompletionRequest, CompletionsEncodeError> {
     let mut messages = Vec::new();
@@ -78,17 +80,15 @@ pub(crate) fn encode_request(
         None
     };
 
-    let reasoning = req.options.reasoning_effort;
-    let thinking = reasoning.map(|effort| WireThinking {
-        mode: if effort.is_off() {
-            "disabled".to_string()
-        } else {
+    let thinking = reasoning.toggle.map(|on| WireThinking {
+        mode: if on {
             "enabled".to_string()
+        } else {
+            "disabled".to_string()
         },
     });
 
-    let reasoning_effort = reasoning.and_then(|effort| effort.keyword().map(str::to_string));
-
+    let reasoning_effort = reasoning.level.map(str::to_string);
     Ok(ChatCompletionRequest {
         model: req.model.wire_id().to_owned(),
         messages,
@@ -356,7 +356,6 @@ fn encode_tool_choice(choice: &ToolChoice) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::reasoning::ReasoningEffort;
     use crate::domain::request::{CallOptions, SamplingParams};
 
     // --- encode_request: system field (Requirement 3.1) ---
@@ -368,7 +367,7 @@ mod tests {
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, Channels::default(), false).unwrap();
         assert_eq!(wire.messages[0].role, "system");
         assert_eq!(wire.messages[0].content, Some("be helpful".to_string()));
         assert_eq!(wire.messages[1].role, "user");
@@ -380,7 +379,7 @@ mod tests {
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, Channels::default(), false).unwrap();
         assert_eq!(wire.messages.len(), 1);
         assert_eq!(wire.messages[0].role, "user");
     }
@@ -425,7 +424,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let wire = encode_request(&req, true).unwrap();
+        let wire = encode_request(&req, Channels::default(), true).unwrap();
         assert_eq!(wire.stop, Some(StopValue::Single("STOP".to_string())));
     }
 
@@ -441,7 +440,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, Channels::default(), false).unwrap();
         assert_eq!(
             wire.stop,
             Some(StopValue::Multiple(vec!["A".to_string(), "B".to_string()]))
@@ -451,7 +450,7 @@ mod tests {
     #[test]
     fn stop_none_maps_to_none() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, Channels::default(), false).unwrap();
         assert_eq!(wire.stop, None);
     }
 
@@ -467,7 +466,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, Channels::default(), false).unwrap();
         assert_eq!(wire.stop, None);
     }
 
@@ -807,7 +806,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let wire = encode_request(&req, true).unwrap();
+        let wire = encode_request(&req, Channels::default(), true).unwrap();
         assert_eq!(wire.model, "gpt-4");
     }
 
@@ -817,7 +816,7 @@ mod tests {
             model: crate::domain::ModelId::from("deepseek/deepseek-v4-flash:responses"),
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, Channels::default(), false).unwrap();
         assert_eq!(wire.model, "deepseek-v4-flash");
     }
 
@@ -841,7 +840,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let wire = encode_request(&req, true).unwrap();
+        let wire = encode_request(&req, Channels::default(), true).unwrap();
         assert_eq!(wire.model, "gpt-4");
         assert_eq!(wire.tools.unwrap().len(), 1);
         assert_eq!(wire.temperature, Some(0.5));
@@ -859,81 +858,81 @@ mod tests {
     #[test]
     fn encode_request_no_stream_has_no_stream_options() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, Channels::default(), false).unwrap();
         assert!(!wire.stream);
         assert_eq!(wire.stream_options, None);
     }
 
     #[test]
-    fn encode_request_effort_enables_thinking() {
-        let req = Request {
-            options: CallOptions {
-                reasoning_effort: Some(ReasoningEffort::High),
-                ..Default::default()
+    fn encode_request_sends_the_level_channel() {
+        let req = Request::default();
+        let wire = encode_request(
+            &req,
+            Channels {
+                level: Some("high"),
+                toggle: None,
             },
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert_eq!(wire.thinking.unwrap().mode, "enabled");
+            false,
+        )
+        .unwrap();
         assert_eq!(wire.reasoning_effort, Some("high".to_string()));
+        assert!(wire.thinking.is_none());
     }
 
     #[test]
-    fn encode_request_off_disables_thinking() {
-        let req = Request {
-            options: CallOptions {
-                reasoning_effort: Some(ReasoningEffort::Off),
-                ..Default::default()
+    fn encode_request_sends_the_toggle_channel() {
+        let req = Request::default();
+        let wire = encode_request(
+            &req,
+            Channels {
+                level: None,
+                toggle: Some(true),
             },
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
+            false,
+        )
+        .unwrap();
+        assert_eq!(wire.thinking.unwrap().mode, "enabled");
+        assert!(wire.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn encode_request_off_turns_the_switch_off() {
+        let req = Request::default();
+        let wire = encode_request(
+            &req,
+            Channels {
+                level: Some("none"),
+                toggle: Some(false),
+            },
+            false,
+        )
+        .unwrap();
         assert_eq!(wire.thinking.unwrap().mode, "disabled");
         assert_eq!(wire.reasoning_effort, Some("none".to_string()));
     }
 
     #[test]
-    fn encode_request_unset_effort_sends_no_reasoning_field() {
+    fn encode_request_unset_sends_no_reasoning_field() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, Channels::default(), false).unwrap();
         assert!(wire.thinking.is_none());
         assert!(wire.reasoning_effort.is_none());
     }
 
     #[test]
-    fn encode_request_all_reasoning_effort_levels() {
-        for (effort, expected) in [
-            (ReasoningEffort::Off, "none"),
-            (ReasoningEffort::Minimal, "minimal"),
-            (ReasoningEffort::Low, "low"),
-            (ReasoningEffort::Medium, "medium"),
-            (ReasoningEffort::High, "high"),
-            (ReasoningEffort::XHigh, "xhigh"),
-            (ReasoningEffort::Max, "max"),
-        ] {
-            let req = Request {
-                options: CallOptions {
-                    reasoning_effort: Some(effort),
-                    ..Default::default()
+    fn encode_request_each_level_word_reaches_the_wire() {
+        for word in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let req = Request::default();
+            let wire = encode_request(
+                &req,
+                Channels {
+                    level: Some(word),
+                    toggle: None,
                 },
-                ..Default::default()
-            };
-            let wire = encode_request(&req, false).unwrap();
-            assert_eq!(wire.reasoning_effort, Some(expected.to_string()));
+                false,
+            )
+            .unwrap();
+            assert_eq!(wire.reasoning_effort, Some(word.to_string()));
         }
-    }
-
-    #[test]
-    fn encode_request_budget_sends_no_level_channel() {
-        let req = Request {
-            options: CallOptions {
-                reasoning_effort: Some(ReasoningEffort::Budget(2048)),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert!(wire.reasoning_effort.is_none());
-        assert_eq!(wire.thinking.unwrap().mode, "enabled");
     }
 }

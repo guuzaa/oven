@@ -143,7 +143,8 @@ impl ResponsesProvider {
     /// 产出标准 wire JSON，再把 `req.options.provider_options` 中的每个键值对合并进
     /// 去。`provider_options` 的键与标准字段重名时会覆盖标准字段。
     fn build_body(&self, req: &Request, stream: bool) -> Result<serde_json::Value, ProviderError> {
-        let wire = encoder::encode_request(req, stream)?;
+        let reasoning = self.endpoint.reasoning_channels(req);
+        let wire = encoder::encode_request(req, reasoning, stream)?;
         let body = serde_json::to_value(wire).map_err(|err| {
             ProviderError::ResponsesEncode(encoder::EncodeError::InvalidContent(err.to_string()))
         })?;
@@ -298,6 +299,7 @@ mod tests {
         catalog::models_for(&ProviderName::Grok, ProviderKind::Responses)
     }
     use crate::domain::message::{ContentBlock, Message};
+    use crate::domain::reasoning::ReasoningEffort;
     use crate::domain::stream::StreamCollector;
     use crate::provider::http;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
@@ -455,6 +457,31 @@ mod tests {
     }
 
     // --- build_body + provider_options ---
+
+    #[test]
+    fn a_request_sends_the_reasoning_field() {
+        let provider = ResponsesProvider::with_base_url(
+            "https://example.com",
+            ProviderName::Custom("example".into()),
+            api_key("k"),
+        );
+        let mut req = sample_request();
+        req.options.reasoning_effort = Some(ReasoningEffort::High);
+        let body = provider.build_body(&req, false).unwrap();
+        assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn an_unset_effort_sends_no_reasoning_field() {
+        let provider = ResponsesProvider::with_base_url(
+            "https://example.com",
+            ProviderName::Custom("example".into()),
+            api_key("k"),
+        );
+        let req = sample_request();
+        let body = provider.build_body(&req, false).unwrap();
+        assert!(body.get("reasoning").is_none());
+    }
 
     #[test]
     fn build_body_with_empty_provider_options_has_no_extra_fields() {
