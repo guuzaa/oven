@@ -10,7 +10,7 @@ Oven reads and edits your files, runs shell commands, delegates to subagents and
 
 <p>
 <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-ff8550" alt="Platform: macOS, Linux, Windows" />
-<img src="https://img.shields.io/badge/rust-1.92%2B-ff8550" alt="Rust 1.92+" />
+<img src="https://img.shields.io/badge/rust-1.94%2B-ff8550" alt="Rust 1.94+" />
 <a href="https://github.com/guuzaa/oven/releases/latest"><img src="https://img.shields.io/github/v/release/guuzaa/oven?label=release&color=ff8550" alt="Latest release" /></a>
 <a href="https://github.com/guuzaa/oven/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-ff8550" alt="License: MIT" /></a>
 </p>
