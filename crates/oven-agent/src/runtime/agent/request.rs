@@ -56,19 +56,17 @@ impl Agent {
             && !self.todos.is_empty()
     }
 
-    /// The options this turn runs with: the reasoning effort the selection
-    /// carries, and the sampling defaults.
+    /// The options this turn runs with: the model it goes to, the reasoning
+    /// effort the selection carries, and the sampling defaults.
     pub(crate) fn build_options(&self) -> CallOptions {
-        let (_, reasoning_effort) = self.selection.model();
-        CallOptions {
-            reasoning_effort,
-            ..Default::default()
-        }
+        let (model, reasoning_effort) = self.selection.model();
+        let mut options = CallOptions::new(model);
+        options.reasoning_effort = reasoning_effort;
+        options
     }
 
     pub(crate) fn build_request(&self) -> Request {
         let mode = self.selection.mode();
-        let (model, _) = self.selection.model();
         let mut messages: Vec<Message> = self
             .history
             .messages()
@@ -95,13 +93,12 @@ impl Agent {
             );
         }
         let mut builder = Request::builder()
-            .model(model)
             .messages(messages)
             .tools(self.llm_tools(mode));
         if let Some(system) = self.system_prompt(mode) {
             builder = builder.system(system);
         }
-        builder.build().expect("model is set")
+        builder.build()
     }
 
     pub(super) async fn complete_response(
@@ -126,7 +123,7 @@ impl Agent {
         let options = self.build_options();
         let router = self.router();
         if router
-            .resolve_model(&req.model)
+            .resolve_model(&options.model)
             .is_some_and(|info| !info.capabilities.supports_streaming)
         {
             return complete_unstreamed(&req, &options, router.as_ref(), sink).await;
@@ -282,9 +279,26 @@ async fn complete_unstreamed(
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolCallGate, is_tool_call_envelope};
+    use super::{Agent, ToolCallGate, is_tool_call_envelope};
+    use oven_llm::{ModelId, ReasoningEffort, Router};
 
     const ENVELOPE: &str = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>";
+
+    /// The model and the effort this turn goes out with are the ones that
+    /// were selected: the model is no longer dropped, and the effort is no
+    /// longer read apart from the model — a switch moves both.
+    #[test]
+    fn the_options_carry_the_selected_model_and_effort() {
+        let agent = Agent::new(Router::new(), Vec::new());
+        agent
+            .selection()
+            .switch_model(ModelId::new("kimi-k3"), Some(ReasoningEffort::High));
+
+        let options = agent.build_options();
+
+        assert_eq!(options.model.as_str(), "kimi-k3");
+        assert_eq!(options.reasoning_effort, Some(ReasoningEffort::High));
+    }
 
     #[test]
     fn prose_passes_without_waiting() {

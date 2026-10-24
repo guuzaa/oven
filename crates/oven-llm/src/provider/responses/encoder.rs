@@ -1,8 +1,8 @@
-//! encoder：将 domain 层的 `Request` 转换为 OpenAI Responses API 的 wire
-//! 格式 `CreateResponseRequest`。
+//! encoder: turns the domain `Request` into the OpenAI Responses API wire
+//! format `CreateResponseRequest`.
 //!
-//! 本模块是纯函数集合，不做任何 I/O；不读取或处理
-//! `Request.provider_options` 字段（该字段的合并逻辑位于 transport 层）。
+//! Pure functions, no I/O. `options.provider_options` is not read here — the
+//! transport layer merges it.
 
 use std::sync::Arc;
 
@@ -30,15 +30,15 @@ pub enum EncodeError {
     UnsupportedToolResultContent(String),
 }
 
-/// 将 `Request` 编码为 OpenAI Responses API 的 wire 请求体。
+/// Encodes a `Request` into the OpenAI Responses API wire request body.
 ///
-/// - `req.system` → 顶层 `instructions`
-/// - `messages` 中每条消息按角色分发到 `encode_message`
-/// - `tools` / `tool_choice` / `reasoning` 逐一映射
-/// - `sampling.stop` 不被 Responses API 支持，忽略
-/// - `stream = true` 时 wire 的 `stream` 字段为 `true`
+/// - `req.system` → the top level `instructions`
+/// - every message in `messages` goes to `encode_message` by its role
+/// - `tools` / `tool_choice` / `reasoning` map one by one
+/// - `sampling.stop` is not supported by the Responses API and is ignored
+/// - `stream = true` sets the wire `stream` field to `true`
 ///
-/// 不读取或处理 `req.options.provider_options`（由 transport 层负责合并）。
+/// `options.provider_options` is not read here — the transport layer merges it.
 pub(crate) fn encode_request(
     req: &Request,
     options: &CallOptions,
@@ -58,7 +58,7 @@ pub(crate) fn encode_request(
     };
 
     Ok(ResponseRequest {
-        model: req.model.wire_id().to_owned(),
+        model: options.model.wire_id().to_owned(),
         instructions: req.system.clone(),
         input: if input.is_empty() { None } else { Some(input) },
         tools,
@@ -344,6 +344,10 @@ mod tests {
     use super::*;
     use crate::domain::options::CallOptions;
 
+    fn sample_options() -> CallOptions {
+        CallOptions::new("gpt-4")
+    }
+
     // --- 纯文本请求 ---
 
     #[test]
@@ -353,8 +357,7 @@ mod tests {
             messages: vec![Message::user_text("hi")],
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.instructions.as_deref(), Some("be helpful"));
         assert_eq!(wire.input.as_ref().unwrap().len(), 1);
     }
@@ -365,8 +368,7 @@ mod tests {
             messages: vec![Message::user_text("hello")],
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         assert_eq!(input.len(), 1);
         match &input[0] {
@@ -381,8 +383,7 @@ mod tests {
     #[test]
     fn empty_messages_omit_input() {
         let req = Request::default();
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(wire.input.is_none());
         assert!(wire.instructions.is_none());
     }
@@ -403,8 +404,7 @@ mod tests {
             }])],
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         match &input[0] {
             ResponseInputItem::FunctionCall { arguments, .. } => assert_eq!(arguments, raw),
@@ -430,8 +430,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         assert_eq!(input.len(), 4);
 
@@ -514,8 +513,7 @@ mod tests {
             messages: vec![Message::system("be terse")],
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         match &input[0] {
             ResponseInputItem::Message { role, content } => {
@@ -689,8 +687,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let tools = wire.tools.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].kind, "function");
@@ -712,8 +709,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(wire.tool_choice.is_none());
     }
 
@@ -723,8 +719,7 @@ mod tests {
             tool_choice: ToolChoice::None,
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.tool_choice, Some(serde_json::json!("none")));
     }
 
@@ -734,8 +729,7 @@ mod tests {
             tool_choice: ToolChoice::Any,
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.tool_choice, Some(serde_json::json!("required")));
     }
 
@@ -745,8 +739,7 @@ mod tests {
             tool_choice: ToolChoice::Tool("get_weather".to_string()),
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(
             wire.tool_choice,
             Some(serde_json::json!({"type": "function", "name": "get_weather"}))
@@ -761,7 +754,7 @@ mod tests {
             let req = Request::default();
             let wire = encode_request(
                 &req,
-                &CallOptions::default(),
+                &sample_options(),
                 Channels {
                     level: Some(word),
                     toggle: None,
@@ -776,8 +769,7 @@ mod tests {
     #[test]
     fn unset_sends_no_reasoning_field() {
         let req = Request::default();
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(wire.reasoning.is_none());
     }
 
@@ -788,7 +780,7 @@ mod tests {
         let req = Request {
             ..Default::default()
         };
-        let options = CallOptions::default()
+        let options = sample_options()
             .temperature(0.5)
             .top_p(0.9)
             .max_tokens(100)
@@ -810,8 +802,7 @@ mod tests {
     #[test]
     fn stream_false_by_default() {
         let req = Request::default();
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(!wire.stream);
     }
 

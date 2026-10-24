@@ -56,23 +56,32 @@ impl Endpoint {
             .or_else(|| self.model_catalog.get(&ModelId::from(id.wire_id())))
     }
 
+    /// Validates the request against the model's metadata. A model the
+    /// catalog does not know skips the validation: not knowing what it can
+    /// do, say nothing.
     pub(crate) fn validate_known_model(
         &self,
         req: &Request,
         options: &CallOptions,
+        model: Option<&ModelInfo>,
         stream: bool,
     ) -> Result<(), ProviderError> {
-        if let Some(model) = self.resolve_model(&req.model) {
+        if let Some(model) = model {
             validate_request(req, options, model, stream)?;
         }
         Ok(())
     }
 
-    /// 这次请求在 wire 上要发的推理字段：按模型能力归一化，再按厂商方言拆到
-    /// 各通道。模型不在目录里就按"不知道"处理，不干预。
-    pub(crate) fn reasoning_channels(&self, req: &Request, options: &CallOptions) -> Channels {
-        let support = self
-            .resolve_model(&req.model)
+    /// The reasoning fields this request carries on the wire: normalized by
+    /// what the model can do, then split into the channels the vendor's
+    /// dialect uses. A model the catalog does not know is treated as
+    /// "unknown" and left alone.
+    pub(crate) fn reasoning_channels(
+        &self,
+        options: &CallOptions,
+        model: Option<&ModelInfo>,
+    ) -> Channels {
+        let support = model
             .map(|model| model.effort_support.clone())
             .unwrap_or_default();
         let intent = resolve_reasoning(options.reasoning_effort, &support);

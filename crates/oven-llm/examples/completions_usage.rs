@@ -102,11 +102,9 @@ async fn main() {
 
     // 2. 构建请求。Provider 会为其静态模型目录中命中的 ID 自动执行能力校验。
     let request = Request::builder()
-        .model("glm-4.5-air")
         .message(Message::user_text("用一句话介绍一下 Rust 语言。"))
-        .build()
-        .expect("model is set");
-    let options = CallOptions::default()
+        .build();
+    let options = CallOptions::new("glm-4.5-air")
         .temperature(0.0)
         .reasoning_effort(ReasoningEffort::High);
 

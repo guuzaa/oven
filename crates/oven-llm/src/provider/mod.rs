@@ -39,8 +39,13 @@ const MOONSHOT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
 const GROK_BASE_URL: &str = "https://api.x.ai/v1";
 
-/// 统一的 LLM 调用抽象：harness/应用代码只依赖该 trait 与 domain 类型，
-/// 永远不接触任何 wire format 类型。
+/// The one abstraction for an LLM call: harness and application code depend
+/// on this trait and the domain types only, and never touch a wire format
+/// type.
+///
+/// A call has two halves: `req` is the conversation, `options` say who to
+/// ask (the model) and how to ask (sampling, reasoning effort, private
+/// fields). Another model does not mean another conversation.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// 发送一次非流式请求，返回完整响应。

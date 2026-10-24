@@ -1,10 +1,13 @@
-//! `CallOptions`：一次调用的可调项。
+//! `CallOptions`: the target and the knobs of one call.
 //!
-//! 与 [`Request`](super::request::Request) 分开：请求是一次对话（说给哪个
-//! 模型听），选项是这次怎么问。同一个请求可以配不同的选项发出去。
+//! It sits apart from [`Request`](super::request::Request): the request is a
+//! conversation, the options say who to ask and how. The same conversation
+//! can go out with other options — another model, another effort — without
+//! being rebuilt.
 
 use serde::{Deserialize, Serialize};
 
+use super::model::ModelId;
 use super::reasoning::ReasoningEffort;
 
 /// 采样参数：控制模型生成时的随机性与长度限制。
@@ -19,9 +22,14 @@ pub struct SamplingParams {
     pub stop: Option<Vec<String>>,
 }
 
-/// 一次调用的可调项。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// The target and the knobs of one call.
+///
+/// The model is required: a call names a model. Every other field may stay
+/// unsaid — nothing reaches the wire, and the vendor's default stands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallOptions {
+    /// The model this call asks.
+    pub model: ModelId,
     /// 采样参数。
     pub sampling: SamplingParams,
     /// 推理强度。`None` 表示不表态：不下发任何推理字段，交给上游默认。
@@ -33,6 +41,16 @@ pub struct CallOptions {
 }
 
 impl CallOptions {
+    /// One call, aimed at `model`.
+    pub fn new(model: impl Into<ModelId>) -> Self {
+        Self {
+            model: model.into(),
+            sampling: SamplingParams::default(),
+            reasoning_effort: None,
+            provider_options: serde_json::Map::new(),
+        }
+    }
+
     /// 设置 temperature。
     pub fn temperature(mut self, value: f32) -> Self {
         self.sampling.temperature = Some(value);
@@ -76,7 +94,7 @@ mod tests {
 
     #[test]
     fn the_setters_fill_what_they_say() {
-        let options = CallOptions::default()
+        let options = CallOptions::new("gpt-4")
             .temperature(0.7)
             .top_p(0.9)
             .max_tokens(1024)
@@ -84,6 +102,7 @@ mod tests {
             .reasoning_effort(ReasoningEffort::High)
             .provider_option("top_k", serde_json::json!(40));
 
+        assert_eq!(options.model.as_str(), "gpt-4");
         assert_eq!(options.sampling.temperature, Some(0.7));
         assert_eq!(options.sampling.top_p, Some(0.9));
         assert_eq!(options.sampling.max_tokens, Some(1024));
@@ -96,8 +115,9 @@ mod tests {
     }
 
     #[test]
-    fn the_default_options_say_nothing() {
-        let options = CallOptions::default();
+    fn the_new_options_say_nothing_but_the_model() {
+        let options = CallOptions::new("gpt-4");
+        assert_eq!(options.model.as_str(), "gpt-4");
         assert_eq!(options.reasoning_effort, None);
         assert!(options.provider_options.is_empty());
         assert_eq!(options.sampling.temperature, None);

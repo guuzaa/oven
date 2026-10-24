@@ -67,10 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. 非流式调用（无真实 key 时会打印错误并继续）。
     let request = Request::builder()
-        .model("deepseek/deepseek-v4-flash")
         .prompt("用一句话介绍 Rust 语言。")
-        .build()?;
-    let options = CallOptions::default()
+        .build();
+    let options = CallOptions::new("deepseek/deepseek-v4-flash")
         .temperature(0.01)
         .reasoning_effort(ReasoningEffort::Off);
     match client.complete(&request, &options).await {

@@ -213,14 +213,14 @@ impl RecordingProvider {
 impl Provider for RecordingProvider {
     async fn complete(
         &self,
-        req: &Request,
-        _options: &CallOptions,
+        _req: &Request,
+        options: &CallOptions,
     ) -> Result<Response, ProviderError> {
         self.seen
             .lock()
             .unwrap()
-            .push(format!("request:{}", req.model.as_str()));
-        Ok(text_response(&format!("echo:{}", req.model.as_str())))
+            .push(format!("request:{}", options.model.as_str()));
+        Ok(text_response(&format!("echo:{}", options.model.as_str())))
     }
 
     async fn stream(
@@ -513,7 +513,7 @@ async fn plan_slash_on_idle_switches() {
 }
 
 #[tokio::test]
-async fn model_slash_switch_uses_request_model() {
+async fn model_slash_switch_uses_the_selected_model() {
     let seen = recorder();
     let mut agents = agent_from(Box::new(RecordingProvider::new(seen.clone())));
     agents.main.set_model("gpt-4o");

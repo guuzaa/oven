@@ -103,12 +103,8 @@ pub async fn provider_models(
 /// freshly built client, so `model add` can fail before it saves a config.
 pub async fn verify(provider: &ProviderConfig, timeout: Duration) -> Result<Duration, AppError> {
     let client = build_client(provider)?;
-    let request = Request::builder()
-        .model(provider.effective_model())
-        .prompt(VERIFY_PROMPT)
-        .build()
-        .map_err(|e| AppError::Provider(e.to_string()))?;
-    let options = CallOptions::default().max_tokens(1);
+    let request = Request::builder().prompt(VERIFY_PROMPT).build();
+    let options = CallOptions::new(provider.effective_model()).max_tokens(1);
     let started = Instant::now();
     tokio::time::timeout(timeout, client.complete(&request, &options))
         .await

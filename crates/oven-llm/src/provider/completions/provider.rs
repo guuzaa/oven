@@ -162,20 +162,22 @@ impl CompletionsProvider {
         )
     }
 
-    /// 将 `Request` 编码为最终发送的 JSON 请求体：先由 `encoder::encode_request`
-    /// 产出标准 wire JSON，再把 `req.options.provider_options` 中的每个键值对合并进去
-    /// （Requirement 7.1）。`provider_options` 的键与标准字段重名时会覆盖标准
-    /// 字段——这是设计文档中明确允许的“覆盖”语义，而非错误。
+    /// Encodes a `Request` into the JSON request body that goes out: the
+    /// standard wire JSON from `encoder::encode_request`, then every key of
+    /// `options.provider_options` merged into it (Requirement 7.1). A
+    /// `provider_options` key that names a standard field overwrites it — the
+    /// design calls that "override", not an error.
     ///
-    /// `encoder` 不读取/处理 `provider_options`（Requirement 7.2）；当
-    /// `provider_options` 为空时不会产生任何额外字段（Requirement 7.3）。
+    /// The `encoder` does not read `provider_options` (Requirement 7.2); an
+    /// empty `provider_options` adds no field at all (Requirement 7.3).
     pub(crate) fn build_body(
         &self,
         req: &Request,
         options: &CallOptions,
+        model: Option<&ModelInfo>,
         stream: bool,
     ) -> Result<serde_json::Value, ProviderError> {
-        let reasoning = self.endpoint.reasoning_channels(req, options);
+        let reasoning = self.endpoint.reasoning_channels(options, model);
         let wire = encoder::encode_request(req, options, reasoning, stream)?;
         let body = serde_json::to_value(wire).map_err(|err| {
             ProviderError::CompletionsEncode(
@@ -211,8 +213,10 @@ impl Provider for CompletionsProvider {
         req: &Request,
         options: &CallOptions,
     ) -> Result<Response, ProviderError> {
-        self.endpoint.validate_known_model(req, options, false)?;
-        let body = self.build_body(req, options, false)?;
+        let model = self.resolve_model(&options.model);
+        self.endpoint
+            .validate_known_model(req, options, model, false)?;
+        let body = self.build_body(req, options, model, false)?;
         let response = self.post_chat_completions(&body).await?;
 
         let body_bytes = response.bytes().await?;
@@ -232,8 +236,10 @@ impl Provider for CompletionsProvider {
         req: &Request,
         options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        self.endpoint.validate_known_model(req, options, true)?;
-        let body = self.build_body(req, options, true)?;
+        let model = self.resolve_model(&options.model);
+        self.endpoint
+            .validate_known_model(req, options, model, true)?;
+        let body = self.build_body(req, options, model, true)?;
         let response = self.post_chat_completions(&body).await?;
 
         let byte_stream = Box::pin(response.bytes_stream());
@@ -355,10 +361,25 @@ mod tests {
 
     fn sample_request() -> Request {
         Request {
-            model: ModelId::from("gpt-4"),
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         }
+    }
+
+    fn sample_options() -> CallOptions {
+        CallOptions::new("gpt-4")
+    }
+
+    /// The wire body of one call. The model is resolved against the catalog
+    /// once, and both the validation and the reasoning channels read that
+    /// same metadata.
+    fn wire_body(
+        provider: &CompletionsProvider,
+        req: &Request,
+        options: &CallOptions,
+    ) -> serde_json::Value {
+        let model = provider.resolve_model(&options.model);
+        provider.build_body(req, options, model, false).unwrap()
     }
 
     // --- constructors (Requirement 6.1, 6.2) ---
@@ -575,8 +596,8 @@ mod tests {
             api_key("k"),
         );
         let req = sample_request();
-        let options = CallOptions::default();
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let options = sample_options();
+        let body = wire_body(&provider, &req, &options);
         let object = body.as_object().unwrap();
         assert!(!object.contains_key("top_k"));
         assert_eq!(object["model"], "gpt-4");
@@ -585,10 +606,9 @@ mod tests {
     #[test]
     fn a_zhipu_request_sends_the_thinking_switch_only() {
         let provider = CompletionsProvider::zhipu(api_key("k"));
-        let mut req = sample_request();
-        req.model = ModelId::from("glm-5.3");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::High);
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let req = sample_request();
+        let options = CallOptions::new("glm-5.3").reasoning_effort(ReasoningEffort::High);
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert!(body.get("reasoning_effort").is_none());
     }
@@ -596,10 +616,9 @@ mod tests {
     #[test]
     fn a_deepseek_request_sends_the_level_only() {
         let provider = CompletionsProvider::deepseek(api_key("k"));
-        let mut req = sample_request();
-        req.model = ModelId::from("deepseek-v4-flash");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::High);
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let req = sample_request();
+        let options = CallOptions::new("deepseek-v4-flash").reasoning_effort(ReasoningEffort::High);
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["reasoning_effort"], "high");
         assert!(body.get("thinking").is_none());
     }
@@ -607,20 +626,19 @@ mod tests {
     #[test]
     fn a_level_the_model_does_not_have_is_clamped_down() {
         let provider = CompletionsProvider::deepseek(api_key("k"));
-        let mut req = sample_request();
-        req.model = ModelId::from("deepseek-v4-flash");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::Medium);
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let req = sample_request();
+        let options =
+            CallOptions::new("deepseek-v4-flash").reasoning_effort(ReasoningEffort::Medium);
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["reasoning_effort"], "low");
     }
 
     #[test]
     fn an_unset_effort_sends_no_reasoning_field() {
         let provider = CompletionsProvider::zhipu(api_key("k"));
-        let mut req = sample_request();
-        req.model = ModelId::from("glm-5.3");
-        let options = CallOptions::default();
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let req = sample_request();
+        let options = CallOptions::new("glm-5.3");
+        let body = wire_body(&provider, &req, &options);
         assert!(body.get("thinking").is_none());
         assert!(body.get("reasoning_effort").is_none());
     }
@@ -629,18 +647,17 @@ mod tests {
     fn a_minimax_request_always_splits_the_reasoning_out() {
         let provider = CompletionsProvider::minimax(api_key("k"));
         let req = sample_request();
-        let options = CallOptions::default();
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let options = sample_options();
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["reasoning_split"], true);
     }
 
     #[test]
     fn a_minimax_switch_only_model_uses_the_switch() {
         let provider = CompletionsProvider::minimax(api_key("k"));
-        let mut req = sample_request();
-        req.model = ModelId::from("MiniMax-M3");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::Off);
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let req = sample_request();
+        let options = CallOptions::new("MiniMax-M3").reasoning_effort(ReasoningEffort::Off);
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body.get("reasoning_effort").is_none());
     }
@@ -648,10 +665,10 @@ mod tests {
     #[test]
     fn a_minimax_level_model_uses_the_level() {
         let provider = CompletionsProvider::minimax(api_key("k"));
-        let mut req = sample_request();
-        req.model = ModelId::from("MiniMax-M3.1-Flash");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::High);
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let req = sample_request();
+        let options =
+            CallOptions::new("MiniMax-M3.1-Flash").reasoning_effort(ReasoningEffort::High);
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["reasoning_effort"], "high");
         assert!(body.get("thinking").is_none());
     }
@@ -664,8 +681,8 @@ mod tests {
             api_key("k"),
         );
         let req = sample_request();
-        let options = CallOptions::default().provider_option("top_k", json!(40));
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let options = sample_options().provider_option("top_k", json!(40));
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["top_k"], 40);
     }
 
@@ -677,10 +694,10 @@ mod tests {
             api_key("k"),
         );
         let req = sample_request();
-        let options = CallOptions::default()
+        let options = sample_options()
             .temperature(0.5)
             .provider_option("temperature", json!(1.5));
-        let body = provider.build_body(&req, &options, false).unwrap();
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["temperature"], 1.5);
     }
 
@@ -701,7 +718,7 @@ mod tests {
             api_key("k"),
         );
         let err = provider
-            .complete(&sample_request(), &CallOptions::default())
+            .complete(&sample_request(), &sample_options())
             .await
             .unwrap_err();
         match err {
@@ -725,7 +742,7 @@ mod tests {
             api_key("k"),
         );
         let err = provider
-            .complete(&sample_request(), &CallOptions::default())
+            .complete(&sample_request(), &sample_options())
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderError::Auth(_)));
@@ -746,7 +763,7 @@ mod tests {
             api_key("k"),
         );
         let err = provider
-            .complete(&sample_request(), &CallOptions::default())
+            .complete(&sample_request(), &sample_options())
             .await
             .unwrap_err();
         match err {
@@ -770,7 +787,7 @@ mod tests {
             api_key("k"),
         );
         let err = provider
-            .complete(&sample_request(), &CallOptions::default())
+            .complete(&sample_request(), &sample_options())
             .await
             .unwrap_err();
         match err {
@@ -809,10 +826,7 @@ mod tests {
         );
         let req = sample_request();
 
-        let response = provider
-            .complete(&req, &CallOptions::default())
-            .await
-            .unwrap();
+        let response = provider.complete(&req, &sample_options()).await.unwrap();
         assert_eq!(response.id, "chatcmpl-1");
 
         let requests = mock_server.received_requests().await.unwrap();
@@ -916,10 +930,7 @@ mod tests {
         );
         let req = sample_request();
 
-        let mut event_stream = provider
-            .stream(&req, &CallOptions::default())
-            .await
-            .unwrap();
+        let mut event_stream = provider.stream(&req, &sample_options()).await.unwrap();
         let mut events = Vec::new();
         while let Some(event) = event_stream.next().await {
             events.push(event.unwrap());
@@ -958,7 +969,7 @@ mod tests {
             api_key("k"),
         );
         let mut event_stream = provider
-            .stream(&sample_request(), &CallOptions::default())
+            .stream(&sample_request(), &sample_options())
             .await
             .unwrap();
         let mut collector = StreamCollector::new();
@@ -999,7 +1010,7 @@ mod tests {
             api_key("k"),
         );
         let mut event_stream = provider
-            .stream(&sample_request(), &CallOptions::default())
+            .stream(&sample_request(), &sample_options())
             .await
             .unwrap();
         let mut events = Vec::new();
@@ -1038,9 +1049,7 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let result = provider
-            .stream(&sample_request(), &CallOptions::default())
-            .await;
+        let result = provider.stream(&sample_request(), &sample_options()).await;
         match result {
             Err(ProviderError::RateLimit { .. }) => {}
             Err(other) => panic!("expected RateLimit error, got {other:?}"),

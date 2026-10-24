@@ -40,7 +40,6 @@ async fn main() -> ExampleResult<()> {
     println!("task: {task}");
 
     let mut request = Request::builder()
-        .model("deepseek-v4-flash")
         .system(format!(
             "You are a careful coding agent. Your workspace root is {}. \
              Use read_file before changing a file. Use write_file only for files inside that root. \
@@ -49,9 +48,8 @@ async fn main() -> ExampleResult<()> {
         ))
         .prompt(task)
         .tools(coding_tools())
-        .build()
-        .expect("model is set");
-    let options = oven_llm::CallOptions::default()
+        .build();
+    let options = oven_llm::CallOptions::new("deepseek-v4-flash")
         .temperature(0.1)
         .reasoning_effort(oven_llm::ReasoningEffort::High);
 

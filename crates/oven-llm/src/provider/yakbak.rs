@@ -21,7 +21,7 @@ use super::completions::types::ChatCompletionResponse;
 use super::responses::ResponsesProvider;
 use super::responses::decoder::decode_response as decode_responses;
 use super::responses::types::ResponseObject;
-use crate::domain::{CallOptions, Message, ModelId, ReasoningEffort, Request};
+use crate::domain::{CallOptions, Message, ReasoningEffort, Request};
 
 /// 一条录制：请求正文与响应正文。
 #[derive(Debug, Deserialize)]
@@ -47,9 +47,8 @@ fn api_key(value: &str) -> SecretString {
     SecretString::new(value.to_string().into())
 }
 
-fn user_request(model: &str, prompt: &str) -> Request {
+fn user_request(prompt: &str) -> Request {
     Request {
-        model: ModelId::from(model),
         messages: vec![Message::user_text(prompt)],
         ..Default::default()
     }
@@ -58,15 +57,19 @@ fn user_request(model: &str, prompt: &str) -> Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Provider;
 
     #[test]
     fn kimi_k3_takes_the_level_and_reads_the_thinking_back() {
         let recording = load("kimi_k3.json");
         let provider = CompletionsProvider::moonshot(api_key("k"));
-        let request = user_request("kimi-k3", "求 1+1。");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::High);
+        let request = user_request("求 1+1。");
+        let options = CallOptions::new("kimi-k3").reasoning_effort(ReasoningEffort::High);
 
-        let body = provider.build_body(&request, &options, false).unwrap();
+        let model = provider.resolve_model(&options.model);
+        let body = provider
+            .build_body(&request, &options, model, false)
+            .unwrap();
         assert_eq!(body, recording.request);
 
         let wire: ChatCompletionResponse = serde_json::from_value(recording.response).unwrap();
@@ -79,10 +82,13 @@ mod tests {
     fn kimi_k2_6_takes_the_switch_and_thinks_nothing() {
         let recording = load("kimi_k2_6.json");
         let provider = CompletionsProvider::moonshot(api_key("k"));
-        let request = user_request("kimi-k2.6", "求 1+1。");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::Off);
+        let request = user_request("求 1+1。");
+        let options = CallOptions::new("kimi-k2.6").reasoning_effort(ReasoningEffort::Off);
 
-        let body = provider.build_body(&request, &options, false).unwrap();
+        let model = provider.resolve_model(&options.model);
+        let body = provider
+            .build_body(&request, &options, model, false)
+            .unwrap();
         assert_eq!(body, recording.request);
 
         let wire: ChatCompletionResponse = serde_json::from_value(recording.response).unwrap();
@@ -95,10 +101,13 @@ mod tests {
     fn minimax_splits_the_thinking_out_and_reads_it_back() {
         let recording = load("minimax_m3.json");
         let provider = CompletionsProvider::minimax(api_key("k"));
-        let request = user_request("MiniMax-M3", "求 1+1。");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::High);
+        let request = user_request("求 1+1。");
+        let options = CallOptions::new("MiniMax-M3").reasoning_effort(ReasoningEffort::High);
 
-        let body = provider.build_body(&request, &options, false).unwrap();
+        let model = provider.resolve_model(&options.model);
+        let body = provider
+            .build_body(&request, &options, model, false)
+            .unwrap();
         assert_eq!(body, recording.request);
 
         let wire: ChatCompletionResponse = serde_json::from_value(recording.response).unwrap();
@@ -111,10 +120,13 @@ mod tests {
     fn grok_takes_the_level_and_reads_the_summary_back() {
         let recording = load("grok_4_6.json");
         let provider = ResponsesProvider::grok(api_key("k"));
-        let request = user_request("grok-4.6", "求 1+1。");
-        let options = CallOptions::default().reasoning_effort(ReasoningEffort::XHigh);
+        let request = user_request("求 1+1。");
+        let options = CallOptions::new("grok-4.6").reasoning_effort(ReasoningEffort::XHigh);
 
-        let body = provider.build_body(&request, &options, false).unwrap();
+        let model = provider.resolve_model(&options.model);
+        let body = provider
+            .build_body(&request, &options, model, false)
+            .unwrap();
         assert_eq!(body, recording.request);
 
         let wire: ResponseObject = serde_json::from_value(recording.response).unwrap();

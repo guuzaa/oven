@@ -234,15 +234,15 @@ mod tests {
     }
 
     fn request() -> Request {
-        Request::builder().model("mock").build().unwrap()
+        Request::builder().build()
     }
 
     #[async_trait]
     impl Provider for Flaky {
         async fn complete(
             &self,
-            req: &Request,
-            _options: &CallOptions,
+            _req: &Request,
+            options: &CallOptions,
         ) -> Result<Response, ProviderError> {
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
@@ -254,7 +254,7 @@ mod tests {
             }
             Ok(Response {
                 id: "1".into(),
-                model: req.model.as_str().to_owned(),
+                model: options.model.as_str().to_owned(),
                 role: Role::Assistant,
                 content: Vec::new(),
                 stop_reason: None,
@@ -309,7 +309,7 @@ mod tests {
         .with_retries(3)
         .with_base_backoff(Duration::from_millis(1));
         provider
-            .complete(&request(), &CallOptions::default())
+            .complete(&request(), &CallOptions::new("mock"))
             .await
             .unwrap();
         assert_eq!(*calls.lock().unwrap(), 3);
@@ -347,7 +347,7 @@ mod tests {
             .with_retries(5)
             .with_base_backoff(Duration::from_millis(1));
         let err = provider
-            .complete(&request(), &CallOptions::default())
+            .complete(&request(), &CallOptions::new("mock"))
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderError::Auth(_)));
@@ -366,7 +366,7 @@ mod tests {
         .with_retries(3)
         .with_base_backoff(Duration::from_millis(1));
         let stream = provider
-            .stream(&request(), &CallOptions::default())
+            .stream(&request(), &CallOptions::new("mock"))
             .await
             .unwrap();
         let events: Vec<_> = futures::StreamExt::collect(stream).await;
@@ -414,7 +414,7 @@ mod tests {
             .with_timeout(Duration::from_millis(10))
             .with_retries(0);
         let err = provider
-            .complete(&request(), &CallOptions::default())
+            .complete(&request(), &CallOptions::new("mock"))
             .await
             .unwrap_err();
         assert!(
@@ -433,7 +433,7 @@ mod tests {
             list_calls: Arc::new(Mutex::new(0)),
         });
         let err = provider
-            .complete(&request(), &CallOptions::default())
+            .complete(&request(), &CallOptions::new("mock"))
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderError::Api { status: 500, .. }));

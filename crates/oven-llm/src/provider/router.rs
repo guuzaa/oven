@@ -248,7 +248,7 @@ impl Provider for Client {
         req: &Request,
         options: &CallOptions,
     ) -> Result<Response, ProviderError> {
-        let provider = self.router.provider(&req.model)?;
+        let provider = self.router.provider(&options.model)?;
         provider.complete(req, options).await
     }
 
@@ -257,7 +257,7 @@ impl Provider for Client {
         req: &Request,
         options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        let provider = self.router.provider(&req.model)?;
+        let provider = self.router.provider(&options.model)?;
         provider.stream(req, options).await
     }
 
@@ -388,8 +388,8 @@ mod tests {
     impl Provider for StubProvider {
         async fn complete(
             &self,
-            req: &Request,
-            _options: &CallOptions,
+            _req: &Request,
+            options: &CallOptions,
         ) -> Result<Response, ProviderError> {
             if self.fail {
                 return Err(ProviderError::Auth("stub auth failure".to_string()));
@@ -397,7 +397,7 @@ mod tests {
             self.calls.lock().unwrap().push(self.name.clone());
             Ok(Response {
                 id: "stub-response".to_string(),
-                model: req.model.as_str().to_owned(),
+                model: options.model.as_str().to_owned(),
                 role: Role::Assistant,
                 content: Vec::new(),
                 stop_reason: None,
@@ -435,8 +435,8 @@ mod tests {
         }
     }
 
-    fn request(model: &str) -> Request {
-        Request::builder().model(model).build().unwrap()
+    fn request() -> Request {
+        Request::builder().build()
     }
 
     #[test]
@@ -496,7 +496,7 @@ mod tests {
         router.register(deepseek);
 
         let response = Client::from(router)
-            .complete(&request("deepseek-v4-flash"), &CallOptions::default())
+            .complete(&request(), &CallOptions::new("deepseek-v4-flash"))
             .await
             .unwrap();
         assert_eq!(response.model, "deepseek-v4-flash");
@@ -511,7 +511,7 @@ mod tests {
         router.register(zhipu);
 
         let stream = Client::from(router)
-            .stream(&request("glm-5.2"), &CallOptions::default())
+            .stream(&request(), &CallOptions::new("glm-5.2"))
             .await
             .unwrap();
         let events: Vec<_> = stream.collect().await;
@@ -529,7 +529,7 @@ mod tests {
         ));
 
         let err = Client::from(router)
-            .complete(&request("deepseek-v4-flash"), &CallOptions::default())
+            .complete(&request(), &CallOptions::new("deepseek-v4-flash"))
             .await
             .unwrap_err();
         assert!(matches!(err, ProviderError::Auth(_)));
@@ -544,7 +544,7 @@ mod tests {
         ));
 
         let result = Client::from(router)
-            .stream(&request("deepseek-v4-flash"), &CallOptions::default())
+            .stream(&request(), &CallOptions::new("deepseek-v4-flash"))
             .await;
         assert!(matches!(result, Err(ProviderError::Auth(_))));
     }
@@ -558,7 +558,7 @@ mod tests {
         ));
 
         let result = Client::from(router)
-            .stream(&request("xai/grok-4.6"), &CallOptions::default())
+            .stream(&request(), &CallOptions::new("xai/grok-4.6"))
             .await;
         assert!(matches!(result, Err(ProviderError::UnknownModel(_))));
     }

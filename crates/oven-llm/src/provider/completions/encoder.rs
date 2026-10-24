@@ -1,8 +1,8 @@
-//! encoder：将 domain 层的 `Request` 转换为 OpenAI Chat Completions 的
-//! wire 格式 `ChatCompletionRequest`。
+//! encoder: turns the domain `Request` into the OpenAI Chat Completions wire
+//! format `ChatCompletionRequest`.
 //!
-//! 本模块是纯函数集合，不做任何 I/O；不读取或处理
-//! `Request.provider_options` 字段（该字段的合并逻辑位于 transport 层）。
+//! Pure functions, no I/O. `options.provider_options` is not read here — the
+//! transport layer merges it.
 
 #![allow(dead_code)]
 
@@ -33,14 +33,14 @@ pub enum CompletionsEncodeError {
     UnsupportedToolResultContent(String),
 }
 
-/// 将 `Request` 编码为 OpenAI Chat Completions 的 wire 请求体。
+/// Encodes a `Request` into the OpenAI Chat Completions wire request body.
 ///
-/// - `system` 字段（如果有值）生成消息列表的第一条 `role: "system"` 消息
-/// - `messages` 中每条消息按角色分发给 `encode_message`
-/// - `tools` / `tool_choice` / `sampling.stop` 逐一映射
-/// - `stream = true` 时附带 `stream_options.include_usage = true`
+/// - a `system` field, when set, becomes the first message with `role: "system"`
+/// - every message in `messages` goes to `encode_message` by its role
+/// - `tools` / `tool_choice` / `sampling.stop` map one by one
+/// - `stream = true` adds `stream_options.include_usage = true`
 ///
-/// 不读取或处理 `req.options.provider_options`（由 transport 层负责合并）。
+/// `options.provider_options` is not read here — the transport layer merges it.
 pub(crate) fn encode_request(
     req: &Request,
     options: &CallOptions,
@@ -92,7 +92,7 @@ pub(crate) fn encode_request(
 
     let reasoning_effort = reasoning.level.map(str::to_string);
     Ok(ChatCompletionRequest {
-        model: req.model.wire_id().to_owned(),
+        model: options.model.wire_id().to_owned(),
         messages,
         tools,
         tool_choice: Some(encode_tool_choice(&req.tool_choice)),
@@ -360,6 +360,10 @@ mod tests {
     use super::*;
     use crate::domain::options::CallOptions;
 
+    fn sample_options() -> CallOptions {
+        CallOptions::new("gpt-4")
+    }
+
     // --- encode_request: system field (Requirement 3.1) ---
 
     #[test]
@@ -369,8 +373,7 @@ mod tests {
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.messages[0].role, "system");
         assert_eq!(wire.messages[0].content, Some("be helpful".to_string()));
         assert_eq!(wire.messages[1].role, "user");
@@ -382,8 +385,7 @@ mod tests {
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.messages.len(), 1);
         assert_eq!(wire.messages[0].role, "user");
     }
@@ -421,7 +423,7 @@ mod tests {
         let req = Request {
             ..Default::default()
         };
-        let options = CallOptions::default().stop(vec!["STOP".to_string()]);
+        let options = sample_options().stop(vec!["STOP".to_string()]);
         let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.stop, Some(StopValue::Single("STOP".to_string())));
     }
@@ -431,7 +433,7 @@ mod tests {
         let req = Request {
             ..Default::default()
         };
-        let options = CallOptions::default().stop(vec!["A".to_string(), "B".to_string()]);
+        let options = sample_options().stop(vec!["A".to_string(), "B".to_string()]);
         let wire = encode_request(&req, &options, Channels::default(), false).unwrap();
         assert_eq!(
             wire.stop,
@@ -442,8 +444,7 @@ mod tests {
     #[test]
     fn stop_none_maps_to_none() {
         let req = Request::default();
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.stop, None);
     }
 
@@ -452,7 +453,7 @@ mod tests {
         let req = Request {
             ..Default::default()
         };
-        let options = CallOptions::default().stop(vec![]);
+        let options = sample_options().stop(vec![]);
         let wire = encode_request(&req, &options, Channels::default(), false).unwrap();
         assert_eq!(wire.stop, None);
     }
@@ -776,7 +777,6 @@ mod tests {
     #[test]
     fn encode_request_maps_tools_and_sampling() {
         let req = Request {
-            model: crate::domain::ModelId::from("gpt-4"),
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: None,
@@ -784,7 +784,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let options = CallOptions::default()
+        let options = CallOptions::new("gpt-4")
             .temperature(0.5)
             .top_p(0.9)
             .max_tokens(100);
@@ -794,19 +794,15 @@ mod tests {
 
     #[test]
     fn encode_request_sends_wire_id_not_slug() {
-        let req = Request {
-            model: crate::domain::ModelId::from("deepseek/deepseek-v4-flash:responses"),
-            ..Default::default()
-        };
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let req = Request::default();
+        let options = CallOptions::new("deepseek/deepseek-v4-flash:responses");
+        let wire = encode_request(&req, &options, Channels::default(), false).unwrap();
         assert_eq!(wire.model, "deepseek-v4-flash");
     }
 
     #[test]
     fn encode_request_maps_rest() {
         let req = Request {
-            model: crate::domain::ModelId::from("gpt-4"),
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: None,
@@ -814,7 +810,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let options = CallOptions::default()
+        let options = CallOptions::new("gpt-4")
             .temperature(0.5)
             .top_p(0.9)
             .max_tokens(100);
@@ -836,8 +832,7 @@ mod tests {
     #[test]
     fn encode_request_no_stream_has_no_stream_options() {
         let req = Request::default();
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(!wire.stream);
         assert_eq!(wire.stream_options, None);
     }
@@ -847,7 +842,7 @@ mod tests {
         let req = Request::default();
         let wire = encode_request(
             &req,
-            &CallOptions::default(),
+            &sample_options(),
             Channels {
                 level: Some("high"),
                 toggle: None,
@@ -864,7 +859,7 @@ mod tests {
         let req = Request::default();
         let wire = encode_request(
             &req,
-            &CallOptions::default(),
+            &sample_options(),
             Channels {
                 level: None,
                 toggle: Some(true),
@@ -881,7 +876,7 @@ mod tests {
         let req = Request::default();
         let wire = encode_request(
             &req,
-            &CallOptions::default(),
+            &sample_options(),
             Channels {
                 level: Some("none"),
                 toggle: Some(false),
@@ -896,8 +891,7 @@ mod tests {
     #[test]
     fn encode_request_unset_sends_no_reasoning_field() {
         let req = Request::default();
-        let wire =
-            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(wire.thinking.is_none());
         assert!(wire.reasoning_effort.is_none());
     }
@@ -908,7 +902,7 @@ mod tests {
             let req = Request::default();
             let wire = encode_request(
                 &req,
-                &CallOptions::default(),
+                &sample_options(),
                 Channels {
                     level: Some(word),
                     toggle: None,

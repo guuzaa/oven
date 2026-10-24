@@ -54,11 +54,9 @@ async fn main() {
 
     // 3. 非流式 complete 调用。
     let request = Request::builder()
-        .model("deepseek-v4-flash")
         .message(Message::user_text("用一句话介绍 Rust 语言。"))
-        .build()
-        .expect("model is set");
-    let options = CallOptions::default().temperature(0.0);
+        .build();
+    let options = CallOptions::new("deepseek-v4-flash").temperature(0.0);
 
     match provider.complete(&request, &options).await {
         Ok(response) => {
@@ -131,14 +129,12 @@ async fn collect_streamed_response<P: Provider + ?Sized>(
 /// 则执行并把结果以 `function_call_output` 回传，直到模型结束本轮生成。
 async fn run_tool_loop<P: Provider + ?Sized>(provider: &P) {
     let mut request = Request::builder()
-        .model("deepseek-v4-flash")
         .message(Message::user_text(
             "请调用 get_weather 工具查询杭州今天的天气，然后告诉我结果。",
         ))
         .tools(vec![weather_tool()])
-        .build()
-        .expect("model is set");
-    let options = CallOptions::default().temperature(0.0);
+        .build();
+    let options = CallOptions::new("deepseek-v4-flash").temperature(0.0);
 
     loop {
         let response = match collect_streamed_response(provider, &request, &options).await {

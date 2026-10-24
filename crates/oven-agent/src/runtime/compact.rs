@@ -100,7 +100,7 @@ async fn request_summary(
     let cancel_work = cancel.clone();
     let work = async move {
         let streams = router
-            .resolve_model(&req.model)
+            .resolve_model(&options.model)
             .is_none_or(|info| info.capabilities.supports_streaming);
         if !streams {
             return router
