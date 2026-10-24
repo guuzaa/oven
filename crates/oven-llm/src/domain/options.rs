@@ -8,23 +8,15 @@ use serde::{Deserialize, Serialize};
 use super::reasoning::ReasoningEffort;
 
 /// 采样参数：控制模型生成时的随机性与长度限制。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// 默认值一律是"不带"：厂商的默认值就是对的，而 Kimi 一族的 temperature 是
+/// 按模型固定的值（思考 1.0、非思考 0.6），显式传入别的值会报错。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SamplingParams {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
     pub stop: Option<Vec<String>>,
-}
-
-impl Default for SamplingParams {
-    fn default() -> Self {
-        Self {
-            temperature: Some(1.0),
-            top_p: None,
-            max_tokens: None,
-            stop: None,
-        }
-    }
 }
 
 /// 一次调用的可调项。
@@ -108,6 +100,7 @@ mod tests {
         let options = CallOptions::default();
         assert_eq!(options.reasoning_effort, None);
         assert!(options.provider_options.is_empty());
+        assert_eq!(options.sampling.temperature, None);
         assert_eq!(options.sampling, SamplingParams::default());
     }
 }

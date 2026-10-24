@@ -143,7 +143,7 @@ impl ResponsesProvider {
     /// 将 `Request` 编码为最终发送的 JSON 请求体：先由 `encoder::encode_request`
     /// 产出标准 wire JSON，再把 `req.options.provider_options` 中的每个键值对合并进
     /// 去。`provider_options` 的键与标准字段重名时会覆盖标准字段。
-    fn build_body(
+    pub(crate) fn build_body(
         &self,
         req: &Request,
         options: &CallOptions,

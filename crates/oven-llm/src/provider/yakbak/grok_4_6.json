@@ -1,0 +1,33 @@
+{
+  "request": {
+    "model": "grok-4.6",
+    "input": [{ "type": "message", "role": "user", "content": "求 1+1。" }],
+    "reasoning": { "effort": "xhigh" },
+    "stream": false
+  },
+  "response": {
+    "id": "resp-grok-4-6",
+    "object": "response",
+    "model": "grok-4.6",
+    "status": "completed",
+    "output": [
+      {
+        "id": "rs_1",
+        "type": "reasoning",
+        "summary": [{ "type": "summary_text", "text": "用户问的是加法，结果是 2。" }]
+      },
+      {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": [{ "type": "output_text", "text": "1+1=2。" }]
+      }
+    ],
+    "usage": {
+      "input_tokens": 12,
+      "output_tokens": 24,
+      "input_tokens_details": { "cached_tokens": 0 },
+      "output_tokens_details": { "reasoning_tokens": 9 }
+    }
+  }
+}

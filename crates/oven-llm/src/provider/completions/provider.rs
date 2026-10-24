@@ -169,7 +169,7 @@ impl CompletionsProvider {
     ///
     /// `encoder` 不读取/处理 `provider_options`（Requirement 7.2）；当
     /// `provider_options` 为空时不会产生任何额外字段（Requirement 7.3）。
-    fn build_body(
+    pub(crate) fn build_body(
         &self,
         req: &Request,
         options: &CallOptions,

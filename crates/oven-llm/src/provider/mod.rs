@@ -12,6 +12,8 @@ mod retry;
 mod router;
 pub mod validate;
 mod vendor;
+#[cfg(test)]
+mod yakbak;
 
 pub use builder::ProviderBuilder;
 pub use completions::CompletionsProvider;
