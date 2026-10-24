@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use oven_agent::{ModelCatalog, RouterHandle};
 use oven_llm::{
-    ModelInfo, Provider, ProviderBuilder, ProviderName, Request, RetryingProvider, Router,
+    CallOptions, ModelInfo, Provider, ProviderBuilder, ProviderName, Request, RetryingProvider,
+    Router,
 };
 
 use crate::core::config::{AppConfig, ModelMetadata, ProviderConfig};
@@ -105,11 +106,11 @@ pub async fn verify(provider: &ProviderConfig, timeout: Duration) -> Result<Dura
     let request = Request::builder()
         .model(provider.effective_model())
         .prompt(VERIFY_PROMPT)
-        .max_tokens(1)
         .build()
         .map_err(|e| AppError::Provider(e.to_string()))?;
+    let options = CallOptions::default().max_tokens(1);
     let started = Instant::now();
-    tokio::time::timeout(timeout, client.complete(&request))
+    tokio::time::timeout(timeout, client.complete(&request, &options))
         .await
         .map_err(|_| AppError::Provider(format!("no response within {}s", timeout.as_secs())))??;
     Ok(started.elapsed())

@@ -15,6 +15,7 @@ use super::types::{
     WireTool, WireToolCall, WireToolCallFunction,
 };
 use crate::domain::message::{ContentBlock, Message, Role};
+use crate::domain::options::CallOptions;
 use crate::domain::request::Request;
 use crate::domain::tool::{Tool, ToolChoice};
 use crate::provider::vendor::Channels;
@@ -42,6 +43,7 @@ pub enum CompletionsEncodeError {
 /// 不读取或处理 `req.options.provider_options`（由 transport 层负责合并）。
 pub(crate) fn encode_request(
     req: &Request,
+    options: &CallOptions,
     reasoning: Channels,
     stream: bool,
 ) -> Result<ChatCompletionRequest, CompletionsEncodeError> {
@@ -65,7 +67,7 @@ pub(crate) fn encode_request(
         Some(req.tools.iter().map(encode_tool).collect())
     };
 
-    let stop = match &req.options.sampling.stop {
+    let stop = match &options.sampling.stop {
         None => None,
         Some(values) if values.is_empty() => None,
         Some(values) if values.len() == 1 => Some(StopValue::Single(values[0].clone())),
@@ -94,9 +96,9 @@ pub(crate) fn encode_request(
         messages,
         tools,
         tool_choice: Some(encode_tool_choice(&req.tool_choice)),
-        temperature: req.options.sampling.temperature,
-        top_p: req.options.sampling.top_p,
-        max_tokens: req.options.sampling.max_tokens,
+        temperature: options.sampling.temperature,
+        top_p: options.sampling.top_p,
+        max_tokens: options.sampling.max_tokens,
         stop,
         thinking,
         reasoning_effort,
@@ -356,7 +358,7 @@ fn encode_tool_choice(choice: &ToolChoice) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::request::{CallOptions, SamplingParams};
+    use crate::domain::options::CallOptions;
 
     // --- encode_request: system field (Requirement 3.1) ---
 
@@ -367,7 +369,8 @@ mod tests {
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert_eq!(wire.messages[0].role, "system");
         assert_eq!(wire.messages[0].content, Some("be helpful".to_string()));
         assert_eq!(wire.messages[1].role, "user");
@@ -379,7 +382,8 @@ mod tests {
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert_eq!(wire.messages.len(), 1);
         assert_eq!(wire.messages[0].role, "user");
     }
@@ -415,32 +419,20 @@ mod tests {
     #[test]
     fn stop_single_value_serializes_as_single() {
         let req = Request {
-            options: CallOptions {
-                sampling: SamplingParams {
-                    stop: Some(vec!["STOP".to_string()]),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), true).unwrap();
+        let options = CallOptions::default().stop(vec!["STOP".to_string()]);
+        let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.stop, Some(StopValue::Single("STOP".to_string())));
     }
 
     #[test]
     fn stop_multiple_values_serializes_as_multiple() {
         let req = Request {
-            options: CallOptions {
-                sampling: SamplingParams {
-                    stop: Some(vec!["A".to_string(), "B".to_string()]),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let options = CallOptions::default().stop(vec!["A".to_string(), "B".to_string()]);
+        let wire = encode_request(&req, &options, Channels::default(), false).unwrap();
         assert_eq!(
             wire.stop,
             Some(StopValue::Multiple(vec!["A".to_string(), "B".to_string()]))
@@ -450,23 +442,18 @@ mod tests {
     #[test]
     fn stop_none_maps_to_none() {
         let req = Request::default();
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert_eq!(wire.stop, None);
     }
 
     #[test]
     fn stop_empty_vec_maps_to_none() {
         let req = Request {
-            options: CallOptions {
-                sampling: SamplingParams {
-                    stop: Some(vec![]),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let options = CallOptions::default().stop(vec![]);
+        let wire = encode_request(&req, &options, Channels::default(), false).unwrap();
         assert_eq!(wire.stop, None);
     }
 
@@ -795,18 +782,13 @@ mod tests {
                 description: None,
                 input_schema: Arc::new(serde_json::json!({})),
             }],
-            options: CallOptions {
-                sampling: SamplingParams {
-                    temperature: Some(0.5),
-                    top_p: Some(0.9),
-                    max_tokens: Some(100),
-                    stop: None,
-                },
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), true).unwrap();
+        let options = CallOptions::default()
+            .temperature(0.5)
+            .top_p(0.9)
+            .max_tokens(100);
+        let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.model, "gpt-4");
     }
 
@@ -816,7 +798,8 @@ mod tests {
             model: crate::domain::ModelId::from("deepseek/deepseek-v4-flash:responses"),
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert_eq!(wire.model, "deepseek-v4-flash");
     }
 
@@ -829,18 +812,13 @@ mod tests {
                 description: None,
                 input_schema: Arc::new(serde_json::json!({})),
             }],
-            options: CallOptions {
-                sampling: SamplingParams {
-                    temperature: Some(0.5),
-                    top_p: Some(0.9),
-                    max_tokens: Some(100),
-                    stop: None,
-                },
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), true).unwrap();
+        let options = CallOptions::default()
+            .temperature(0.5)
+            .top_p(0.9)
+            .max_tokens(100);
+        let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.model, "gpt-4");
         assert_eq!(wire.tools.unwrap().len(), 1);
         assert_eq!(wire.temperature, Some(0.5));
@@ -858,7 +836,8 @@ mod tests {
     #[test]
     fn encode_request_no_stream_has_no_stream_options() {
         let req = Request::default();
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert!(!wire.stream);
         assert_eq!(wire.stream_options, None);
     }
@@ -868,6 +847,7 @@ mod tests {
         let req = Request::default();
         let wire = encode_request(
             &req,
+            &CallOptions::default(),
             Channels {
                 level: Some("high"),
                 toggle: None,
@@ -884,6 +864,7 @@ mod tests {
         let req = Request::default();
         let wire = encode_request(
             &req,
+            &CallOptions::default(),
             Channels {
                 level: None,
                 toggle: Some(true),
@@ -900,6 +881,7 @@ mod tests {
         let req = Request::default();
         let wire = encode_request(
             &req,
+            &CallOptions::default(),
             Channels {
                 level: Some("none"),
                 toggle: Some(false),
@@ -914,7 +896,8 @@ mod tests {
     #[test]
     fn encode_request_unset_sends_no_reasoning_field() {
         let req = Request::default();
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert!(wire.thinking.is_none());
         assert!(wire.reasoning_effort.is_none());
     }
@@ -925,6 +908,7 @@ mod tests {
             let req = Request::default();
             let wire = encode_request(
                 &req,
+                &CallOptions::default(),
                 Channels {
                     level: Some(word),
                     toggle: None,

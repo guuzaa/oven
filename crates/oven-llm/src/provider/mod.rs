@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use std::fmt;
 
-use crate::domain::{ModelId, Request, Response, StreamEvent};
+use crate::domain::{CallOptions, ModelId, Request, Response, StreamEvent};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1";
@@ -42,10 +42,14 @@ const GROK_BASE_URL: &str = "https://api.x.ai/v1";
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// 发送一次非流式请求，返回完整响应。
-    async fn complete(&self, req: &Request) -> Result<Response>;
+    async fn complete(&self, req: &Request, options: &CallOptions) -> Result<Response>;
 
     /// 发送一次流式请求，返回统一的 `StreamEvent` 流。
-    async fn stream(&self, req: &Request) -> Result<BoxStream<'static, Result<StreamEvent>>>;
+    async fn stream(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent>>>;
 
     /// 该 provider 静态已知的模型列表，默认空，由具体实现覆写。
     fn known_models(&self) -> Vec<ModelInfo> {
@@ -72,15 +76,16 @@ macro_rules! impl_boxed_provider {
     ($($impl_head:tt)*) => {
         #[async_trait]
         impl $($impl_head)* {
-            async fn complete(&self, req: &Request) -> Result<Response> {
-                Provider::complete(&**self, req).await
+            async fn complete(&self, req: &Request, options: &CallOptions) -> Result<Response> {
+                Provider::complete(&**self, req, options).await
             }
 
             async fn stream(
                 &self,
                 req: &Request,
+                options: &CallOptions,
             ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-                Provider::stream(&**self, req).await
+                Provider::stream(&**self, req, options).await
             }
 
             fn known_models(&self) -> Vec<ModelInfo> {
@@ -297,7 +302,7 @@ mod tests {
 
     #[async_trait]
     impl Provider for StubProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response> {
+        async fn complete(&self, _req: &Request, _options: &CallOptions) -> Result<Response> {
             unimplemented!("not needed for this test")
         }
 
@@ -305,7 +310,11 @@ mod tests {
             None
         }
 
-        async fn stream(&self, _req: &Request) -> Result<BoxStream<'static, Result<StreamEvent>>> {
+        async fn stream(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
             unimplemented!("not needed for this test")
         }
 

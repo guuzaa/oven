@@ -13,6 +13,7 @@ use super::types::{
     WireReasoning,
 };
 use crate::domain::message::{ContentBlock, ImageSource, Message, Role};
+use crate::domain::options::CallOptions;
 use crate::domain::request::Request;
 use crate::domain::tool::{Tool, ToolChoice};
 use crate::provider::vendor::Channels;
@@ -40,6 +41,7 @@ pub enum EncodeError {
 /// 不读取或处理 `req.options.provider_options`（由 transport 层负责合并）。
 pub(crate) fn encode_request(
     req: &Request,
+    options: &CallOptions,
     reasoning: Channels,
     stream: bool,
 ) -> Result<ResponseRequest, EncodeError> {
@@ -64,9 +66,9 @@ pub(crate) fn encode_request(
         reasoning: reasoning.level.map(|effort| WireReasoning {
             effort: effort.to_string(),
         }),
-        temperature: req.options.sampling.temperature,
-        top_p: req.options.sampling.top_p,
-        max_output_tokens: req.options.sampling.max_tokens,
+        temperature: options.sampling.temperature,
+        top_p: options.sampling.top_p,
+        max_output_tokens: options.sampling.max_tokens,
         stream,
     })
 }
@@ -340,7 +342,7 @@ fn encode_tool_choice(choice: &ToolChoice) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::request::{CallOptions, SamplingParams};
+    use crate::domain::options::CallOptions;
 
     // --- 纯文本请求 ---
 
@@ -351,7 +353,8 @@ mod tests {
             messages: vec![Message::user_text("hi")],
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert_eq!(wire.instructions.as_deref(), Some("be helpful"));
         assert_eq!(wire.input.as_ref().unwrap().len(), 1);
     }
@@ -362,7 +365,8 @@ mod tests {
             messages: vec![Message::user_text("hello")],
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         assert_eq!(input.len(), 1);
         match &input[0] {
@@ -377,7 +381,8 @@ mod tests {
     #[test]
     fn empty_messages_omit_input() {
         let req = Request::default();
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert!(wire.input.is_none());
         assert!(wire.instructions.is_none());
     }
@@ -398,7 +403,8 @@ mod tests {
             }])],
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         match &input[0] {
             ResponseInputItem::FunctionCall { arguments, .. } => assert_eq!(arguments, raw),
@@ -424,7 +430,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         assert_eq!(input.len(), 4);
 
@@ -507,7 +514,8 @@ mod tests {
             messages: vec![Message::system("be terse")],
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         match &input[0] {
             ResponseInputItem::Message { role, content } => {
@@ -681,7 +689,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         let tools = wire.tools.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].kind, "function");
@@ -703,7 +712,8 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert!(wire.tool_choice.is_none());
     }
 
@@ -713,7 +723,8 @@ mod tests {
             tool_choice: ToolChoice::None,
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert_eq!(wire.tool_choice, Some(serde_json::json!("none")));
     }
 
@@ -723,7 +734,8 @@ mod tests {
             tool_choice: ToolChoice::Any,
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert_eq!(wire.tool_choice, Some(serde_json::json!("required")));
     }
 
@@ -733,7 +745,8 @@ mod tests {
             tool_choice: ToolChoice::Tool("get_weather".to_string()),
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert_eq!(
             wire.tool_choice,
             Some(serde_json::json!({"type": "function", "name": "get_weather"}))
@@ -748,6 +761,7 @@ mod tests {
             let req = Request::default();
             let wire = encode_request(
                 &req,
+                &CallOptions::default(),
                 Channels {
                     level: Some(word),
                     toggle: None,
@@ -762,7 +776,8 @@ mod tests {
     #[test]
     fn unset_sends_no_reasoning_field() {
         let req = Request::default();
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert!(wire.reasoning.is_none());
     }
 
@@ -771,18 +786,14 @@ mod tests {
     #[test]
     fn sampling_maps_temperature_top_p_max_output_tokens() {
         let req = Request {
-            options: CallOptions {
-                sampling: SamplingParams {
-                    temperature: Some(0.5),
-                    top_p: Some(0.9),
-                    max_tokens: Some(100),
-                    stop: Some(vec!["STOP".to_string()]),
-                },
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, Channels::default(), true).unwrap();
+        let options = CallOptions::default()
+            .temperature(0.5)
+            .top_p(0.9)
+            .max_tokens(100)
+            .stop(vec!["STOP".to_string()]);
+        let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.temperature, Some(0.5));
         assert_eq!(wire.top_p, Some(0.9));
         assert_eq!(wire.max_output_tokens, Some(100));
@@ -799,7 +810,8 @@ mod tests {
     #[test]
     fn stream_false_by_default() {
         let req = Request::default();
-        let wire = encode_request(&req, Channels::default(), false).unwrap();
+        let wire =
+            encode_request(&req, &CallOptions::default(), Channels::default(), false).unwrap();
         assert!(!wire.stream);
     }
 

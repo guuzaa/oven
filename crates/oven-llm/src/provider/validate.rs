@@ -4,6 +4,7 @@ use thiserror::Error;
 
 use super::model::ModelInfo;
 use crate::domain::message::ContentBlock;
+use crate::domain::options::CallOptions;
 use crate::domain::request::Request;
 use crate::domain::tool::Tool;
 
@@ -116,10 +117,11 @@ pub fn estimate_input_tokens(req: &Request) -> u32 {
 /// 因此本函数不对其做任何静态检查（Requirement 9.8）。
 pub fn validate_request(
     req: &Request,
+    options: &CallOptions,
     model: &ModelInfo,
     stream: bool,
 ) -> Result<(), ValidationError> {
-    if let Some(requested) = req.options.sampling.max_tokens
+    if let Some(requested) = options.sampling.max_tokens
         && model.max_output_tokens > 0
         && requested > model.max_output_tokens
     {
@@ -168,7 +170,8 @@ mod tests {
 
     use super::*;
     use crate::domain::message::{ImageSource, Message};
-    use crate::domain::request::{CallOptions, ModelId, SamplingParams};
+    use crate::domain::options::CallOptions;
+    use crate::domain::request::ModelId;
     use crate::domain::tool::ToolChoice;
     use crate::provider::model::ModelCapabilities;
     use crate::provider::vendor::EffortSupport;
@@ -209,18 +212,10 @@ mod tests {
     #[test]
     fn max_tokens_exceeded_fails() {
         let model = full_capability_model();
-        let req = Request {
-            options: CallOptions {
-                sampling: SamplingParams {
-                    max_tokens: Some(model.max_output_tokens + 1),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..base_request()
-        };
+        let options = CallOptions::default().max_tokens(model.max_output_tokens + 1);
+        let req = base_request();
         assert_eq!(
-            validate_request(&req, &model, false),
+            validate_request(&req, &options, &model, false),
             Err(ValidationError::MaxTokensExceeded {
                 requested: model.max_output_tokens + 1,
                 max: model.max_output_tokens,
@@ -231,34 +226,18 @@ mod tests {
     #[test]
     fn max_tokens_within_limit_passes() {
         let model = full_capability_model();
-        let req = Request {
-            options: CallOptions {
-                sampling: SamplingParams {
-                    max_tokens: Some(model.max_output_tokens),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..base_request()
-        };
-        assert_eq!(validate_request(&req, &model, false), Ok(()));
+        let options = CallOptions::default().max_tokens(model.max_output_tokens);
+        let req = base_request();
+        assert_eq!(validate_request(&req, &options, &model, false), Ok(()));
     }
 
     #[test]
     fn max_tokens_skipped_when_model_limit_unknown() {
         let mut model = full_capability_model();
         model.max_output_tokens = 0;
-        let req = Request {
-            options: CallOptions {
-                sampling: SamplingParams {
-                    max_tokens: Some(u32::MAX),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..base_request()
-        };
-        assert_eq!(validate_request(&req, &model, false), Ok(()));
+        let options = CallOptions::default().max_tokens(u32::MAX);
+        let req = base_request();
+        assert_eq!(validate_request(&req, &options, &model, false), Ok(()));
     }
 
     // --- system prompt (Requirement 9.2) ---
@@ -272,7 +251,7 @@ mod tests {
             ..base_request()
         };
         assert_eq!(
-            validate_request(&req, &model, false),
+            validate_request(&req, &CallOptions::default(), &model, false),
             Err(ValidationError::SystemPromptUnsupported)
         );
     }
@@ -284,7 +263,10 @@ mod tests {
             system: Some("be helpful".to_string()),
             ..base_request()
         };
-        assert_eq!(validate_request(&req, &model, false), Ok(()));
+        assert_eq!(
+            validate_request(&req, &CallOptions::default(), &model, false),
+            Ok(())
+        );
     }
 
     // --- tools (Requirement 9.3) ---
@@ -302,7 +284,7 @@ mod tests {
             ..base_request()
         };
         assert_eq!(
-            validate_request(&req, &model, false),
+            validate_request(&req, &CallOptions::default(), &model, false),
             Err(ValidationError::ToolsUnsupported)
         );
     }
@@ -319,7 +301,10 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             ..base_request()
         };
-        assert_eq!(validate_request(&req, &model, false), Ok(()));
+        assert_eq!(
+            validate_request(&req, &CallOptions::default(), &model, false),
+            Ok(())
+        );
     }
 
     // --- vision (Requirement 9.5) ---
@@ -337,7 +322,7 @@ mod tests {
             ..base_request()
         };
         assert_eq!(
-            validate_request(&req, &model, false),
+            validate_request(&req, &CallOptions::default(), &model, false),
             Err(ValidationError::VisionUnsupported)
         );
     }
@@ -359,7 +344,7 @@ mod tests {
             ..base_request()
         };
         assert_eq!(
-            validate_request(&req, &model, false),
+            validate_request(&req, &CallOptions::default(), &model, false),
             Err(ValidationError::VisionUnsupported)
         );
     }
@@ -375,7 +360,10 @@ mod tests {
             }])],
             ..base_request()
         };
-        assert_eq!(validate_request(&req, &model, false), Ok(()));
+        assert_eq!(
+            validate_request(&req, &CallOptions::default(), &model, false),
+            Ok(())
+        );
     }
 
     #[test]
@@ -390,7 +378,7 @@ mod tests {
             }])],
             ..base_request()
         };
-        assert!(validate_request(&req, &model, true).is_err());
+        assert!(validate_request(&req, &CallOptions::default(), &model, true).is_err());
     }
 
     // --- context window (Requirement 9.6) ---
@@ -408,7 +396,7 @@ mod tests {
         let estimated = estimate_input_tokens(&req);
         assert!(estimated > model.context_window);
         assert_eq!(
-            validate_request(&req, &model, false),
+            validate_request(&req, &CallOptions::default(), &model, false),
             Err(ValidationError::ContextOverflow {
                 estimated,
                 window: model.context_window,
@@ -420,7 +408,10 @@ mod tests {
     fn context_within_window_passes() {
         let model = full_capability_model();
         let req = base_request();
-        assert_eq!(validate_request(&req, &model, false), Ok(()));
+        assert_eq!(
+            validate_request(&req, &CallOptions::default(), &model, false),
+            Ok(())
+        );
     }
 
     #[test]
@@ -433,7 +424,10 @@ mod tests {
             )])],
             ..base_request()
         };
-        assert_eq!(validate_request(&req, &model, false), Ok(()));
+        assert_eq!(
+            validate_request(&req, &CallOptions::default(), &model, false),
+            Ok(())
+        );
     }
 
     // --- Ok(()) when everything satisfied (Requirement 9.7) ---
@@ -456,16 +450,10 @@ mod tests {
                 description: Some("查询天气".to_string()),
                 input_schema: Arc::new(serde_json::json!({"type": "object"})),
             }],
-            options: CallOptions {
-                sampling: SamplingParams {
-                    max_tokens: Some(model.max_output_tokens),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
             ..base_request()
         };
-        assert_eq!(validate_request(&req, &model, false), Ok(()));
+        let options = CallOptions::default().max_tokens(model.max_output_tokens);
+        assert_eq!(validate_request(&req, &options, &model, false), Ok(()));
     }
 
     // --- supports_parallel_tool_calls has no effect (Requirement 9.8) ---
@@ -481,10 +469,13 @@ mod tests {
         model_unsupported.capabilities.supports_parallel_tool_calls = false;
 
         assert_eq!(
-            validate_request(&req, &model_supported, false),
-            validate_request(&req, &model_unsupported, false)
+            validate_request(&req, &CallOptions::default(), &model_supported, false),
+            validate_request(&req, &CallOptions::default(), &model_unsupported, false)
         );
-        assert_eq!(validate_request(&req, &model_unsupported, false), Ok(()));
+        assert_eq!(
+            validate_request(&req, &CallOptions::default(), &model_unsupported, false),
+            Ok(())
+        );
     }
 
     // --- estimate_input_tokens ---

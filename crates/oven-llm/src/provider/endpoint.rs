@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use reqwest::header::HeaderMap;
 use secrecy::SecretString;
 
-use crate::domain::{ModelId, Request};
+use crate::domain::{CallOptions, ModelId, Request};
 use crate::provider::http;
 use crate::provider::model::ModelInfo;
 use crate::provider::validate::validate_request;
@@ -59,22 +59,23 @@ impl Endpoint {
     pub(crate) fn validate_known_model(
         &self,
         req: &Request,
+        options: &CallOptions,
         stream: bool,
     ) -> Result<(), ProviderError> {
         if let Some(model) = self.resolve_model(&req.model) {
-            validate_request(req, model, stream)?;
+            validate_request(req, options, model, stream)?;
         }
         Ok(())
     }
 
     /// 这次请求在 wire 上要发的推理字段：按模型能力归一化，再按厂商方言拆到
     /// 各通道。模型不在目录里就按"不知道"处理，不干预。
-    pub(crate) fn reasoning_channels(&self, req: &Request) -> Channels {
+    pub(crate) fn reasoning_channels(&self, req: &Request, options: &CallOptions) -> Channels {
         let support = self
             .resolve_model(&req.model)
             .map(|model| model.effort_support.clone())
             .unwrap_or_default();
-        let intent = resolve_reasoning(req.options.reasoning_effort, &support);
+        let intent = resolve_reasoning(options.reasoning_effort, &support);
         channels(intent, dialect_for(&self.provider_name), &support)
     }
 

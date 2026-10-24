@@ -7,8 +7,8 @@ use crate::core::view::{ToolCaps, ToolOutcome};
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt, iter};
 use oven_llm::{
-    Delta, ModelId, ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason,
-    StreamEvent as LlmStreamEvent,
+    CallOptions, Delta, ModelId, ModelInfo, ProviderError, ProviderName, Result as LlmResult,
+    StopReason, StreamEvent as LlmStreamEvent,
 };
 use oven_proto::ToolCallId;
 use oven_proto::TurnId;
@@ -194,7 +194,7 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
-    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         self.responses
             .lock()
             .unwrap()
@@ -208,6 +208,7 @@ impl Provider for MockProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -237,7 +238,7 @@ impl SlowComplete {
 
 #[async_trait]
 impl Provider for SlowComplete {
-    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         tokio::time::sleep(self.delay).await;
         Ok(self.response.clone())
     }
@@ -245,6 +246,7 @@ impl Provider for SlowComplete {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -270,7 +272,7 @@ struct ScriptedStream {
 
 #[async_trait]
 impl Provider for ScriptedStream {
-    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         Err(ProviderError::Api {
             status: 500,
             body: "complete disabled in mock".into(),
@@ -280,6 +282,7 @@ impl Provider for ScriptedStream {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         let mut events = vec![Ok(message_start())];
         for (index, delta) in self.deltas.iter().enumerate() {
@@ -324,7 +327,7 @@ impl QueuedStreams {
 
 #[async_trait]
 impl Provider for QueuedStreams {
-    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         Err(ProviderError::Api {
             status: 500,
             body: "complete disabled in mock".into(),
@@ -334,6 +337,7 @@ impl Provider for QueuedStreams {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         let events = self
             .rounds
@@ -1280,7 +1284,7 @@ async fn stream_auth_failure_is_not_requested_again() {
 
     #[async_trait]
     impl Provider for AuthOnStream {
-        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+        async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
             self.completes.fetch_add(1, Ordering::SeqCst);
             Err(ProviderError::Auth("bad key".into()))
         }
@@ -1288,6 +1292,7 @@ async fn stream_auth_failure_is_not_requested_again() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
             Err(ProviderError::Auth("bad key".into()))
         }
@@ -1641,7 +1646,7 @@ impl CaptureSystem {
 
 #[async_trait]
 impl Provider for CaptureSystem {
-    async fn complete(&self, req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         *self.system.lock().unwrap() = Some(req.system.clone());
         Ok(text_response("ok"))
     }
@@ -1649,6 +1654,7 @@ impl Provider for CaptureSystem {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -1708,7 +1714,7 @@ impl CaptureTools {
 
 #[async_trait]
 impl Provider for CaptureTools {
-    async fn complete(&self, req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         self.names
             .lock()
             .unwrap()
@@ -1719,6 +1725,7 @@ impl Provider for CaptureTools {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -1891,7 +1898,7 @@ impl CaptureRequests {
 
 #[async_trait]
 impl Provider for CaptureRequests {
-    async fn complete(&self, req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         self.seen.lock().unwrap().push(req.clone());
         if let Some(tx) = self.entered.lock().unwrap().take() {
             let _ = tx.send(());
@@ -1913,6 +1920,7 @@ impl Provider for CaptureRequests {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,

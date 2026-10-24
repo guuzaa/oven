@@ -8,8 +8,8 @@ use oven_agent::{
     CancellationToken, MEMORY_PROMPT, SpawnRequest, SubagentSpawner, TOP_LEVEL_PROMPT, TurnContext,
 };
 use oven_llm::{
-    ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
-    Role, StopReason, StreamEvent, Usage,
+    CallOptions, ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request,
+    Response, Role, StopReason, StreamEvent, Usage,
 };
 use oven_mem::{MemoryRoots, MemoryStore};
 use oven_proto::{NullSink, TurnId};
@@ -60,7 +60,11 @@ struct CaptureProvider {
 
 #[async_trait]
 impl Provider for CaptureProvider {
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         self.calls.lock().unwrap().push(SeenCall {
             system: req.system.clone().unwrap_or_default(),
             tools: req.tools.iter().map(|tool| tool.name.clone()).collect(),
@@ -83,6 +87,7 @@ impl Provider for CaptureProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
@@ -343,7 +348,11 @@ struct ScriptedProvider {
 
 #[async_trait]
 impl Provider for ScriptedProvider {
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         self.systems
             .lock()
             .unwrap()
@@ -361,6 +370,7 @@ impl Provider for ScriptedProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,

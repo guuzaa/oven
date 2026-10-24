@@ -11,6 +11,8 @@
 - Every protocol type has a serde form, and the wire format is pinned by tests
 
 ### Changed
+- **Breaking:** `oven-llm`: the request and the options are separate arguments — `Provider::complete` and `Provider::stream` take `(&Request, &CallOptions)`. The request is the conversation and the model it goes to; the options are how to ask (sampling, reasoning effort, private fields). The same request can go out with different options, and a turn rebuilds only the conversation
+- **Breaking:** `oven-llm`: `SamplingParams` and `CallOptions` move out of `domain::request` into `domain::options`; the crate-root paths are unchanged
 - `oven-llm`: the model's own capability decides which reasoning channel a request uses — a model with levels takes the level channel, a model with only a switch takes the switch channel — and the vendor dialect is the fallback for a model nobody knows. MiniMax needs both: `MiniMax-M3` has a switch, `MiniMax-M3.1-Flash` has levels
 - **Breaking:** `oven-proto`: `AppLevels.models` is a list of `ModelChoice` — id, provider, and what the model can express — rather than a list of pairs, so a frontend can offer the levels a model actually takes
 - `oven-app`, `oven-tui`: the model picker lists the reasoning levels the model takes and nothing else, and the status bar reads the effort the way the model reads it: a switch-only model shows `on`, and a level the model does not take shows the one it will use

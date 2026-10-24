@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use oven_llm::{
-    Client, ContentBlock, Delta, Message, Provider, Request, Response, Role, StreamCollector,
-    StreamEvent as LlmStreamEvent,
+    CallOptions, Client, ContentBlock, Delta, Message, Provider, Request, Response, Role,
+    StreamCollector, StreamEvent as LlmStreamEvent,
 };
 
 use oven_host::as_ms;
@@ -56,9 +56,19 @@ impl Agent {
             && !self.todos.is_empty()
     }
 
+    /// The options this turn runs with: the reasoning effort the selection
+    /// carries, and the sampling defaults.
+    pub(crate) fn build_options(&self) -> CallOptions {
+        let (_, reasoning_effort) = self.selection.model();
+        CallOptions {
+            reasoning_effort,
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn build_request(&self) -> Request {
         let mode = self.selection.mode();
-        let (model, reasoning_effort) = self.selection.model();
+        let (model, _) = self.selection.model();
         let mut messages: Vec<Message> = self
             .history
             .messages()
@@ -91,9 +101,6 @@ impl Agent {
         if let Some(system) = self.system_prompt(mode) {
             builder = builder.system(system);
         }
-        if let Some(effort) = reasoning_effort {
-            builder = builder.reasoning_effort(effort);
-        }
         builder.build().expect("model is set")
     }
 
@@ -116,15 +123,16 @@ impl Agent {
         sink: &mut impl EventSink,
     ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
         let req = self.build_request();
+        let options = self.build_options();
         let router = self.router();
         if router
             .resolve_model(&req.model)
             .is_some_and(|info| !info.capabilities.supports_streaming)
         {
-            return complete_unstreamed(&req, router.as_ref(), sink).await;
+            return complete_unstreamed(&req, &options, router.as_ref(), sink).await;
         }
 
-        match router.stream(&req).await {
+        match router.stream(&req, &options).await {
             Ok(mut stream) => {
                 let mut collector = StreamCollector::new();
                 let mut thinking = ThinkingSpan::default();
@@ -246,11 +254,12 @@ impl ToolCallGate {
 
 async fn complete_unstreamed(
     req: &Request,
+    options: &CallOptions,
     router: &Client,
     sink: &mut impl EventSink,
 ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
     let started = Instant::now();
-    let mut response = router.complete(req).await?;
+    let mut response = router.complete(req, options).await?;
     strip_tool_call_text(&mut response);
     let reasoning = response.thinking();
     let span = (!reasoning.is_empty()).then(|| thinking_span(started.elapsed()));

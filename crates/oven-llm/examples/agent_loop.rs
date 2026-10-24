@@ -49,13 +49,14 @@ async fn main() -> ExampleResult<()> {
         ))
         .prompt(task)
         .tools(coding_tools())
-        .temperature(0.1)
-        .reasoning_effort(oven_llm::ReasoningEffort::High)
         .build()
         .expect("model is set");
+    let options = oven_llm::CallOptions::default()
+        .temperature(0.1)
+        .reasoning_effort(oven_llm::ReasoningEffort::High);
 
     loop {
-        let response = collect_streamed_response(provider.as_ref(), &request).await?;
+        let response = collect_streamed_response(provider.as_ref(), &request, &options).await?;
         let requests_tools =
             response.stop_reason == Some(StopReason::ToolUse) && response.has_tool_use();
         println!("usage: {:?}", response.usage);
@@ -90,8 +91,9 @@ async fn main() -> ExampleResult<()> {
 async fn collect_streamed_response<P: Provider + ?Sized>(
     provider: &P,
     request: &Request,
+    options: &oven_llm::CallOptions,
 ) -> ExampleResult<oven_llm::Response> {
-    let mut stream = provider.stream(request).await?;
+    let mut stream = provider.stream(request, options).await?;
     let mut collector = StreamCollector::new();
 
     print!("\nassistant: ");

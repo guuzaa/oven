@@ -43,7 +43,7 @@ mod tests {
     use futures::stream::BoxStream;
     use oven_agent::Agent;
     use oven_llm::{
-        ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
+        CallOptions, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
         Result as LlmResult, Router, StreamEvent,
     };
     use oven_proto::{TodoItem, TodoList, TodoStatus};
@@ -52,7 +52,7 @@ mod tests {
 
     #[async_trait]
     impl Provider for MockProvider {
-        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+        async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "unused".into(),
@@ -62,6 +62,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
             Err(ProviderError::Api {
                 status: 500,

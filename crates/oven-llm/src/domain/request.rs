@@ -1,4 +1,4 @@
-//! `ModelId` / `SamplingParams` / `Request`：provider 无关的请求模型。
+//! `ModelId` / `Request`：provider 无关的请求模型。
 
 use std::{borrow::Borrow, fmt};
 
@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::message::Message;
-use super::reasoning::ReasoningEffort;
 use super::tool::{Tool, ToolChoice};
 
 /// 模型标识：完整 slug（`vendor/wire-id[:variant]`）或裸 wire id。
@@ -110,39 +109,6 @@ impl fmt::Display for ModelId {
     }
 }
 
-/// 采样参数：控制模型生成时的随机性与长度限制。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SamplingParams {
-    pub temperature: Option<f32>,
-    pub top_p: Option<f32>,
-    pub max_tokens: Option<u32>,
-    pub stop: Option<Vec<String>>,
-}
-
-impl Default for SamplingParams {
-    fn default() -> Self {
-        Self {
-            temperature: Some(1.0),
-            top_p: None,
-            max_tokens: None,
-            stop: None,
-        }
-    }
-}
-
-/// 一次调用的可调项。与会话内容分离，便于"默认值 ← 单次覆盖"的级联。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CallOptions {
-    /// 采样参数。
-    pub sampling: SamplingParams,
-    /// 推理强度。`None` 表示不表态：不下发任何推理字段，交给上游默认。
-    pub reasoning_effort: Option<ReasoningEffort>,
-    /// Provider 私有参数直通（跳过标准 Serialize，由 transport 层 merge 进
-    /// wire JSON body，键名需与 provider wire format 一致，不应与标准字段重名）。
-    #[serde(skip, default)]
-    pub provider_options: serde_json::Map<String, serde_json::Value>,
-}
-
 /// 一次 LLM 调用的完整请求，与具体 provider 无关。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Request {
@@ -151,8 +117,6 @@ pub struct Request {
     pub messages: Vec<Message>,
     pub tools: Vec<Tool>,
     pub tool_choice: ToolChoice,
-    /// 采样、推理强度与 provider 私有参数。
-    pub options: CallOptions,
 }
 
 impl Request {
@@ -197,46 +161,6 @@ impl Request {
         self.tool_choice = choice;
         self
     }
-
-    /// 设置 temperature。
-    pub fn temperature(&mut self, value: f32) -> &mut Self {
-        self.options.sampling.temperature = Some(value);
-        self
-    }
-
-    /// 设置 top_p。
-    pub fn top_p(&mut self, value: f32) -> &mut Self {
-        self.options.sampling.top_p = Some(value);
-        self
-    }
-
-    /// 设置 max_tokens。
-    pub fn max_tokens(&mut self, value: u32) -> &mut Self {
-        self.options.sampling.max_tokens = Some(value);
-        self
-    }
-
-    /// 设置 stop 序列。
-    pub fn stop(&mut self, sequences: Vec<String>) -> &mut Self {
-        self.options.sampling.stop = Some(sequences);
-        self
-    }
-
-    /// 设置推理强度。
-    pub fn reasoning_effort(&mut self, effort: ReasoningEffort) -> &mut Self {
-        self.options.reasoning_effort = Some(effort);
-        self
-    }
-
-    /// 添加一个 provider 私有参数。
-    pub fn provider_option(
-        &mut self,
-        key: impl Into<String>,
-        value: serde_json::Value,
-    ) -> &mut Self {
-        self.options.provider_options.insert(key.into(), value);
-        self
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -260,8 +184,6 @@ pub enum BuilderError {
 ///     .model("gpt-4")
 ///     .system("be helpful")
 ///     .message(Message::user(vec![ContentBlock::text("hello")]))
-///     .temperature(0.7)
-///     .reasoning_effort(ReasoningEffort::High)
 ///     .build()
 ///     .unwrap();
 /// ```
@@ -272,7 +194,6 @@ pub struct RequestBuilder {
     messages: Vec<Message>,
     tools: Vec<Tool>,
     tool_choice: ToolChoice,
-    options: CallOptions,
 }
 
 impl RequestBuilder {
@@ -317,45 +238,9 @@ impl RequestBuilder {
         self
     }
 
-    /// 设置 temperature。
-    pub fn temperature(mut self, value: f32) -> Self {
-        self.options.sampling.temperature = Some(value);
-        self
-    }
-
-    /// 设置 top_p。
-    pub fn top_p(mut self, value: f32) -> Self {
-        self.options.sampling.top_p = Some(value);
-        self
-    }
-
-    /// 设置 max_tokens。
-    pub fn max_tokens(mut self, value: u32) -> Self {
-        self.options.sampling.max_tokens = Some(value);
-        self
-    }
-
-    /// 设置 stop 序列。
-    pub fn stop(mut self, sequences: Vec<String>) -> Self {
-        self.options.sampling.stop = Some(sequences);
-        self
-    }
-
     /// 替换全部消息。
     pub fn messages(mut self, messages: Vec<Message>) -> Self {
         self.messages = messages;
-        self
-    }
-
-    /// 设置推理强度。未设置表示不表态：不下发任何推理字段。
-    pub fn reasoning_effort(mut self, effort: ReasoningEffort) -> Self {
-        self.options.reasoning_effort = Some(effort);
-        self
-    }
-
-    /// 添加一个 provider 私有参数。
-    pub fn provider_option(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
-        self.options.provider_options.insert(key.into(), value);
         self
     }
 
@@ -368,7 +253,6 @@ impl RequestBuilder {
             messages: self.messages,
             tools: self.tools,
             tool_choice: self.tool_choice,
-            options: self.options,
         })
     }
 }
@@ -424,30 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn sampling_params_default_is_all_none() {
-        let params = SamplingParams::default();
-        assert_eq!(params.temperature, Some(1.0));
-        assert_eq!(params.top_p, None);
-        assert_eq!(params.max_tokens, None);
-        assert_eq!(params.stop, None);
-    }
-
-    #[test]
-    fn sampling_params_serializes_all_fields() {
-        let params = SamplingParams {
-            temperature: Some(0.7),
-            top_p: Some(0.9),
-            max_tokens: Some(1024),
-            stop: Some(vec!["STOP".to_string()]),
-        };
-        let json = serde_json::to_value(&params).unwrap();
-        assert_eq!(json["temperature"].as_f64().unwrap(), 0.7_f32 as f64);
-        assert_eq!(json["top_p"].as_f64().unwrap(), 0.9_f32 as f64);
-        assert_eq!(json["max_tokens"], 1024);
-        assert_eq!(json["stop"][0], "STOP");
-    }
-
-    #[test]
     fn request_default_has_empty_collections() {
         let req = Request::default();
         assert_eq!(req.model, ModelId::default());
@@ -455,70 +315,23 @@ mod tests {
         assert!(req.messages.is_empty());
         assert!(req.tools.is_empty());
         assert_eq!(req.tool_choice, ToolChoice::Auto);
-        assert_eq!(req.options.sampling, SamplingParams::default());
-        assert_eq!(req.options.reasoning_effort, None);
-        assert!(req.options.provider_options.is_empty());
     }
 
     #[test]
-    fn provider_options_is_skipped_in_serialization() {
-        let mut req = Request {
-            model: ModelId::from("gpt-4"),
-            ..Default::default()
-        };
-        req.options
-            .provider_options
-            .insert("top_k".to_string(), serde_json::json!(40));
-
-        let json = serde_json::to_value(&req).unwrap();
-        assert!(json["options"].get("provider_options").is_none());
-        assert_eq!(json["model"], "gpt-4");
-    }
-
-    #[test]
-    fn provider_options_defaults_to_empty_when_deserializing() {
-        let json = serde_json::json!({
-            "model": "gpt-4",
-            "system": null,
-            "messages": [],
-            "tools": [],
-            "tool_choice": "auto",
-            "options": { "sampling": { "temperature": null, "top_p": null, "max_tokens": null, "stop": null } }
-        });
-        let req: Request = serde_json::from_value(json).unwrap();
-        assert_eq!(req.model.as_str(), "gpt-4");
-        assert!(req.options.provider_options.is_empty());
-    }
-
-    #[test]
-    fn request_round_trips_without_provider_options() {
+    fn request_round_trips() {
         let req = Request {
             model: ModelId::from("gpt-4"),
             system: Some("be helpful".to_string()),
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             tools: vec![],
             tool_choice: ToolChoice::Auto,
-            options: CallOptions {
-                sampling: SamplingParams {
-                    temperature: Some(0.5),
-                    ..Default::default()
-                },
-                reasoning_effort: Some(ReasoningEffort::High),
-                provider_options: serde_json::Map::new(),
-            },
         };
         let json = serde_json::to_string(&req).unwrap();
         let decoded: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.model, req.model);
         assert_eq!(decoded.system, req.system);
         assert_eq!(decoded.tool_choice, req.tool_choice);
-        assert_eq!(decoded.options.sampling, req.options.sampling);
-        assert_eq!(
-            decoded.options.reasoning_effort,
-            Some(ReasoningEffort::High)
-        );
         assert_eq!(decoded.messages[0].role, Role::User);
-        assert!(decoded.options.provider_options.is_empty());
     }
 
     #[test]
@@ -534,12 +347,6 @@ mod tests {
                 input_schema: Arc::new(serde_json::json!({"type": "object"})),
             })
             .tool_choice(ToolChoice::Auto)
-            .temperature(0.7)
-            .top_p(0.9)
-            .max_tokens(1024)
-            .stop(vec!["STOP".into()])
-            .reasoning_effort(ReasoningEffort::High)
-            .provider_option("top_k", serde_json::json!(40))
             .build()
             .unwrap();
 
@@ -551,15 +358,6 @@ mod tests {
         assert_eq!(req.tools.len(), 1);
         assert_eq!(req.tools[0].name, "search");
         assert_eq!(req.tool_choice, ToolChoice::Auto);
-        assert_eq!(req.options.sampling.temperature, Some(0.7));
-        assert_eq!(req.options.sampling.top_p, Some(0.9));
-        assert_eq!(req.options.sampling.max_tokens, Some(1024));
-        assert_eq!(
-            req.options.sampling.stop.as_ref().unwrap(),
-            &["STOP".to_string()]
-        );
-        assert_eq!(req.options.reasoning_effort, Some(ReasoningEffort::High));
-        assert_eq!(req.options.provider_options["top_k"], 40);
     }
 
     #[test]
@@ -571,34 +369,14 @@ mod tests {
     }
 
     #[test]
-    fn builder_without_effort_leaves_reasoning_unset() {
-        let req = Request::builder().model("gpt-4").build().unwrap();
-
-        assert_eq!(req.options.reasoning_effort, None);
-    }
-
-    #[test]
     fn fluent_setters_chain_correctly() {
         let mut req = Request::default();
         req.model("gpt-4")
             .system("be helpful")
-            .temperature(0.7)
-            .top_p(0.9)
-            .max_tokens(1024)
-            .stop(vec!["STOP".into()])
-            .reasoning_effort(ReasoningEffort::High)
             .tool_choice(ToolChoice::Any);
 
         assert_eq!(req.model.as_str(), "gpt-4");
         assert_eq!(req.system.as_deref(), Some("be helpful"));
-        assert_eq!(req.options.sampling.temperature, Some(0.7));
-        assert_eq!(req.options.sampling.top_p, Some(0.9));
-        assert_eq!(req.options.sampling.max_tokens, Some(1024));
-        assert_eq!(
-            req.options.sampling.stop.as_ref().unwrap(),
-            &["STOP".to_string()]
-        );
-        assert_eq!(req.options.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(req.tool_choice, ToolChoice::Any);
     }
 
@@ -663,17 +441,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_option_inserts() {
-        let mut req = Request::default();
-        req.model("gpt-4")
-            .provider_option("top_k", serde_json::json!(40))
-            .provider_option("custom_flag", serde_json::json!(true));
-
-        assert_eq!(req.options.provider_options["top_k"], 40);
-        assert_eq!(req.options.provider_options["custom_flag"], true);
-    }
-
-    #[test]
     fn realistic_construction_and_mutation() {
         // Construction phase — use builder
         let mut req = Request::builder()
@@ -687,8 +454,6 @@ mod tests {
                 description: Some("Execute code".into()),
                 input_schema: Arc::new(serde_json::json!({"type": "object"})),
             })
-            .temperature(0.0)
-            .reasoning_effort(ReasoningEffort::High)
             .build()
             .expect("model id's set");
 
@@ -706,6 +471,5 @@ mod tests {
         assert_eq!(req.messages[1].role, Role::Assistant);
         assert_eq!(req.messages[2].role, Role::User);
         assert_eq!(req.tools.len(), 1);
-        assert_eq!(req.options.reasoning_effort, Some(ReasoningEffort::High));
     }
 }

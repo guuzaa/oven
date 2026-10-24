@@ -21,7 +21,7 @@ use super::decoder::{self, StreamDecoder};
 use super::encoder;
 use super::types::{ResponseEvent, ResponseObject};
 use crate::ProviderName;
-use crate::domain::{ModelId, Request, Response, StreamEvent};
+use crate::domain::{CallOptions, ModelId, Request, Response, StreamEvent};
 use crate::provider::catalog;
 use crate::provider::endpoint::Endpoint;
 use crate::provider::model::ModelInfo;
@@ -143,15 +143,20 @@ impl ResponsesProvider {
     /// 将 `Request` 编码为最终发送的 JSON 请求体：先由 `encoder::encode_request`
     /// 产出标准 wire JSON，再把 `req.options.provider_options` 中的每个键值对合并进
     /// 去。`provider_options` 的键与标准字段重名时会覆盖标准字段。
-    fn build_body(&self, req: &Request, stream: bool) -> Result<serde_json::Value, ProviderError> {
-        let reasoning = self.endpoint.reasoning_channels(req);
-        let wire = encoder::encode_request(req, reasoning, stream)?;
+    fn build_body(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+        stream: bool,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let reasoning = self.endpoint.reasoning_channels(req, options);
+        let wire = encoder::encode_request(req, options, reasoning, stream)?;
         let body = serde_json::to_value(wire).map_err(|err| {
             ProviderError::ResponsesEncode(encoder::EncodeError::InvalidContent(err.to_string()))
         })?;
         Ok(Endpoint::merge_provider_options(
             body,
-            &req.options.provider_options,
+            &options.provider_options,
         ))
     }
 
@@ -170,9 +175,13 @@ impl ResponsesProvider {
 #[async_trait]
 impl Provider for ResponsesProvider {
     /// 发送一次非流式请求（强制 `stream = false`）。
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        self.endpoint.validate_known_model(req, false)?;
-        let body = self.build_body(req, false)?;
+    async fn complete(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
+        self.endpoint.validate_known_model(req, options, false)?;
+        let body = self.build_body(req, options, false)?;
         let response = self.post_responses(&body).await?;
 
         let body_bytes = response.bytes().await?;
@@ -190,9 +199,10 @@ impl Provider for ResponsesProvider {
     async fn stream(
         &self,
         req: &Request,
+        options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        self.endpoint.validate_known_model(req, true)?;
-        let body = self.build_body(req, true)?;
+        self.endpoint.validate_known_model(req, options, true)?;
+        let body = self.build_body(req, options, true)?;
         let response = self.post_responses(&body).await?;
 
         let byte_stream = Box::pin(response.bytes_stream());
@@ -466,9 +476,9 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut req = sample_request();
-        req.options.reasoning_effort = Some(ReasoningEffort::High);
-        let body = provider.build_body(&req, false).unwrap();
+        let req = sample_request();
+        let options = CallOptions::default().reasoning_effort(ReasoningEffort::High);
+        let body = provider.build_body(&req, &options, false).unwrap();
         assert_eq!(body["reasoning"]["effort"], "high");
     }
 
@@ -480,7 +490,9 @@ mod tests {
             api_key("k"),
         );
         let req = sample_request();
-        let body = provider.build_body(&req, false).unwrap();
+        let body = provider
+            .build_body(&req, &CallOptions::default(), false)
+            .unwrap();
         assert!(body.get("reasoning").is_none());
     }
 
@@ -492,7 +504,9 @@ mod tests {
             api_key("k"),
         );
         let req = sample_request();
-        let body = provider.build_body(&req, false).unwrap();
+        let body = provider
+            .build_body(&req, &CallOptions::default(), false)
+            .unwrap();
         let object = body.as_object().unwrap();
         assert_eq!(object["model"], "deepseek-v4-flash");
         assert!(object.get("text").is_none());
@@ -505,11 +519,9 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut req = sample_request();
-        req.options
-            .provider_options
-            .insert("top_k".to_string(), json!(40));
-        let body = provider.build_body(&req, false).unwrap();
+        let req = sample_request();
+        let options = CallOptions::default().provider_option("top_k", json!(40));
+        let body = provider.build_body(&req, &options, false).unwrap();
         assert_eq!(body["top_k"], 40);
     }
 
@@ -520,12 +532,11 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut req = sample_request();
-        req.options.sampling.temperature = Some(0.5);
-        req.options
-            .provider_options
-            .insert("temperature".to_string(), json!(1.5));
-        let body = provider.build_body(&req, false).unwrap();
+        let req = sample_request();
+        let options = CallOptions::default()
+            .temperature(0.5)
+            .provider_option("temperature", json!(1.5));
+        let body = provider.build_body(&req, &options, false).unwrap();
         assert_eq!(body["temperature"], 1.5);
     }
 
@@ -536,12 +547,12 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut req = sample_request();
-        req.options.provider_options.insert(
+        let req = sample_request();
+        let options = CallOptions::default().provider_option(
             "text".to_string(),
             json!({"format": {"type": "json_object"}}),
         );
-        let body = provider.build_body(&req, false).unwrap();
+        let body = provider.build_body(&req, &options, false).unwrap();
         assert_eq!(body["text"]["format"]["type"], "json_object");
     }
 
@@ -561,7 +572,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let err = provider.complete(&sample_request()).await.unwrap_err();
+        let err = provider
+            .complete(&sample_request(), &CallOptions::default())
+            .await
+            .unwrap_err();
         match err {
             ProviderError::Auth(body) => assert_eq!(body, "bad key"),
             other => panic!("expected Auth error, got {other:?}"),
@@ -582,7 +596,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let err = provider.complete(&sample_request()).await.unwrap_err();
+        let err = provider
+            .complete(&sample_request(), &CallOptions::default())
+            .await
+            .unwrap_err();
         match err {
             ProviderError::RateLimit { retry_after_ms } => assert_eq!(retry_after_ms, None),
             other => panic!("expected RateLimit error, got {other:?}"),
@@ -603,7 +620,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let err = provider.complete(&sample_request()).await.unwrap_err();
+        let err = provider
+            .complete(&sample_request(), &CallOptions::default())
+            .await
+            .unwrap_err();
         match err {
             ProviderError::Api { status, body } => {
                 assert_eq!(status, 500);
@@ -655,7 +675,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let response = provider.complete(&sample_request()).await.unwrap();
+        let response = provider
+            .complete(&sample_request(), &CallOptions::default())
+            .await
+            .unwrap();
         assert_eq!(response.id, "resp_1");
         assert_eq!(response.model, "deepseek-v4-flash");
         assert_eq!(response.content.len(), 2);
@@ -703,7 +726,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let err = provider.complete(&sample_request()).await.unwrap_err();
+        let err = provider
+            .complete(&sample_request(), &CallOptions::default())
+            .await
+            .unwrap_err();
         match err {
             ProviderError::ResponsesDecode(decoder::DecodeError::Failed { message }) => {
                 assert_eq!(message, "boom");
@@ -732,7 +758,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut event_stream = provider.stream(&sample_request()).await.unwrap();
+        let mut event_stream = provider
+            .stream(&sample_request(), &CallOptions::default())
+            .await
+            .unwrap();
 
         let mut collector = StreamCollector::new();
         let mut saw_message_stop = false;
@@ -797,7 +826,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut event_stream = provider.stream(&sample_request()).await.unwrap();
+        let mut event_stream = provider
+            .stream(&sample_request(), &CallOptions::default())
+            .await
+            .unwrap();
         let mut events = Vec::new();
         while let Some(event) = event_stream.next().await {
             events.push(event);
@@ -834,7 +866,9 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let result = provider.stream(&sample_request()).await;
+        let result = provider
+            .stream(&sample_request(), &CallOptions::default())
+            .await;
         match result {
             Err(ProviderError::RateLimit { .. }) => {}
             Err(other) => panic!("expected RateLimit error, got {other:?}"),
