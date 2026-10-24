@@ -573,6 +573,8 @@ mod tests {
     use super::*;
     use crate::core::component::idle_levels;
     use crossterm::event::KeyCode;
+    use oven_app::ModelChoice;
+    use oven_llm::{EffortSupport, ReasoningEffort};
 
     fn commands() -> Vec<(String, String)> {
         vec![
@@ -583,12 +585,39 @@ mod tests {
         ]
     }
 
-    fn models() -> Vec<(String, String)> {
+    fn models() -> Vec<ModelChoice> {
         vec![
-            ("gpt-4o".into(), "OpenAI".into()),
-            ("gpt-4o-mini".into(), "OpenAI".into()),
-            ("deepseek-chat".into(), "DeepSeek".into()),
+            ModelChoice {
+                id: "gpt-4o".into(),
+                provider: "OpenAI".into(),
+                effort_support: levels(&[
+                    ReasoningEffort::Off,
+                    ReasoningEffort::Minimal,
+                    ReasoningEffort::Low,
+                    ReasoningEffort::Medium,
+                    ReasoningEffort::High,
+                ]),
+            },
+            ModelChoice {
+                id: "gpt-4o-mini".into(),
+                provider: "OpenAI".into(),
+                effort_support: levels(&[ReasoningEffort::Off, ReasoningEffort::Low]),
+            },
+            ModelChoice {
+                id: "deepseek-chat".into(),
+                provider: "DeepSeek".into(),
+                effort_support: levels(&[
+                    ReasoningEffort::Off,
+                    ReasoningEffort::Low,
+                    ReasoningEffort::High,
+                    ReasoningEffort::Max,
+                ]),
+            },
         ]
+    }
+
+    fn levels(levels: &[ReasoningEffort]) -> EffortSupport {
+        EffortSupport::Levels(std::borrow::Cow::Owned(levels.to_vec()))
     }
 
     fn view() -> InputView {
@@ -895,7 +924,6 @@ mod tests {
         view.handle_key(key(KeyCode::Enter), &State::new());
         view.handle_key(key(KeyCode::Enter), &State::new());
         view.handle_key(key(KeyCode::Down), &State::new());
-        view.handle_key(key(KeyCode::Down), &State::new());
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         match result {
             KeyResult::Action(Action::QuietSubmit(text)) => {
@@ -910,7 +938,7 @@ mod tests {
         let mut view = view();
         open_picker(&mut view);
         view.handle_key(key(KeyCode::Enter), &State::new());
-        for _ in 0..7 {
+        for _ in 0..5 {
             view.handle_key(key(KeyCode::Down), &State::new());
         }
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
@@ -959,7 +987,11 @@ mod tests {
     fn update_models_refreshes_picker() {
         let mut view = InputView::new(commands(), ProviderView::default());
         view.sync(&AppLevels {
-            models: vec![("kimi-k2".into(), "Moonshot".into())],
+            models: vec![ModelChoice {
+                id: "kimi-k2".into(),
+                provider: "Moonshot".into(),
+                effort_support: EffortSupport::Unknown,
+            }],
             ..idle_levels()
         });
         type_text(&mut view, "/model");

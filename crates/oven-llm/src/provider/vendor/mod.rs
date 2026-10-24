@@ -12,7 +12,7 @@ mod resolve;
 mod xai;
 
 pub use capability::EffortSupport;
-pub use resolve::{Channels, channels, resolve};
+pub use resolve::{Channels, ReasoningIntent, channels, resolve_reasoning};
 
 use crate::ProviderKind;
 use crate::ProviderName;

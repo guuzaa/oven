@@ -9,7 +9,7 @@ use oven_agent::{Agent, CancellationToken, CompactStats, RunPolicy};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
 use oven_mem::MemoryStore;
 use oven_proto::{
-    AgentError, AppPhase, HistoryChangeReason, Input, Record, SessionState, TodoList,
+    AgentError, AppPhase, HistoryChangeReason, Input, ModelChoice, Record, SessionState, TodoList,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
@@ -178,6 +178,11 @@ impl Runtime {
         self.shared
             .state
             .send_modify(|state| state.levels.models = models);
+        if let Some(warning) =
+            shared::effort_warning(router.as_ref(), &model, self.agent.reasoning_effort())
+        {
+            self.emit(AppEventKind::Notification { text: warning });
+        }
     }
 
     fn shutdown(&self, inbox: &InboxReceiver) {
@@ -672,7 +677,7 @@ async fn refresh_model_choices(
     provider: &dyn Provider,
     current_model: &str,
     config: &AppConfig,
-) -> (Vec<(String, String)>, Option<String>) {
+) -> (Vec<ModelChoice>, Option<String>) {
     let timeout = config.request_timeout().min(Duration::from_secs(5));
     let known = provider.known_models();
     let (dynamic, auth_error) = match tokio::time::timeout(timeout, provider.list_models()).await {
@@ -694,26 +699,34 @@ fn merge_model_choices(
     dynamic: Vec<ModelInfo>,
     current_model: &str,
     current_provider: &ProviderName,
-) -> Vec<(String, String)> {
+) -> Vec<ModelChoice> {
+    let current_id = slug_without_variant(current_model);
+    let current_support = known
+        .iter()
+        .chain(dynamic.iter())
+        .find(|model| slug_without_variant(&model.id) == current_id)
+        .map(|model| model.effort_support.clone())
+        .unwrap_or_default();
+
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    let choices = std::iter::once((
-        slug_without_variant(current_model),
-        current_provider.clone(),
-    ))
-    .chain(
-        known
-            .into_iter()
-            .map(|m| (slug_without_variant(&m.id), m.provider)),
-    )
-    .chain(
-        dynamic
-            .into_iter()
-            .map(|m| (slug_without_variant(&m.id), m.provider)),
-    );
-    for (id, provider) in choices {
+    if !current_id.is_empty() {
+        seen.insert(current_id.clone());
+        out.push(ModelChoice {
+            id: current_id,
+            provider: current_provider.to_string(),
+            effort_support: current_support,
+        });
+    }
+
+    for model in known.into_iter().chain(dynamic) {
+        let id = slug_without_variant(&model.id);
         if !id.is_empty() && seen.insert(id.clone()) {
-            out.push((id, provider.to_string()));
+            out.push(ModelChoice {
+                id,
+                provider: model.provider.to_string(),
+                effort_support: model.effort_support,
+            });
         }
     }
     out

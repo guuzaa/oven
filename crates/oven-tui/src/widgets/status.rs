@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use oven_app::{
     AgentEvent, AgentMode, AppEvent, AppEventKind, AppLevels, CompactionEvent, TurnEvent,
 };
-use oven_llm::{ReasoningEffort, Usage};
+use oven_llm::{EffortSupport, ReasoningEffort, ReasoningIntent, Usage, resolve_reasoning};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -32,6 +32,9 @@ const COMPACTING: &str = "compacting…";
 pub struct StatusBar {
     model: String,
     effort: Option<ReasoningEffort>,
+    /// What the active model can express, so the effort reads the way the
+    /// model takes it.
+    effort_support: EffortSupport,
     root: String,
     usage: Usage,
     context_tokens: u32,
@@ -50,6 +53,7 @@ impl StatusBar {
         Self {
             model: model.into(),
             effort: None,
+            effort_support: EffortSupport::default(),
             root: short_root(root),
             usage,
             context_tokens: 0,
@@ -78,6 +82,12 @@ impl StatusBar {
     pub fn sync(&mut self, levels: &AppLevels) {
         self.model.clone_from(&levels.model);
         self.effort = levels.reasoning_effort;
+        self.effort_support = levels
+            .models
+            .iter()
+            .find(|choice| choice.id == levels.model)
+            .map(|choice| choice.effort_support.clone())
+            .unwrap_or_default();
         self.context_window = levels.context_window;
         if levels.phase.is_idle() {
             self.usage = levels.last_turn_usage;
@@ -201,8 +211,20 @@ impl StatusBar {
 
     fn model_label(&self) -> String {
         match self.effort {
-            Some(effort) => format!("{} {effort}", self.model),
+            Some(effort) => format!("{} {}", self.model, self.effort_label(effort)),
             None => self.model.clone(),
+        }
+    }
+
+    /// The effort as the model reads it: a switch-only model has no levels,
+    /// so any of them reads as "on", and a level it does not take reads as
+    /// the one it will use.
+    fn effort_label(&self, effort: ReasoningEffort) -> String {
+        match resolve_reasoning(Some(effort), &self.effort_support) {
+            ReasoningIntent::Unset => "unsupported".to_string(),
+            ReasoningIntent::Off => "none".to_string(),
+            ReasoningIntent::On => "on".to_string(),
+            ReasoningIntent::At(level) => level.to_string(),
         }
     }
 
@@ -376,6 +398,28 @@ mod tests {
     fn bar() -> StatusBar {
         StatusBar::new(MODEL, Path::new("/home/code/rust/oven"), usage())
             .with_effort(Some(ReasoningEffort::High))
+    }
+
+    #[test]
+    fn a_switch_only_model_reads_any_level_as_on() {
+        let mut bar = bar();
+        bar.effort_support = EffortSupport::Toggle;
+        assert_eq!(bar.model_label(), "deepseek-chat on");
+
+        bar.effort = Some(ReasoningEffort::Off);
+        assert_eq!(bar.model_label(), "deepseek-chat none");
+    }
+
+    #[test]
+    fn a_level_the_model_does_not_take_reads_as_the_one_it_will_use() {
+        let mut bar = bar();
+        bar.effort_support = EffortSupport::Levels(std::borrow::Cow::Owned(vec![
+            ReasoningEffort::Off,
+            ReasoningEffort::Low,
+            ReasoningEffort::High,
+        ]));
+        bar.effort = Some(ReasoningEffort::Medium);
+        assert_eq!(bar.model_label(), "deepseek-chat low");
     }
 
     fn agent_event(event: AgentEvent) -> AppEvent {

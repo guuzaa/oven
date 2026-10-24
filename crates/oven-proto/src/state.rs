@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use oven_llm::{Message, ProviderKind, ReasoningEffort, Usage};
+use oven_llm::{EffortSupport, Message, ProviderKind, ReasoningEffort, Usage};
 use serde::{Deserialize, Serialize};
 
 use crate::{AgentId, AgentMode, NodeInfo, TodoList};
@@ -53,7 +53,20 @@ pub struct AppLevels {
     /// Context window of the active model, when known.
     pub context_window: Option<u32>,
     pub session: SessionState,
-    pub models: Vec<(String, String)>,
+    pub models: Vec<ModelChoice>,
+}
+
+/// One model the app can run, as a frontend sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    /// The model slug, e.g. `deepseek/deepseek-v4-flash`.
+    pub id: String,
+    /// The vendor that serves it.
+    pub provider: String,
+    /// What the model can express: the levels it takes, or that it only has
+    /// a switch. A frontend picks its reasoning effort from this, so the
+    /// choice can never name a level the model does not have.
+    pub effort_support: EffortSupport,
 }
 
 /// The active provider as a frontend may see it.
@@ -214,7 +227,11 @@ mod tests {
                 context_tokens: 0,
                 context_window: None,
                 session: SessionState::default(),
-                models: vec![("deepseek-chat".into(), "DeepSeek".into())],
+                models: vec![ModelChoice {
+                    id: "deepseek-chat".into(),
+                    provider: "DeepSeek".into(),
+                    effort_support: EffortSupport::Unknown,
+                }],
             },
             history: vec![Arc::new(Message::user_text("hi"))],
             history_timestamps: vec![1],

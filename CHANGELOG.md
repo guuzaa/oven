@@ -10,6 +10,8 @@
 - Every protocol type has a serde form, and the wire format is pinned by tests
 
 ### Changed
+- **Breaking:** `oven-proto`: `AppLevels.models` is a list of `ModelChoice` — id, provider, and what the model can express — rather than a list of pairs, so a frontend can offer the levels a model actually takes
+- `oven-app`, `oven-tui`: the model picker lists the reasoning levels the model takes and nothing else, and the status bar reads the effort the way the model reads it: a switch-only model shows `on`, and a level the model does not take shows the one it will use
 - `oven-llm`: the reasoning effort reaches the wire through the vendor's own dialect — Zhipu gets `thinking.type` and no `reasoning_effort`, OpenAI and DeepSeek get `reasoning_effort` and no `thinking`, and a vendor nobody verified yet keeps sending both. A level the model does not have is clamped down to the closest one it has, and the request path never fails on it
 - **Breaking:** `oven-llm`: the reasoning effort is one axis — `ReasoningEffort::None` is now `Off` (the wire word stays `"none"`), and `Minimal`, `XHigh`, `Max` and `Budget(u32)` join it. An effort that is not set means "no preference" and reaches the wire as no field at all; before, the Responses protocol turned it into `effort: "none"` and forced the upstream default off
 - **Breaking:** `oven-llm`: `Request` splits into the conversation and its `CallOptions` — `sampling`, `reasoning_effort` and `provider_options` live under `Request::options`. `Request::thinking` and `ThinkingMode` are gone: the thinking switch is derived from the effort, so the two protocols can no longer disagree about it
@@ -29,6 +31,7 @@
 - `Tool::view` falls back to the tool's own name, so a tool describes itself instead of being looked up in a global table
 
 ### Fixed
+- Switching to a model that does not take the chosen reasoning effort now says so — the request path degrades silently, so the switch is where the difference is said out loud: `glm-5.3 only has a reasoning switch; high will be treated as on`
 - GLM no longer receives a `reasoning_effort` it does not read: it takes `thinking.type` only, so the level used to be dropped in silence while the status bar showed it as if it had taken effect
 - A `todo_write` call that was refused no longer rewrites the checklist: the driver takes the checklist from the tool it ran, so a call to a tool that is not mounted leaves the plan alone
 

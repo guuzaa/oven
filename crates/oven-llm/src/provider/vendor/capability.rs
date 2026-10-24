@@ -5,10 +5,12 @@
 
 use std::borrow::Cow;
 
+use serde::{Deserialize, Serialize};
+
 use crate::domain::ReasoningEffort;
 
 /// 模型对推理的支持程度。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EffortSupport {
     /// 不知道：不干预，按方言的默认行为发送。
     #[default]

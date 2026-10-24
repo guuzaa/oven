@@ -12,6 +12,7 @@ use crate::commands::{CommandOutcome, Model, ModelDirective, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::EventBus;
 use crate::core::state::context_window_of;
+use crate::runtime::shared::effort_warning;
 use oven_proto::AppState;
 use oven_proto::Input;
 use oven_proto::{AppEventKind, SubagentEvent};
@@ -113,6 +114,9 @@ impl Shared {
         )
         .await;
         let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
+        if let Some(warning) = effort_warning(&router, &outcome.model, outcome.reasoning_effort) {
+            let _ = write!(text, "\n{warning}");
+        }
         if let Some(path) = saved {
             let _ = write!(text, "\nsaved to {}", path.display());
         }

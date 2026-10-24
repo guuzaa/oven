@@ -42,9 +42,9 @@ pub use oven_proto::{
     AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AppEvent, AppEventKind,
     AppId, AppLevels, AppPhase, AppState, ApprovalDecision, COMPACTION_CANCELLED, CallOutcome,
     Command, CommandResult, CompactionEvent, HistoryChangeReason, Input, LoopLimitDecision,
-    NodeInfo, NodeStatus, ProviderView, Question, QuestionOption, SessionState, ShellEvent,
-    StepStop, StreamEvent, SubagentEvent, TodoItem, TodoList, TodoStatus, ToolCallId, ToolEvent,
-    ToolResult, ToolView, TurnEvent, TurnId, UserRequestId, UserResponse,
+    ModelChoice, NodeInfo, NodeStatus, ProviderView, Question, QuestionOption, SessionState,
+    ShellEvent, StepStop, StreamEvent, SubagentEvent, TodoItem, TodoList, TodoStatus, ToolCallId,
+    ToolEvent, ToolResult, ToolView, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
 pub use platform::shell::{LocalShell, ShellInput, display_shell_line};
 pub use platform::{dirs, log};

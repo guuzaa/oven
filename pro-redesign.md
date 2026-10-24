@@ -458,8 +458,31 @@ encoder 只做"把意图写进 body"，**零策略**；策略全部在 vendor �
 
 ---
 
-## 附：genai 源码参考
+## 附：落地记录（2026-10-24，branch `refactor/oven-llm`）
 
+前四批已经落地，与本文的三处偏差记在这里：
+
+1. **厂商只声明方言，wire 的拼写归 codec。** 本文原写"每 vendor 一个
+   `encode_reasoning()`"，实际落地是：vendor 给出 `Dialect`（`Level` /
+   `Toggle` / `Both`）与 `EffortSupport`，codec（Completions / Responses）负责把
+   通道写进各自的 wire 形状。否则 6 个 vendor × 2 个协议 = 12 份几乎一样的映射。
+2. **`EffortSupport::Levels` 用 `Cow<'static, [ReasoningEffort]>`。** 厂商默认值是
+   静态切片（不分配），配置声明的档位将来可以是 owned。
+3. **开关型模型的"开启"没有独立的值。** 领域词表按决定不保留 `On`：开关型模型上
+   任意档位都表达"开启"，picker 用最低档承载这一项。
+
+各批的落点：
+
+| 批次 | 提交 | 落点 |
+| --- | --- | --- |
+| 1 词表与领域模型 | `378acb4` | `domain/reasoning.rs`、`Request` 拆出 `CallOptions` |
+| 2 能力与方言 | `2d92eca` | `provider/vendor/`（能力表 + 方言）、`ModelInfo.effort_support` |
+| 3 归一化与映射 | `62d0084` | `provider/vendor/resolve.rs`、两个 codec 接线 |
+| 4 展示与反馈 | 见下 | `ModelChoice`、picker 按能力生成、切换时的 warning |
+
+---
+
+## 附：genai 源码参考
 | 位置 | 内容 |
 | --- | --- |
 | [`src/chat/chat_options.rs`](https://github.com/jeremychone/rust-genai/blob/v0.7.1/src/chat/chat_options.rs) | `ReasoningEffort`、`ChatOptions`、`ChatOptionsSet`（客户端默认 ← 单次覆盖） |

@@ -12,7 +12,7 @@ use crate::domain::{ModelId, Request};
 use crate::provider::http;
 use crate::provider::model::ModelInfo;
 use crate::provider::validate::validate_request;
-use crate::provider::vendor::{Channels, channels, dialect_for, resolve};
+use crate::provider::vendor::{Channels, channels, dialect_for, resolve_reasoning};
 use crate::provider::{ProviderError, ProviderName};
 
 pub(crate) struct Endpoint {
@@ -74,7 +74,7 @@ impl Endpoint {
             .resolve_model(&req.model)
             .map(|model| model.effort_support.clone())
             .unwrap_or_default();
-        let intent = resolve(req.options.reasoning_effort, &support);
+        let intent = resolve_reasoning(req.options.reasoning_effort, &support);
         channels(intent, dialect_for(&self.provider_name))
     }
 

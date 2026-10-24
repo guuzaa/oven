@@ -10,6 +10,7 @@ use oven_agent::{
     Agent, CancellationToken, PendingInput, PendingRequest, RequestSink, RouterHandle, Selection,
     UserRequest,
 };
+use oven_llm::{ModelId, ReasoningEffort, ReasoningIntent, Router, resolve_reasoning};
 use oven_proto::{
     AgentEvent, AgentId, AgentMode, ToolEvent, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
@@ -21,7 +22,6 @@ use crate::core::event::EventBus;
 use crate::runtime::pending::TurnInbox;
 use oven_proto::AppEventKind;
 use oven_proto::{AppPhase, AppState};
-
 /// The turn that is running now: how to stop it, and the one request it is
 /// waiting on the user for.
 struct ActiveTurn {
@@ -280,6 +280,32 @@ impl RequestSink for Shared {
 
 /// Projects a user request onto the event a frontend draws. The agent sends
 /// the request and waits; it does not emit the prompt itself.
+/// Says so when the effort the user picked is not one the model takes.
+///
+/// The request path degrades silently, so the switch and the startup are the
+/// only places where the difference can still be said out loud.
+pub(crate) fn effort_warning(
+    router: &Router,
+    model: &str,
+    effort: Option<ReasoningEffort>,
+) -> Option<String> {
+    let effort = effort?;
+    let support = &router.resolve_model(&ModelId::from(model))?.effort_support;
+    match resolve_reasoning(Some(effort), support) {
+        ReasoningIntent::Unset => Some(format!(
+            "{model} does not reason; the request carries no reasoning field"
+        )),
+        ReasoningIntent::Off => None,
+        ReasoningIntent::On => Some(format!(
+            "{model} only has a reasoning switch; {effort} will be treated as on"
+        )),
+        ReasoningIntent::At(level) if level == effort => None,
+        ReasoningIntent::At(level) => Some(format!(
+            "{model} does not take {effort}; {level} will be used"
+        )),
+    }
+}
+
 fn requested_event(request: &PendingRequest) -> AgentEvent {
     let request_id = request.request_id;
     match &request.request {
@@ -315,9 +341,38 @@ mod tests {
 
     use crate::core::state::app_state;
     use oven_agent::Agent;
-    use oven_llm::Router;
+    use oven_llm::{CompletionsProvider, Provider, Router};
     use oven_proto::{AnswerResponse, ApprovalDecision, LoopLimitDecision};
     use tokio::sync::{mpsc, oneshot};
+
+    fn router_with(provider: Box<dyn Provider>) -> Router {
+        let mut router = Router::new();
+        router.register(provider);
+        router
+    }
+
+    #[test]
+    fn a_switch_to_a_switch_only_model_says_so() {
+        let router = router_with(Box::new(CompletionsProvider::zhipu(String::from("k"))));
+        let warning = effort_warning(&router, "glm-5.3", Some(ReasoningEffort::High)).unwrap();
+        assert!(warning.contains("only has a reasoning switch"), "{warning}");
+    }
+
+    #[test]
+    fn a_switch_to_a_model_that_takes_the_level_says_nothing() {
+        let router = router_with(Box::new(CompletionsProvider::deepseek(String::from("k"))));
+        assert!(
+            effort_warning(&router, "deepseek-v4-flash", Some(ReasoningEffort::High)).is_none()
+        );
+    }
+
+    #[test]
+    fn a_switch_names_the_level_the_model_will_use() {
+        let router = router_with(Box::new(CompletionsProvider::deepseek(String::from("k"))));
+        let warning =
+            effort_warning(&router, "deepseek-v4-flash", Some(ReasoningEffort::Medium)).unwrap();
+        assert!(warning.contains("low"), "{warning}");
+    }
 
     fn shared() -> Shared {
         let agent = Agent::new(Router::new(), Vec::new());

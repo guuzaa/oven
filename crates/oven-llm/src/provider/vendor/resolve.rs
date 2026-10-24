@@ -37,7 +37,10 @@ pub struct Channels {
 /// - `Toggle`：档位请求折叠成"开启"，关闭保持关闭。
 /// - `Levels(S)`：档位按强度钳到 `S` 里不强于请求的最高档；请求比 `S` 里
 ///   最弱的还弱时取 `S` 里最弱的档；`S` 不含 `Off` 时"关闭"降到最弱的档。
-pub fn resolve(intent: Option<ReasoningEffort>, support: &EffortSupport) -> ReasoningIntent {
+pub fn resolve_reasoning(
+    intent: Option<ReasoningEffort>,
+    support: &EffortSupport,
+) -> ReasoningIntent {
     let Some(requested) = intent else {
         return ReasoningIntent::Unset;
     };
@@ -138,18 +141,18 @@ mod tests {
             EffortSupport::Toggle,
             levels(&[ReasoningEffort::Low]),
         ] {
-            assert_eq!(resolve(None, &support), ReasoningIntent::Unset);
+            assert_eq!(resolve_reasoning(None, &support), ReasoningIntent::Unset);
         }
     }
 
     #[test]
     fn an_unsupported_model_sends_nothing() {
         assert_eq!(
-            resolve(Some(ReasoningEffort::High), &EffortSupport::Unsupported),
+            resolve_reasoning(Some(ReasoningEffort::High), &EffortSupport::Unsupported),
             ReasoningIntent::Unset
         );
         assert_eq!(
-            resolve(Some(ReasoningEffort::Off), &EffortSupport::Unsupported),
+            resolve_reasoning(Some(ReasoningEffort::Off), &EffortSupport::Unsupported),
             ReasoningIntent::Unset
         );
     }
@@ -157,11 +160,11 @@ mod tests {
     #[test]
     fn an_unknown_model_passes_the_intent_through() {
         assert_eq!(
-            resolve(Some(ReasoningEffort::High), &EffortSupport::Unknown),
+            resolve_reasoning(Some(ReasoningEffort::High), &EffortSupport::Unknown),
             ReasoningIntent::At(ReasoningEffort::High)
         );
         assert_eq!(
-            resolve(Some(ReasoningEffort::Off), &EffortSupport::Unknown),
+            resolve_reasoning(Some(ReasoningEffort::Off), &EffortSupport::Unknown),
             ReasoningIntent::Off
         );
     }
@@ -169,11 +172,11 @@ mod tests {
     #[test]
     fn a_toggle_only_model_folds_a_level_into_on() {
         assert_eq!(
-            resolve(Some(ReasoningEffort::High), &EffortSupport::Toggle),
+            resolve_reasoning(Some(ReasoningEffort::High), &EffortSupport::Toggle),
             ReasoningIntent::On
         );
         assert_eq!(
-            resolve(Some(ReasoningEffort::Off), &EffortSupport::Toggle),
+            resolve_reasoning(Some(ReasoningEffort::Off), &EffortSupport::Toggle),
             ReasoningIntent::Off
         );
     }
@@ -182,15 +185,15 @@ mod tests {
     fn a_level_is_clamped_down_to_the_supported_set() {
         let support = levels(&[ReasoningEffort::Low, ReasoningEffort::High]);
         assert_eq!(
-            resolve(Some(ReasoningEffort::Medium), &support),
+            resolve_reasoning(Some(ReasoningEffort::Medium), &support),
             ReasoningIntent::At(ReasoningEffort::Low)
         );
         assert_eq!(
-            resolve(Some(ReasoningEffort::Max), &support),
+            resolve_reasoning(Some(ReasoningEffort::Max), &support),
             ReasoningIntent::At(ReasoningEffort::High)
         );
         assert_eq!(
-            resolve(Some(ReasoningEffort::High), &support),
+            resolve_reasoning(Some(ReasoningEffort::High), &support),
             ReasoningIntent::At(ReasoningEffort::High)
         );
     }
@@ -199,7 +202,7 @@ mod tests {
     fn a_level_weaker_than_the_whole_set_falls_to_the_weakest() {
         let support = levels(&[ReasoningEffort::Medium, ReasoningEffort::High]);
         assert_eq!(
-            resolve(Some(ReasoningEffort::Low), &support),
+            resolve_reasoning(Some(ReasoningEffort::Low), &support),
             ReasoningIntent::At(ReasoningEffort::Medium)
         );
     }
@@ -208,7 +211,7 @@ mod tests {
     fn a_set_without_off_lowers_the_request_to_the_weakest_level() {
         let support = levels(&[ReasoningEffort::Low, ReasoningEffort::High]);
         assert_eq!(
-            resolve(Some(ReasoningEffort::Off), &support),
+            resolve_reasoning(Some(ReasoningEffort::Off), &support),
             ReasoningIntent::At(ReasoningEffort::Low)
         );
     }
@@ -217,7 +220,7 @@ mod tests {
     fn a_set_with_off_keeps_the_request_off() {
         let support = levels(&[ReasoningEffort::Off, ReasoningEffort::Low]);
         assert_eq!(
-            resolve(Some(ReasoningEffort::Off), &support),
+            resolve_reasoning(Some(ReasoningEffort::Off), &support),
             ReasoningIntent::Off
         );
     }
@@ -226,7 +229,7 @@ mod tests {
     fn a_budget_falls_to_the_weakest_level() {
         let support = levels(&[ReasoningEffort::Low, ReasoningEffort::High]);
         assert_eq!(
-            resolve(Some(ReasoningEffort::Budget(2048)), &support),
+            resolve_reasoning(Some(ReasoningEffort::Budget(2048)), &support),
             ReasoningIntent::At(ReasoningEffort::Low)
         );
     }
@@ -308,7 +311,7 @@ mod tests {
 
         for (support_name, support) in &supports {
             for (intent_name, intent) in &intents {
-                let resolved = resolve(*intent, support);
+                let resolved = resolve_reasoning(*intent, support);
                 for (dialect_name, dialect) in &dialects {
                     let channels = channels(resolved, *dialect);
                     let label = format!("{support_name} × {intent_name} × {dialect_name}");
