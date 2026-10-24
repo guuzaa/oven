@@ -12,6 +12,9 @@ use super::{Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, labeled, requ
 use oven_host::{CommandError, run_shell_command};
 use oven_proto::AgentError;
 
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
+const MAX_TIMEOUT_SECS: u64 = 86_400;
+
 pub struct BashTool {
     root: PathBuf,
     timeout: Duration,
@@ -28,13 +31,28 @@ impl BashTool {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            timeout: Duration::from_secs(300),
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    fn resolve_timeout(&self, args: &Value) -> Result<Duration, AgentError> {
+        let Some(value) = args.get("timeout_secs") else {
+            return Ok(self.timeout);
+        };
+        let secs = value.as_u64().ok_or_else(|| {
+            AgentError::from("bash: 'timeout_secs' must be a positive integer number of seconds")
+        })?;
+        if !(1..=MAX_TIMEOUT_SECS).contains(&secs) {
+            return Err(AgentError::from(format!(
+                "bash: 'timeout_secs' must be between 1 and {MAX_TIMEOUT_SECS}, got {secs}"
+            )));
+        }
+        Ok(Duration::from_secs(secs))
     }
 }
 
@@ -53,20 +71,27 @@ impl Tool for BashTool {
         }
     }
     fn description(&self) -> &'static str {
-        "Execute a command with the host shell in the workspace root and return stdout/stderr. Uses PowerShell on Windows and bash (falling back to sh) elsewhere. Use for builds, tests, git, etc."
+        "Execute a command with the host shell in the workspace root and return stdout/stderr. Uses PowerShell on Windows and bash (falling back to sh) elsewhere. Use for builds, tests, git, etc. Set timeout_secs for commands that need longer than the default 300 seconds."
     }
     fn schema(&self) -> Arc<Value> {
         Arc::new(json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "The command to execute with the host shell." }
+                "command": { "type": "string", "description": "The command to execute with the host shell." },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_TIMEOUT_SECS,
+                    "description": "Seconds to wait before the command is killed. Defaults to 300."
+                }
             },
             "required": ["command"]
         }))
     }
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let command = require_str(args, "command", Self::NAME)?;
-        let output = run_shell_command(command, &self.root, self.timeout, Some(&cx.cancellation))
+        let timeout = self.resolve_timeout(args)?;
+        let output = run_shell_command(command, &self.root, timeout, Some(&cx.cancellation))
             .await
             .map_err(|error| match error {
                 CommandError::Cancelled { .. } => AgentError::cancelled(),
@@ -166,6 +191,54 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.message.contains("timed out"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_secs_argument_overrides_default() {
+        let tmp = tmp_dir();
+        let bash = BashTool::new(tmp.path());
+        let err = bash
+            .run(
+                &json!({"command": sleep_command(5), "timeout_secs": 1}),
+                &turn(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("timed out"), "{}", err.message);
+    }
+
+    #[test]
+    fn bash_timeout_defaults_to_300_seconds() {
+        let tmp = tmp_dir();
+        let bash = BashTool::new(tmp.path());
+        assert_eq!(
+            bash.resolve_timeout(&json!({})).unwrap(),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            bash.resolve_timeout(&json!({"timeout_secs": 42})).unwrap(),
+            Duration::from_secs(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_rejects_invalid_timeout_secs() {
+        let tmp = tmp_dir();
+        let bash = BashTool::new(tmp.path());
+        for value in [json!(0), json!(-1), json!("60"), json!(100_000)] {
+            let err = bash
+                .run(
+                    &json!({"command": "echo hi", "timeout_secs": value}),
+                    &turn(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                err.message.contains("timeout_secs"),
+                "unexpected error for {value}: {}",
+                err.message
+            );
+        }
     }
 
     #[tokio::test]
