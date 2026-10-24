@@ -1,4 +1,4 @@
-use oven_agent::AgentMode;
+use oven_proto::AgentMode;
 
 use super::{CommandContext, CommandOutcome, SlashCommand};
 use crate::core::error::AppError;
@@ -46,6 +46,7 @@ mod tests {
         ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
         Result as LlmResult, Router, StreamEvent,
     };
+    use oven_proto::{TodoItem, TodoList, TodoStatus};
 
     struct MockProvider;
 
@@ -96,11 +97,11 @@ mod tests {
     #[test]
     fn no_args_reports_current_mode_and_list() {
         let mut agent = fresh_agent();
-        agent.set_todos(oven_agent::TodoList {
-            items: vec![oven_agent::TodoItem {
+        agent.set_todos(TodoList {
+            items: vec![TodoItem {
                 id: "a".into(),
                 content: "one".into(),
-                status: oven_agent::TodoStatus::Pending,
+                status: TodoStatus::Pending,
             }],
         });
         let subagents = Subagents::bare(agent.id(), agent.router_handle());

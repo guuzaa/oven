@@ -195,9 +195,10 @@ disk.
 | `sink` | `EventSink`, `NullSink`, `VecEventSink` |
 | `input` | `Input` |
 
-`oven-agent` and `oven-app` both re-export what they used to own, so
-`oven_app::AppEvent` and `oven_agent::AgentEvent` still resolve and no
-public path moved.
+`oven-app` re-exports the vocabulary it hands to a frontend, so
+`oven_app::AppEvent` still resolves. `oven-agent` does not: it names the
+protocol where it uses it, so a crate that needs an event depends on
+`oven-proto` for it.
 
 ## Two rules for the vocabulary
 

@@ -1,8 +1,6 @@
 use super::stub_tools::{AskTool, StubTool, TodoTool};
 use super::*;
 use crate::RunPolicy;
-use crate::StepStop;
-use crate::TurnId;
 use crate::core::subagent::NOTICE_MARK;
 use crate::core::turn::{PendingInbox, PendingInput, TurnContext};
 use crate::core::view::{ToolCaps, ToolOutcome};
@@ -13,6 +11,7 @@ use oven_llm::{
     StreamEvent as LlmStreamEvent,
 };
 use oven_proto::ToolCallId;
+use oven_proto::TurnId;
 use oven_proto::{NullSink, VecEventSink};
 use std::time::Duration;
 
@@ -21,7 +20,7 @@ use oven_llm::{ContentBlock, Message, Provider, Request, Response, Role, Usage};
 use crate::core::turn::TurnOutput;
 use oven_proto::AgentError;
 use oven_proto::ToolPermission;
-use oven_proto::{ApprovalDecision, LoopLimitDecision};
+use oven_proto::{ApprovalDecision, LoopLimitDecision, MAX_ITERS_EXCEEDED, StepStop};
 use oven_proto::{StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -1551,12 +1550,12 @@ async fn loop_limit_without_sender_fails() {
     let err = run_with(&mut agent, "read it", &ctx, &mut sink)
         .await
         .unwrap_err();
-    assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
+    assert_eq!(err.message, MAX_ITERS_EXCEEDED);
     assert_valid_event_sequence(&sink.events);
     assert!(matches!(
         sink.events.last(),
         Some(AgentEvent::Turn(TurnEvent::Failed { error, .. }))
-            if error.message == crate::MAX_ITERS_EXCEEDED
+            if error.message == MAX_ITERS_EXCEEDED
     ));
 }
 
@@ -1615,12 +1614,12 @@ async fn loop_limit_exit_fails() {
         responder.send(LoopLimitDecision::Exit).unwrap();
         turn.await.unwrap_err()
     };
-    assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
+    assert_eq!(err.message, MAX_ITERS_EXCEEDED);
     assert_valid_event_sequence(&sink.events);
     assert!(matches!(
         sink.events.last(),
         Some(AgentEvent::Turn(TurnEvent::Failed { error, .. }))
-            if error.message == crate::MAX_ITERS_EXCEEDED
+            if error.message == MAX_ITERS_EXCEEDED
     ));
 }
 

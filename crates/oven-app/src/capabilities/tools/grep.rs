@@ -7,8 +7,9 @@ use serde_json::{Value, json};
 
 use super::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
 use super::{parse_limit, require_str, resolve_within};
-use oven_agent::{AgentError, Tool, ToolOutcome, TurnContext};
+use oven_agent::{Tool, ToolOutcome, TurnContext};
 use oven_host::walk_dir_stream;
+use oven_proto::AgentError;
 use oven_proto::ToolView;
 
 pub struct GrepTool {

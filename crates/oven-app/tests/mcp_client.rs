@@ -5,24 +5,22 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mockall::mock;
-use oven_agent::{CancellationToken, Tool, ToolOutcome, TurnContext};
+use oven_agent::{CancellationToken, Selection, Tool, ToolOutcome, TurnContext};
 use oven_app::AppBuilder;
 use oven_app::config::AppConfig;
 use oven_app::mcp::McpRegistry;
 use oven_app::mcp::client::{McpCaller, McpConnector, McpTool};
+use oven_llm::ModelId;
+use oven_proto::{AgentMode, TurnId};
 use rmcp::model::ContentBlock as McpContentBlock;
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 
 /// A bare run context: these tests exercise the tool, not a turn.
 fn turn() -> TurnContext {
     TurnContext::new(
-        oven_agent::TurnId::next(),
+        TurnId::next(),
         CancellationToken::new(),
-        oven_agent::Selection::new(
-            oven_agent::AgentMode::Agent,
-            oven_llm::ModelId::new("default"),
-            None,
-        ),
+        Selection::new(AgentMode::Agent, ModelId::new("default"), None),
     )
 }
 

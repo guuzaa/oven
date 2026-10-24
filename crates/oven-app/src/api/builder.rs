@@ -2,13 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use oven_agent::{
-    Agent, AgentId, InstructionDoc, MEMORY_PROMPT, Record, RoleSpec, SubagentSpawner,
-    TOP_LEVEL_PROMPT, Tool, ToolPermission, load_instructions, router_handle, subagent_preamble,
+    Agent, InstructionDoc, MEMORY_PROMPT, RoleSpec, SubagentSpawner, TOP_LEVEL_PROMPT, Tool,
+    load_instructions, router_handle, subagent_preamble,
 };
 #[cfg(test)]
 use oven_llm::Provider;
 use oven_llm::{Role, Router};
 use oven_mem::MemoryStore;
+use oven_proto::{AgentId, Record, ToolPermission};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 

@@ -9,7 +9,8 @@ use reqwest::{Client, StatusCode, Url};
 use serde_json::{Value, json};
 
 use super::{labeled, require_str};
-use oven_agent::{AgentError, Tool, ToolOutcome, TurnContext};
+use oven_agent::{Tool, ToolOutcome, TurnContext};
+use oven_proto::AgentError;
 use oven_proto::ToolView;
 
 const SCHEME_HTTP: &str = "http";

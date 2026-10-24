@@ -21,13 +21,15 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use futures::Stream;
 use futures::stream::BoxStream;
-use oven_agent::{
-    Agent, AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, PendingInput, Record,
-    Tool, ToolOutcome, TurnContext, TurnEvent, TurnId,
-};
+use oven_agent::{Agent, PendingInput, Tool, ToolOutcome, TurnContext};
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName,
     Request, Response, Role, Router, StopReason, StreamEvent, Usage,
+};
+use oven_proto::{
+    AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse,
+    ApprovalDecision, LoopLimitDecision, MAX_ITERS_EXCEEDED, Record, ToolEvent, TurnEvent, TurnId,
+    UserResponse,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -2493,10 +2495,8 @@ async fn repro_ask_mode_bash_requests_approval() {
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind {
-            if let AgentEvent::Tool(oven_agent::ToolEvent::ApprovalRequested {
-                request_id: id,
-                ..
-            }) = &env.event
+            if let AgentEvent::Tool(ToolEvent::ApprovalRequested { request_id: id, .. }) =
+                &env.event
             {
                 request_id = Some(*id);
                 break;
@@ -2514,7 +2514,7 @@ async fn repro_ask_mode_bash_requests_approval() {
     );
     handle.respond(
         request_id,
-        oven_agent::UserResponse::Approval(oven_agent::ApprovalDecision::Approved),
+        UserResponse::Approval(ApprovalDecision::Approved),
     );
 
     while let Some(ev) = rx.recv().await {
@@ -2551,9 +2551,8 @@ async fn answering_a_closed_request_is_refused() {
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind
-            && let AgentEvent::Tool(oven_agent::ToolEvent::ApprovalRequested {
-                request_id: id, ..
-            }) = &env.event
+            && let AgentEvent::Tool(ToolEvent::ApprovalRequested { request_id: id, .. }) =
+                &env.event
         {
             request_id = Some(*id);
             break;
@@ -2562,7 +2561,7 @@ async fn answering_a_closed_request_is_refused() {
     let request_id = request_id.expect("approval requested");
     let approval = || Command::Respond {
         request_id,
-        response: oven_agent::UserResponse::Approval(oven_agent::ApprovalDecision::Approved),
+        response: UserResponse::Approval(ApprovalDecision::Approved),
     };
 
     let applied = handle.apply(approval()).await.unwrap();
@@ -2601,7 +2600,7 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind {
-            if let AgentEvent::Tool(oven_agent::ToolEvent::QuestionAsked {
+            if let AgentEvent::Tool(ToolEvent::QuestionAsked {
                 request_id: id,
                 question,
             }) = &env.event
@@ -2625,7 +2624,7 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
 
     handle.respond(
         request_id,
-        oven_agent::UserResponse::Answer(oven_agent::AnswerResponse::Answered {
+        UserResponse::Answer(AnswerResponse::Answered {
             answer: ANSWER.into(),
         }),
     );
@@ -2702,7 +2701,7 @@ async fn loop_limit_continue_completes_turn() {
     );
     handle.respond(
         request_id,
-        oven_agent::UserResponse::LoopLimit(oven_agent::LoopLimitDecision::Continue),
+        UserResponse::LoopLimit(LoopLimitDecision::Continue),
     );
 
     while let Some(ev) = rx.recv().await {
@@ -2721,7 +2720,7 @@ async fn prompt_exits_loop_limit_without_hanging() {
     let tmp = tempdir::TempDir::new("app-runtime-loop-limit-prompt").unwrap();
     let handle = spawn_loop_limit_app(&tmp).await;
     let err = handle.prompt("read it").await.unwrap_err();
-    assert_eq!(err.to_string(), oven_agent::MAX_ITERS_EXCEEDED);
+    assert_eq!(err.to_string(), MAX_ITERS_EXCEEDED);
     assert!(handle.state().levels.phase.is_idle());
     handle.shutdown().await;
 }

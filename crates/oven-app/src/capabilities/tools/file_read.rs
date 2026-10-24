@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{labeled, require_str, resolve_within};
-use oven_agent::{AgentError, Tool, ToolOutcome, TurnContext};
+use oven_agent::{Tool, ToolOutcome, TurnContext};
+use oven_proto::AgentError;
 use oven_proto::ToolView;
 
 pub struct FileReadTool {

@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use oven_agent::{
-    Agent, AgentEvent, AgentId, AgentMode, CancellationToken, PendingInput, PendingRequest,
-    RequestSink, RouterHandle, Selection, ToolEvent, TurnEvent, TurnId, UserRequest, UserRequestId,
-    UserResponse,
+    Agent, CancellationToken, PendingInput, PendingRequest, RequestSink, RouterHandle, Selection,
+    UserRequest,
+};
+use oven_proto::{
+    AgentEvent, AgentId, AgentMode, ToolEvent, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
 use tokio::sync::watch;
 
@@ -312,8 +314,9 @@ mod tests {
     use oven_proto::{AppEvent, AppEventKind};
 
     use crate::core::state::app_state;
-    use oven_agent::{Agent, AnswerResponse, ApprovalDecision, LoopLimitDecision};
+    use oven_agent::Agent;
     use oven_llm::Router;
+    use oven_proto::{AnswerResponse, ApprovalDecision, LoopLimitDecision};
     use tokio::sync::{mpsc, oneshot};
 
     fn shared() -> Shared {

@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use oven_agent::Record;
 use oven_llm::{Message, Usage};
+use oven_proto::Record;
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -311,7 +311,7 @@ pub async fn recent_session_id(dir: &Path, root: &Path) -> Result<Option<String>
 
 /// Parse one JSONL line into records.
 ///
-/// Keep in sync with `oven_agent::Record` variants. Unknown tags are skipped
+/// Keep in sync with `oven_proto::Record` variants. Unknown tags are skipped
 /// so a newer session file still loads on this version.
 const KNOWN_RECORD_TYPES: &[&str] = &[
     "message",
@@ -377,8 +377,8 @@ fn validate_id(id: &str) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_agent::SessionMeta;
     use oven_llm::ContentBlock;
+    use oven_proto::SessionMeta;
 
     fn tmp() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-session").unwrap()

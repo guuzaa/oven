@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{labeled, require_str};
-use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, TurnContext};
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
 use oven_host::{CommandError, run_shell_command};
+use oven_proto::AgentError;
 use oven_proto::{ToolPermission, ToolView};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 300;

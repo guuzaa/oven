@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use oven_llm::ModelInfo;
 use serde_json::{Value, json};
 
-use oven_agent::{AgentError, ModelCatalog, Tool, ToolOutcome, TurnContext};
+use oven_agent::{ModelCatalog, Tool, ToolOutcome, TurnContext};
+use oven_proto::AgentError;
 
 const NO_MODELS: &str = "no models are available; configure a provider with /setup";
 const UNKNOWN: &str = "unknown";

@@ -11,7 +11,8 @@ mod model;
 mod plan;
 mod setup;
 
-use oven_agent::{Agent, AgentId, AgentMode};
+use oven_agent::Agent;
+use oven_proto::{AgentId, AgentMode};
 
 use crate::capabilities::subagent::Subagents;
 use crate::core::config::ProviderConfig;
@@ -196,6 +197,7 @@ mod tests {
         Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
         Result as LlmResult, Router, StreamEvent,
     };
+    use oven_proto::{TodoItem, TodoList, TodoStatus};
 
     struct MockProvider;
 
@@ -306,11 +308,11 @@ mod tests {
         let reg = SlashRegistry::with_builtin();
         let mut agent = fresh_agent();
         agent.push_history(Message::user_text("hi"));
-        agent.set_todos(oven_agent::TodoList {
-            items: vec![oven_agent::TodoItem {
+        agent.set_todos(TodoList {
+            items: vec![TodoItem {
                 id: "a".into(),
                 content: "one".into(),
-                status: oven_agent::TodoStatus::Pending,
+                status: TodoStatus::Pending,
             }],
         });
         let subagents = Subagents::bare(agent.id(), agent.router_handle());

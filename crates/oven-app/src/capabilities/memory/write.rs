@@ -1,6 +1,7 @@
 use async_trait::async_trait;
-use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, TurnContext};
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
 use oven_mem::{Memory, MemoryScope, MemoryStore, PutOutcome};
+use oven_proto::{AgentError, ToolPermission, ToolView};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -114,11 +115,10 @@ fn outcome_text(scope: MemoryScope, id: &str, outcome: PutOutcome) -> String {
 
 #[cfg(test)]
 mod tests {
-    use oven_agent::{
-        AgentMode, CancellationToken, Selection, Tool, ToolOutcome, TurnContext, TurnId,
-    };
+    use oven_agent::{CancellationToken, Selection, Tool, ToolOutcome, TurnContext};
     use oven_llm::ModelId;
     use oven_mem::{MemoryId, MemoryRoots, MemoryScope, MemoryStore};
+    use oven_proto::{AgentMode, TurnId};
     use serde_json::json;
 
     use crate::core::session::{Session, SessionStore};

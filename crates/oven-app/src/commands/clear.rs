@@ -1,3 +1,5 @@
+use oven_proto::TodoList;
+
 use super::{CommandContext, CommandOutcome, SlashCommand};
 use crate::core::error::AppError;
 
@@ -17,7 +19,7 @@ impl SlashCommand for Clear {
     ) -> Result<CommandOutcome, AppError> {
         let agent = cx.agent()?;
         agent.clear_history();
-        agent.set_todos(oven_agent::TodoList::default());
+        agent.set_todos(TodoList::default());
         Ok(CommandOutcome::Cleared)
     }
 }

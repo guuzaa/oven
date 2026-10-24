@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use oven_agent::{AgentError, Tool, ToolCaps, ToolEffect, ToolOutcome, TurnContext};
+use oven_agent::{Tool, ToolCaps, ToolEffect, ToolOutcome, TurnContext};
+use oven_proto::AgentError;
 use oven_proto::{TodoList, ToolPermission, ToolView};
 
 pub struct TodoWriteTool;

@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use super::labeled;
-use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, TurnContext};
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
+use oven_proto::AgentError;
 use oven_proto::{AnswerResponse, Question, QuestionOption, ToolView};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";

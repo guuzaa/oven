@@ -13,9 +13,10 @@ use serde_json::{Value, json};
 
 use super::require_str;
 use oven_agent::{
-    AgentError, AgentMode, NodeOutcome, NodeReport, NodeStatus, RoleSpec, SpawnRequest,
-    SubagentSpawner, Tool, ToolCaps, ToolOutcome, TurnContext,
+    NodeOutcome, NodeReport, RoleSpec, SpawnRequest, SubagentSpawner, Tool, ToolCaps, ToolOutcome,
+    TurnContext,
 };
+use oven_proto::{AgentError, AgentMode, NodeStatus};
 use oven_proto::{READ_RESULT_HINT, ToolPermission, ToolView};
 
 const NO_SUBAGENTS: &str = "no subagents have run in this session";

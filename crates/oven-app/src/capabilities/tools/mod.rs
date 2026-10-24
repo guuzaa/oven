@@ -30,16 +30,17 @@ use std::path::{Path, PathBuf};
 use std::string::String;
 use std::sync::Arc;
 
-use oven_agent::{AgentError, Tool};
+use oven_agent::Tool;
+use oven_proto::AgentError;
 use oven_proto::ToolView;
 use serde_json::Value;
 
 #[cfg(test)]
-use oven_agent::{AgentMode, CancellationToken, Selection, TurnContext};
+use oven_agent::{CancellationToken, Selection, TurnContext};
 #[cfg(test)]
 use oven_llm::ModelId;
 #[cfg(test)]
-use oven_proto::TurnId;
+use oven_proto::{AgentMode, TurnId};
 
 pub use answer::AnswerTool;
 pub use bash::BashTool;

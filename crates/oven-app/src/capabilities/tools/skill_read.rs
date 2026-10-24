@@ -8,7 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use oven_agent::{AgentError, Tool, ToolOutcome, TurnContext};
+use oven_agent::{Tool, ToolOutcome, TurnContext};
+use oven_proto::AgentError;
 
 /// Reads the full content of a skill's `SKILL.md` by id. The system prompt
 /// only lists skill descriptions; this tool is how the model gets the body.

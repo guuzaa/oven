@@ -9,7 +9,9 @@
 //!
 //! Below both sits `oven-proto`: the events, state and commands a
 //! frontend shares with the runtime. The agent reports through it, so what a
-//! terminal sees and what a web page would see are the same facts.
+//! terminal sees and what a web page would see are the same facts. That
+//! vocabulary is not re-exported here: a crate that names an event names
+//! `oven-proto` for it.
 //!
 //! Providers and messages are `oven-llm`; files, processes and the clock are
 //! `oven-host`. All of them sit below both layers.
@@ -35,14 +37,6 @@ pub use core::turn::{
 };
 pub use core::view::{ToolCaps, ToolEffect, ToolOutcome};
 pub use oven_llm::RouterHandle;
-pub use oven_proto::{
-    AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse,
-    ApprovalDecision, CallOutcome, EventSink, LoopLimitDecision, MAX_ITERS_EXCEEDED, NodeInfo,
-    NodeStatus, NullSink, Question, QuestionOption, READ_RESULT_HINT, Record, SessionMeta,
-    StepStop, StreamEvent, TodoItem, TodoList, TodoStatus, ToolAccess, ToolCallId, ToolEvent,
-    ToolOutputStream, ToolPermission, ToolResult, ToolView, TurnEvent, TurnId, UserRequestId,
-    UserResponse, VecEventSink,
-};
 pub use runtime::agent::{Agent, router_handle};
 pub use runtime::compact::{CompactStats, NOTHING_TO_COMPACT};
 pub use tokio_util::sync::CancellationToken;

@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use oven_agent::{
-    CancellationToken, MEMORY_PROMPT, NullSink, SpawnRequest, SubagentSpawner, TOP_LEVEL_PROMPT,
-    TurnContext, TurnId,
+    CancellationToken, MEMORY_PROMPT, SpawnRequest, SubagentSpawner, TOP_LEVEL_PROMPT, TurnContext,
 };
 use oven_llm::{
     ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
     Role, StopReason, StreamEvent, Usage,
 };
 use oven_mem::{MemoryRoots, MemoryStore};
+use oven_proto::{NullSink, TurnId};
 
 use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
 use crate::capabilities::tools::ListModelsTool;

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
-use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, TurnContext};
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
 use oven_mem::MemoryStore;
+use oven_proto::{AgentError, ToolPermission, ToolView};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -69,9 +70,10 @@ impl Tool for MemoryForgetTool {
 
 #[cfg(test)]
 mod tests {
-    use oven_agent::{AgentMode, CancellationToken, Selection, Tool, TurnContext, TurnId};
+    use oven_agent::{CancellationToken, Selection, Tool, TurnContext};
     use oven_llm::ModelId;
     use oven_mem::{MemoryRoots, MemoryStore, NOT_FOUND};
+    use oven_proto::{AgentMode, TurnId};
     use serde_json::json;
 
     use super::{FORGOT_MEMORY, MemoryForgetTool};

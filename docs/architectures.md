@@ -92,8 +92,9 @@ tools that produce it. The nouns a **frontend** needs live one layer lower
 still, in `oven-proto`: `AgentEvent`, `ToolView`, `ToolPermission`,
 `AgentMode`, `TodoList` and `NodeInfo` are all part of the protocol, so the
 crate that speaks it owns them. The
-public surface is pinned by `crates/oven-agent/tests/public_api.rs`, so moving
-a module behind a layer cannot move a path.
+public surface is pinned by `crates/oven-agent/tests/public_api.rs` and
+`crates/oven-proto/tests/public_api.rs`, so moving a module behind a layer
+cannot move a path.
 
 ### `oven-tui` layers
 
@@ -138,8 +139,9 @@ oven-tui ──► oven-app ──► oven-agent ──► oven-llm
 
 `oven-proto` sits below `oven-agent` and below `oven-app`: the agent reports
 its events through it, and the app publishes its state and its commands
-through it. Nothing above it re-implements the vocabulary — `oven-agent` and
-`oven-app` re-export what they used to own, so no public path moved.
+through it. Nothing above it re-implements the vocabulary, and nothing above
+it re-exports it either: `oven-agent` and `oven-app` name the protocol where
+they use it, so a crate that needs an event depends on `oven-proto` for it.
 
 `oven-host` may depend on operating-system and third-party implementation crates such as Tokio and `ignore`, but those types do not appear in its public API. Consumers use host-owned types such as `WalkEntry`, `PathError`, and `CommandError`. Pattern matching remains an Agent concern.
 

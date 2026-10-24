@@ -3,8 +3,8 @@ mod read;
 mod view;
 mod write;
 
-use oven_agent::AgentError;
 use oven_mem::{MemoryError, MemoryId, MemoryKind, MemoryScope};
+use oven_proto::AgentError;
 use serde_json::{Value, json};
 
 pub(crate) use forget::MemoryForgetTool;

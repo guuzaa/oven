@@ -5,10 +5,12 @@ use std::sync::Arc;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use oven_agent::{Agent, AgentError, CancellationToken, CompactStats, Record, RunPolicy, TodoList};
+use oven_agent::{Agent, CancellationToken, CompactStats, RunPolicy};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
 use oven_mem::MemoryStore;
-use oven_proto::{AppPhase, HistoryChangeReason, Input, SessionState};
+use oven_proto::{
+    AgentError, AppPhase, HistoryChangeReason, Input, Record, SessionState, TodoList,
+};
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
