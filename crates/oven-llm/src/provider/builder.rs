@@ -233,6 +233,7 @@ mod tests {
             ProviderName::DeepSeek,
             ProviderName::Moonshot,
             ProviderName::Zhipu,
+            ProviderName::MiniMax,
         ] {
             let provider = build(ProviderKind::Completions, name.clone()).unwrap();
             assert_eq!(provider.provider_name(), name);
@@ -359,6 +360,7 @@ mod tests {
             (ProviderKind::Completions, ProviderName::DeepSeek),
             (ProviderKind::Completions, ProviderName::Moonshot),
             (ProviderKind::Completions, ProviderName::Zhipu),
+            (ProviderKind::Completions, ProviderName::MiniMax),
             (ProviderKind::Responses, ProviderName::OpenAI),
             (ProviderKind::Responses, ProviderName::DeepSeek),
             (ProviderKind::Responses, ProviderName::Grok),

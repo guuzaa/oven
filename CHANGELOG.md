@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- `oven-llm`: MiniMax is a vendor now — `minimax` in the setup wizard, the OpenAI-compatible endpoint (`https://api.minimax.io/v1`), and the reasoning parameters MiniMax actually takes: `thinking.type` on the models that can turn thinking off, `reasoning_effort` on the ones that take a depth, and `reasoning_split` on every request so the thinking comes back as thinking rather than as text
 - `oven-proto`: the protocol vocabulary moves into a crate of its own — the events, the state and the commands a frontend shares with the runtime. It is a leaf, on `oven-llm` and serde alone, so a frontend can be written without the agent runtime in its dependency tree. Documented in [`docs/oven-proto.md`](docs/oven-proto.md)
 - `Command` is one enum for every request a frontend can make, and `App::apply` applies one: `Submit`, `Steer`, `Rewind`, `Cancel`, `CancelCompaction`, `SetMode`, `Respond`, `StopSubagent`, `StopSubagents`. A transport turns what it received into a `Command` and nothing else, and `CommandResult::Refused` says the request did not apply — the driver was idle, or the request it answered was already closed
 - `AppState` splits in two: `levels` holds the phase, the mode, the model, the provider, the checklist and the usage — small, and cheap enough to forward on every change — and the conversation stays beside it, read once when a frontend connects
@@ -10,6 +11,7 @@
 - Every protocol type has a serde form, and the wire format is pinned by tests
 
 ### Changed
+- `oven-llm`: the model's own capability decides which reasoning channel a request uses — a model with levels takes the level channel, a model with only a switch takes the switch channel — and the vendor dialect is the fallback for a model nobody knows. MiniMax needs both: `MiniMax-M3` has a switch, `MiniMax-M3.1-Flash` has levels
 - **Breaking:** `oven-proto`: `AppLevels.models` is a list of `ModelChoice` — id, provider, and what the model can express — rather than a list of pairs, so a frontend can offer the levels a model actually takes
 - `oven-app`, `oven-tui`: the model picker lists the reasoning levels the model takes and nothing else, and the status bar reads the effort the way the model reads it: a switch-only model shows `on`, and a level the model does not take shows the one it will use
 - `oven-llm`: the reasoning effort reaches the wire through the vendor's own dialect — Zhipu gets `thinking.type` and no `reasoning_effort`, OpenAI and DeepSeek get `reasoning_effort` and no `thinking`, and a vendor nobody verified yet keeps sending both. A level the model does not have is clamped down to the closest one it has, and the request path never fails on it

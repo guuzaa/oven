@@ -1,7 +1,7 @@
 //! 合并后的静态模型目录：每个模型一条，协议写在 `protocols` 里（第一个为默认）。
 
 use super::model::{ModelCapabilities, ModelInfo, Pricing};
-use super::vendor::capabilities_for;
+use super::vendor::{EffortSupport, capabilities_for, minimax};
 use crate::{ProviderKind, ProviderName};
 
 pub(crate) const OPENAI_DEFAULT_MODEL: &str = "gpt-5.6-terra";
@@ -9,6 +9,8 @@ pub(crate) const DEEPSEEK_V4_FLASH: &str = "deepseek-v4-flash";
 pub(crate) const KIMI_K3: &str = "kimi-k3";
 pub(crate) const GLM_53: &str = "glm-5.3";
 pub(crate) const GROK_46: &str = "grok-4.6";
+pub(crate) const MINIMAX_M3: &str = "MiniMax-M3";
+pub(crate) const MINIMAX_M3_FLASH: &str = "MiniMax-M3.1-Flash";
 
 pub(crate) const fn default_model_id(name: &ProviderName) -> Option<&'static str> {
     match name {
@@ -17,6 +19,7 @@ pub(crate) const fn default_model_id(name: &ProviderName) -> Option<&'static str
         ProviderName::Moonshot => Some(KIMI_K3),
         ProviderName::Zhipu => Some(GLM_53),
         ProviderName::Grok => Some(GROK_46),
+        ProviderName::MiniMax => Some(MINIMAX_M3),
         ProviderName::Anthropic | ProviderName::Custom(_) => None,
     }
 }
@@ -27,6 +30,7 @@ pub fn all_models() -> Vec<ModelInfo> {
     models.extend(moonshot_models());
     models.extend(zhipu_models());
     models.extend(grok_models());
+    models.extend(minimax_models());
     models
 }
 
@@ -50,11 +54,10 @@ fn model(
     provider: ProviderName,
     limits: (u32, u32),
     capabilities: ModelCapabilities,
-    pricing: (f64, f64),
+    pricing: Option<(f64, f64)>,
     protocols: &[ProviderKind],
 ) -> ModelInfo {
     let (context_window, max_output_tokens) = limits;
-    let (input_per_million, output_per_million) = pricing;
     let effort_support = capabilities_for(&provider);
     ModelInfo {
         id: id.to_string(),
@@ -63,7 +66,7 @@ fn model(
         max_output_tokens,
         capabilities,
         effort_support,
-        pricing: Some(Pricing {
+        pricing: pricing.map(|(input_per_million, output_per_million)| Pricing {
             input_per_million,
             output_per_million,
         }),
@@ -78,7 +81,7 @@ fn deepseek_models() -> Vec<ModelInfo> {
             ProviderName::DeepSeek,
             (1_000_000, 384_000),
             caps(false, 64),
-            (0.14, 0.28),
+            Some((0.14, 0.28)),
             &[ProviderKind::Completions, ProviderKind::Responses],
         ),
         model(
@@ -86,7 +89,7 @@ fn deepseek_models() -> Vec<ModelInfo> {
             ProviderName::DeepSeek,
             (1_000_000, 384_000),
             caps(false, 128),
-            (2.5, 10.0),
+            Some((2.5, 10.0)),
             &[ProviderKind::Completions],
         ),
     ]
@@ -102,7 +105,7 @@ fn moonshot_models() -> Vec<ModelInfo> {
             ProviderName::Moonshot,
             (1_048_576, 128_000),
             caps(true, 128),
-            (1.2, 4.8),
+            Some((1.2, 4.8)),
             &[ProviderKind::Completions],
         ),
         model(
@@ -110,7 +113,7 @@ fn moonshot_models() -> Vec<ModelInfo> {
             ProviderName::Moonshot,
             (256_000, 128_000),
             caps(false, 64),
-            (0.6, 2.4),
+            Some((0.6, 2.4)),
             &[ProviderKind::Completions],
         ),
         model(
@@ -118,7 +121,7 @@ fn moonshot_models() -> Vec<ModelInfo> {
             ProviderName::Moonshot,
             (256_000, 128_000),
             k2_6,
-            (0.3, 1.2),
+            Some((0.3, 1.2)),
             &[ProviderKind::Completions],
         ),
     ]
@@ -131,7 +134,7 @@ fn zhipu_models() -> Vec<ModelInfo> {
             ProviderName::Zhipu,
             (1_000_000, 128_000),
             caps(false, 128),
-            (1.0, 4.0),
+            Some((1.0, 4.0)),
             &[ProviderKind::Completions],
         ),
         model(
@@ -139,7 +142,7 @@ fn zhipu_models() -> Vec<ModelInfo> {
             ProviderName::Zhipu,
             (1_000_000, 128_000),
             caps(false, 128),
-            (1.0, 4.0),
+            Some((1.0, 4.0)),
             &[ProviderKind::Completions],
         ),
         model(
@@ -147,7 +150,7 @@ fn zhipu_models() -> Vec<ModelInfo> {
             ProviderName::Zhipu,
             (200_000, 128_000),
             caps(false, 64),
-            (0.5, 2.0),
+            Some((0.5, 2.0)),
             &[ProviderKind::Completions],
         ),
         model(
@@ -155,7 +158,7 @@ fn zhipu_models() -> Vec<ModelInfo> {
             ProviderName::Zhipu,
             (200_000, 128_000),
             caps(false, 32),
-            (0.2, 0.8),
+            Some((0.2, 0.8)),
             &[ProviderKind::Completions],
         ),
         model(
@@ -163,7 +166,7 @@ fn zhipu_models() -> Vec<ModelInfo> {
             ProviderName::Zhipu,
             (200_000, 128_000),
             caps(false, 32),
-            (0.2, 0.8),
+            Some((0.2, 0.8)),
             &[ProviderKind::Completions],
         ),
     ]
@@ -176,7 +179,7 @@ fn grok_models() -> Vec<ModelInfo> {
             ProviderName::Grok,
             (256_000, 100_000),
             caps(false, 64),
-            (0.5, 1.0),
+            Some((0.5, 1.0)),
             &[ProviderKind::Responses],
         ),
         model(
@@ -184,9 +187,34 @@ fn grok_models() -> Vec<ModelInfo> {
             ProviderName::Grok,
             (256_000, 100_000),
             caps(false, 64),
-            (0.5, 1.0),
+            Some((0.5, 1.0)),
             &[ProviderKind::Responses],
         ),
+    ]
+}
+
+fn minimax_models() -> Vec<ModelInfo> {
+    // MiniMax 的思考深度与开关按模型分开：M3 只有开关（关掉思考靠
+    // `thinking.type`），M3.1-Flash 思考常开、只有深度（`reasoning_effort`）。
+    vec![
+        model(
+            MINIMAX_M3,
+            ProviderName::MiniMax,
+            (1_000_000, 0),
+            caps(true, 64),
+            None,
+            &[ProviderKind::Completions],
+        )
+        .with_effort_support(EffortSupport::Toggle),
+        model(
+            MINIMAX_M3_FLASH,
+            ProviderName::MiniMax,
+            (1_000_000, 0),
+            caps(true, 64),
+            None,
+            &[ProviderKind::Completions],
+        )
+        .with_effort_support(minimax::CAPABILITIES),
     ]
 }
 

@@ -26,8 +26,8 @@ use crate::provider::catalog;
 use crate::provider::endpoint::Endpoint;
 use crate::provider::model::ModelInfo;
 use crate::provider::{
-    DEEPSEEK_BASE_URL, MOONSHOT_BASE_URL, OPENAI_BASE_URL, Provider, ProviderError, ProviderKind,
-    ZHIPU_BASE_URL,
+    DEEPSEEK_BASE_URL, MINIMAX_BASE_URL, MOONSHOT_BASE_URL, OPENAI_BASE_URL, Provider,
+    ProviderError, ProviderKind, ZHIPU_BASE_URL,
 };
 
 /// OpenAI Chat Completions 兼容协议的通用 `Provider` 实现。
@@ -55,6 +55,7 @@ impl CompletionsProvider {
             ProviderName::DeepSeek => Ok(Self::deepseek(api_key)),
             ProviderName::Moonshot => Ok(Self::moonshot(api_key)),
             ProviderName::Zhipu => Ok(Self::zhipu(api_key)),
+            ProviderName::MiniMax => Ok(Self::minimax(api_key)),
             ProviderName::Anthropic | ProviderName::Grok | ProviderName::Custom(_) => {
                 Err(ProviderError::UnsupportedProvider {
                     kind: ProviderKind::Completions,
@@ -135,6 +136,17 @@ impl CompletionsProvider {
         )
     }
 
+    /// MiniMax 预设：`base_url = https://api.minimax.io/v1`（OpenAI 兼容面）。
+    pub fn minimax(api_key: impl Into<SecretString>) -> Self {
+        Self::with_models(
+            MINIMAX_BASE_URL,
+            ProviderName::MiniMax,
+            api_key,
+            catalog::models_for(&ProviderName::MiniMax, ProviderKind::Completions),
+            HeaderMap::new(),
+        )
+    }
+
     /// OpenAI 官方预设：`base_url = https://api.openai.com/v1`。
     ///
     /// `models.rs` 目前没有为 OpenAI 官方提供静态模型列表（其模型迭代速度快，
@@ -165,6 +177,7 @@ impl CompletionsProvider {
                 super::encoder::CompletionsEncodeError::InvalidContent(err.to_string()),
             )
         })?;
+        let body = Endpoint::merge_extra_fields(body, &self.endpoint.extra_fields());
         Ok(Endpoint::merge_provider_options(
             body,
             &req.options.provider_options,
@@ -598,6 +611,36 @@ mod tests {
         let body = provider.build_body(&req, false).unwrap();
         assert!(body.get("thinking").is_none());
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn a_minimax_request_always_splits_the_reasoning_out() {
+        let provider = CompletionsProvider::minimax(api_key("k"));
+        let req = sample_request();
+        let body = provider.build_body(&req, false).unwrap();
+        assert_eq!(body["reasoning_split"], true);
+    }
+
+    #[test]
+    fn a_minimax_switch_only_model_uses_the_switch() {
+        let provider = CompletionsProvider::minimax(api_key("k"));
+        let mut req = sample_request();
+        req.model = ModelId::from("MiniMax-M3");
+        req.options.reasoning_effort = Some(ReasoningEffort::Off);
+        let body = provider.build_body(&req, false).unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn a_minimax_level_model_uses_the_level() {
+        let provider = CompletionsProvider::minimax(api_key("k"));
+        let mut req = sample_request();
+        req.model = ModelId::from("MiniMax-M3.1-Flash");
+        req.options.reasoning_effort = Some(ReasoningEffort::High);
+        let body = provider.build_body(&req, false).unwrap();
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]

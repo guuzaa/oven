@@ -67,7 +67,10 @@ pub fn resolve_reasoning(
 }
 
 /// 按方言把归一化意图拆到各通道上。
-pub fn channels(intent: ReasoningIntent, dialect: Dialect) -> Channels {
+///
+/// 模型的能力说了算：只有开关的模型走开关通道，有档位的模型走档位通道。
+/// 能力未知时才问厂商方言——那是"我们不知道这个模型"时的兜底。
+pub fn channels(intent: ReasoningIntent, dialect: Dialect, support: &EffortSupport) -> Channels {
     let level = match intent {
         ReasoningIntent::Unset | ReasoningIntent::On => None,
         ReasoningIntent::Off => Some("none"),
@@ -78,17 +81,16 @@ pub fn channels(intent: ReasoningIntent, dialect: Dialect) -> Channels {
         ReasoningIntent::Off => Some(false),
         ReasoningIntent::On | ReasoningIntent::At(_) => Some(true),
     };
-    match dialect {
-        Dialect::Level => Channels {
-            level,
-            toggle: None,
+    let (level, toggle) = match support {
+        EffortSupport::Toggle => (None, toggle),
+        EffortSupport::Levels(_) => (level, None),
+        _ => match dialect {
+            Dialect::Level => (level, None),
+            Dialect::Toggle => (None, toggle),
+            Dialect::Both => (level, toggle),
         },
-        Dialect::Toggle => Channels {
-            level: None,
-            toggle,
-        },
-        Dialect::Both => Channels { level, toggle },
-    }
+    };
+    Channels { level, toggle }
 }
 
 /// 把档位钳到模型支持的集合里。
@@ -236,35 +238,70 @@ mod tests {
 
     #[test]
     fn the_level_dialect_fills_only_the_level_channel() {
-        let channels = channels(ReasoningIntent::At(ReasoningEffort::High), Dialect::Level);
+        let channels = channels(
+            ReasoningIntent::At(ReasoningEffort::High),
+            Dialect::Level,
+            &EffortSupport::Unknown,
+        );
         assert_eq!(channels.level, Some("high"));
         assert_eq!(channels.toggle, None);
     }
 
     #[test]
     fn the_toggle_dialect_fills_only_the_toggle_channel() {
-        let channels = channels(ReasoningIntent::At(ReasoningEffort::High), Dialect::Toggle);
+        let channels = channels(
+            ReasoningIntent::At(ReasoningEffort::High),
+            Dialect::Toggle,
+            &EffortSupport::Unknown,
+        );
         assert_eq!(channels.level, None);
         assert_eq!(channels.toggle, Some(true));
     }
 
     #[test]
     fn the_permissive_dialect_fills_both_channels() {
-        let channels = channels(ReasoningIntent::At(ReasoningEffort::High), Dialect::Both);
+        let channels = channels(
+            ReasoningIntent::At(ReasoningEffort::High),
+            Dialect::Both,
+            &EffortSupport::Unknown,
+        );
         assert_eq!(channels.level, Some("high"));
         assert_eq!(channels.toggle, Some(true));
     }
 
     #[test]
     fn off_fills_the_level_channel_with_none_and_the_toggle_with_false() {
-        let channels = channels(ReasoningIntent::Off, Dialect::Both);
+        let channels = channels(ReasoningIntent::Off, Dialect::Both, &EffortSupport::Unknown);
         assert_eq!(channels.level, Some("none"));
         assert_eq!(channels.toggle, Some(false));
     }
 
     #[test]
     fn on_fills_the_toggle_channel_only() {
-        let channels = channels(ReasoningIntent::On, Dialect::Both);
+        let channels = channels(ReasoningIntent::On, Dialect::Both, &EffortSupport::Unknown);
+        assert_eq!(channels.level, None);
+        assert_eq!(channels.toggle, Some(true));
+    }
+
+    #[test]
+    fn a_model_with_levels_uses_the_level_channel_whatever_the_dialect() {
+        let support = levels(&[ReasoningEffort::Low, ReasoningEffort::High]);
+        let channels = channels(
+            ReasoningIntent::At(ReasoningEffort::High),
+            Dialect::Both,
+            &support,
+        );
+        assert_eq!(channels.level, Some("high"));
+        assert_eq!(channels.toggle, None);
+    }
+
+    #[test]
+    fn a_switch_only_model_uses_the_switch_channel_whatever_the_dialect() {
+        let channels = channels(
+            ReasoningIntent::At(ReasoningEffort::High),
+            Dialect::Both,
+            &EffortSupport::Toggle,
+        );
         assert_eq!(channels.level, None);
         assert_eq!(channels.toggle, Some(true));
     }
@@ -274,6 +311,7 @@ mod tests {
         let channels = channels(
             ReasoningIntent::At(ReasoningEffort::Budget(2048)),
             Dialect::Both,
+            &EffortSupport::Unknown,
         );
         assert_eq!(channels.level, None);
         assert_eq!(channels.toggle, Some(true));
@@ -313,7 +351,7 @@ mod tests {
             for (intent_name, intent) in &intents {
                 let resolved = resolve_reasoning(*intent, support);
                 for (dialect_name, dialect) in &dialects {
-                    let channels = channels(resolved, *dialect);
+                    let channels = channels(resolved, *dialect, support);
                     let label = format!("{support_name} × {intent_name} × {dialect_name}");
 
                     // 不表态与不支持都不发任何字段。

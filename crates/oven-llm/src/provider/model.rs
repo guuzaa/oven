@@ -102,6 +102,13 @@ impl ModelInfo {
             .unwrap_or(ProviderKind::Completions)
     }
 
+    /// 覆盖该模型对推理的支持。模型目录用它登记例外：厂商默认之外，
+    /// 只有这一个模型不一样。
+    pub fn with_effort_support(mut self, support: EffortSupport) -> Self {
+        self.effort_support = support;
+        self
+    }
+
     pub fn supports_protocol(&self, kind: ProviderKind) -> bool {
         if self.protocols.is_empty() {
             kind == ProviderKind::Completions

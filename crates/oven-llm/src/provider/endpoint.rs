@@ -12,7 +12,7 @@ use crate::domain::{ModelId, Request};
 use crate::provider::http;
 use crate::provider::model::ModelInfo;
 use crate::provider::validate::validate_request;
-use crate::provider::vendor::{Channels, channels, dialect_for, resolve_reasoning};
+use crate::provider::vendor::{Channels, channels, dialect_for, extra_fields, resolve_reasoning};
 use crate::provider::{ProviderError, ProviderName};
 
 pub(crate) struct Endpoint {
@@ -75,7 +75,12 @@ impl Endpoint {
             .map(|model| model.effort_support.clone())
             .unwrap_or_default();
         let intent = resolve_reasoning(req.options.reasoning_effort, &support);
-        channels(intent, dialect_for(&self.provider_name))
+        channels(intent, dialect_for(&self.provider_name), &support)
+    }
+
+    /// 该厂商每次请求都要带的额外字段（例如 MiniMax 的 `reasoning_split`）。
+    pub(crate) fn extra_fields(&self) -> Vec<(&'static str, serde_json::Value)> {
+        extra_fields(&self.provider_name)
     }
 
     pub(crate) fn merge_provider_options(
@@ -90,6 +95,23 @@ impl Endpoint {
             .expect("wire request always serializes to a JSON object");
         for (key, value) in options {
             object.insert(key.clone(), value.clone());
+        }
+        body
+    }
+
+    /// 把厂商每次都要带的额外字段并进 wire body。
+    pub(crate) fn merge_extra_fields(
+        mut body: serde_json::Value,
+        fields: &[(&str, serde_json::Value)],
+    ) -> serde_json::Value {
+        if fields.is_empty() {
+            return body;
+        }
+        let object = body
+            .as_object_mut()
+            .expect("wire request always serializes to a JSON object");
+        for (key, value) in fields {
+            object.insert((*key).to_string(), value.clone());
         }
         body
     }

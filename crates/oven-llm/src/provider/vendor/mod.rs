@@ -6,6 +6,7 @@
 pub mod capability;
 mod deepseek;
 mod glm;
+pub(crate) mod minimax;
 mod moonshot;
 mod openai;
 mod resolve;
@@ -55,6 +56,7 @@ pub fn dialect_for(provider: &ProviderName) -> Dialect {
         ProviderName::Moonshot => moonshot::DIALECT,
         ProviderName::Zhipu => glm::DIALECT,
         ProviderName::Grok => xai::DIALECT,
+        ProviderName::MiniMax => minimax::DIALECT,
         ProviderName::Anthropic | ProviderName::Custom(_) => Dialect::Both,
     }
 }
@@ -67,7 +69,16 @@ pub fn capabilities_for(provider: &ProviderName) -> EffortSupport {
         ProviderName::Moonshot => moonshot::CAPABILITIES,
         ProviderName::Zhipu => glm::CAPABILITIES,
         ProviderName::Grok => xai::CAPABILITIES,
+        ProviderName::MiniMax => minimax::CAPABILITIES,
         ProviderName::Anthropic | ProviderName::Custom(_) => EffortSupport::Unknown,
+    }
+}
+
+/// 该厂商每次请求都要带的额外字段。
+pub fn extra_fields(provider: &ProviderName) -> Vec<(&'static str, serde_json::Value)> {
+    match provider {
+        ProviderName::MiniMax => minimax::extra_fields(),
+        _ => Vec::new(),
     }
 }
 

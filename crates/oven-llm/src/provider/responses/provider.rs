@@ -56,6 +56,7 @@ impl ResponsesProvider {
             ProviderName::Anthropic
             | ProviderName::Moonshot
             | ProviderName::Zhipu
+            | ProviderName::MiniMax
             | ProviderName::Custom(_) => Err(ProviderError::UnsupportedProvider {
                 kind: ProviderKind::Responses,
                 name: provider_name,

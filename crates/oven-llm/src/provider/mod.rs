@@ -31,6 +31,7 @@ use std::fmt;
 use crate::domain::{ModelId, Request, Response, StreamEvent};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const MOONSHOT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
@@ -118,17 +119,19 @@ pub enum ProviderName {
     Zhipu,
     Anthropic,
     Grok,
+    MiniMax,
     Custom(String),
 }
 
 /// The vendors oven ships, in the order they are offered.
-const KNOWN_VENDORS: [ProviderName; 6] = [
+const KNOWN_VENDORS: [ProviderName; 7] = [
     ProviderName::DeepSeek,
     ProviderName::OpenAI,
     ProviderName::Moonshot,
     ProviderName::Zhipu,
     ProviderName::Anthropic,
     ProviderName::Grok,
+    ProviderName::MiniMax,
 ];
 
 impl ProviderName {
@@ -147,6 +150,7 @@ impl ProviderName {
             ProviderName::Zhipu => "zhipu",
             ProviderName::Anthropic => "anthropic",
             ProviderName::Grok => "xai",
+            ProviderName::MiniMax => "minimax",
             ProviderName::Custom(name) => name.as_str(),
         }
     }
@@ -162,6 +166,7 @@ impl ProviderName {
             ProviderName::Moonshot => Some(MOONSHOT_BASE_URL),
             ProviderName::Zhipu => Some(ZHIPU_BASE_URL),
             ProviderName::Grok => Some(GROK_BASE_URL),
+            ProviderName::MiniMax => Some(MINIMAX_BASE_URL),
             _ => None,
         }
     }
@@ -171,6 +176,7 @@ impl ProviderName {
             ProviderName::DeepSeek
             | ProviderName::Moonshot
             | ProviderName::Zhipu
+            | ProviderName::MiniMax
             | ProviderName::Custom(_) => Some(ProviderKind::Completions),
             ProviderName::OpenAI | ProviderName::Grok => Some(ProviderKind::Responses),
             ProviderName::Anthropic => None,
@@ -199,6 +205,7 @@ impl From<&str> for ProviderName {
             "zhipu" | "glm" => ProviderName::Zhipu,
             "anthropic" => ProviderName::Anthropic,
             "grok" | "xai" => ProviderName::Grok,
+            "minimax" => ProviderName::MiniMax,
             other => ProviderName::Custom(other.to_string()),
         }
     }
@@ -213,6 +220,7 @@ impl Serialize for ProviderName {
             ProviderName::Zhipu => serializer.serialize_str("zhipu"),
             ProviderName::Anthropic => serializer.serialize_str("anthropic"),
             ProviderName::Grok => serializer.serialize_str("xai"),
+            ProviderName::MiniMax => serializer.serialize_str("minimax"),
             ProviderName::Custom(name) => {
                 serializer.serialize_str(&format!("custom({})", name.to_lowercase()))
             }
@@ -230,6 +238,7 @@ impl<'de> Deserialize<'de> for ProviderName {
             "zhipu" => ProviderName::Zhipu,
             "anthropic" => ProviderName::Anthropic,
             "grok" | "xai" => ProviderName::Grok,
+            "minimax" => ProviderName::MiniMax,
             _ => match raw
                 .strip_prefix("custom(")
                 .and_then(|s| s.strip_suffix(')'))
@@ -250,6 +259,7 @@ impl fmt::Display for ProviderName {
             ProviderName::Zhipu => f.write_str("Zhipu"),
             ProviderName::Anthropic => f.write_str("Anthropic"),
             ProviderName::Grok => f.write_str("Grok"),
+            ProviderName::MiniMax => f.write_str("MiniMax"),
             ProviderName::Custom(name) => write!(f, "Custom({})", name),
         }
     }
@@ -503,6 +513,7 @@ mod tests {
             ProviderName::Zhipu => vec![ProviderName::Zhipu],
             ProviderName::Anthropic => vec![ProviderName::Anthropic],
             ProviderName::Grok => vec![ProviderName::Grok],
+            ProviderName::MiniMax => vec![ProviderName::MiniMax],
             ProviderName::Custom(_) => Vec::new(),
         }
     }
