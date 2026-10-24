@@ -11,6 +11,7 @@ mod responses;
 mod retry;
 mod router;
 pub mod validate;
+mod vendor;
 
 pub use builder::ProviderBuilder;
 pub use completions::CompletionsProvider;
@@ -21,6 +22,7 @@ pub use retry::RetryingProvider;
 pub use router::{Client, Router, RouterError, RouterHandle};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use validate::{ValidationError, estimate_input_tokens, validate_request};
+pub use vendor::{Dialect, EffortSupport, VendorProfile};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;

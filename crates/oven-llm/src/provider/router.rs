@@ -324,6 +324,7 @@ mod tests {
 
     use crate::domain::message::Role;
     use crate::provider::model::{ModelCapabilities, ModelInfo};
+    use crate::provider::vendor::EffortSupport;
 
     fn model_info(id: &str, provider: ProviderName) -> ModelInfo {
         ModelInfo {
@@ -332,6 +333,7 @@ mod tests {
             context_window: 1000,
             max_output_tokens: 100,
             capabilities: ModelCapabilities::default(),
+            effort_support: EffortSupport::default(),
             pricing: None,
             protocols: Vec::new(),
         }

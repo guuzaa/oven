@@ -1,6 +1,7 @@
 //! 合并后的静态模型目录：每个模型一条，协议写在 `protocols` 里（第一个为默认）。
 
 use super::model::{ModelCapabilities, ModelInfo, Pricing};
+use super::vendor::capabilities_for;
 use crate::{ProviderKind, ProviderName};
 
 pub(crate) const OPENAI_DEFAULT_MODEL: &str = "gpt-5.6-terra";
@@ -54,12 +55,14 @@ fn model(
 ) -> ModelInfo {
     let (context_window, max_output_tokens) = limits;
     let (input_per_million, output_per_million) = pricing;
+    let effort_support = capabilities_for(&provider);
     ModelInfo {
         id: id.to_string(),
         provider,
         context_window,
         max_output_tokens,
         capabilities,
+        effort_support,
         pricing: Some(Pricing {
             input_per_million,
             output_per_million,
@@ -190,6 +193,8 @@ fn grok_models() -> Vec<ModelInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ReasoningEffort;
+    use crate::provider::vendor::EffortSupport;
 
     #[test]
     fn catalog_ids_unique_per_provider() {
@@ -233,5 +238,43 @@ mod tests {
         let responses = models_for(&ProviderName::Grok, ProviderKind::Responses);
         assert!(responses.iter().any(|model| model.id == GROK_46));
         assert!(responses.iter().any(|model| model.id == "grok-build-0.1"));
+    }
+
+    #[test]
+    fn catalog_models_carry_their_vendor_effort_support() {
+        let models = all_models();
+
+        let zhipu = models
+            .iter()
+            .find(|model| model.provider == ProviderName::Zhipu)
+            .unwrap();
+        assert_eq!(zhipu.effort_support, EffortSupport::Toggle);
+
+        let deepseek = models
+            .iter()
+            .find(|model| model.provider == ProviderName::DeepSeek)
+            .unwrap();
+        assert_eq!(
+            deepseek.effort_support.levels(),
+            &[
+                ReasoningEffort::Off,
+                ReasoningEffort::Low,
+                ReasoningEffort::High,
+                ReasoningEffort::Max,
+            ]
+        );
+    }
+
+    #[test]
+    fn vendors_without_a_verified_set_do_not_intervene() {
+        let models = all_models();
+
+        for provider in [ProviderName::Moonshot, ProviderName::Grok] {
+            let model = models
+                .iter()
+                .find(|model| model.provider == provider)
+                .unwrap();
+            assert_eq!(model.effort_support, EffortSupport::Unknown);
+        }
     }
 }

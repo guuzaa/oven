@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 use crate::domain::ModelId;
 use crate::{ProviderKind, ProviderName};
 
+use super::vendor::{EffortSupport, capabilities_for};
+
 /// 描述单个模型的元数据（所属 provider、上下文窗口、最大输出 token、能力集合、定价）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelInfo {
@@ -14,6 +16,8 @@ pub struct ModelInfo {
     pub context_window: u32,
     pub max_output_tokens: u32,
     pub capabilities: ModelCapabilities,
+    /// 该模型对推理的支持程度：能表达哪些档位。
+    pub effort_support: EffortSupport,
     pub pricing: Option<Pricing>,
     /// 该模型会说的协议；第一个是默认。空表示只走 Completions。
     pub protocols: Vec<ProviderKind>,
@@ -60,13 +64,16 @@ impl ModelCapabilities {
 
 impl ModelInfo {
     /// 用户声明的模型：窗口和输出上限保持 0（未知），能力默认支持。
+    /// 推理档位取该厂商的默认值。
     pub fn declared(id: impl Into<String>, provider: ProviderName) -> Self {
+        let effort_support = capabilities_for(&provider);
         Self {
             id: id.into(),
             provider,
             context_window: 0,
             max_output_tokens: 0,
             capabilities: ModelCapabilities::supported(),
+            effort_support,
             pricing: None,
             protocols: Vec::new(),
         }
@@ -82,6 +89,7 @@ impl ModelInfo {
             context_window: 0,
             max_output_tokens: 0,
             capabilities: ModelCapabilities::default(),
+            effort_support: EffortSupport::default(),
             pricing: None,
             protocols: Vec::new(),
         }
@@ -176,6 +184,15 @@ mod tests {
         assert!(info.capabilities.supports_parallel_tool_calls);
         assert!(info.capabilities.supports_system_prompt);
         assert_eq!(info.capabilities.max_concurrent_tools, None);
+    }
+
+    #[test]
+    fn declared_models_take_their_vendor_effort_support() {
+        let info = ModelInfo::declared("glm-5.3", ProviderName::Zhipu);
+        assert_eq!(info.effort_support, EffortSupport::Toggle);
+
+        let custom = ModelInfo::declared("my-model", ProviderName::Custom("gw".into()));
+        assert_eq!(custom.effort_support, EffortSupport::Unknown);
     }
 
     #[test]

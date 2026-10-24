@@ -171,6 +171,7 @@ mod tests {
     use crate::domain::request::{CallOptions, ModelId, SamplingParams};
     use crate::domain::tool::ToolChoice;
     use crate::provider::model::ModelCapabilities;
+    use crate::provider::vendor::EffortSupport;
 
     /// 构造一个默认全支持能力的模型（除非测试中显式覆盖），
     /// `context_window`/`max_output_tokens` 足够大以避免无关规则触发。
@@ -189,6 +190,7 @@ mod tests {
                 supports_system_prompt: true,
                 max_concurrent_tools: None,
             },
+            effort_support: EffortSupport::default(),
             pricing: None,
             protocols: Vec::new(),
         }

@@ -78,7 +78,7 @@ fn limit(tokens: u32) -> String {
 mod tests {
     use super::*;
     use crate::capabilities::tools::test_context;
-    use oven_llm::{ModelCapabilities, ProviderName};
+    use oven_llm::{EffortSupport, ModelCapabilities, ProviderName};
 
     struct Catalog(Vec<ModelInfo>);
 
@@ -95,6 +95,7 @@ mod tests {
             context_window,
             max_output_tokens,
             capabilities: ModelCapabilities::default(),
+            effort_support: EffortSupport::default(),
             pricing: None,
             protocols: Vec::new(),
         }
