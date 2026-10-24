@@ -7,6 +7,7 @@ pub mod error;
 pub mod event;
 pub mod memory;
 pub mod mention;
+pub mod profile;
 pub mod provider;
 pub mod session;
 pub mod state;

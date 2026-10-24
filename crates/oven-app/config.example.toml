@@ -79,6 +79,13 @@ max_iters = 200
 # api_key = "xai-..."
 # reasoning_effort = "low"
 
+# Quality profiles: a name we choose, and what it means for each vendor. The
+# same profile is a different model on a different vendor, so each vendor gets
+# its own line. `/profile <name>` switches to one; `/model` unbinds it.
+# [profiles.balanced]
+# deepseek = { model = "deepseek-v4-flash", effort = "medium" }
+# moonshot = { model = "kimi-k3", effort = "high" }
+
 # Subagents. `task` delegates a self-contained job to another agent; the roles
 # (explore, general) decide which tools it may use, not this block.
 [subagents]

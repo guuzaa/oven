@@ -551,6 +551,21 @@ fn is_custom_vendor_name(name: Option<&str>) -> bool {
     }
 }
 
+/// 一个 profile 在某个厂商下的落法。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileBinding {
+    /// wire id，属于该厂商。
+    pub model: String,
+    /// 推理强度。`None` = 该厂商下这个 profile 不带强度。
+    pub effort: Option<ReasoningEffort>,
+}
+
+/// profile 名 → 厂商 slug → 落法。
+///
+/// profile 是我们定的质量级别（`balanced`、`deep`…），落到每个厂商各自的模型
+/// 与强度上：同一个 `balanced` 在 deepseek 是一种模型，在 moonshot 是另一种。
+pub type ProfileTable = BTreeMap<String, BTreeMap<String, ProfileBinding>>;
+
 /// Per-process behavioural knobs that are provider-agnostic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
@@ -559,6 +574,11 @@ pub struct AppConfig {
     pub active_provider: ProviderSelection,
     /// Saved vendors keyed by canonical slug (`deepseek`, `xai`, …).
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// profile 名 → 厂商 slug → 落法。
+    pub profiles: ProfileTable,
+    /// 当前生效的 profile。`None` = 没用 profile，模型与强度由
+    /// `[providers.<slug>]` 手写。
+    pub active_profile: Option<String>,
     pub request_timeout_secs: u64,
     pub max_retries: u32,
     pub base_backoff_ms: u64,
@@ -592,6 +612,10 @@ struct RawAppConfig {
     provider: Option<ProviderConfig>,
     #[serde(default)]
     providers: BTreeMap<String, ProviderConfig>,
+    #[serde(default)]
+    profiles: ProfileTable,
+    #[serde(default)]
+    active_profile: Option<String>,
     #[serde(default = "default_request_timeout_secs")]
     request_timeout_secs: u64,
     #[serde(default = "default_max_retries")]
@@ -655,6 +679,12 @@ impl Serialize for AppConfig {
         if !self.providers.is_empty() {
             map.serialize_entry("providers", &self.providers)?;
         }
+        if !self.profiles.is_empty() {
+            map.serialize_entry("profiles", &self.profiles)?;
+        }
+        if let Some(profile) = &self.active_profile {
+            map.serialize_entry("active_profile", profile)?;
+        }
         map.end()
     }
 }
@@ -708,6 +738,8 @@ impl<'de> Deserialize<'de> for AppConfig {
         let mut config = Self {
             active_provider: ProviderSelection::default(),
             providers: BTreeMap::new(),
+            profiles: raw.profiles,
+            active_profile: raw.active_profile,
             request_timeout_secs: raw.request_timeout_secs,
             max_retries: raw.max_retries,
             base_backoff_ms: raw.base_backoff_ms,
@@ -973,6 +1005,7 @@ impl AppConfig {
     pub async fn save_provider_at(
         path: &Path,
         overlay: &ProviderConfig,
+        active_profile: Option<&str>,
     ) -> Result<(), ConfigError> {
         let mut config = Self::load_file(path).await?.unwrap_or_default();
         let name = overlay
@@ -986,6 +1019,7 @@ impl AppConfig {
             .ok_or_else(|| ConfigError::InvalidProvider("provider name is required".into()))?;
         config.merge_provider(&name, overlay).name = Some(name.clone());
         config.active_provider.name = name;
+        config.active_profile = active_profile.map(str::to_string);
         Self::save_at(path, &config).await
     }
 
@@ -1025,6 +1059,8 @@ impl AppConfig {
         Self {
             active_provider: ProviderSelection::default(),
             providers: BTreeMap::new(),
+            profiles: ProfileTable::new(),
+            active_profile: None,
             request_timeout_secs: default_request_timeout_secs(),
             max_retries: default_max_retries(),
             base_backoff_ms: default_base_backoff_ms(),
@@ -1107,6 +1143,68 @@ mod tests {
         "active = \"deepseek\"\n[providers.deepseek]\nmodel = \"kept\"\n";
     const EDITED_USER_CONFIG: &str =
         "active = \"deepseek\"\n[providers.deepseek]\nmodel = \"edited\"\n";
+
+    #[test]
+    fn profiles_round_trip_through_the_config() {
+        let toml = r#"
+active = "deepseek"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+
+[profiles.balanced]
+deepseek = { model = "deepseek-v4-flash", effort = "medium" }
+moonshot = { model = "kimi-k3", effort = "high" }
+"#;
+        let config: AppConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.active_profile, None);
+
+        let balanced = config.profiles.get("balanced").unwrap();
+        assert_eq!(
+            balanced
+                .get("deepseek")
+                .map(|binding| binding.model.as_str()),
+            Some("deepseek-v4-flash")
+        );
+        assert_eq!(
+            balanced.get("moonshot").and_then(|binding| binding.effort),
+            Some(ReasoningEffort::High)
+        );
+
+        let written = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            written.contains("[profiles.balanced.deepseek]"),
+            "{written}"
+        );
+        let reread: AppConfig = toml::from_str(&written).unwrap();
+        assert_eq!(reread.profiles, config.profiles);
+    }
+
+    #[test]
+    fn the_active_profile_is_written_next_to_the_providers() {
+        let mut config = AppConfig::empty();
+        config.active_profile = Some("balanced".into());
+        config.profiles.insert(
+            "balanced".into(),
+            [(
+                "deepseek".into(),
+                ProfileBinding {
+                    model: "deepseek-v4-flash".into(),
+                    effort: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let written = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            written.contains("active_profile = \"balanced\""),
+            "{written}"
+        );
+        let reread: AppConfig = toml::from_str(&written).unwrap();
+        assert_eq!(reread.active_profile.as_deref(), Some("balanced"));
+    }
 
     #[tokio::test]
     async fn ensure_user_config_creates_template_once() {
@@ -1602,6 +1700,7 @@ supports_vision = true
                 base_url: Some("https://proxy.example".into()),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1642,6 +1741,7 @@ supports_vision = true
                 name: Some("moonshot".into()),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1677,6 +1777,7 @@ supports_vision = true
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1729,6 +1830,7 @@ supports_vision = true
                 model: Some("deepseek-v4-flash".into()),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1740,6 +1842,7 @@ supports_vision = true
                 model: Some("grok-4.6".into()),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1772,6 +1875,7 @@ supports_vision = true
                 model: Some("deepseek-v4-flash".into()),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1783,6 +1887,7 @@ supports_vision = true
                 reasoning_effort: Some(ReasoningEffort::High),
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();

@@ -9,6 +9,7 @@ mod exit;
 mod memory;
 mod model;
 mod plan;
+mod profile;
 mod setup;
 
 use oven_agent::Agent;
@@ -26,6 +27,7 @@ pub use exit::Exit;
 pub use memory::Memory;
 pub(crate) use model::{Model, ModelDirective};
 pub use plan::Plan;
+pub use profile::Profile;
 pub use setup::Setup;
 
 /// What a command may reach: the conversation driver it configures, and the
@@ -75,6 +77,12 @@ pub enum CommandOutcome {
         model: String,
         reasoning_effort: Option<oven_llm::ReasoningEffort>,
     },
+    /// The profiles this vendor has, and which one is in effect.
+    ProfileQuery,
+    /// Switch to a quality profile.
+    ProfileChanged {
+        name: String,
+    },
     ProviderChanged {
         provider: ProviderConfig,
     },
@@ -111,6 +119,7 @@ impl SlashRegistry {
         r.register(Box::new(Compact));
         r.register(Box::new(Exit));
         r.register(Box::new(Model));
+        r.register(Box::new(Profile));
         r.register(Box::new(Setup));
         r.register(Box::new(Plan));
         r.register(Box::new(Agents));
@@ -293,11 +302,12 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 8);
+        assert_eq!(cmds.len(), 9);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "compact" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
         assert!(cmds.iter().any(|(n, d)| n == "model" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, d)| n == "profile" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "setup" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "plan" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "agents" && !d.is_empty()));

@@ -19,6 +19,7 @@ use crate::capabilities::subagent::Subagents;
 use crate::commands::{CommandOutcome, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::EventBus;
+use crate::core::profile;
 use crate::core::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,
@@ -182,6 +183,9 @@ impl Runtime {
             shared::effort_warning(router.as_ref(), &model, self.agent.reasoning_effort())
         {
             self.emit(AppEventKind::Notification { text: warning });
+        }
+        if let Some(warning) = profile_warning(&config) {
+            self.emit_error(warning);
         }
     }
 
@@ -371,6 +375,11 @@ impl Runtime {
                 model,
                 reasoning_effort,
             } => self.shared.switch_model(model, reasoning_effort).await,
+            CommandOutcome::ProfileQuery => {
+                let text = self.shared.describe_profiles();
+                self.shared.notify(text);
+            }
+            CommandOutcome::ProfileChanged { name } => self.shared.switch_profile(name).await,
             CommandOutcome::ProviderChanged { provider } => self.set_provider(provider).await,
             CommandOutcome::ModeChanged { mode } => {
                 self.shared.set_mode(mode);
@@ -444,6 +453,10 @@ impl Runtime {
             .expect("provider name assigned before update");
         next.merge_provider(&name, &overlay);
         next.active_provider.name = name;
+        // A profile is a promise about quality, and each vendor keeps it
+        // differently: the new vendor's binding wins over what the provider
+        // table says.
+        let profile_warning = apply_profile(&mut next);
         let model = next
             .active_provider_config()
             .expect("active provider inserted before build")
@@ -491,6 +504,9 @@ impl Runtime {
         self.emit(AppEventKind::Notification {
             text: summarize_setup(&overlay, saved.as_deref()),
         });
+        if let Some(warning) = profile_warning {
+            self.emit_error(warning);
+        }
         if let Some(body) = auth_error {
             self.emit_error(format!("API key rejected: {body}"));
         }
@@ -546,12 +562,45 @@ impl Runtime {
     }
 
     async fn save_provider_overlay(&self, overlay: &ProviderConfig) -> Option<PathBuf> {
-        save_provider_overlay(self.shared.user_config_path(), overlay, &self.shared.events).await
+        let profile = self.shared.config().active_profile.clone();
+        save_provider_overlay(
+            self.shared.user_config_path(),
+            overlay,
+            profile.as_deref(),
+            &self.shared.events,
+        )
+        .await
     }
 }
 
 fn format_compacted(before_tokens: u32, after_tokens: u32) -> String {
     format!("context compacted: {before_tokens} → {after_tokens} tokens")
+}
+
+/// Expand the active profile onto the active provider, and report when the
+/// vendor has no binding for it.
+///
+/// A profile is a promise about quality, and each vendor keeps it differently:
+/// the binding wins over what the provider table says.
+fn apply_profile(config: &mut AppConfig) -> Option<String> {
+    let name = config.active_profile.clone()?;
+    let provider = profile::active_provider(config);
+    let Some(binding) = profile::binding(&config.profiles, &name, &provider).cloned() else {
+        return Some(format!("profile '{name}' has no binding for {provider}"));
+    };
+    let provider_config = config.providers.get_mut(provider.slug())?;
+    provider_config.model = Some(binding.model);
+    provider_config.reasoning_effort = binding.effort;
+    None
+}
+
+/// Warn when the active profile has no binding for the active vendor.
+fn profile_warning(config: &AppConfig) -> Option<String> {
+    let name = config.active_profile.as_deref()?;
+    let provider = profile::active_provider(config);
+    profile::binding(&config.profiles, name, &provider)
+        .is_none()
+        .then(|| format!("profile '{name}' has no binding for {provider}"))
 }
 
 pub(crate) fn hydrate_session(agent: &mut Agent, prior: &[Record]) {

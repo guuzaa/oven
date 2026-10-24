@@ -1,6 +1,6 @@
 use crate::capabilities::subagent::{SubagentParts, Subagents};
 use crate::capabilities::tools::{TaskTool, TodoWriteTool};
-use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
+use crate::core::config::{AppConfig, ProfileBinding, ProviderConfig, ProviderSelection};
 use crate::core::event::EventBus;
 use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL};
 use crate::core::session::{Session, canonical_root};
@@ -484,7 +484,7 @@ async fn handle_exposes_slash_commands() {
     assert_eq!(
         names,
         [
-            "clear", "compact", "exit", "model", "setup", "plan", "agents", "memory"
+            "clear", "compact", "exit", "model", "profile", "setup", "plan", "agents", "memory"
         ]
     );
     assert!(commands.iter().all(|(_, d)| !d.is_empty()));
@@ -1183,6 +1183,97 @@ async fn spawn_applies_configured_reasoning_effort() {
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     let out = handle.prompt("/model").await.unwrap();
     assert!(out.contains("reasoning effort: medium"));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_profile_switch_moves_the_model_and_keeps_the_profile() {
+    let tmp = tempdir::TempDir::new("app-profile-switch").unwrap();
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig {
+            active_provider: ProviderSelection {
+                name: "mock".into(),
+            },
+            providers: [(
+                "mock".into(),
+                ProviderConfig {
+                    name: Some("mock".into()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            profiles: [(
+                "balanced".into(),
+                [(
+                    "mock".into(),
+                    ProfileBinding {
+                        model: "mock-model".into(),
+                        effort: Some(oven_llm::ReasoningEffort::High),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+            ..AppConfig::default()
+        })
+        .await;
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+
+    handle.prompt("/profile balanced").await.unwrap();
+    assert_eq!(handle.state().levels.model, "mock/mock-model");
+    assert_eq!(
+        handle.state().levels.reasoning_effort,
+        Some(oven_llm::ReasoningEffort::High)
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_profile_without_a_binding_for_the_vendor_changes_nothing() {
+    let tmp = tempdir::TempDir::new("app-profile-missing").unwrap();
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig {
+            active_provider: ProviderSelection {
+                name: "mock".into(),
+            },
+            providers: [(
+                "mock".into(),
+                ProviderConfig {
+                    name: Some("mock".into()),
+                    reasoning_effort: Some(oven_llm::ReasoningEffort::Medium),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            profiles: [(
+                "balanced".into(),
+                [(
+                    "other".into(),
+                    ProfileBinding {
+                        model: "other-model".into(),
+                        effort: Some(oven_llm::ReasoningEffort::High),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+            ..AppConfig::default()
+        })
+        .await;
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+
+    let err = handle.prompt("/profile balanced").await.unwrap_err();
+    assert!(err.to_string().contains("has no binding"), "{err}");
+    assert_eq!(
+        handle.state().levels.reasoning_effort,
+        Some(oven_llm::ReasoningEffort::Medium)
+    );
     handle.shutdown().await;
 }
 

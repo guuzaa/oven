@@ -581,6 +581,7 @@ mod tests {
             ("clear".into(), "Clear conversation history.".into()),
             ("exit".into(), "End the session.".into()),
             ("model".into(), "Switch model and reasoning effort.".into()),
+            ("profile".into(), "Switch the quality profile.".into()),
             ("setup".into(), "Configure provider.".into()),
         ]
     }
@@ -641,7 +642,7 @@ mod tests {
         let mut view = view();
         type_text(&mut view, "/");
         assert!(view.slash_command.is_open());
-        assert_eq!(view.overlay_height(), 4);
+        assert_eq!(view.overlay_height(), 5);
         assert_eq!(view.overlay(), Overlay::Slash);
     }
 
@@ -736,6 +737,8 @@ mod tests {
         assert_eq!(view.slash_command.selected_command(), Some(2));
         view.handle_key(key(KeyCode::Down), &State::new());
         assert_eq!(view.slash_command.selected_command(), Some(3));
+        view.handle_key(key(KeyCode::Down), &State::new());
+        assert_eq!(view.slash_command.selected_command(), Some(4));
         view.handle_key(key(KeyCode::Down), &State::new());
         assert_eq!(view.slash_command.selected_command(), Some(0));
     }

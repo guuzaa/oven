@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- `oven-app`: quality profiles — a name we choose (`balanced`, `deep`…) and what it means for each vendor, so the same quality is a different model on a different vendor. `/profile <name>` switches to one, `/profile` lists what the active vendor has, and a vendor without that binding is refused rather than quietly kept
 - `oven-llm`: replay tests that pin both halves of a call — a recorded exchange per vendor (`kimi-k3`, `kimi-k2.6`, `MiniMax-M3`, `grok-4.6`) replays the request body and the response through the encoders and the decoders, so a change in either shows up as a failing test instead of a broken call
 - `oven-llm`: MiniMax is a vendor now — `minimax` in the setup wizard, the OpenAI-compatible endpoint (`https://api.minimax.io/v1`), and the reasoning parameters MiniMax actually takes: `thinking.type` on the models that can turn thinking off, `reasoning_effort` on the ones that take a depth, and `reasoning_split` on every request so the thinking comes back as thinking rather than as text
 - `oven-llm`: the reasoning effort is one axis — `ReasoningEffort::None` is now `Off` (the wire word stays `"none"`), and `Minimal`, `XHigh`, `Max` and `Budget(u32)` join it. An effort that is not set means "no preference": no field reaches the wire at all; before, the Responses protocol turned it into `effort: "none"` and forced the upstream default off
@@ -13,6 +14,7 @@
 - Every protocol type has a serde form, and the wire format is pinned by tests
 
 ### Changed
+- `oven-app`: a manual `/model` unbinds the profile — the user asked for a model, not for a quality level — and switching vendors re-expands the profile for the new vendor
 - **Breaking:** `oven-llm`: the sampling parameters are no longer sent by default — the vendor's own default is the right one, and the Kimi family fixes its temperature per model (thinking 1.0, non-thinking 0.6) and rejects any other value
 - `oven-llm`: the Moonshot and xAI reasoning parameters are calibrated from the vendor docs — Kimi K3 takes `reasoning_effort` (`low`/`high`/`max`, no `medium`), `kimi-k2.6` takes the `thinking.type` switch, `kimi-k2.7-code` always thinks and takes neither, and the Grok models with no effort option say so
 - `oven-llm`: a model whose reasoning depth is fixed gets no reasoning field at all — a new `EffortSupport::Fixed`, next to `Unknown`, `Unsupported`, `Toggle` and `Levels`
