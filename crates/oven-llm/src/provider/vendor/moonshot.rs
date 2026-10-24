@@ -1,16 +1,33 @@
-//! Moonshot（Kimi）系：档位走 `reasoning_effort`。
+//! Moonshot（Kimi）系：档位走 `reasoning_effort`，开关走 `thinking.type`，
+//! 两者**按模型分开**。
 //!
-//! 档位集尚未核实，先留 `Unknown`（不干预，按方言的默认行为发送）。核实后
-//! 改成 `Levels`。
+//! - `kimi-k3` / `kimi-k3.1-pro`：思考强度用顶层 `reasoning_effort`
+//!   （`low` / `high` / `max`，默认 `max`），不支持 `thinking` 参数。
+//! - `kimi-k2.6`：默认就思考，用 `thinking.type`（`enabled` / `disabled`）
+//!   控制，不支持 `reasoning_effort`。
+//! - `kimi-k2.7-code`：始终思考，`thinking.type` 只接受 `enabled`
+//!   （传 `disabled` 报错），也不支持 `reasoning_effort`。
 //!
-//! 方言同样未核实：Kimi 读不读 `thinking.type` 没有定论，所以两条通道都发
-//! （与今天一致），核实后再收窄成 `Level`。
+//! 思考内容在 `reasoning_content` 里回来，多轮要把它原样带回去。
+
+use std::borrow::Cow;
 
 use super::Dialect;
 use super::capability::EffortSupport;
+use crate::domain::ReasoningEffort;
 
-/// Moonshot 系的推理方言。
-pub const DIALECT: Dialect = Dialect::Both;
+/// Moonshot 系的推理方言：K3 一代走档位通道。
+pub const DIALECT: Dialect = Dialect::Level;
 
-/// Moonshot 系模型支持的档位：尚未核实。
-pub const CAPABILITIES: EffortSupport = EffortSupport::Unknown;
+/// Moonshot 系默认的档位集：K3 一代的 `low` / `high` / `max`（没有 `medium`）。
+pub const CAPABILITIES: EffortSupport = EffortSupport::Levels(Cow::Borrowed(&[
+    ReasoningEffort::Low,
+    ReasoningEffort::High,
+    ReasoningEffort::Max,
+]));
+
+/// `kimi-k2.6`：只有开关，默认就思考。
+pub const K2_6: EffortSupport = EffortSupport::Toggle;
+
+/// `kimi-k2.7-code`：始终思考，既不能调深度也不能关。
+pub const K2_7_CODE: EffortSupport = EffortSupport::Fixed;

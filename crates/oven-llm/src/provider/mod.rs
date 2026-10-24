@@ -22,7 +22,7 @@ pub use retry::RetryingProvider;
 pub use router::{Client, Router, RouterError, RouterHandle};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use validate::{ValidationError, estimate_input_tokens, validate_request};
-pub use vendor::{Dialect, EffortSupport, ReasoningIntent, VendorProfile, resolve_reasoning};
+pub use vendor::{Dialect, EffortSupport, VendorProfile, clamp_level};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;

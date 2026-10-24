@@ -7,13 +7,13 @@ pub mod capability;
 mod deepseek;
 mod glm;
 pub(crate) mod minimax;
-mod moonshot;
+pub(crate) mod moonshot;
 mod openai;
 mod resolve;
-mod xai;
+pub(crate) mod xai;
 
 pub use capability::EffortSupport;
-pub use resolve::{Channels, ReasoningIntent, channels, resolve_reasoning};
+pub use resolve::{Channels, channels, clamp_level, resolve_reasoning};
 
 use crate::ProviderKind;
 use crate::ProviderName;
@@ -99,8 +99,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unverified_vendor_keeps_sending_both_channels() {
-        assert_eq!(dialect_for(&ProviderName::Moonshot), Dialect::Both);
+    fn moonshot_speaks_the_level_channel() {
+        assert_eq!(dialect_for(&ProviderName::Moonshot), Dialect::Level);
     }
 
     #[test]

@@ -11,6 +11,9 @@
 - Every protocol type has a serde form, and the wire format is pinned by tests
 
 ### Changed
+- `oven-llm`: the Moonshot and xAI reasoning parameters are calibrated from the vendor docs — Kimi K3 takes `reasoning_effort` (`low`/`high`/`max`, no `medium`), `kimi-k2.6` takes the `thinking.type` switch, `kimi-k2.7-code` always thinks and takes neither, and the Grok models with no effort option say so
+- `oven-llm`: a model whose reasoning depth is fixed gets no reasoning field at all — a new `EffortSupport::Fixed`, next to `Unknown`, `Unsupported`, `Toggle` and `Levels`
+- `oven-tui`: the status bar shows the effort as it was asked for; a switch-only model reads as `on`, and a model that does not reason (or whose depth is fixed) shows no effort at all
 - **Breaking:** `oven-llm`: the request and the options are separate arguments — `Provider::complete` and `Provider::stream` take `(&Request, &CallOptions)`. The request is the conversation and the model it goes to; the options are how to ask (sampling, reasoning effort, private fields). The same request can go out with different options, and a turn rebuilds only the conversation
 - **Breaking:** `oven-llm`: `SamplingParams` and `CallOptions` move out of `domain::request` into `domain::options`; the crate-root paths are unchanged
 - `oven-llm`: the model's own capability decides which reasoning channel a request uses — a model with levels takes the level channel, a model with only a switch takes the switch channel — and the vendor dialect is the fallback for a model nobody knows. MiniMax needs both: `MiniMax-M3` has a switch, `MiniMax-M3.1-Flash` has levels

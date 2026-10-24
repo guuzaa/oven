@@ -10,7 +10,7 @@ use oven_agent::{
     Agent, CancellationToken, PendingInput, PendingRequest, RequestSink, RouterHandle, Selection,
     UserRequest,
 };
-use oven_llm::{ModelId, ReasoningEffort, ReasoningIntent, Router, resolve_reasoning};
+use oven_llm::{EffortSupport, ModelId, ReasoningEffort, Router, clamp_level};
 use oven_proto::{
     AgentEvent, AgentId, AgentMode, ToolEvent, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
@@ -291,18 +291,28 @@ pub(crate) fn effort_warning(
 ) -> Option<String> {
     let effort = effort?;
     let support = &router.resolve_model(&ModelId::from(model))?.effort_support;
-    match resolve_reasoning(Some(effort), support) {
-        ReasoningIntent::Unset => Some(format!(
+    match support {
+        EffortSupport::Unknown => None,
+        EffortSupport::Unsupported => Some(format!(
             "{model} does not reason; the request carries no reasoning field"
         )),
-        ReasoningIntent::Off => None,
-        ReasoningIntent::On => Some(format!(
+        EffortSupport::Fixed => Some(format!(
+            "{model} thinks at a fixed depth; the request carries no reasoning field"
+        )),
+        EffortSupport::Toggle => Some(format!(
             "{model} only has a reasoning switch; {effort} will be treated as on"
         )),
-        ReasoningIntent::At(level) if level == effort => None,
-        ReasoningIntent::At(level) => Some(format!(
-            "{model} does not take {effort}; {level} will be used"
-        )),
+        EffortSupport::Levels(levels) => {
+            if levels.contains(&effort) {
+                return None;
+            }
+            match clamp_level(effort, levels) {
+                Some(level) => Some(format!(
+                    "{model} does not take {effort}; {level} will be used"
+                )),
+                None => Some(format!("{model} does not take {effort}")),
+            }
+        }
     }
 }
 

@@ -49,7 +49,7 @@ pub fn resolve_reasoning(
             ReasoningEffort::Off => ReasoningIntent::Off,
             other => ReasoningIntent::At(other),
         },
-        EffortSupport::Unsupported => ReasoningIntent::Unset,
+        EffortSupport::Unsupported | EffortSupport::Fixed => ReasoningIntent::Unset,
         EffortSupport::Toggle => match requested {
             ReasoningEffort::Off => ReasoningIntent::Off,
             _ => ReasoningIntent::On,
@@ -84,6 +84,7 @@ pub fn channels(intent: ReasoningIntent, dialect: Dialect, support: &EffortSuppo
     let (level, toggle) = match support {
         EffortSupport::Toggle => (None, toggle),
         EffortSupport::Levels(_) => (level, None),
+        EffortSupport::Unsupported | EffortSupport::Fixed => (None, None),
         _ => match dialect {
             Dialect::Level => (level, None),
             Dialect::Toggle => (None, toggle),
@@ -97,7 +98,7 @@ pub fn channels(intent: ReasoningIntent, dialect: Dialect, support: &EffortSuppo
 ///
 /// 取不强于请求的最高档；请求（`Off` 或预算）不在强度阶梯上时，取集合里
 /// 最弱的档。集合里没有可用档位时返回 `None`。
-fn clamp_level(
+pub fn clamp_level(
     requested: ReasoningEffort,
     supported: &[ReasoningEffort],
 ) -> Option<ReasoningEffort> {

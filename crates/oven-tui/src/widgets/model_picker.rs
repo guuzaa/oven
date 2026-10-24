@@ -115,7 +115,9 @@ impl ModelPicker {
                     (TOGGLE_ON, "Enable reasoning"),
                 ]
             }
-            _ => ALL_LEVELS
+            // 深度固定或不推理的模型：推理参数不由我们决定，只剩"保持当前"。
+            EffortSupport::Fixed | EffortSupport::Unsupported => Vec::new(),
+            EffortSupport::Unknown => ALL_LEVELS
                 .iter()
                 .map(|word| (*word, level_label(word)))
                 .collect(),

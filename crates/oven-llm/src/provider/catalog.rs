@@ -1,7 +1,7 @@
 //! 合并后的静态模型目录：每个模型一条，协议写在 `protocols` 里（第一个为默认）。
 
 use super::model::{ModelCapabilities, ModelInfo, Pricing};
-use super::vendor::{EffortSupport, capabilities_for, minimax};
+use super::vendor::{EffortSupport, capabilities_for, minimax, moonshot, xai};
 use crate::{ProviderKind, ProviderName};
 
 pub(crate) const OPENAI_DEFAULT_MODEL: &str = "gpt-5.6-terra";
@@ -115,7 +115,8 @@ fn moonshot_models() -> Vec<ModelInfo> {
             caps(false, 64),
             Some((0.6, 2.4)),
             &[ProviderKind::Completions],
-        ),
+        )
+        .with_effort_support(moonshot::K2_7_CODE),
         model(
             "kimi-k2.6",
             ProviderName::Moonshot,
@@ -123,7 +124,8 @@ fn moonshot_models() -> Vec<ModelInfo> {
             k2_6,
             Some((0.3, 1.2)),
             &[ProviderKind::Completions],
-        ),
+        )
+        .with_effort_support(moonshot::K2_6),
     ]
 }
 
@@ -177,7 +179,7 @@ fn grok_models() -> Vec<ModelInfo> {
         model(
             GROK_46,
             ProviderName::Grok,
-            (256_000, 100_000),
+            (500_000, 100_000),
             caps(false, 64),
             Some((0.5, 1.0)),
             &[ProviderKind::Responses],
@@ -189,7 +191,8 @@ fn grok_models() -> Vec<ModelInfo> {
             caps(false, 64),
             Some((0.5, 1.0)),
             &[ProviderKind::Responses],
-        ),
+        )
+        .with_effort_support(xai::FIXED_DEPTH),
     ]
 }
 
@@ -294,15 +297,53 @@ mod tests {
     }
 
     #[test]
-    fn vendors_without_a_verified_set_do_not_intervene() {
+    fn the_kimi_models_differ_in_how_they_take_reasoning() {
         let models = all_models();
-
-        for provider in [ProviderName::Moonshot, ProviderName::Grok] {
-            let model = models
+        let support = |id: &str| {
+            models
                 .iter()
-                .find(|model| model.provider == provider)
-                .unwrap();
-            assert_eq!(model.effort_support, EffortSupport::Unknown);
-        }
+                .find(|model| model.id == id)
+                .unwrap()
+                .effort_support
+                .clone()
+        };
+
+        // K3 一代用 reasoning_effort，没有 medium。
+        assert_eq!(
+            support(KIMI_K3).levels(),
+            &[
+                ReasoningEffort::Low,
+                ReasoningEffort::High,
+                ReasoningEffort::Max
+            ]
+        );
+        // K2.6 只有开关。
+        assert_eq!(support("kimi-k2.6"), EffortSupport::Toggle);
+        // K2.7-code 始终思考，既不能调深度也不能关。
+        assert_eq!(support("kimi-k2.7-code"), EffortSupport::Fixed);
+    }
+
+    #[test]
+    fn the_grok_models_that_cannot_be_tuned_say_so() {
+        let models = all_models();
+        let support = |id: &str| {
+            models
+                .iter()
+                .find(|model| model.id == id)
+                .unwrap()
+                .effort_support
+                .clone()
+        };
+
+        assert_eq!(
+            support(GROK_46).levels(),
+            &[
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::XHigh,
+            ]
+        );
+        assert_eq!(support("grok-build-0.1"), EffortSupport::Fixed);
     }
 }

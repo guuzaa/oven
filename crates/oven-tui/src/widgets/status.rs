@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use oven_app::{
     AgentEvent, AgentMode, AppEvent, AppEventKind, AppLevels, CompactionEvent, TurnEvent,
 };
-use oven_llm::{EffortSupport, ReasoningEffort, ReasoningIntent, Usage, resolve_reasoning};
+use oven_llm::{EffortSupport, ReasoningEffort, Usage};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -210,21 +210,21 @@ impl StatusBar {
     }
 
     fn model_label(&self) -> String {
-        match self.effort {
-            Some(effort) => format!("{} {}", self.model, self.effort_label(effort)),
+        match self.effort.and_then(|effort| self.effort_label(effort)) {
+            Some(label) => format!("{} {label}", self.model),
             None => self.model.clone(),
         }
     }
 
-    /// The effort as the model reads it: a switch-only model has no levels,
-    /// so any of them reads as "on", and a level it does not take reads as
-    /// the one it will use.
-    fn effort_label(&self, effort: ReasoningEffort) -> String {
-        match resolve_reasoning(Some(effort), &self.effort_support) {
-            ReasoningIntent::Unset => "unsupported".to_string(),
-            ReasoningIntent::Off => "none".to_string(),
-            ReasoningIntent::On => "on".to_string(),
-            ReasoningIntent::At(level) => level.to_string(),
+    /// The effort as the model reads it. A switch-only model has no levels, so
+    /// any of them reads as "on"; a model whose depth is fixed (or that does
+    /// not reason) shows no effort at all. The value asked for is shown as it
+    /// is: what the request does with it is the request path's business.
+    fn effort_label(&self, effort: ReasoningEffort) -> Option<String> {
+        match &self.effort_support {
+            EffortSupport::Unsupported | EffortSupport::Fixed => None,
+            EffortSupport::Toggle => Some(if effort.is_off() { "off" } else { "on" }.to_string()),
+            _ => Some(effort.to_string()),
         }
     }
 
@@ -407,11 +407,11 @@ mod tests {
         assert_eq!(bar.model_label(), "deepseek-chat on");
 
         bar.effort = Some(ReasoningEffort::Off);
-        assert_eq!(bar.model_label(), "deepseek-chat none");
+        assert_eq!(bar.model_label(), "deepseek-chat off");
     }
 
     #[test]
-    fn a_level_the_model_does_not_take_reads_as_the_one_it_will_use() {
+    fn the_effort_is_shown_as_it_was_asked_for() {
         let mut bar = bar();
         bar.effort_support = EffortSupport::Levels(std::borrow::Cow::Owned(vec![
             ReasoningEffort::Off,
@@ -419,7 +419,14 @@ mod tests {
             ReasoningEffort::High,
         ]));
         bar.effort = Some(ReasoningEffort::Medium);
-        assert_eq!(bar.model_label(), "deepseek-chat low");
+        assert_eq!(bar.model_label(), "deepseek-chat medium");
+    }
+
+    #[test]
+    fn a_model_that_does_not_reason_shows_no_effort() {
+        let mut bar = bar();
+        bar.effort_support = EffortSupport::Unsupported;
+        assert_eq!(bar.model_label(), "deepseek-chat");
     }
 
     fn agent_event(event: AgentEvent) -> AppEvent {
