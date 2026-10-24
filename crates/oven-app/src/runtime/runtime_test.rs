@@ -1,4 +1,5 @@
 use crate::capabilities::subagent::{SubagentParts, Subagents};
+use crate::capabilities::tools::{TaskTool, TodoWriteTool};
 use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
 use crate::core::event::EventBus;
 use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL};
@@ -22,7 +23,7 @@ use futures::Stream;
 use futures::stream::BoxStream;
 use oven_agent::{
     Agent, AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, PendingInput, Record,
-    TaskTool, TodoWriteTool, Tool, ToolOutcome, TurnContext, TurnEvent, TurnId,
+    Tool, ToolOutcome, TurnContext, TurnEvent, TurnId,
 };
 use oven_llm::{
     ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName,

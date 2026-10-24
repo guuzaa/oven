@@ -5,10 +5,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{Tool, ToolOutcome, ToolView, labeled, require_str, resolve_within};
-
-use crate::core::turn::TurnContext;
-use oven_proto::AgentError;
+use super::{labeled, require_str, resolve_within};
+use oven_agent::{AgentError, Tool, ToolOutcome, TurnContext};
+use oven_proto::ToolView;
 
 pub struct FileReadTool {
     root: PathBuf,
@@ -101,9 +100,7 @@ impl Tool for FileReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn turn() -> TurnContext {
-        TurnContext::for_test()
-    }
+    use crate::capabilities::tools::test_context;
     use serde_json::json;
 
     fn tmp_dir() -> tempdir::TempDir {
@@ -115,7 +112,7 @@ mod tests {
         let tmp = tmp_dir();
         let read = FileReadTool::new(tmp.path());
         let err = read
-            .run(&json!({"path": "../etc/passwd"}), &turn())
+            .run(&json!({"path": "../etc/passwd"}), &test_context())
             .await
             .unwrap_err();
         assert!(err.message.contains("escapes root"));
@@ -128,7 +125,10 @@ mod tests {
         std::fs::write(&path, "l1\nl2\nl3\nl4\n").unwrap();
         let read = FileReadTool::new(tmp.path());
         let ToolOutcome { output: out, .. } = read
-            .run(&json!({"path": "r.txt", "offset": 2, "limit": 2}), &turn())
+            .run(
+                &json!({"path": "r.txt", "offset": 2, "limit": 2}),
+                &test_context(),
+            )
             .await
             .unwrap();
         assert_eq!(out, "file: r.txt\nlines: 2-3\n\nL2→l2\nL3→l3\n");
@@ -141,7 +141,10 @@ mod tests {
         std::fs::write(&path, "l1\nl2\n").unwrap();
         let read = FileReadTool::new(tmp.path());
         let ToolOutcome { output: out, .. } = read
-            .run(&json!({"path": "r.txt", "offset": 99, "limit": 5}), &turn())
+            .run(
+                &json!({"path": "r.txt", "offset": 99, "limit": 5}),
+                &test_context(),
+            )
             .await
             .unwrap();
         assert_eq!(out, "file: r.txt\nlines: empty\n");
@@ -153,8 +156,10 @@ mod tests {
         let path = tmp.path().join("r.txt");
         std::fs::write(&path, "one\ntwo").unwrap();
         let read = FileReadTool::new(tmp.path());
-        let ToolOutcome { output: out, .. } =
-            read.run(&json!({"path": "r.txt"}), &turn()).await.unwrap();
+        let ToolOutcome { output: out, .. } = read
+            .run(&json!({"path": "r.txt"}), &test_context())
+            .await
+            .unwrap();
         assert_eq!(out, "file: r.txt\nlines: 1-2\n\nL1→one\nL2→two");
     }
 
@@ -165,7 +170,7 @@ mod tests {
         std::fs::write(&path, "l1\nl2\nl3\nl4\n").unwrap();
         let read = FileReadTool::new(tmp.path());
         let ToolOutcome { output: out, .. } = read
-            .run(&json!({"path": "r.txt", "offset": 2}), &turn())
+            .run(&json!({"path": "r.txt", "offset": 2}), &test_context())
             .await
             .unwrap();
         assert_eq!(out, "file: r.txt\nlines: 2-4\n\nL2→l2\nL3→l3\nL4→l4\n");

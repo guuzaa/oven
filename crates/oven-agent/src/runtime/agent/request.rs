@@ -48,8 +48,8 @@ impl Agent {
         prompt_template::compose_system(base, mode)
     }
 
-    /// Plan mode asks for a todo update after several tool rounds skipped
-    /// `todo_write`. The note is appended to that request only.
+    /// Plan mode asks for a todo update after several tool rounds skipped the
+    /// checklist. The note is appended to that request only.
     fn wants_plan_reminder(&self, mode: AgentMode) -> bool {
         mode == AgentMode::Plan
             && self.todo_misses >= prompt_template::PLAN_REMINDER_AFTER_MISSES

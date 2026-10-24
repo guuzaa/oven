@@ -18,6 +18,13 @@
 - `oven-agent` and `oven-app` re-export what they used to own, so `oven_app::AppEvent` and `oven_agent::AgentEvent` still resolve and no public path moved
 - `oven-llm` talks HTTP over `reqwest` instead of `isahc` (0.6.0): the crate now needs a Tokio runtime, `ProviderError::Transport` carries a `reqwest::Error`, and `ProviderError::Io` is gone. The `curl-sys`, `libz-sys` and `libnghttp2-sys` builds leave the tree, so a build needs no C toolchain and no CMake
 - The Windows release artifact is built with the MSVC toolchain and is named `oven-<tag>-x86_64-pc-windows-msvc.zip`; an ARM64 build (`aarch64-pc-windows-msvc`) ships beside it. The `x86_64-pc-windows-gnu` target is dropped, and the PowerShell installer picks the MSVC build the machine needs
+- **Breaking:** the built-in tools move from `oven-agent` to `oven-app`: `file_read`, `file_write`, `file_edit`, `bash`, `glob`, `grep`, `web_fetch`, `todo_write`, `answer`, `task`, `task_output`, `list_models` and `skill_read` are reached through `oven_app::…` now, and `BUILTIN_TOOLS` and `present_tool` live there too. `oven-agent` keeps the `Tool` protocol and the nouns around it, so the driver never names a tool it was not handed
+- **Breaking:** `Skill` and `SkillRegistry` move to `oven-app` as well. The agent layer never consumed a skill — it took a rendered list for the system prompt and nothing else — so the registry and the `skill_read` tool belong with the rest of the app's capabilities
+- `Tool::effect` says what a call leaves behind: `todo_write` hands back the checklist it wrote, and the driver records it and emits `TodosChanged` without naming the tool
+- `Tool::view` falls back to the tool's own name, so a tool describes itself instead of being looked up in a global table
+
+### Fixed
+- A `todo_write` call that was refused no longer rewrites the checklist: the driver takes the checklist from the tool it ran, so a call to a tool that is not mounted leaves the plan alone
 
 ## [0.1.1] - 2026-10-22
 

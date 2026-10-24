@@ -1,5 +1,3 @@
-#[cfg(test)]
-use oven_llm::ModelId;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -214,7 +212,7 @@ pub struct TurnOutput {
 ///
 /// This is what a loop strategy reads between steps. Tool output is not
 /// repeated here — it is the tool-result message the step appended to the
-/// history — so a step carrying a huge `file_read` result stays cheap.
+/// history — so a step carrying a huge tool result stays cheap.
 #[derive(Debug, Clone)]
 pub struct Step {
     pub text: String,
@@ -243,22 +241,6 @@ pub struct StepCall {
     pub call_id: ToolCallId,
     pub name: String,
     pub outcome: CallOutcome,
-}
-
-#[cfg(test)]
-impl TurnContext {
-    /// A bare context for tests that exercise a tool without driving a turn.
-    pub(crate) fn for_test() -> Self {
-        Self::for_test_in(AgentMode::Agent)
-    }
-
-    pub(crate) fn for_test_in(mode: AgentMode) -> Self {
-        Self::new(
-            TurnId::next(),
-            CancellationToken::new(),
-            Selection::new(mode, ModelId::new("default"), None),
-        )
-    }
 }
 
 impl TurnOutput {

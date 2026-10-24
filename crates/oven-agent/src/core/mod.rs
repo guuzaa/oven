@@ -6,10 +6,10 @@
 
 pub mod history;
 pub mod interaction;
-pub mod matching;
 pub mod models;
 pub mod prompt_template;
 pub mod selection;
 pub mod subagent;
+pub mod tool;
 pub mod turn;
 pub mod view;

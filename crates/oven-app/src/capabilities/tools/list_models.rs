@@ -8,10 +8,7 @@ use async_trait::async_trait;
 use oven_llm::ModelInfo;
 use serde_json::{Value, json};
 
-use crate::capabilities::tools::{Tool, ToolOutcome};
-use crate::core::models::ModelCatalog;
-use crate::core::turn::TurnContext;
-use oven_proto::AgentError;
+use oven_agent::{AgentError, ModelCatalog, Tool, ToolOutcome, TurnContext};
 
 const NO_MODELS: &str = "no models are available; configure a provider with /setup";
 const UNKNOWN: &str = "unknown";
@@ -79,6 +76,7 @@ fn limit(tokens: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capabilities::tools::test_context;
     use oven_llm::{ModelCapabilities, ProviderName};
 
     struct Catalog(Vec<ModelInfo>);
@@ -111,7 +109,7 @@ mod tests {
             model("deepseek-v4-flash", 1_000_000, 384_000),
             model("model", 0, 0),
         ])
-        .run(&json!({}), &TurnContext::for_test())
+        .run(&json!({}), &test_context())
         .await
         .unwrap();
         assert!(
@@ -127,7 +125,7 @@ mod tests {
     #[tokio::test]
     async fn says_so_when_nothing_is_available() {
         let ToolOutcome { output: out, .. } = tool(Vec::new())
-            .run(&json!({}), &TurnContext::for_test())
+            .run(&json!({}), &test_context())
             .await
             .unwrap();
         assert_eq!(out, NO_MODELS);

@@ -79,7 +79,7 @@ oven-agent: vocabulary       SpawnRequest / NodeHandle / NodeOutcome / NodeInfo 
 oven-app:   machinery        Subagents (registry + semaphore + one tokio task per subagent)
 ```
 
-Tools only know `Arc<dyn SubagentSpawner>`; they don't know how a subagent is built, which tools it mounts, or how long it runs. This line keeps `task` in `oven-agent` (alongside the other built-in tools) while all policy stays in the app layer.
+Tools only know `Arc<dyn SubagentSpawner>`; they don't know how a subagent is built, which tools it mounts, or how long it runs. This line keeps the spawner protocol in `oven-agent` while the `task` tool and all policy stay in the app layer.
 
 ### 4.2 The path of one `task` call
 
@@ -285,7 +285,7 @@ max_iters = 60         # one subagent's provider round-trip budget
 | Concern | Location |
 |---------|----------|
 | Delegation protocol (vocabulary) | `crates/oven-agent/src/core/subagent.rs` |
-| `task` / `task_output` | `crates/oven-agent/src/capabilities/tools/task.rs` |
+| `task` / `task_output` | `crates/oven-app/src/capabilities/tools/task.rs` |
 | Subagent system-prompt preamble | `crates/oven-agent/src/core/prompt_template/subagent.{rs,md}` |
 | Loop seams: `Step` / `RunPolicy` | `crates/oven-agent/src/core/turn.rs`, `crates/oven-agent/src/runtime/agent/step.rs` |
 | Iteration events | `crates/oven-agent/src/core/event.rs` (`StepStarted` / `StepFinished` / `StepStop` / `CallOutcome`) |

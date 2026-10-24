@@ -13,12 +13,14 @@ use serde_json::Value;
 
 use super::Agent;
 use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
-use crate::capabilities::tools::{TodoWriteTool, Tool, ToolOutcome, present_tool};
 use crate::core::subagent::notice_message;
+use crate::core::tool::Tool;
 use crate::core::turn::{PendingInput, Step, StepCall, TurnContext, TurnOutput};
+use crate::core::view::{ToolEffect, ToolOutcome};
 use oven_proto::EventSink;
 use oven_proto::TodoList;
 use oven_proto::ToolCallId;
+use oven_proto::ToolView;
 use oven_proto::{AgentError, MAX_ITERS_EXCEEDED};
 use oven_proto::{AgentEvent, CallOutcome, ToolEvent, ToolResult, TurnEvent};
 use oven_proto::{AgentMode, ToolAccess};
@@ -74,7 +76,8 @@ impl Agent {
         Ok(Step { text, calls, usage })
     }
 
-    /// Counts plan-mode tool rounds that skipped `todo_write`. A write clears it.
+    /// Counts plan-mode tool rounds that left the checklist alone. A write
+    /// clears it.
     fn note_todo_round(&mut self, wrote_todo: bool) {
         if wrote_todo {
             self.todo_misses = 0;
@@ -122,11 +125,12 @@ impl Agent {
                 let argument_error = raw_arguments.as_deref().and_then(invalid_json_arguments);
                 let tool = self.tools.iter().find(|tool| tool.name() == name).cloned();
                 let caps = tool.as_ref().map(|tool| tool.caps());
-                let todos = if name == TodoWriteTool::NAME {
-                    TodoList::parse(input).ok()
-                } else {
-                    None
-                };
+                let todos = tool
+                    .as_ref()
+                    .and_then(|tool| tool.effect(input))
+                    .map(|effect| match effect {
+                        ToolEffect::Todos(list) => list,
+                    });
                 Some(PlannedCall {
                     id: id.clone(),
                     call_id: ToolCallId::next(),
@@ -134,7 +138,7 @@ impl Agent {
                     input: input.clone(),
                     view: tool
                         .as_ref()
-                        .map_or_else(|| present_tool(name, input), |tool| tool.view(input)),
+                        .map_or_else(|| ToolView::named(name), |tool| tool.view(input)),
                     todos,
                     exclusive: caps.is_some_and(|caps| caps.exclusive),
                     argument_error,
@@ -170,7 +174,7 @@ impl Agent {
         (calls, wrote_todo)
     }
 
-    /// A `todo_write` call replaces the checklist with what its arguments say.
+    /// A call that leaves a checklist replaces it with what its arguments say.
     fn commit_todo(&mut self, call: &PlannedCall, sink: &mut impl EventSink) -> bool {
         let Some(list) = call.todos.clone() else {
             return false;
@@ -301,9 +305,9 @@ struct PlannedCall {
     call_id: ToolCallId,
     name: String,
     input: serde_json::Value,
-    view: crate::capabilities::tools::ToolView,
-    /// The checklist a `todo_write` call stands for. `None` when the call is
-    /// not one, or its arguments do not describe a valid list.
+    view: ToolView,
+    /// The checklist this call stands for. `None` when the call leaves no
+    /// checklist behind, or its arguments do not describe a valid list.
     todos: Option<TodoList>,
     /// Whether this call has to run on its own. A tool that rewrites a file
     /// from what it read would otherwise lose one of two edits to the same

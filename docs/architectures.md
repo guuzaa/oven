@@ -68,10 +68,9 @@ dependency tree. It is documented in [`oven-proto.md`](./oven-proto.md).
 
 ```text
 runtime        the Agent driver: one provider round trip and the tools it asked for
-capabilities   what an agent can call: the Tool protocol, the built-in tools,
-               skills, the subagent spawner protocol
 core           nouns and their pure rules: identity, events, history and its
-               records, the turn context, the user-request protocol, tool views
+               records, the turn context, the user-request protocol, tool views,
+               the tool protocol
 ```
 
 | Layer | Path | Owns |
@@ -81,11 +80,10 @@ core           nouns and their pure rules: identity, events, history and its
 | | `runtime/agent/step.rs` | one round trip and the tools it asked for: gating, approvals, calls in flight, result order |
 | | `runtime/agent/notify.rs` | the thinking window, per-call logging, the tool-output cap |
 | | `runtime/compact.rs` | compaction: replace the history with an LLM-written summary |
-| `capabilities` | `capabilities/tools/` | the `Tool` protocol, the built-in tools, `present_tool` |
-| | `capabilities/skills.rs` | skills: named guidance merged into the system prompt |
 | `core` | `core/history/` | the message buffer, and the rules that project it into records |
 | | `core/turn.rs` | `TurnContext`, `RunPolicy`, `Step`, `TurnOutput` |
 | | `core/interaction.rs` | the user-request protocol: one request out, one reply back |
+| | `core/tool.rs` | the `Tool` protocol: what a call is, what it may do, what it leaves behind |
 | | `core/subagent.rs`, `core/retry.rs` | the spawner protocol; `RetryingProvider` |
 
 A noun a lower layer needs lives in the lower layer: `ToolCaps` is core
@@ -160,14 +158,16 @@ through it. Nothing above it re-implements the vocabulary — `oven-agent` and
 
 The host facade deliberately does not know about `AgentError`, `Tool`, `AgentEvent`, `AppEvent`, or `AppState`. This keeps the infrastructure reusable and prevents a dependency cycle.
 
-`oven-agent` retains the `Tool` trait because it describes the Agent protocol. Concrete tools adapt that protocol to host capabilities:
+`oven-agent` retains the `Tool` trait because it describes the Agent protocol.
+The capabilities themselves live in `oven-app`, so the driver never names a tool
+it was not handed. Concrete tools adapt that protocol to host capabilities:
 
 ```text
 oven-agent::Tool
   ├── FileReadTool / FileEditTool / SkillReadTool ──► tokio::fs
   ├── FileWriteTool / FileEditTool                ──► oven-host write
   ├── BashTool                                    ──► oven-host process
-  ├── GlobTool / GrepTool                         ──► oven-agent matching + oven-host walk
+  ├── GlobTool / GrepTool                         ──► globset + regex + oven-host walk
   ├── WebFetchTool                                ──► reqwest
   ├── TaskTool / TaskOutputTool                   ──► oven-agent SubagentSpawner (oven-app implements it)
   └── memory_read / memory_write / memory_forget  ──► oven-mem MemoryStore

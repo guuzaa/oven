@@ -8,9 +8,9 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, StatusCode, Url};
 use serde_json::{Value, json};
 
-use super::{Tool, ToolOutcome, ToolView, labeled, require_str};
-use crate::core::turn::TurnContext;
-use oven_proto::AgentError;
+use super::{labeled, require_str};
+use oven_agent::{AgentError, Tool, ToolOutcome, TurnContext};
+use oven_proto::ToolView;
 
 const SCHEME_HTTP: &str = "http";
 const SCHEME_HTTPS: &str = "https";
@@ -225,9 +225,7 @@ mod tests {
     const UNSUPPORTED_SCHEME: &str = "web_fetch: unsupported url scheme 'file'";
     const MARKDOWN_PAGE: &str = "# Title\n\nHello [docs](https://example.com/docs)\n";
 
-    fn turn() -> TurnContext {
-        TurnContext::for_test()
-    }
+    use crate::capabilities::tools::test_context;
 
     async fn serve(status: u16, content_type: &str, body: &str) -> MockServer {
         let server = MockServer::start().await;
@@ -264,7 +262,7 @@ mod tests {
         let server = serve(200, CONTENT_TYPE_HTML, PAGE_HTML).await;
         let tool = WebFetchTool::new();
         let ToolOutcome { output: out, .. } = tool
-            .run(&json!({ "url": page_url(&server) }), &turn())
+            .run(&json!({ "url": page_url(&server) }), &test_context())
             .await
             .unwrap();
         assert_eq!(out, MARKDOWN_PAGE);
@@ -277,7 +275,10 @@ mod tests {
         let server = serve(404, CONTENT_TYPE_HTML, "missing").await;
         let tool = WebFetchTool::new();
         let url = page_url(&server);
-        let err = tool.run(&json!({ "url": url }), &turn()).await.unwrap_err();
+        let err = tool
+            .run(&json!({ "url": url }), &test_context())
+            .await
+            .unwrap_err();
         assert_eq!(
             err.message,
             format!("web_fetch: {url} returned {NOT_FOUND}")
@@ -288,7 +289,7 @@ mod tests {
     async fn rejects_non_http_url() {
         let tool = WebFetchTool::new();
         let err = tool
-            .run(&json!({ "url": "file:///etc/passwd" }), &turn())
+            .run(&json!({ "url": "file:///etc/passwd" }), &test_context())
             .await
             .unwrap_err();
         assert_eq!(err.message, UNSUPPORTED_SCHEME);

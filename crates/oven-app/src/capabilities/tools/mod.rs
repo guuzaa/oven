@@ -2,16 +2,58 @@
 //!
 //! Tools are executable capabilities the model can invoke (`file_read`,
 //! `file_write`, `bash`). They are deliberately kept separate from
-//! [`crate::skill::Skill`]: a skill contributes guidance to the system prompt,
-//! while a tool is something the agent can actually call. [`ToolRegistry`]
-//! owns the mounted set and resolves the user's `tools:` config list.
+//! [`crate::capabilities::skills::Skill`]: a skill contributes guidance to the
+//! system prompt, while a tool is something the agent can actually call.
+//! [`ToolRegistry`] owns the mounted set and resolves the user's `tools:`
+//! config list.
+//!
+//! The tools speak the [`oven_agent::Tool`] protocol; this layer owns the
+//! capabilities themselves, not the protocol they speak.
+
+mod answer;
+mod bash;
+mod catalog;
+mod file_edit;
+mod file_read;
+mod file_write;
+mod glob;
+mod grep;
+mod list_models;
+mod matching;
+mod skill_read;
+mod task;
+mod todo_write;
+mod web_fetch;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::string::String;
 use std::sync::Arc;
 
-use oven_agent::{BUILTIN_TOOLS, Tool};
+use oven_agent::{AgentError, Tool};
+use oven_proto::ToolView;
+use serde_json::Value;
+
+#[cfg(test)]
+use oven_agent::{AgentMode, CancellationToken, Selection, TurnContext};
+#[cfg(test)]
+use oven_llm::ModelId;
+#[cfg(test)]
+use oven_proto::TurnId;
+
+pub use answer::AnswerTool;
+pub use bash::BashTool;
+pub use catalog::{BUILTIN_TOOLS, BuiltinTool};
+pub use file_edit::FileEditTool;
+pub use file_read::FileReadTool;
+pub use file_write::FileWriteTool;
+pub use glob::GlobTool;
+pub use grep::GrepTool;
+pub use list_models::ListModelsTool;
+pub use skill_read::SkillReadTool;
+pub use task::{TaskOutputTool, TaskTool};
+pub use todo_write::TodoWriteTool;
+pub use web_fetch::WebFetchTool;
 
 /// A factory producing one tool instance. Tools are rebuilt on every agent
 /// spawn, so the registry hands out fresh instances on demand.
@@ -43,7 +85,7 @@ impl ToolRegistry {
     pub fn from_config(root: impl Into<PathBuf>, requested: &[String]) -> Self {
         let root = root.into();
         let requested: BTreeSet<&str> = requested.iter().map(String::as_str).collect();
-        let selected: Vec<&oven_agent::BuiltinTool> = if requested.is_empty() {
+        let selected: Vec<&BuiltinTool> = if requested.is_empty() {
             BUILTIN_TOOLS.iter().collect()
         } else {
             BUILTIN_TOOLS
@@ -86,6 +128,64 @@ impl ToolRegistry {
             .map(|make| Arc::from(make()) as Arc<dyn Tool>)
             .collect()
     }
+}
+
+fn resolve_within(root: &Path, rel: &str) -> Result<PathBuf, AgentError> {
+    oven_host::resolve_within(root, rel).map_err(|error| AgentError::from(error.to_string()))
+}
+
+fn require_str<'a>(args: &'a Value, key: &str, tool: &str) -> Result<&'a str, AgentError> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AgentError::from(format!("{tool}: missing '{key}' string argument")))
+}
+
+fn parse_limit(args: &Value, default: usize) -> usize {
+    args.get("limit")
+        .and_then(Value::as_i64)
+        .map(|v| v.max(0))
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(default)
+}
+
+/// Summary for a call keyed on one argument, e.g. `Edited src/main.rs`.
+///
+/// Falls back to the bare verb, not the tool name, so a model that emits
+/// malformed arguments still renders as an action — `Edited 1 file` — instead
+/// of a raw `file_edit` line the frontend cannot group.
+fn labeled(verb: &str, input: &Value, key: &str) -> ToolView {
+    match input_str(input, key) {
+        Some(v) => ToolView {
+            summary: format!("{verb} {v}"),
+            collapse: true,
+            detail: None,
+        },
+        None => ToolView::named(verb),
+    }
+}
+
+fn input_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
+    input
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// A bare turn for tests that exercise a tool without driving a turn.
+#[cfg(test)]
+fn test_context() -> TurnContext {
+    test_context_in(AgentMode::Agent)
+}
+
+/// A bare turn in the given mode, for tests that exercise what a mode allows.
+#[cfg(test)]
+fn test_context_in(mode: AgentMode) -> TurnContext {
+    TurnContext::new(
+        TurnId::next(),
+        CancellationToken::new(),
+        Selection::new(mode, ModelId::new("default"), None),
+    )
 }
 
 #[cfg(test)]

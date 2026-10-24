@@ -5,12 +5,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::core::turn::TurnContext;
-
-use super::{Tool, ToolOutcome, ToolView, parse_limit, require_str, resolve_within};
-use crate::core::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
+use super::matching::{GlobMatcher, Regex, compile_glob, compile_regex};
+use super::{parse_limit, require_str, resolve_within};
+use oven_agent::{AgentError, Tool, ToolOutcome, TurnContext};
 use oven_host::walk_dir_stream;
-use oven_proto::AgentError;
+use oven_proto::ToolView;
 
 pub struct GrepTool {
     root: PathBuf,
@@ -81,6 +80,9 @@ impl Tool for GrepTool {
             },
             "required": ["pattern"]
         }))
+    }
+    fn view(&self, input: &Value) -> ToolView {
+        Self::view_input(input)
     }
     async fn run(&self, args: &Value, cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
         let pattern = require_str(args, "pattern", Self::NAME)?;
@@ -200,10 +202,8 @@ impl GrepTool {
 
 #[cfg(test)]
 mod tests {
-    fn turn() -> TurnContext {
-        TurnContext::for_test()
-    }
     use super::*;
+    use crate::capabilities::tools::test_context;
     use serde_json::json;
 
     fn tmp_dir() -> tempdir::TempDir {
@@ -222,8 +222,10 @@ mod tests {
         let root = tmp.path();
         write(root, "a.rs", "fn foo() {}\nfn bar() {}\n");
         let grep = GrepTool::new(root);
-        let ToolOutcome { output: out, .. } =
-            grep.run(&json!({"pattern": "foo"}), &turn()).await.unwrap();
+        let ToolOutcome { output: out, .. } = grep
+            .run(&json!({"pattern": "foo"}), &test_context())
+            .await
+            .unwrap();
         assert_eq!(out, "a.rs:1:fn foo() {}");
     }
 
@@ -236,13 +238,13 @@ mod tests {
         let ToolOutcome { output: out, .. } = grep
             .run(
                 &json!({"pattern": "hello", "case_insensitive": true}),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap();
         assert_eq!(out, "a.txt:1:Hello");
         let ToolOutcome { output: out, .. } = grep
-            .run(&json!({"pattern": "hello"}), &turn())
+            .run(&json!({"pattern": "hello"}), &test_context())
             .await
             .unwrap();
         assert_eq!(out, "(no matches)");
@@ -256,7 +258,10 @@ mod tests {
         write(root, "a.txt", "needle\n");
         let grep = GrepTool::new(root);
         let ToolOutcome { output: out, .. } = grep
-            .run(&json!({"pattern": "needle", "include": "*.rs"}), &turn())
+            .run(
+                &json!({"pattern": "needle", "include": "*.rs"}),
+                &test_context(),
+            )
             .await
             .unwrap();
         assert_eq!(out, "a.rs:1:needle");
@@ -273,7 +278,7 @@ mod tests {
         write(root, ".github/ci.yml", "needle\n");
         let grep = GrepTool::new(root);
         let ToolOutcome { output: out, .. } = grep
-            .run(&json!({"pattern": "needle"}), &turn())
+            .run(&json!({"pattern": "needle"}), &test_context())
             .await
             .unwrap();
         let lines: Vec<_> = out.lines().collect();
@@ -294,7 +299,7 @@ mod tests {
         write(root, ".hidden/x.txt", "needle\n");
         let grep = GrepTool::new(root);
         let ToolOutcome { output: out, .. } = grep
-            .run(&json!({"pattern": "needle"}), &turn())
+            .run(&json!({"pattern": "needle"}), &test_context())
             .await
             .unwrap();
         assert_eq!(out, "real.txt:1:needle");
@@ -305,7 +310,7 @@ mod tests {
         let tmp = tmp_dir();
         let grep = GrepTool::new(tmp.path());
         let err = grep
-            .run(&json!({"pattern": "("}), &turn())
+            .run(&json!({"pattern": "("}), &test_context())
             .await
             .unwrap_err();
         assert!(err.message.contains("invalid regex"), "{}", err.message);
@@ -316,7 +321,7 @@ mod tests {
         let tmp = tmp_dir();
         let grep = GrepTool::new(tmp.path());
         let err = grep
-            .run(&json!({"pattern": "x", "path": "missing"}), &turn())
+            .run(&json!({"pattern": "x", "path": "missing"}), &test_context())
             .await
             .unwrap_err();
         assert!(err.message.contains("not found"), "{}", err.message);
@@ -327,7 +332,7 @@ mod tests {
         let tmp = tmp_dir();
         let grep = GrepTool::new(tmp.path());
         let err = grep
-            .run(&json!({"pattern": "x", "path": "../etc"}), &turn())
+            .run(&json!({"pattern": "x", "path": "../etc"}), &test_context())
             .await
             .unwrap_err();
         assert!(err.message.contains("escapes root"), "{}", err.message);

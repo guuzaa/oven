@@ -43,7 +43,8 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 | `src/runtime/shared/live.rs` | what applies while a turn holds the driver: `/model`, `/agents`, `/exit`. |
 | `src/runtime/inbox.rs` | the queue of inputs for the driver, counting the prompts nobody took. |
 | `src/commands/mod.rs` | `SlashRegistry`, `CommandContext`, `CommandOutcome`; one module per built-in. |
-| `src/capabilities/tools.rs` | the `ToolRegistry` a workspace mounts. |
+| `src/capabilities/tools/` | the built-in tools, their catalog, and the `ToolRegistry` a workspace mounts. |
+| `src/capabilities/skills.rs` | skills: named guidance merged into the system prompt, and the registry that discovers them. |
 | `src/capabilities/subagent.rs` | delegated runs — the registry, the concurrency cap, one task per subagent. |
 | `src/capabilities/mcp/` | server registry plus the stdio/HTTP client that bridges remote tools. |
 | `src/capabilities/memory/` | `memory_read`, `memory_write`, `memory_forget` as agent tools. |
@@ -371,8 +372,8 @@ short timeout; an auth error surfaces as `API key rejected: …`.
 
 ## Tools, MCP and skills
 
-`capabilities/tools.rs` mounts a named set of tools per workspace. The built-ins come from
-`oven_agent::BUILTIN_TOOLS` — `file_read`, `file_write`, `file_edit`, `bash`,
+`capabilities/tools/` mounts a named set of tools per workspace. The built-ins come from
+its own `BUILTIN_TOOLS` — `file_read`, `file_write`, `file_edit`, `bash`,
 `glob`, `grep`, `web_fetch`, `todo_write` and `answer` — and the builder adds
 `skill_read` on top. After `AppBuilder::load_memory` — which the CLI calls
 unless `--amnesia` is passed — the builder also mounts `memory_read`,
@@ -469,7 +470,7 @@ blocks the UI thread. It never touches the agent.
 
 Unit tests live in-file (`core/session.rs`, `core/config.rs`,
 `core/provider.rs`, `runtime/shared.rs`, `runtime/inbox.rs`, `commands/*`,
-`capabilities/tools.rs`, `capabilities/memory/*`, `platform/*`,
+`capabilities/tools/`, `capabilities/memory/*`, `platform/*`,
 `capabilities/mcp/registry.rs`, `capabilities/mcp/client_test.rs`). The
 runtime's behaviour — input ordering, queued commands, mid-turn model switches,
 compaction, rewinds, session switching, approval and loop-limit handling,

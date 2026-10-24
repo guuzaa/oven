@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
+use oven_agent::Tool;
+
 use super::{
     AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,
-    TodoWriteTool, Tool, WebFetchTool,
+    TodoWriteTool, WebFetchTool,
 };
 
 pub struct BuiltinTool {
