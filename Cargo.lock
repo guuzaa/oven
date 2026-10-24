@@ -1911,7 +1911,7 @@ dependencies = [
 
 [[package]]
 name = "oven-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1930,7 +1930,7 @@ dependencies = [
 
 [[package]]
 name = "oven-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1965,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "oven-host"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ignore",
  "libc",
@@ -1998,7 +1998,7 @@ dependencies = [
 
 [[package]]
 name = "oven-mem"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "oven-host",
  "serde",
@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "oven-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "oven-llm",
  "serde",
@@ -2020,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "oven-tui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arboard",
  "base64 0.23.1",
