@@ -146,6 +146,8 @@ impl ProcessTree {
 
 #[cfg(windows)]
 fn create_job(process: RawHandle) -> Option<OwnedHandle> {
+    use std::os::windows::io::FromRawHandle;
+
     // SAFETY: null attributes and name request an anonymous, non-inheritable job.
     let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if job.is_null() {
