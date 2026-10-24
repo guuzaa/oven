@@ -23,11 +23,12 @@ step and no npm dependencies — the site is still deployed by `npx wrangler@lat
 deploy`.
 
 `docs.html` (with `docs.css` and `docs.js`) is a separate page: an interactive
-walk through one turn — the agent loop, tool calls, plan mode, subagents and
-memory. Workers static assets serve it at `/docs` (the default
-`html_handling = "auto-trailing-slash"` drops the extension), so it never
-reaches the worker and does not load `app.js`. Its walkthrough is data at the
-top of `docs.js`; keep it in step with `docs/*.md` when the flow changes.
+walk through one turn — the agent loop, the model and its reasoning effort,
+tool calls, plan mode, subagents and memory. Workers static assets serve it at
+`/docs` (the default `html_handling = "auto-trailing-slash"` drops the
+extension), so it never reaches the worker and does not load `app.js`. Its
+walkthrough is data at the top of `docs.js`; keep it in step with `docs/*.md`
+when the flow changes.
 
 SEO lives in the same static files. Both pages carry a canonical link, Open
 Graph and `twitter:card` meta, and `index.html` adds a `SoftwareApplication`

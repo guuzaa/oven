@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>How oven works — oven docs</title>
-    <meta name="description" content="An interactive walk through one oven conversation: the agent loop, tool calls, plan mode and its checklist, subagents and durable memory." />
+    <meta name="description" content="An interactive walk through one oven conversation: the agent loop, the model and its reasoning effort, tool calls, plan mode and its checklist, subagents and durable memory." />
     <link rel="canonical" href="https://oven.paulden.site/docs" />
     <meta property="og:type" content="article" />
     <meta property="og:site_name" content="oven" />
     <meta property="og:title" content="How oven works — oven docs" />
-    <meta property="og:description" content="An interactive walk through one oven conversation: the agent loop, tool calls, plan mode and its checklist, subagents and durable memory." />
+    <meta property="og:description" content="An interactive walk through one oven conversation: the agent loop, the model and its reasoning effort, tool calls, plan mode and its checklist, subagents and durable memory." />
     <meta property="og:url" content="https://oven.paulden.site/docs" />
     <meta property="og:image" content="https://oven.paulden.site/og.png" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -40,12 +40,14 @@
           <p class="chip"><span class="chip-dot" aria-hidden="true"></span>docs · how it works</p>
           <h1>Follow one prompt <span class="hl">through the oven</span>.</h1>
           <p class="lede">
-            What happens between pressing <kbd>Enter</kbd> and the final answer: the agent loop, tool calls,
-            plan mode and its checklist, subagents and durable memory. Step through a real turn below or jump to a part.
+            What happens between pressing <kbd>Enter</kbd> and the final answer: the agent loop, the model and its
+            reasoning effort, tool calls, plan mode and its checklist, subagents and durable memory. Step through a real
+            turn below or jump to a part.
           </p>
           <nav class="doc-toc" aria-label="On this page">
             <a href="#trace">Trace a turn</a>
             <a href="#loop">Agent loop</a>
+            <a href="#model">Model &amp; profiles</a>
             <a href="#tools">Tool calls</a>
             <a href="#plan">Plan &amp; todos</a>
             <a href="#subagents">Subagents</a>
@@ -56,8 +58,8 @@
 
         <div class="doc-stack" data-reveal aria-label="Crates, top to bottom">
           <div class="doc-layer" data-lane="tui"><b>oven-tui</b><span>keys, screen, <code>oven</code> binary</span></div>
-          <div class="doc-layer" data-lane="app"><b>oven-app</b><span>runtime actor, sessions, subagents, slash commands</span></div>
-          <div class="doc-layer" data-lane="agent"><b>oven-agent</b><span>the loop, tools, todos, prompts</span></div>
+          <div class="doc-layer" data-lane="app"><b>oven-app</b><span>runtime actor, sessions, subagents, slash commands, the built-in tools</span></div>
+          <div class="doc-layer" data-lane="agent"><b>oven-agent</b><span>the loop, the tool protocol, todos, prompts</span></div>
           <div class="doc-row">
             <div class="doc-layer" data-lane="llm"><b>oven-llm</b><span>providers, streaming</span></div>
             <div class="doc-layer" data-lane="host"><b>oven-host</b><span>files, processes</span></div>
@@ -133,6 +135,40 @@
             <pre class="doc-code" id="loop-code"></pre>
           </article>
         </div>
+      </section>
+
+      <section id="model">
+        <h2 data-reveal>Model, effort &amp; profiles</h2>
+        <p class="doc-intro" data-reveal>
+          The model and the reasoning effort are one selection, read again at every step. The effort is a single axis —
+          <code>none</code>, <code>minimal</code>, <code>low</code>, <code>medium</code>, <code>high</code>,
+          <code>xhigh</code>, <code>max</code>, or a token budget — and how it reaches the wire is the vendor's business,
+          not ours. A <b>profile</b> is a name we choose for a level of quality; each vendor keeps it with its own model.
+          Pick a vendor to see what it reads.
+        </p>
+        <div class="model" data-reveal>
+          <div class="model-main">
+            <div class="tabs" role="tablist" aria-label="Vendor" id="model-vendors"></div>
+            <article class="mode model-detail" aria-live="polite">
+              <p class="mode-tag" id="model-tag"></p>
+              <h3 id="model-title"></h3>
+              <p id="model-text"></p>
+              <pre class="doc-code" id="model-code"></pre>
+              <p class="model-takes" id="model-takes"></p>
+            </article>
+          </div>
+          <div class="model-side">
+            <h4>The profile table</h4>
+            <pre class="doc-code" id="profile-config"></pre>
+            <p class="model-note" id="profile-note"></p>
+          </div>
+        </div>
+        <ul class="facts" data-reveal>
+          <li><b>One axis.</b> <code>/model &lt;id&gt; [none|minimal|low|medium|high|xhigh|max|budget]</code>. Unset means "no preference": no reasoning field goes out at all and the upstream default applies.</li>
+          <li><b>Request and options are separate.</b> The request is the conversation and the model it goes to; the options are how we ask — sampling, reasoning effort, provider-private fields. One request can go out with different options.</li>
+          <li><b>The model decides.</b> A model with levels takes those levels, one with only a switch reads any level as "on", one with a fixed depth takes no field at all — and the switch says it out loud: <code>zhipu/glm-5.3 only has a reasoning switch; high will be treated as on</code>.</li>
+          <li><b>Profiles are promises.</b> <code>/profile balanced</code> expands to a model per vendor, and a vendor without that binding refuses the switch instead of quietly keeping something else. <code>/model</code> unbinds the profile: you asked for a model, not for a quality level.</li>
+        </ul>
       </section>
 
       <section id="tools">
@@ -290,7 +326,7 @@ resolver blocks for 30s per test. Seen in CI and locally.</span></pre>
           </li>
           <li class="step">
             <h3>Publish</h3>
-            <p>The runtime writes the new <code>AppState</code> to a watch channel: events say <i>something happened</i>, state says <i>what is true</i>.</p>
+            <p>The runtime writes the new <code>AppState</code> to a watch channel: events say <i>something happened</i>, state says <i>what is true</i>. The state is split in two — the levels (phase, mode, model, effort, checklist, usage) travel on every change, the conversation is read once when a frontend connects.</p>
           </li>
           <li class="step">
             <h3>Compact?</h3>
@@ -330,6 +366,11 @@ resolver blocks for 30s per test. Seen in CI and locally.</span></pre>
             <span class="feature-icon" aria-hidden="true">🖥️</span>
             <h3><a href="https://github.com/guuzaa/oven/blob/master/docs/oven-tui.md" rel="noopener">TUI</a></h3>
             <p>The event loop, transcript, widgets and the <kbd>Esc</kbd> ladder.</p>
+          </li>
+          <li class="feature" data-reveal>
+            <span class="feature-icon" aria-hidden="true">📡</span>
+            <h3><a href="https://github.com/guuzaa/oven/blob/master/docs/oven-proto.md" rel="noopener">Protocol</a></h3>
+            <p>The events, the state and the commands a frontend shares with the runtime — a crate of its own.</p>
           </li>
           <li class="feature" data-reveal>
             <span class="feature-icon" aria-hidden="true">📚</span>

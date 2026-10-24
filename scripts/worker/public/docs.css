@@ -595,6 +595,40 @@ main dt code,
   overflow-x: auto;
 }
 
+/* model, effort and profiles */
+
+.model {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 1.25rem;
+  padding: 1rem;
+  border: 2px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--pop);
+}
+
+.model-detail {
+  margin-top: 1rem;
+}
+
+.model-detail pre {
+  margin: 0.6rem 0 0;
+}
+
+.model-takes {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.model-note {
+  margin: 0.6rem 0 0;
+  color: var(--muted);
+  font-size: 0.93rem;
+}
+
 /* tools */
 
 .tool-panel {
@@ -1150,6 +1184,7 @@ main dt code,
   .loop,
   .plan,
   .memory,
+  .model,
   .sub,
   .sub-roles {
     grid-template-columns: minmax(0, 1fr);
