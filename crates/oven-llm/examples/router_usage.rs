@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use oven_llm::{
-    Client, Delta, ModelId, ModelInfo, Provider, ProviderBuilder, ProviderName, Request, Router,
-    RouterError, StreamEvent, ThinkingMode,
+    Client, Delta, ModelId, ModelInfo, Provider, ProviderBuilder, ProviderName, ReasoningEffort,
+    Request, Router, RouterError, StreamEvent,
 };
 
 fn api_key(env: &str) -> String {
@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model("deepseek/deepseek-v4-flash")
         .prompt("用一句话介绍 Rust 语言。")
         .temperature(0.01)
-        .thinking(ThinkingMode::Disabled)
+        .reasoning_effort(ReasoningEffort::Off)
         .build()?;
     match client.complete(&request).await {
         Ok(response) => println!("complete() -> {}", response.text()),

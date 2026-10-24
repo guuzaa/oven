@@ -10,6 +10,10 @@
 - Every protocol type has a serde form, and the wire format is pinned by tests
 
 ### Changed
+- **Breaking:** `oven-llm`: the reasoning effort is one axis — `ReasoningEffort::None` is now `Off` (the wire word stays `"none"`), and `Minimal`, `XHigh`, `Max` and `Budget(u32)` join it. An effort that is not set means "no preference" and reaches the wire as no field at all; before, the Responses protocol turned it into `effort: "none"` and forced the upstream default off
+- **Breaking:** `oven-llm`: `Request` splits into the conversation and its `CallOptions` — `sampling`, `reasoning_effort` and `provider_options` live under `Request::options`. `Request::thinking` and `ThinkingMode` are gone: the thinking switch is derived from the effort, so the two protocols can no longer disagree about it
+- `oven-llm`: a compaction asks for `Off` instead of switching the thinking switch off by hand
+- `oven-app`, `oven-tui`: `/model` and the model picker take the whole vocabulary (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and a token budget written as a number), and an effort that is not set reads as "unspecified" rather than "none"
 - **Breaking:** `AppState` is `{ levels, history }` rather than one flat struct, and `AppState::provider` is a `ProviderView` — the API key stays in the app layer, and a frontend is told only whether a credential is configured
 - **Breaking:** `App::provider_config` is gone; `App::provider_view` hands out the credential-free view instead, so no public method on the facade returns the key
 - **Breaking:** `App::respond` returns whether the answer was delivered — `false` when the request was already closed, or the answer did not fit it

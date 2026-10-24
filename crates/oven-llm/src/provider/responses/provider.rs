@@ -140,7 +140,7 @@ impl ResponsesProvider {
     }
 
     /// 将 `Request` 编码为最终发送的 JSON 请求体：先由 `encoder::encode_request`
-    /// 产出标准 wire JSON，再把 `req.provider_options` 中的每个键值对合并进
+    /// 产出标准 wire JSON，再把 `req.options.provider_options` 中的每个键值对合并进
     /// 去。`provider_options` 的键与标准字段重名时会覆盖标准字段。
     fn build_body(&self, req: &Request, stream: bool) -> Result<serde_json::Value, ProviderError> {
         let wire = encoder::encode_request(req, stream)?;
@@ -149,7 +149,7 @@ impl ResponsesProvider {
         })?;
         Ok(Endpoint::merge_provider_options(
             body,
-            &req.provider_options,
+            &req.options.provider_options,
         ))
     }
 
@@ -478,7 +478,9 @@ mod tests {
             api_key("k"),
         );
         let mut req = sample_request();
-        req.provider_options.insert("top_k".to_string(), json!(40));
+        req.options
+            .provider_options
+            .insert("top_k".to_string(), json!(40));
         let body = provider.build_body(&req, false).unwrap();
         assert_eq!(body["top_k"], 40);
     }
@@ -491,8 +493,9 @@ mod tests {
             api_key("k"),
         );
         let mut req = sample_request();
-        req.sampling.temperature = Some(0.5);
-        req.provider_options
+        req.options.sampling.temperature = Some(0.5);
+        req.options
+            .provider_options
             .insert("temperature".to_string(), json!(1.5));
         let body = provider.build_body(&req, false).unwrap();
         assert_eq!(body["temperature"], 1.5);
@@ -506,7 +509,7 @@ mod tests {
             api_key("k"),
         );
         let mut req = sample_request();
-        req.provider_options.insert(
+        req.options.provider_options.insert(
             "text".to_string(),
             json!({"format": {"type": "json_object"}}),
         );

@@ -11,11 +11,14 @@ const KEEP_CURRENT: &str = "keep current";
 
 /// Reasoning-effort choices shown in the second stage. `keep current` submits
 /// the command without an effort argument.
-const EFFORT_ITEMS: [(&str, &str); 5] = [
+const EFFORT_ITEMS: [(&str, &str); 8] = [
     ("none", "Disable reasoning"),
+    ("minimal", "Minimal reasoning effort"),
     ("low", "Low reasoning effort"),
     ("medium", "Medium reasoning effort"),
     ("high", "High reasoning effort"),
+    ("xhigh", "Extra-high reasoning effort"),
+    ("max", "Maximum reasoning effort"),
     (KEEP_CURRENT, "Keep the current reasoning effort"),
 ];
 

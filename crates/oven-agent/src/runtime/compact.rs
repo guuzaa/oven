@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use oven_llm::{
-    Client, Message, Provider, Request, Response, StreamCollector, ThinkingMode, ToolChoice,
+    Client, Message, Provider, ReasoningEffort, Request, Response, StreamCollector, ToolChoice,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -55,8 +55,7 @@ impl Agent {
         req.messages.push(Message::user_text(COMPACT_PROMPT));
         req.tools = Vec::new();
         req.tool_choice = ToolChoice::None;
-        req.thinking = Some(ThinkingMode::Disabled);
-        req.reasoning_effort = None;
+        req.options.reasoning_effort = Some(ReasoningEffort::Off);
 
         let response = request_summary(self.router(), req, cancel).await?;
         if cancel.is_cancelled() {

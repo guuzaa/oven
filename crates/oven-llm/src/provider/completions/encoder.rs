@@ -63,7 +63,7 @@ pub(crate) fn encode_request(
         Some(req.tools.iter().map(encode_tool).collect())
     };
 
-    let stop = match &req.sampling.stop {
+    let stop = match &req.options.sampling.stop {
         None => None,
         Some(values) if values.is_empty() => None,
         Some(values) if values.len() == 1 => Some(StopValue::Single(values[0].clone())),
@@ -78,20 +78,25 @@ pub(crate) fn encode_request(
         None
     };
 
-    let thinking = req.thinking.map(|t| WireThinking {
-        mode: t.to_string(),
+    let reasoning = req.options.reasoning_effort;
+    let thinking = reasoning.map(|effort| WireThinking {
+        mode: if effort.is_off() {
+            "disabled".to_string()
+        } else {
+            "enabled".to_string()
+        },
     });
 
-    let reasoning_effort = req.reasoning_effort.map(|e| e.to_string());
+    let reasoning_effort = reasoning.and_then(|effort| effort.keyword().map(str::to_string));
 
     Ok(ChatCompletionRequest {
         model: req.model.wire_id().to_owned(),
         messages,
         tools,
         tool_choice: Some(encode_tool_choice(&req.tool_choice)),
-        temperature: req.sampling.temperature,
-        top_p: req.sampling.top_p,
-        max_tokens: req.sampling.max_tokens,
+        temperature: req.options.sampling.temperature,
+        top_p: req.options.sampling.top_p,
+        max_tokens: req.options.sampling.max_tokens,
         stop,
         thinking,
         reasoning_effort,
@@ -351,7 +356,8 @@ fn encode_tool_choice(choice: &ToolChoice) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::request::{ReasoningEffort, SamplingParams, ThinkingMode};
+    use crate::domain::reasoning::ReasoningEffort;
+    use crate::domain::request::{CallOptions, SamplingParams};
 
     // --- encode_request: system field (Requirement 3.1) ---
 
@@ -410,8 +416,11 @@ mod tests {
     #[test]
     fn stop_single_value_serializes_as_single() {
         let req = Request {
-            sampling: SamplingParams {
-                stop: Some(vec!["STOP".to_string()]),
+            options: CallOptions {
+                sampling: SamplingParams {
+                    stop: Some(vec!["STOP".to_string()]),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -423,8 +432,11 @@ mod tests {
     #[test]
     fn stop_multiple_values_serializes_as_multiple() {
         let req = Request {
-            sampling: SamplingParams {
-                stop: Some(vec!["A".to_string(), "B".to_string()]),
+            options: CallOptions {
+                sampling: SamplingParams {
+                    stop: Some(vec!["A".to_string(), "B".to_string()]),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -446,8 +458,11 @@ mod tests {
     #[test]
     fn stop_empty_vec_maps_to_none() {
         let req = Request {
-            sampling: SamplingParams {
-                stop: Some(vec![]),
+            options: CallOptions {
+                sampling: SamplingParams {
+                    stop: Some(vec![]),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -781,11 +796,14 @@ mod tests {
                 description: None,
                 input_schema: Arc::new(serde_json::json!({})),
             }],
-            sampling: SamplingParams {
-                temperature: Some(0.5),
-                top_p: Some(0.9),
-                max_tokens: Some(100),
-                stop: None,
+            options: CallOptions {
+                sampling: SamplingParams {
+                    temperature: Some(0.5),
+                    top_p: Some(0.9),
+                    max_tokens: Some(100),
+                    stop: None,
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -812,11 +830,14 @@ mod tests {
                 description: None,
                 input_schema: Arc::new(serde_json::json!({})),
             }],
-            sampling: SamplingParams {
-                temperature: Some(0.5),
-                top_p: Some(0.9),
-                max_tokens: Some(100),
-                stop: None,
+            options: CallOptions {
+                sampling: SamplingParams {
+                    temperature: Some(0.5),
+                    top_p: Some(0.9),
+                    max_tokens: Some(100),
+                    stop: None,
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -844,61 +865,57 @@ mod tests {
     }
 
     #[test]
-    fn encode_request_thinking_enabled() {
+    fn encode_request_effort_enables_thinking() {
         let req = Request {
-            thinking: Some(ThinkingMode::Enabled),
+            options: CallOptions {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let wire = encode_request(&req, false).unwrap();
-        let thinking = wire.thinking.unwrap();
-        assert_eq!(thinking.mode, "enabled");
-    }
-
-    #[test]
-    fn encode_request_thinking_disabled() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Disabled),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        let thinking = wire.thinking.unwrap();
-        assert_eq!(thinking.mode, "disabled");
-    }
-
-    #[test]
-    fn encode_request_thinking_none_is_absent() {
-        let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
-        assert!(wire.thinking.is_none());
-    }
-
-    #[test]
-    fn encode_request_reasoning_effort_high() {
-        let req = Request {
-            reasoning_effort: Some(ReasoningEffort::High),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
+        assert_eq!(wire.thinking.unwrap().mode, "enabled");
         assert_eq!(wire.reasoning_effort, Some("high".to_string()));
     }
 
     #[test]
-    fn encode_request_reasoning_effort_none_is_absent() {
+    fn encode_request_off_disables_thinking() {
+        let req = Request {
+            options: CallOptions {
+                reasoning_effort: Some(ReasoningEffort::Off),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let wire = encode_request(&req, false).unwrap();
+        assert_eq!(wire.thinking.unwrap().mode, "disabled");
+        assert_eq!(wire.reasoning_effort, Some("none".to_string()));
+    }
+
+    #[test]
+    fn encode_request_unset_effort_sends_no_reasoning_field() {
         let req = Request::default();
         let wire = encode_request(&req, false).unwrap();
+        assert!(wire.thinking.is_none());
         assert!(wire.reasoning_effort.is_none());
     }
 
     #[test]
     fn encode_request_all_reasoning_effort_levels() {
         for (effort, expected) in [
-            (ReasoningEffort::None, "none"),
+            (ReasoningEffort::Off, "none"),
+            (ReasoningEffort::Minimal, "minimal"),
             (ReasoningEffort::Low, "low"),
             (ReasoningEffort::Medium, "medium"),
             (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
         ] {
             let req = Request {
-                reasoning_effort: Some(effort),
+                options: CallOptions {
+                    reasoning_effort: Some(effort),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let wire = encode_request(&req, false).unwrap();
@@ -907,14 +924,16 @@ mod tests {
     }
 
     #[test]
-    fn encode_request_thinking_and_reasoning_effort_together() {
+    fn encode_request_budget_sends_no_level_channel() {
         let req = Request {
-            thinking: Some(ThinkingMode::Enabled),
-            reasoning_effort: Some(ReasoningEffort::Medium),
+            options: CallOptions {
+                reasoning_effort: Some(ReasoningEffort::Budget(2048)),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let wire = encode_request(&req, false).unwrap();
+        assert!(wire.reasoning_effort.is_none());
         assert_eq!(wire.thinking.unwrap().mode, "enabled");
-        assert_eq!(wire.reasoning_effort, Some("medium".to_string()));
     }
 }

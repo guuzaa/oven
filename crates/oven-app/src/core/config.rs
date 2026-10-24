@@ -426,16 +426,6 @@ impl ProviderConfig {
         }
     }
 
-    pub fn parse_effort(raw: &str) -> Option<ReasoningEffort> {
-        match raw.to_ascii_lowercase().as_str() {
-            "none" => Some(ReasoningEffort::None),
-            "low" => Some(ReasoningEffort::Low),
-            "medium" => Some(ReasoningEffort::Medium),
-            "high" => Some(ReasoningEffort::High),
-            _ => None,
-        }
-    }
-
     /// The effective base URL: `base_url` config wins, then `OVEN_BASE_URL`.
     pub fn effective_base_url(&self) -> Option<String> {
         if let Some(u) = &self.base_url {

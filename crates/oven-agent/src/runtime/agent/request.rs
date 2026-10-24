@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use oven_llm::{
-    Client, ContentBlock, Delta, Message, Provider, ReasoningEffort, Request, Response, Role,
-    StreamCollector, StreamEvent as LlmStreamEvent, ThinkingMode,
+    Client, ContentBlock, Delta, Message, Provider, Request, Response, Role, StreamCollector,
+    StreamEvent as LlmStreamEvent,
 };
 
 use oven_host::as_ms;
@@ -59,11 +59,6 @@ impl Agent {
     pub(crate) fn build_request(&self) -> Request {
         let mode = self.selection.mode();
         let (model, reasoning_effort) = self.selection.model();
-        let thinking = if reasoning_effort.is_some_and(|effort| effort != ReasoningEffort::None) {
-            ThinkingMode::Enabled
-        } else {
-            ThinkingMode::Disabled
-        };
         let mut messages: Vec<Message> = self
             .history
             .messages()
@@ -92,8 +87,7 @@ impl Agent {
         let mut builder = Request::builder()
             .model(model)
             .messages(messages)
-            .tools(self.llm_tools(mode))
-            .thinking(thinking);
+            .tools(self.llm_tools(mode));
         if let Some(system) = self.system_prompt(mode) {
             builder = builder.system(system);
         }

@@ -7,7 +7,9 @@ use std::time::Duration;
 use clap::Args as ClapArgs;
 use oven_app::config::{AppConfig, ModelMetadata, ProviderConfig};
 use oven_app::{AppError, provider_catalog, provider_models, verify};
-use oven_llm::{ModelInfo, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor};
+use oven_llm::{
+    ModelInfo, ParseEffortError, ProviderKind, ProviderName, ReasoningEffort, canonical_vendor,
+};
 
 use super::{Context, MILLION, THOUSAND};
 use crate::commands::prompt::{PromptError, Prompter, Stdin, choose, required_text};
@@ -512,11 +514,8 @@ fn parse_tokens(raw: &str) -> Result<u32, AppError> {
 }
 
 fn parse_effort(raw: &str) -> Result<ReasoningEffort, AppError> {
-    ProviderConfig::parse_effort(raw).ok_or_else(|| {
-        AppError::Runtime(format!(
-            "invalid reasoning effort '{raw}'; expected none, low, medium or high"
-        ))
-    })
+    raw.parse()
+        .map_err(|err: ParseEffortError| AppError::Runtime(err.to_string()))
 }
 
 #[cfg(test)]

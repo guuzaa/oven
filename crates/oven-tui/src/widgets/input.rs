@@ -864,7 +864,7 @@ mod tests {
         assert_eq!(view.textarea.lines()[0], "/model gpt-4o none");
 
         view.handle_key(key(KeyCode::Down), &State::new());
-        assert_eq!(view.textarea.lines()[0], "/model gpt-4o low");
+        assert_eq!(view.textarea.lines()[0], "/model gpt-4o minimal");
     }
 
     #[test]
@@ -895,6 +895,7 @@ mod tests {
         view.handle_key(key(KeyCode::Enter), &State::new());
         view.handle_key(key(KeyCode::Enter), &State::new());
         view.handle_key(key(KeyCode::Down), &State::new());
+        view.handle_key(key(KeyCode::Down), &State::new());
         let result = view.handle_key(key(KeyCode::Enter), &State::new());
         match result {
             KeyResult::Action(Action::QuietSubmit(text)) => {
@@ -909,7 +910,7 @@ mod tests {
         let mut view = view();
         open_picker(&mut view);
         view.handle_key(key(KeyCode::Enter), &State::new());
-        for _ in 0..4 {
+        for _ in 0..7 {
             view.handle_key(key(KeyCode::Down), &State::new());
         }
         let result = view.handle_key(key(KeyCode::Enter), &State::new());

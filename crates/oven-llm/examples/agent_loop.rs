@@ -50,7 +50,7 @@ async fn main() -> ExampleResult<()> {
         .prompt(task)
         .tools(coding_tools())
         .temperature(0.1)
-        .thinking(oven_llm::ThinkingMode::Enabled)
+        .reasoning_effort(oven_llm::ReasoningEffort::High)
         .build()
         .expect("model is set");
 

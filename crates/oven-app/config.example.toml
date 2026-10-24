@@ -49,6 +49,9 @@ max_iters = 200
 # base_url = "https://api.deepseek.com"
 # Wire protocol for unknown vendors only; known vendors ignore it.
 # protocol = "completions"
+# Reasoning effort: none (off), minimal, low, medium, high, xhigh, max, or a
+# token budget written as a number. Unset means "no preference" — no effort
+# field is sent and the upstream default applies.
 # reasoning_effort = "medium"
 # Model metadata, declared per model in a table keyed by wire id. This is the
 # only source of window sizes for a custom vendor, so it is what turns on ctx%

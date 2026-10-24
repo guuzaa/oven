@@ -18,7 +18,9 @@
 use std::io::Write;
 use std::{io, time::Duration};
 
-use oven_llm::{CompletionsProvider, Delta, Message, Provider, Request, StreamEvent, ThinkingMode};
+use oven_llm::{
+    CompletionsProvider, Delta, Message, Provider, ReasoningEffort, Request, StreamEvent,
+};
 
 async fn provider_example(provider: Box<dyn Provider>, request: &Request) {
     // 3. 演示 list_models（可能因缺少真实 API key/网络而失败，打印错误后继续）。
@@ -102,7 +104,7 @@ async fn main() {
         .model("glm-4.5-air")
         .message(Message::user_text("用一句话介绍一下 Rust 语言。"))
         .temperature(0.0)
-        .thinking(ThinkingMode::Enabled)
+        .reasoning_effort(ReasoningEffort::High)
         .build()
         .expect("model is set");
 

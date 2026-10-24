@@ -119,7 +119,7 @@ pub fn validate_request(
     model: &ModelInfo,
     stream: bool,
 ) -> Result<(), ValidationError> {
-    if let Some(requested) = req.sampling.max_tokens
+    if let Some(requested) = req.options.sampling.max_tokens
         && model.max_output_tokens > 0
         && requested > model.max_output_tokens
     {
@@ -168,7 +168,7 @@ mod tests {
 
     use super::*;
     use crate::domain::message::{ImageSource, Message};
-    use crate::domain::request::{ModelId, SamplingParams};
+    use crate::domain::request::{CallOptions, ModelId, SamplingParams};
     use crate::domain::tool::ToolChoice;
     use crate::provider::model::ModelCapabilities;
 
@@ -208,8 +208,11 @@ mod tests {
     fn max_tokens_exceeded_fails() {
         let model = full_capability_model();
         let req = Request {
-            sampling: SamplingParams {
-                max_tokens: Some(model.max_output_tokens + 1),
+            options: CallOptions {
+                sampling: SamplingParams {
+                    max_tokens: Some(model.max_output_tokens + 1),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..base_request()
@@ -227,8 +230,11 @@ mod tests {
     fn max_tokens_within_limit_passes() {
         let model = full_capability_model();
         let req = Request {
-            sampling: SamplingParams {
-                max_tokens: Some(model.max_output_tokens),
+            options: CallOptions {
+                sampling: SamplingParams {
+                    max_tokens: Some(model.max_output_tokens),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..base_request()
@@ -241,8 +247,11 @@ mod tests {
         let mut model = full_capability_model();
         model.max_output_tokens = 0;
         let req = Request {
-            sampling: SamplingParams {
-                max_tokens: Some(u32::MAX),
+            options: CallOptions {
+                sampling: SamplingParams {
+                    max_tokens: Some(u32::MAX),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..base_request()
@@ -445,8 +454,11 @@ mod tests {
                 description: Some("查询天气".to_string()),
                 input_schema: Arc::new(serde_json::json!({"type": "object"})),
             }],
-            sampling: SamplingParams {
-                max_tokens: Some(model.max_output_tokens),
+            options: CallOptions {
+                sampling: SamplingParams {
+                    max_tokens: Some(model.max_output_tokens),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..base_request()

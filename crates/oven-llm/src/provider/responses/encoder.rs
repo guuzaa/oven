@@ -13,7 +13,8 @@ use super::types::{
     WireReasoning,
 };
 use crate::domain::message::{ContentBlock, ImageSource, Message, Role};
-use crate::domain::request::{ReasoningEffort, Request, ThinkingMode};
+use crate::domain::reasoning::ReasoningEffort;
+use crate::domain::request::Request;
 use crate::domain::tool::{Tool, ToolChoice};
 
 /// `encode_request` 及其子函数的编码失败原因。
@@ -56,10 +57,10 @@ pub(crate) fn encode_request(req: &Request, stream: bool) -> Result<ResponseRequ
         input: if input.is_empty() { None } else { Some(input) },
         tools,
         tool_choice: encode_tool_choice(&req.tool_choice),
-        reasoning: encode_reasoning(req.reasoning_effort, req.thinking),
-        temperature: req.sampling.temperature,
-        top_p: req.sampling.top_p,
-        max_output_tokens: req.sampling.max_tokens,
+        reasoning: encode_reasoning(req.options.reasoning_effort),
+        temperature: req.options.sampling.temperature,
+        top_p: req.options.sampling.top_p,
+        max_output_tokens: req.options.sampling.max_tokens,
         stream,
     })
 }
@@ -332,28 +333,21 @@ fn encode_tool_choice(choice: &ToolChoice) -> Option<serde_json::Value> {
 
 /// 编码 `reasoning` 参数：
 ///
-/// - 有 `reasoning_effort` 时按枚举输出对应档位（`none`/`low`/`medium`/
-///   `high`）；
-/// - 无 `reasoning_effort` 但 `thinking == Disabled` 时输出
-///   `{"effort":"none"}`；
-/// - 其余情况（`thinking == Enabled` 或未设置）不输出 `reasoning` 字段。
-fn encode_reasoning(
-    reasoning_effort: Option<ReasoningEffort>,
-    thinking: Option<ThinkingMode>,
-) -> Option<WireReasoning> {
-    let effort = match reasoning_effort {
-        Some(effort) => Some(effort.to_string()),
-        None if thinking == Some(ThinkingMode::Disabled) => Some(ReasoningEffort::None.to_string()),
-        None => None,
-    };
-
-    effort.map(|effort| WireReasoning { effort })
+/// - 有档位词时输出该词（`none`/`low`/`medium`/`high`/…）；
+/// - 未设置推理强度，或档位是预算类（尚无 wire 表达）时不输出 `reasoning`
+///   字段，交给上游默认。
+fn encode_reasoning(reasoning_effort: Option<ReasoningEffort>) -> Option<WireReasoning> {
+    reasoning_effort
+        .and_then(|effort| effort.keyword())
+        .map(|effort| WireReasoning {
+            effort: effort.to_string(),
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::request::SamplingParams;
+    use crate::domain::request::{CallOptions, SamplingParams};
 
     // --- 纯文本请求 ---
 
@@ -753,18 +747,23 @@ mod tests {
         );
     }
 
-    // --- reasoning / thinking ---
+    // --- reasoning ---
 
     #[test]
     fn reasoning_effort_levels_map_to_wire() {
         for (effort, expected) in [
-            (ReasoningEffort::None, "none"),
+            (ReasoningEffort::Off, "none"),
             (ReasoningEffort::Low, "low"),
             (ReasoningEffort::Medium, "medium"),
             (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
         ] {
             let req = Request {
-                reasoning_effort: Some(effort),
+                options: CallOptions {
+                    reasoning_effort: Some(effort),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let wire = encode_request(&req, false).unwrap();
@@ -773,39 +772,21 @@ mod tests {
     }
 
     #[test]
-    fn thinking_disabled_maps_to_reasoning_none() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Disabled),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert_eq!(wire.reasoning.unwrap().effort, "none");
-    }
-
-    #[test]
-    fn reasoning_effort_wins_over_thinking_disabled() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Disabled),
-            reasoning_effort: Some(ReasoningEffort::High),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert_eq!(wire.reasoning.unwrap().effort, "high");
-    }
-
-    #[test]
-    fn thinking_enabled_without_effort_omits_reasoning() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Enabled),
-            ..Default::default()
-        };
+    fn unset_effort_omits_the_reasoning_field() {
+        let req = Request::default();
         let wire = encode_request(&req, false).unwrap();
         assert!(wire.reasoning.is_none());
     }
 
     #[test]
-    fn no_reasoning_fields_omit_reasoning() {
-        let req = Request::default();
+    fn budget_effort_omits_the_reasoning_field() {
+        let req = Request {
+            options: CallOptions {
+                reasoning_effort: Some(ReasoningEffort::Budget(2048)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let wire = encode_request(&req, false).unwrap();
         assert!(wire.reasoning.is_none());
     }
@@ -815,11 +796,14 @@ mod tests {
     #[test]
     fn sampling_maps_temperature_top_p_max_output_tokens() {
         let req = Request {
-            sampling: SamplingParams {
-                temperature: Some(0.5),
-                top_p: Some(0.9),
-                max_tokens: Some(100),
-                stop: Some(vec!["STOP".to_string()]),
+            options: CallOptions {
+                sampling: SamplingParams {
+                    temperature: Some(0.5),
+                    top_p: Some(0.9),
+                    max_tokens: Some(100),
+                    stop: Some(vec!["STOP".to_string()]),
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
