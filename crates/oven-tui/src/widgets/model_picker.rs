@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use oven_app::complete;
-use oven_llm::ModelId;
+use oven_app::{ModelChoice, complete};
+use oven_llm::{EffortSupport, ModelId};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
@@ -9,15 +9,12 @@ use super::list::{self, MAX_LIST_ROWS};
 const EMPTY_HINT: &str = "no matching models";
 const KEEP_CURRENT: &str = "keep current";
 
-/// Reasoning-effort choices shown in the second stage. `keep current` submits
-/// the command without an effort argument.
-const EFFORT_ITEMS: [(&str, &str); 5] = [
-    ("none", "Disable reasoning"),
-    ("low", "Low reasoning effort"),
-    ("medium", "Medium reasoning effort"),
-    ("high", "High reasoning effort"),
-    (KEEP_CURRENT, "Keep the current reasoning effort"),
-];
+/// 全部档位词，按强度排。模型支持什么就只列什么，所以这里只是兜底。
+const ALL_LEVELS: [&str; 7] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// 只有开关的模型上，"开启"用最低档承载：方言会把它当成开关，档位本身
+/// 被丢掉。
+const TOGGLE_ON: &str = "low";
 
 /// Result of a key consumed by the model picker.
 pub(crate) enum ModelPickerAction {
@@ -39,7 +36,7 @@ enum Stage {
 /// reasoning effort. Owns the keyboard while open; the input line stays frozen
 /// at `/model ` and is restored to `/model` when cancelled.
 pub(crate) struct ModelPicker {
-    models: Vec<(String, String)>,
+    models: Vec<ModelChoice>,
     filter: String,
     stage: Stage,
     selected: usize,
@@ -50,7 +47,7 @@ pub(crate) struct ModelPicker {
 impl ModelPicker {
     pub(crate) const HINT: &str = "enter select · tab complete · esc back";
 
-    pub(crate) fn new(models: Vec<(String, String)>) -> Self {
+    pub(crate) fn new(models: Vec<ModelChoice>) -> Self {
         Self {
             models,
             filter: String::new(),
@@ -68,7 +65,7 @@ impl ModelPicker {
     /// Replace the model list (e.g. after a provider switch).
     /// Takes the catalog the app reports. One that has not changed leaves the
     /// selection where the user put it.
-    pub(crate) fn update_models(&mut self, models: &[(String, String)]) {
+    pub(crate) fn update_models(&mut self, models: &[ModelChoice]) {
         if self.models == models {
             return;
         }
@@ -95,18 +92,52 @@ impl ModelPicker {
         self.selected = 0;
     }
 
+    /// The reasoning-effort choices for the model in focus: what it supports
+    /// and nothing else, so the picker cannot name a level the model does not
+    /// have.
+    fn effort_items(&self) -> Vec<(&'static str, &'static str)> {
+        let support = self
+            .model
+            .as_deref()
+            .and_then(|id| self.models.iter().find(|choice| choice.id == id))
+            .map(|choice| choice.effort_support.clone())
+            .unwrap_or_default();
+
+        let mut items: Vec<(&str, &str)> = match support {
+            EffortSupport::Levels(levels) => levels
+                .iter()
+                .filter_map(|level| level.keyword())
+                .map(|word| (word, level_label(word)))
+                .collect(),
+            EffortSupport::Toggle => {
+                vec![
+                    ("none", "Disable reasoning"),
+                    (TOGGLE_ON, "Enable reasoning"),
+                ]
+            }
+            // 深度固定或不推理的模型：推理参数不由我们决定，只剩"保持当前"。
+            EffortSupport::Fixed | EffortSupport::Unsupported => Vec::new(),
+            EffortSupport::Unknown => ALL_LEVELS
+                .iter()
+                .map(|word| (*word, level_label(word)))
+                .collect(),
+        };
+        items.push((KEEP_CURRENT, "Keep the current reasoning effort"));
+        items
+    }
+
     /// Indices of items in the active stage: models filtered by `filter`, or
-    /// the fixed effort list.
+    /// the effort list of the model in focus.
     pub(crate) fn matches(&self) -> Vec<usize> {
         match self.stage {
             Stage::Models => self
                 .models
                 .iter()
                 .enumerate()
-                .filter(|(_, (id, _))| complete::matches_model(id, &self.filter))
+                .filter(|(_, choice)| complete::matches_model(&choice.id, &self.filter))
                 .map(|(i, _)| i)
                 .collect(),
-            Stage::Effort => (0..EFFORT_ITEMS.len()).collect(),
+            Stage::Effort => (0..self.effort_items().len()).collect(),
         }
     }
 
@@ -119,7 +150,11 @@ impl ModelPicker {
                 let Some(model) = self.model.as_deref() else {
                     return format!("/model {}", self.filter);
                 };
-                match EFFORT_ITEMS[self.selected].0 {
+                let items = self.effort_items();
+                let Some((word, _)) = items.get(self.selected) else {
+                    return format!("/model {model}");
+                };
+                match *word {
                     KEEP_CURRENT => format!("/model {model}"),
                     effort => format!("/model {model} {effort}"),
                 }
@@ -142,7 +177,7 @@ impl ModelPicker {
         }
         match self.stage {
             Stage::Models => list::bounded_rows(self.matches().len()),
-            Stage::Effort => u16::try_from(EFFORT_ITEMS.len()).unwrap_or(u16::MAX),
+            Stage::Effort => u16::try_from(self.effort_items().len()).unwrap_or(u16::MAX),
         }
     }
 
@@ -201,7 +236,7 @@ impl ModelPicker {
             _ if list::cycle_key(key, &mut self.selected, rows) => ModelPickerAction::Handled,
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if let Some(idx) = self.selected_item() {
-                    self.model = Some(self.models[idx].0.clone());
+                    self.model = Some(self.models[idx].id.clone());
                     self.stage = Stage::Effort;
                     self.selected = 0;
                 }
@@ -216,6 +251,7 @@ impl ModelPicker {
     }
 
     fn handle_effort_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        let rows = self.effort_items().len();
         match key.code {
             KeyCode::Enter if key.modifiers.is_empty() => {
                 if self.model.is_none() {
@@ -229,7 +265,7 @@ impl ModelPicker {
                 let back = self
                     .models
                     .iter()
-                    .position(|(id, _)| Some(id) == self.model.as_ref())
+                    .position(|choice| Some(&choice.id) == self.model.as_ref())
                     .unwrap_or(0);
                 self.stage = Stage::Models;
                 self.model = None;
@@ -237,9 +273,7 @@ impl ModelPicker {
                 self.selected = back;
                 ModelPickerAction::Handled
             }
-            _ if list::cycle_key(key, &mut self.selected, EFFORT_ITEMS.len()) => {
-                ModelPickerAction::Handled
-            }
+            _ if list::cycle_key(key, &mut self.selected, rows) => ModelPickerAction::Handled,
             _ => ModelPickerAction::Handled,
         }
     }
@@ -249,7 +283,7 @@ impl ModelPicker {
         let Some(idx) = self.selected_item() else {
             return;
         };
-        self.filter = self.models[idx].0.clone();
+        self.filter = self.models[idx].id.clone();
         self.selected = self
             .matches()
             .iter()
@@ -265,15 +299,29 @@ impl ModelPicker {
             area,
             EMPTY_HINT,
             indices.iter().skip(start).take(MAX_LIST_ROWS).map(|&idx| {
-                let (id, provider) = &self.models[idx];
-                (wire_id(id), provider.clone())
+                let choice = &self.models[idx];
+                (wire_id(&choice.id), choice.provider.clone())
             }),
             self.selected - start,
         );
     }
 
     fn draw_effort(&self, f: &mut Frame<'_>, area: Rect) {
-        list::draw_choice_list(f, area, EMPTY_HINT, EFFORT_ITEMS, self.selected);
+        list::draw_choice_list(f, area, EMPTY_HINT, self.effort_items(), self.selected);
+    }
+}
+
+/// The label a level word carries in the picker.
+fn level_label(word: &str) -> &'static str {
+    match word {
+        "none" => "Disable reasoning",
+        "minimal" => "Minimal reasoning effort",
+        "low" => "Low reasoning effort",
+        "medium" => "Medium reasoning effort",
+        "high" => "High reasoning effort",
+        "xhigh" => "Extra-high reasoning effort",
+        "max" => "Maximum reasoning effort",
+        _ => "Reasoning effort",
     }
 }
 

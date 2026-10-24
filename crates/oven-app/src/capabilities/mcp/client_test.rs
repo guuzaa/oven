@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use mockall::mock;
 use oven_llm::{
-    ContentBlock as LlmContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName,
-    Request, Response, Role, StopReason, Usage,
+    CallOptions, ContentBlock as LlmContentBlock, ModelId, ModelInfo, Provider, ProviderError,
+    ProviderName, Request, Response, Role, StopReason, Usage,
 };
 
 use crate::AppBuilder;
@@ -98,7 +98,11 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
-    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         self.responses
             .lock()
             .unwrap()
@@ -112,6 +116,7 @@ impl Provider for MockProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<oven_llm::StreamEvent, ProviderError>>, ProviderError>
     {
         Err(ProviderError::Api {

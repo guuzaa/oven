@@ -14,12 +14,13 @@ use crate::core::theme;
 const KEEP: &str = "keep current";
 const EMPTY_HINT: &str = "no choices";
 
-const NAME_ITEMS: [(&str, &str); 6] = [
+const NAME_ITEMS: [(&str, &str); 7] = [
     ("openai", "OpenAI"),
     ("deepseek", "DeepSeek"),
     ("zhipu", "Zhipu (GLM)"),
     // ("moonshot", "Moonshot (Kimi)"),
     ("xai", "Grok"),
+    ("minimax", "MiniMax"),
     ("custom", "Custom gateway"),
     (KEEP, "Keep the current provider"),
 ];

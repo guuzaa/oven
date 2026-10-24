@@ -18,9 +18,12 @@
 use std::io::Write;
 use std::{io, time::Duration};
 
-use oven_llm::{CompletionsProvider, Delta, Message, Provider, Request, StreamEvent, ThinkingMode};
+use oven_llm::{
+    CallOptions, CompletionsProvider, Delta, Message, Provider, ReasoningEffort, Request,
+    StreamEvent,
+};
 
-async fn provider_example(provider: Box<dyn Provider>, request: &Request) {
+async fn provider_example(provider: Box<dyn Provider>, request: &Request, options: &CallOptions) {
     // 3. 演示 list_models（可能因缺少真实 API key/网络而失败，打印错误后继续）。
     match provider.list_models().await {
         Ok(models) => {
@@ -33,7 +36,7 @@ async fn provider_example(provider: Box<dyn Provider>, request: &Request) {
     }
 
     // 4. 演示非流式 complete 调用。
-    match provider.complete(request).await {
+    match provider.complete(request, options).await {
         Ok(response) => {
             println!(
                 "complete() succeeded: id={} stop_reason={:?}",
@@ -53,7 +56,7 @@ async fn provider_example(provider: Box<dyn Provider>, request: &Request) {
 
     std::thread::sleep(Duration::from_secs(1));
     // 5. 演示流式 stream 调用，逐块打印 Delta::TextDelta 内容。
-    match provider.stream(request).await {
+    match provider.stream(request, options).await {
         Ok(mut event_stream) => {
             print!("stream() text: ");
             use futures::StreamExt;
@@ -99,12 +102,11 @@ async fn main() {
 
     // 2. 构建请求。Provider 会为其静态模型目录中命中的 ID 自动执行能力校验。
     let request = Request::builder()
-        .model("glm-4.5-air")
         .message(Message::user_text("用一句话介绍一下 Rust 语言。"))
+        .build();
+    let options = CallOptions::new("glm-4.5-air")
         .temperature(0.0)
-        .thinking(ThinkingMode::Enabled)
-        .build()
-        .expect("model is set");
+        .reasoning_effort(ReasoningEffort::High);
 
-    provider_example(provider, &request).await
+    provider_example(provider, &request, &options).await
 }

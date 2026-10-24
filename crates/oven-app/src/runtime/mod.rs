@@ -5,10 +5,12 @@ use std::sync::Arc;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use oven_agent::{Agent, AgentError, CancellationToken, CompactStats, Record, RunPolicy, TodoList};
+use oven_agent::{Agent, CancellationToken, CompactStats, RunPolicy};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
 use oven_mem::MemoryStore;
-use oven_proto::{AppPhase, HistoryChangeReason, Input, SessionState};
+use oven_proto::{
+    AgentError, AppPhase, HistoryChangeReason, Input, ModelChoice, Record, SessionState, TodoList,
+};
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 
@@ -17,6 +19,7 @@ use crate::capabilities::subagent::Subagents;
 use crate::commands::{CommandOutcome, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::EventBus;
+use crate::core::profile;
 use crate::core::session::{
     Session, SessionError, SessionStore, current_or_session_span, record_recent,
     record_session_span,
@@ -176,6 +179,14 @@ impl Runtime {
         self.shared
             .state
             .send_modify(|state| state.levels.models = models);
+        if let Some(warning) =
+            shared::effort_warning(router.as_ref(), &model, self.agent.reasoning_effort())
+        {
+            self.emit(AppEventKind::Notification { text: warning });
+        }
+        if let Some(warning) = profile_warning(&config) {
+            self.emit_error(warning);
+        }
     }
 
     fn shutdown(&self, inbox: &InboxReceiver) {
@@ -364,6 +375,11 @@ impl Runtime {
                 model,
                 reasoning_effort,
             } => self.shared.switch_model(model, reasoning_effort).await,
+            CommandOutcome::ProfileQuery => {
+                let text = self.shared.describe_profiles();
+                self.shared.notify(text);
+            }
+            CommandOutcome::ProfileChanged { name } => self.shared.switch_profile(name).await,
             CommandOutcome::ProviderChanged { provider } => self.set_provider(provider).await,
             CommandOutcome::ModeChanged { mode } => {
                 self.shared.set_mode(mode);
@@ -437,6 +453,10 @@ impl Runtime {
             .expect("provider name assigned before update");
         next.merge_provider(&name, &overlay);
         next.active_provider.name = name;
+        // A profile is a promise about quality, and each vendor keeps it
+        // differently: the new vendor's binding wins over what the provider
+        // table says.
+        let profile_warning = apply_profile(&mut next);
         let model = next
             .active_provider_config()
             .expect("active provider inserted before build")
@@ -484,6 +504,9 @@ impl Runtime {
         self.emit(AppEventKind::Notification {
             text: summarize_setup(&overlay, saved.as_deref()),
         });
+        if let Some(warning) = profile_warning {
+            self.emit_error(warning);
+        }
         if let Some(body) = auth_error {
             self.emit_error(format!("API key rejected: {body}"));
         }
@@ -539,12 +562,45 @@ impl Runtime {
     }
 
     async fn save_provider_overlay(&self, overlay: &ProviderConfig) -> Option<PathBuf> {
-        save_provider_overlay(self.shared.user_config_path(), overlay, &self.shared.events).await
+        let profile = self.shared.config().active_profile.clone();
+        save_provider_overlay(
+            self.shared.user_config_path(),
+            overlay,
+            profile.as_deref(),
+            &self.shared.events,
+        )
+        .await
     }
 }
 
 fn format_compacted(before_tokens: u32, after_tokens: u32) -> String {
     format!("context compacted: {before_tokens} → {after_tokens} tokens")
+}
+
+/// Expand the active profile onto the active provider, and report when the
+/// vendor has no binding for it.
+///
+/// A profile is a promise about quality, and each vendor keeps it differently:
+/// the binding wins over what the provider table says.
+fn apply_profile(config: &mut AppConfig) -> Option<String> {
+    let name = config.active_profile.clone()?;
+    let provider = profile::active_provider(config);
+    let Some(binding) = profile::binding(&config.profiles, &name, &provider).cloned() else {
+        return Some(format!("profile '{name}' has no binding for {provider}"));
+    };
+    let provider_config = config.providers.get_mut(provider.slug())?;
+    provider_config.model = Some(binding.model);
+    provider_config.reasoning_effort = binding.effort;
+    None
+}
+
+/// Warn when the active profile has no binding for the active vendor.
+fn profile_warning(config: &AppConfig) -> Option<String> {
+    let name = config.active_profile.as_deref()?;
+    let provider = profile::active_provider(config);
+    profile::binding(&config.profiles, name, &provider)
+        .is_none()
+        .then(|| format!("profile '{name}' has no binding for {provider}"))
 }
 
 pub(crate) fn hydrate_session(agent: &mut Agent, prior: &[Record]) {
@@ -670,7 +726,7 @@ async fn refresh_model_choices(
     provider: &dyn Provider,
     current_model: &str,
     config: &AppConfig,
-) -> (Vec<(String, String)>, Option<String>) {
+) -> (Vec<ModelChoice>, Option<String>) {
     let timeout = config.request_timeout().min(Duration::from_secs(5));
     let known = provider.known_models();
     let (dynamic, auth_error) = match tokio::time::timeout(timeout, provider.list_models()).await {
@@ -692,26 +748,34 @@ fn merge_model_choices(
     dynamic: Vec<ModelInfo>,
     current_model: &str,
     current_provider: &ProviderName,
-) -> Vec<(String, String)> {
+) -> Vec<ModelChoice> {
+    let current_id = slug_without_variant(current_model);
+    let current_support = known
+        .iter()
+        .chain(dynamic.iter())
+        .find(|model| slug_without_variant(&model.id) == current_id)
+        .map(|model| model.effort_support.clone())
+        .unwrap_or_default();
+
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    let choices = std::iter::once((
-        slug_without_variant(current_model),
-        current_provider.clone(),
-    ))
-    .chain(
-        known
-            .into_iter()
-            .map(|m| (slug_without_variant(&m.id), m.provider)),
-    )
-    .chain(
-        dynamic
-            .into_iter()
-            .map(|m| (slug_without_variant(&m.id), m.provider)),
-    );
-    for (id, provider) in choices {
+    if !current_id.is_empty() {
+        seen.insert(current_id.clone());
+        out.push(ModelChoice {
+            id: current_id,
+            provider: current_provider.to_string(),
+            effort_support: current_support,
+        });
+    }
+
+    for model in known.into_iter().chain(dynamic) {
+        let id = slug_without_variant(&model.id);
         if !id.is_empty() && seen.insert(id.clone()) {
-            out.push((id, provider.to_string()));
+            out.push(ModelChoice {
+                id,
+                provider: model.provider.to_string(),
+                effort_support: model.effort_support,
+            });
         }
     }
     out

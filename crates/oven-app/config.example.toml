@@ -49,6 +49,9 @@ max_iters = 200
 # base_url = "https://api.deepseek.com"
 # Wire protocol for unknown vendors only; known vendors ignore it.
 # protocol = "completions"
+# Reasoning effort: none (off), minimal, low, medium, high, xhigh, max, or a
+# token budget written as a number. Unset means "no preference" — no effort
+# field is sent and the upstream default applies.
 # reasoning_effort = "medium"
 # Model metadata, declared per model in a table keyed by wire id. This is the
 # only source of window sizes for a custom vendor, so it is what turns on ctx%
@@ -75,6 +78,13 @@ max_iters = 200
 # [providers.xai]
 # api_key = "xai-..."
 # reasoning_effort = "low"
+
+# Quality profiles: a name we choose, and what it means for each vendor. The
+# same profile is a different model on a different vendor, so each vendor gets
+# its own line. `/profile <name>` switches to one; `/model` unbinds it.
+# [profiles.balanced]
+# deepseek = { model = "deepseek-v4-flash", effort = "medium" }
+# moonshot = { model = "kimi-k3", effort = "high" }
 
 # Subagents. `task` delegates a self-contained job to another agent; the roles
 # (explore, general) decide which tools it may use, not this block.

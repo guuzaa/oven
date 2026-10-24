@@ -2,8 +2,8 @@ use thiserror::Error;
 
 use crate::core::config::ConfigError;
 use crate::core::session::SessionError;
-use oven_agent::AgentError;
 use oven_llm::ProviderError;
+use oven_proto::AgentError;
 
 #[derive(Debug, Error)]
 pub enum AppError {

@@ -24,7 +24,12 @@ mod runtime;
 
 pub use api::{App, AppBuilder};
 pub use capabilities::mcp;
-pub use capabilities::tools::ToolRegistry;
+pub use capabilities::skills::{SKILL_FILE, Skill, SkillRegistry};
+pub use capabilities::tools::{
+    AnswerTool, BUILTIN_TOOLS, BashTool, BuiltinTool, FileEditTool, FileReadTool, FileWriteTool,
+    GlobTool, GrepTool, ListModelsTool, SkillReadTool, TaskOutputTool, TaskTool, TodoWriteTool,
+    ToolRegistry, WebFetchTool,
+};
 pub use capabilities::view::present_tool;
 pub use core::config::McpServerConfig;
 pub use core::error::AppError;
@@ -32,14 +37,14 @@ pub use core::mention::FileMentions;
 pub use core::provider::{provider_catalog, provider_models, verify};
 pub use core::session;
 pub use core::{complete, config};
-pub use oven_agent::{AnswerTool, CancellationToken, NOTICE_MARK, RoleSpec, Skill, SkillRegistry};
+pub use oven_agent::{CancellationToken, NOTICE_MARK, RoleSpec};
 pub use oven_proto::{
     AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AppEvent, AppEventKind,
     AppId, AppLevels, AppPhase, AppState, ApprovalDecision, COMPACTION_CANCELLED, CallOutcome,
     Command, CommandResult, CompactionEvent, HistoryChangeReason, Input, LoopLimitDecision,
-    NodeInfo, NodeStatus, ProviderView, Question, QuestionOption, SessionState, ShellEvent,
-    StepStop, StreamEvent, SubagentEvent, TodoItem, TodoList, TodoStatus, ToolCallId, ToolEvent,
-    ToolResult, ToolView, TurnEvent, TurnId, UserRequestId, UserResponse,
+    ModelChoice, NodeInfo, NodeStatus, ProviderView, Question, QuestionOption, SessionState,
+    ShellEvent, StepStop, StreamEvent, SubagentEvent, TodoItem, TodoList, TodoStatus, ToolCallId,
+    ToolEvent, ToolResult, ToolView, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
 pub use platform::shell::{LocalShell, ShellInput, display_shell_line};
 pub use platform::{dirs, log};

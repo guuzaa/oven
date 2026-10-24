@@ -11,14 +11,13 @@ use async_trait::async_trait;
 use oven_llm::ModelId;
 use serde_json::{Value, json};
 
-use crate::capabilities::tools::{
-    Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, require_str,
+use super::require_str;
+use oven_agent::{
+    NodeOutcome, NodeReport, RoleSpec, SpawnRequest, SubagentSpawner, Tool, ToolCaps, ToolOutcome,
+    TurnContext,
 };
-use crate::core::subagent::{NodeOutcome, NodeReport, RoleSpec, SpawnRequest, SubagentSpawner};
-use crate::core::turn::TurnContext;
-use oven_proto::AgentError;
-use oven_proto::AgentMode;
-use oven_proto::{NodeStatus, READ_RESULT_HINT};
+use oven_proto::{AgentError, AgentMode, NodeStatus};
+use oven_proto::{READ_RESULT_HINT, ToolPermission, ToolView};
 
 const NO_SUBAGENTS: &str = "no subagents have run in this session";
 const PLAN_MODE_NOTE: &str = " In plan mode only the read-only roles may run.";
@@ -344,8 +343,8 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::subagent::NodeHandle;
-    use crate::core::turn::TurnContext;
+    use crate::capabilities::tools::{test_context, test_context_in};
+    use oven_agent::NodeHandle;
     use oven_llm::Usage;
     use oven_proto::NodeInfo;
     use oven_proto::{AgentId, TurnId};
@@ -465,7 +464,7 @@ mod tests {
         let ToolOutcome { output: out, .. } = tool(spawner.clone())
             .run(
                 &json!({"description": "find it", "prompt": "go"}),
-                &TurnContext::for_test(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -488,7 +487,7 @@ mod tests {
         let ToolOutcome { output: out, .. } = tool(spawner.clone())
             .run(
                 &json!({"description": "find it", "prompt": "go", "background": true}),
-                &TurnContext::for_test(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -503,7 +502,7 @@ mod tests {
         tool(spawner.clone())
             .run(
                 &json!({"description": "find it", "prompt": "go", "model": "deepseek/deepseek-v4-pro"}),
-                &TurnContext::for_test(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -519,7 +518,7 @@ mod tests {
         tool(spawner.clone())
             .run(
                 &json!({"description": "find it", "prompt": "go", "model": "  "}),
-                &TurnContext::for_test(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -531,7 +530,7 @@ mod tests {
         let err = tool(MockSpawner::new(completed()))
             .run(
                 &json!({"description": "x", "prompt": "y", "role": "nope"}),
-                &TurnContext::for_test(),
+                &test_context(),
             )
             .await
             .unwrap_err();
@@ -545,7 +544,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_mode_refuses_a_writing_role() {
-        let cx = TurnContext::for_test_in(AgentMode::Plan);
+        let cx = test_context_in(AgentMode::Plan);
         let err = tool(MockSpawner::new(completed()))
             .run(
                 &json!({"description": "x", "prompt": "y", "role": "general"}),
@@ -579,7 +578,7 @@ mod tests {
         let ToolOutcome { output: out, .. } = tool(MockSpawner::new(outcome))
             .run(
                 &json!({"description": "find it", "prompt": "go"}),
-                &TurnContext::for_test(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -597,7 +596,7 @@ mod tests {
         let ToolOutcome { output: out, .. } = tool(MockSpawner::new(outcome))
             .run(
                 &json!({"description": "find it", "prompt": "go"}),
-                &TurnContext::for_test(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -608,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn missing_arguments_are_refused() {
         let err = tool(MockSpawner::new(completed()))
-            .run(&json!({"description": "x"}), &TurnContext::for_test())
+            .run(&json!({"description": "x"}), &test_context())
             .await
             .unwrap_err();
         assert!(err.message.contains("missing 'prompt'"), "{}", err.message);
@@ -627,7 +626,7 @@ mod tests {
         }];
         let ToolOutcome { output: out, .. } =
             TaskOutputTool::new(MockSpawner::with_reports(completed(), reports))
-                .run(&json!({}), &TurnContext::for_test())
+                .run(&json!({}), &test_context())
                 .await
                 .unwrap();
         assert!(out.contains("explore#1 · running"), "{out}");
@@ -637,7 +636,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_says_so_when_nothing_ran() {
         let ToolOutcome { output: out, .. } = TaskOutputTool::new(MockSpawner::new(completed()))
-            .run(&json!({"name": "explore#1"}), &TurnContext::for_test())
+            .run(&json!({"name": "explore#1"}), &test_context())
             .await
             .unwrap();
         assert_eq!(out, NO_SUBAGENTS);
@@ -646,7 +645,7 @@ mod tests {
     #[tokio::test]
     async fn task_output_names_itself_in_an_error() {
         let err = TaskOutputTool::new(MockSpawner::with_reports_error("unknown subagent 'nope'"))
-            .run(&json!({"name": "nope"}), &TurnContext::for_test())
+            .run(&json!({"name": "nope"}), &test_context())
             .await
             .unwrap_err();
         assert_eq!(err.message, format!("task_output: unknown subagent 'nope'"));

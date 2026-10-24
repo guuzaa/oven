@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use oven_llm::{
-    Client, Message, Provider, Request, Response, StreamCollector, ThinkingMode, ToolChoice,
+    CallOptions, Client, Message, Provider, ReasoningEffort, Request, Response, StreamCollector,
+    ToolChoice,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -55,10 +56,11 @@ impl Agent {
         req.messages.push(Message::user_text(COMPACT_PROMPT));
         req.tools = Vec::new();
         req.tool_choice = ToolChoice::None;
-        req.thinking = Some(ThinkingMode::Disabled);
-        req.reasoning_effort = None;
+        // A summary does not need the thinking the turn had.
+        let mut options = self.build_options();
+        options.reasoning_effort = Some(ReasoningEffort::Off);
 
-        let response = request_summary(self.router(), req, cancel).await?;
+        let response = request_summary(self.router(), req, options, cancel).await?;
         if cancel.is_cancelled() {
             return Err(AgentError::cancelled());
         }
@@ -92,17 +94,21 @@ impl Agent {
 async fn request_summary(
     router: Arc<Client>,
     req: Request,
+    options: CallOptions,
     cancel: &CancellationToken,
 ) -> Result<Response, AgentError> {
     let cancel_work = cancel.clone();
     let work = async move {
         let streams = router
-            .resolve_model(&req.model)
+            .resolve_model(&options.model)
             .is_none_or(|info| info.capabilities.supports_streaming);
         if !streams {
-            return router.complete(&req).await.map_err(AgentError::from);
+            return router
+                .complete(&req, &options)
+                .await
+                .map_err(AgentError::from);
         }
-        let mut stream = router.stream(&req).await?;
+        let mut stream = router.stream(&req, &options).await?;
         let mut collector = StreamCollector::new();
         while let Some(event) = stream.next().await {
             if cancel_work.is_cancelled() {
@@ -149,7 +155,11 @@ mod tests {
 
     #[async_trait]
     impl Provider for SummaryProvider {
-        async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             self.seen.lock().unwrap().push(req.clone());
             Ok(Response {
                 id: "r1".into(),
@@ -169,6 +179,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -246,7 +257,11 @@ mod tests {
 
         #[async_trait]
         impl Provider for FailingProvider {
-            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+            async fn complete(
+                &self,
+                _req: &Request,
+                _options: &CallOptions,
+            ) -> Result<Response, ProviderError> {
                 Err(ProviderError::Api {
                     status: 500,
                     body: "boom".into(),
@@ -255,6 +270,7 @@ mod tests {
             async fn stream(
                 &self,
                 _req: &Request,
+                _options: &CallOptions,
             ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
             {
                 Err(ProviderError::Api {
@@ -427,7 +443,11 @@ mod tests {
 
     #[async_trait]
     impl Provider for BlockingComplete {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let _flag = DropFlag(Arc::clone(&self.dropped));
             if let Some(entered) = self.entered.lock().unwrap().take() {
                 let _ = entered.send(());
@@ -438,6 +458,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -462,7 +483,11 @@ mod tests {
 
     #[async_trait]
     impl Provider for HangingStream {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "complete disabled".into(),
@@ -472,6 +497,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             let events = self.events.clone();
             let entered = self.entered.lock().unwrap().take();
@@ -525,7 +551,11 @@ mod tests {
 
     #[async_trait]
     impl Provider for FinishedStream {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "complete disabled".into(),
@@ -535,6 +565,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             let events = self.events.clone();
             Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))

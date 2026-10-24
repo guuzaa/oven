@@ -1,10 +1,9 @@
-use oven_llm::{ModelId, ReasoningEffort, Router, RouterError};
+use oven_llm::{ModelId, ParseEffortError, ReasoningEffort, Router, RouterError};
 
 use super::{CommandContext, CommandOutcome, SlashCommand};
-use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 
-const USAGE: &str = "usage: /model <id> [none|low|medium|high]";
+const USAGE: &str = "usage: /model <id> [none|minimal|low|medium|high|xhigh|max|budget]";
 
 pub struct Model;
 
@@ -22,11 +21,8 @@ impl Model {
     pub(crate) const NAME: &'static str = "model";
 
     pub(crate) fn parse_effort(s: &str) -> Result<ReasoningEffort, AppError> {
-        ProviderConfig::parse_effort(s).ok_or_else(|| {
-            AppError::Runtime(format!(
-                "invalid reasoning effort '{s}'; expected none, low, medium, or high"
-            ))
-        })
+        s.parse()
+            .map_err(|err: ParseEffortError| AppError::Runtime(err.to_string()))
     }
 
     pub(crate) fn qualify_against(router: &Router, raw: &str) -> Result<String, AppError> {
@@ -49,7 +45,7 @@ impl Model {
     /// Renders the "current model" summary shared by the idle `/model`
     /// reply and the mid-turn query path (see `runtime::apply_model_during_turn`).
     pub(crate) fn describe(model: &str, reasoning_effort: Option<ReasoningEffort>) -> String {
-        let effort = reasoning_effort.map_or_else(|| "none".to_string(), |e| e.to_string());
+        let effort = reasoning_effort.map_or_else(|| "unspecified".to_string(), |e| e.to_string());
         format!("current model: {model} (reasoning effort: {effort})")
     }
 
@@ -81,7 +77,7 @@ impl SlashCommand for Model {
     }
 
     fn description(&self) -> &'static str {
-        "Switch model and reasoning effort: /model <id> [none|low|medium|high]"
+        "Switch model and reasoning effort: /model <id> [none|minimal|low|medium|high|xhigh|max]"
     }
 
     fn execute(&self, cx: &mut CommandContext<'_>, args: &str) -> Result<CommandOutcome, AppError> {
@@ -110,15 +106,15 @@ mod tests {
     use futures::stream::BoxStream;
     use oven_agent::Agent;
     use oven_llm::{
-        ModelInfo, Provider, ProviderError, ProviderName, Request, Response, Result as LlmResult,
-        Router, StreamEvent,
+        CallOptions, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
+        Result as LlmResult, Router, StreamEvent,
     };
 
     struct MockProvider;
 
     #[async_trait]
     impl Provider for MockProvider {
-        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+        async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "unused".into(),
@@ -128,6 +124,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
             Err(ProviderError::Api {
                 status: 500,
@@ -212,7 +209,7 @@ mod tests {
     #[test]
     fn effort_is_parsed_case_insensitively() {
         for (raw, expected) in [
-            ("none", ReasoningEffort::None),
+            ("none", ReasoningEffort::Off),
             ("LOW", ReasoningEffort::Low),
             ("Medium", ReasoningEffort::Medium),
             ("high", ReasoningEffort::High),

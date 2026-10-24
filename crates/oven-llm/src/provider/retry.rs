@@ -9,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 
-use crate::domain::{ModelId, Request, Response, StreamEvent};
+use crate::domain::{CallOptions, ModelId, Request, Response, StreamEvent};
 use crate::provider::model::ModelInfo;
 use crate::provider::{Provider, ProviderError, ProviderKind, ProviderName};
 
@@ -165,28 +165,37 @@ impl RetryingProvider {
         self
     }
 
-    async fn attempt_complete(&self, req: &Request) -> Result<Response, ProviderError> {
+    async fn attempt_complete(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         match self.policy.timeout {
-            Some(limit) => match with_timeout(limit, self.inner.complete(req)).await {
+            Some(limit) => match with_timeout(limit, self.inner.complete(req, options)).await {
                 Ok(result) => result,
                 Err(()) => Err(timeout_error(limit)),
             },
-            None => self.inner.complete(req).await,
+            None => self.inner.complete(req, options).await,
         }
     }
 }
 
 #[async_trait]
 impl Provider for RetryingProvider {
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        run(&self.policy, || self.attempt_complete(req)).await
+    async fn complete(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
+        run(&self.policy, || self.attempt_complete(req, options)).await
     }
 
     async fn stream(
         &self,
         req: &Request,
+        options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        run(&self.policy, || self.inner.stream(req)).await
+        run(&self.policy, || self.inner.stream(req, options)).await
     }
 
     fn known_models(&self) -> Vec<ModelInfo> {
@@ -225,12 +234,16 @@ mod tests {
     }
 
     fn request() -> Request {
-        Request::builder().model("mock").build().unwrap()
+        Request::builder().build()
     }
 
     #[async_trait]
     impl Provider for Flaky {
-        async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let mut calls = self.calls.lock().unwrap();
             *calls += 1;
             if *calls <= self.fails_before_success {
@@ -241,7 +254,7 @@ mod tests {
             }
             Ok(Response {
                 id: "1".into(),
-                model: req.model.as_str().to_owned(),
+                model: options.model.as_str().to_owned(),
                 role: Role::Assistant,
                 content: Vec::new(),
                 stop_reason: None,
@@ -252,6 +265,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             let mut calls = self.stream_calls.lock().unwrap();
             *calls += 1;
@@ -294,7 +308,10 @@ mod tests {
         })
         .with_retries(3)
         .with_base_backoff(Duration::from_millis(1));
-        provider.complete(&request()).await.unwrap();
+        provider
+            .complete(&request(), &CallOptions::new("mock"))
+            .await
+            .unwrap();
         assert_eq!(*calls.lock().unwrap(), 3);
     }
 
@@ -303,12 +320,17 @@ mod tests {
         struct AuthFail;
         #[async_trait]
         impl Provider for AuthFail {
-            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+            async fn complete(
+                &self,
+                _req: &Request,
+                _options: &CallOptions,
+            ) -> Result<Response, ProviderError> {
                 Err(ProviderError::Auth("bad key".into()))
             }
             async fn stream(
                 &self,
                 _req: &Request,
+                _options: &CallOptions,
             ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
             {
                 Err(ProviderError::Auth("bad key".into()))
@@ -324,7 +346,10 @@ mod tests {
         let provider = RetryingProvider::new(AuthFail)
             .with_retries(5)
             .with_base_backoff(Duration::from_millis(1));
-        let err = provider.complete(&request()).await.unwrap_err();
+        let err = provider
+            .complete(&request(), &CallOptions::new("mock"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, ProviderError::Auth(_)));
     }
 
@@ -340,7 +365,10 @@ mod tests {
         })
         .with_retries(3)
         .with_base_backoff(Duration::from_millis(1));
-        let stream = provider.stream(&request()).await.unwrap();
+        let stream = provider
+            .stream(&request(), &CallOptions::new("mock"))
+            .await
+            .unwrap();
         let events: Vec<_> = futures::StreamExt::collect(stream).await;
         assert_eq!(events.len(), 1);
         assert_eq!(*stream_calls.lock().unwrap(), 2);
@@ -355,7 +383,11 @@ mod tests {
         struct Slow;
         #[async_trait]
         impl Provider for Slow {
-            async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+            async fn complete(
+                &self,
+                _req: &Request,
+                _options: &CallOptions,
+            ) -> Result<Response, ProviderError> {
                 sleep(Duration::from_millis(50)).await;
                 Err(ProviderError::Api {
                     status: 500,
@@ -365,6 +397,7 @@ mod tests {
             async fn stream(
                 &self,
                 _req: &Request,
+                _options: &CallOptions,
             ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>
             {
                 unimplemented!()
@@ -380,7 +413,10 @@ mod tests {
         let provider = RetryingProvider::new(Slow)
             .with_timeout(Duration::from_millis(10))
             .with_retries(0);
-        let err = provider.complete(&request()).await.unwrap_err();
+        let err = provider
+            .complete(&request(), &CallOptions::new("mock"))
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, ProviderError::Api { status: 408, .. }),
             "{err}"
@@ -396,7 +432,10 @@ mod tests {
             stream_calls: Arc::new(Mutex::new(0)),
             list_calls: Arc::new(Mutex::new(0)),
         });
-        let err = provider.complete(&request()).await.unwrap_err();
+        let err = provider
+            .complete(&request(), &CallOptions::new("mock"))
+            .await
+            .unwrap_err();
         assert!(matches!(err, ProviderError::Api { status: 500, .. }));
         assert_eq!(*calls.lock().unwrap(), 1);
     }

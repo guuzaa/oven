@@ -1,11 +1,148 @@
 //! How a tool call renders when only its name and input survive, e.g. when
-//! replaying a saved session: the agent's built-in table plus the app's tools.
+//! replaying a saved session: the app's own tools and the built-in ones.
 
-use oven_agent::ToolView;
+use oven_proto::ToolView;
 use serde_json::Value;
 
 use super::memory::present_memory_tool;
+use super::tools::{
+    AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool,
+    TaskOutputTool, TaskTool, TodoWriteTool, WebFetchTool,
+};
 
 pub fn present_tool(name: &str, input: &Value) -> ToolView {
-    present_memory_tool(name, input).unwrap_or_else(|| oven_agent::present_tool(name, input))
+    present_memory_tool(name, input).unwrap_or_else(|| present_builtin_tool(name, input))
+}
+
+fn present_builtin_tool(name: &str, input: &Value) -> ToolView {
+    match name {
+        BashTool::NAME => BashTool::view_input(input),
+        FileReadTool::NAME => FileReadTool::view_input(input),
+        FileEditTool::NAME => FileEditTool::view_input(input),
+        FileWriteTool::NAME => FileWriteTool::view_input(input),
+        GlobTool::NAME => GlobTool::view_input(input),
+        GrepTool::NAME => GrepTool::view_input(input),
+        WebFetchTool::NAME => WebFetchTool::view_input(input),
+        TodoWriteTool::NAME => TodoWriteTool::view_input(input),
+        TaskTool::NAME => TaskTool::view_input(input),
+        TaskOutputTool::NAME => TaskOutputTool::view_input(input),
+        AnswerTool::NAME => AnswerTool::view_input(input),
+        _ => ToolView::named(name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn present_tool_uses_command_and_path() {
+        assert_eq!(
+            present_tool(BashTool::NAME, &json!({ "command": "ls -la" })).summary,
+            format!("{} ls -la", BashTool::VERB)
+        );
+        assert_eq!(
+            present_tool(FileReadTool::NAME, &json!({ "path": "src/main.rs" })).summary,
+            format!("{} src/main.rs", FileReadTool::VERB)
+        );
+        let edit = present_tool(
+            FileEditTool::NAME,
+            &json!({
+                "path": "src/main.rs",
+                "edit": [{ "old_string": "old", "new_string": "new" }]
+            }),
+        );
+        assert_eq!(edit.summary, format!("{} src/main.rs", FileEditTool::VERB));
+        assert_eq!(edit.detail.as_deref(), Some("- old\n+ new"));
+        assert!(edit.collapse);
+        assert_eq!(
+            present_tool(
+                FileWriteTool::NAME,
+                &json!({ "path": "out.txt", "content": "new content" })
+            )
+            .summary,
+            format!("{} out.txt", FileWriteTool::VERB)
+        );
+        assert_eq!(
+            present_tool(
+                FileWriteTool::NAME,
+                &json!({ "path": "out.txt", "content": "new content" })
+            )
+            .detail
+            .as_deref(),
+            Some("+ new content")
+        );
+        assert!(
+            present_tool(
+                FileWriteTool::NAME,
+                &json!({ "path": "out.txt", "content": "new content" })
+            )
+            .collapse
+        );
+        assert_eq!(
+            present_tool(GrepTool::NAME, &json!({ "pattern": "foo" })).summary,
+            format!("{} foo", GrepTool::VERB)
+        );
+        assert_eq!(
+            present_tool(
+                WebFetchTool::NAME,
+                &json!({ "url": "https://example.com/docs" })
+            )
+            .summary,
+            format!("{} https://example.com/docs", WebFetchTool::VERB)
+        );
+        assert_eq!(
+            present_tool(WebFetchTool::NAME, &json!({})).summary,
+            WebFetchTool::VERB
+        );
+        assert_eq!(
+            present_tool(
+                GlobTool::NAME,
+                &json!({ "pattern": "**/*.rs", "path": "src" })
+            )
+            .summary,
+            format!("{} **/*.rs in src", GlobTool::VERB)
+        );
+        assert_eq!(
+            present_tool(BashTool::NAME, &json!({})).summary,
+            BashTool::VERB
+        );
+        let todo = present_tool(
+            TodoWriteTool::NAME,
+            &json!({ "todos": [{"id": "a", "content": "one", "status": "pending"}] }),
+        );
+        assert!(!todo.collapse);
+        assert_eq!(todo.detail, None);
+        assert_eq!(
+            todo.summary,
+            "todo_write · 1 todos (0 in_progress, 0 completed)"
+        );
+        assert!(present_tool(TodoWriteTool::NAME, &json!({})).summary == TodoWriteTool::NAME);
+        assert!(!present_tool(TodoWriteTool::NAME, &json!({})).collapse);
+        assert_eq!(
+            present_tool(
+                TaskTool::NAME,
+                &json!({ "description": "find it", "role": "explore" })
+            )
+            .summary,
+            "Agent explore: find it"
+        );
+        assert_eq!(
+            present_tool(TaskOutputTool::NAME, &json!({ "name": "explore#1" })).summary,
+            "Agent status: explore#1"
+        );
+        assert_eq!(
+            present_tool(
+                AnswerTool::NAME,
+                &json!({ "question": "which database?", "options": [{ "label": "postgres" }] })
+            )
+            .summary,
+            format!("{} which database?", AnswerTool::VERB)
+        );
+        assert_eq!(
+            present_tool(AnswerTool::NAME, &json!({})).summary,
+            AnswerTool::VERB
+        );
+    }
 }

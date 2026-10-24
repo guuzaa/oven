@@ -8,10 +8,11 @@ use std::collections::HashMap;
 use reqwest::header::HeaderMap;
 use secrecy::SecretString;
 
-use crate::domain::{ModelId, Request};
+use crate::domain::{CallOptions, ModelId, Request};
 use crate::provider::http;
 use crate::provider::model::ModelInfo;
 use crate::provider::validate::validate_request;
+use crate::provider::vendor::{Channels, channels, dialect_for, extra_fields, resolve_reasoning};
 use crate::provider::{ProviderError, ProviderName};
 
 pub(crate) struct Endpoint {
@@ -55,15 +56,41 @@ impl Endpoint {
             .or_else(|| self.model_catalog.get(&ModelId::from(id.wire_id())))
     }
 
+    /// Validates the request against the model's metadata. A model the
+    /// catalog does not know skips the validation: not knowing what it can
+    /// do, say nothing.
     pub(crate) fn validate_known_model(
         &self,
         req: &Request,
+        options: &CallOptions,
+        model: Option<&ModelInfo>,
         stream: bool,
     ) -> Result<(), ProviderError> {
-        if let Some(model) = self.resolve_model(&req.model) {
-            validate_request(req, model, stream)?;
+        if let Some(model) = model {
+            validate_request(req, options, model, stream)?;
         }
         Ok(())
+    }
+
+    /// The reasoning fields this request carries on the wire: normalized by
+    /// what the model can do, then split into the channels the vendor's
+    /// dialect uses. A model the catalog does not know is treated as
+    /// "unknown" and left alone.
+    pub(crate) fn reasoning_channels(
+        &self,
+        options: &CallOptions,
+        model: Option<&ModelInfo>,
+    ) -> Channels {
+        let support = model
+            .map(|model| model.effort_support.clone())
+            .unwrap_or_default();
+        let intent = resolve_reasoning(options.reasoning_effort, &support);
+        channels(intent, dialect_for(&self.provider_name), &support)
+    }
+
+    /// 该厂商每次请求都要带的额外字段（例如 MiniMax 的 `reasoning_split`）。
+    pub(crate) fn extra_fields(&self) -> Vec<(&'static str, serde_json::Value)> {
+        extra_fields(&self.provider_name)
     }
 
     pub(crate) fn merge_provider_options(
@@ -78,6 +105,23 @@ impl Endpoint {
             .expect("wire request always serializes to a JSON object");
         for (key, value) in options {
             object.insert(key.clone(), value.clone());
+        }
+        body
+    }
+
+    /// 把厂商每次都要带的额外字段并进 wire body。
+    pub(crate) fn merge_extra_fields(
+        mut body: serde_json::Value,
+        fields: &[(&str, serde_json::Value)],
+    ) -> serde_json::Value {
+        if fields.is_empty() {
+            return body;
+        }
+        let object = body
+            .as_object_mut()
+            .expect("wire request always serializes to a JSON object");
+        for (key, value) in fields {
+            object.insert((*key).to_string(), value.clone());
         }
         body
     }

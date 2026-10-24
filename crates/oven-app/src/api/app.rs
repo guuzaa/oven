@@ -2,13 +2,11 @@ use std::path::{Path, PathBuf};
 use std::string::String;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oven_agent::{
-    AgentId, AgentMode, LoopLimitDecision, TodoList, TurnId, UserRequestId, UserResponse,
-};
 use oven_llm::{Message, Usage};
 use oven_proto::{
-    AgentEvent, AppEvent, AppEventKind, AppId, AppState, Command, CommandResult, Input,
-    ProviderView, ShellEvent, TurnEvent,
+    AgentEvent, AgentId, AgentMode, AppEvent, AppEventKind, AppId, AppState, Command,
+    CommandResult, Input, LoopLimitDecision, NodeInfo, ProviderView, ShellEvent, StreamEvent,
+    TodoList, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -76,12 +74,12 @@ impl App {
     }
 
     /// The conversation driver. Anything else a view sees is a subagent.
-    pub fn agent_id(&self) -> oven_agent::AgentId {
+    pub fn agent_id(&self) -> AgentId {
         self.state.borrow().levels.agent_id
     }
 
     /// Subagents in spawn order, mirrored from the registry.
-    pub fn subagents(&self) -> Vec<oven_agent::NodeInfo> {
+    pub fn subagents(&self) -> Vec<NodeInfo> {
         self.state.borrow().levels.subagents.as_ref().clone()
     }
 
@@ -235,7 +233,7 @@ impl App {
                         in_turn = true;
                         text.clear();
                     }
-                    AgentEvent::Stream(oven_agent::StreamEvent::TextDelta { text: t }) => {
+                    AgentEvent::Stream(StreamEvent::TextDelta { text: t }) => {
                         text.push_str(&t);
                     }
                     AgentEvent::Turn(TurnEvent::Completed { .. } | TurnEvent::Cancelled { .. }) => {

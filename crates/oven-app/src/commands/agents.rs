@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use oven_agent::NodeInfo;
+use oven_proto::NodeInfo;
 
 use super::{CommandContext, CommandOutcome, SlashCommand};
 use crate::core::error::AppError;
@@ -102,8 +102,9 @@ mod tests {
     use super::*;
     use crate::capabilities::subagent::Subagents;
     use crate::commands::SlashRegistry;
-    use oven_agent::{Agent, AgentId, NodeStatus, TurnId};
+    use oven_agent::Agent;
     use oven_llm::Router;
+    use oven_proto::{AgentId, NodeStatus, TurnId};
 
     const LABEL: &str = "find the spawn path";
 

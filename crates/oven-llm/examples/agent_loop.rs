@@ -40,7 +40,6 @@ async fn main() -> ExampleResult<()> {
     println!("task: {task}");
 
     let mut request = Request::builder()
-        .model("deepseek-v4-flash")
         .system(format!(
             "You are a careful coding agent. Your workspace root is {}. \
              Use read_file before changing a file. Use write_file only for files inside that root. \
@@ -49,13 +48,13 @@ async fn main() -> ExampleResult<()> {
         ))
         .prompt(task)
         .tools(coding_tools())
+        .build();
+    let options = oven_llm::CallOptions::new("deepseek-v4-flash")
         .temperature(0.1)
-        .thinking(oven_llm::ThinkingMode::Enabled)
-        .build()
-        .expect("model is set");
+        .reasoning_effort(oven_llm::ReasoningEffort::High);
 
     loop {
-        let response = collect_streamed_response(provider.as_ref(), &request).await?;
+        let response = collect_streamed_response(provider.as_ref(), &request, &options).await?;
         let requests_tools =
             response.stop_reason == Some(StopReason::ToolUse) && response.has_tool_use();
         println!("usage: {:?}", response.usage);
@@ -90,8 +89,9 @@ async fn main() -> ExampleResult<()> {
 async fn collect_streamed_response<P: Provider + ?Sized>(
     provider: &P,
     request: &Request,
+    options: &oven_llm::CallOptions,
 ) -> ExampleResult<oven_llm::Response> {
-    let mut stream = provider.stream(request).await?;
+    let mut stream = provider.stream(request, options).await?;
     let mut collector = StreamCollector::new();
 
     print!("\nassistant: ");

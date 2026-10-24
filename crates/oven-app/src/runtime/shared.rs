@@ -7,9 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use oven_agent::{
-    Agent, AgentEvent, AgentId, AgentMode, CancellationToken, PendingInput, PendingRequest,
-    RequestSink, RouterHandle, Selection, ToolEvent, TurnEvent, TurnId, UserRequest, UserRequestId,
-    UserResponse,
+    Agent, CancellationToken, PendingInput, PendingRequest, RequestSink, RouterHandle, Selection,
+    UserRequest,
+};
+use oven_llm::{EffortSupport, ModelId, ReasoningEffort, Router, clamp_level};
+use oven_proto::{
+    AgentEvent, AgentId, AgentMode, ToolEvent, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
 use tokio::sync::watch;
 
@@ -19,7 +22,6 @@ use crate::core::event::EventBus;
 use crate::runtime::pending::TurnInbox;
 use oven_proto::AppEventKind;
 use oven_proto::{AppPhase, AppState};
-
 /// The turn that is running now: how to stop it, and the one request it is
 /// waiting on the user for.
 struct ActiveTurn {
@@ -278,6 +280,42 @@ impl RequestSink for Shared {
 
 /// Projects a user request onto the event a frontend draws. The agent sends
 /// the request and waits; it does not emit the prompt itself.
+/// Says so when the effort the user picked is not one the model takes.
+///
+/// The request path degrades silently, so the switch and the startup are the
+/// only places where the difference can still be said out loud.
+pub(crate) fn effort_warning(
+    router: &Router,
+    model: &str,
+    effort: Option<ReasoningEffort>,
+) -> Option<String> {
+    let effort = effort?;
+    let support = &router.resolve_model(&ModelId::from(model))?.effort_support;
+    match support {
+        EffortSupport::Unknown => None,
+        EffortSupport::Unsupported => Some(format!(
+            "{model} does not reason; the request carries no reasoning field"
+        )),
+        EffortSupport::Fixed => Some(format!(
+            "{model} thinks at a fixed depth; the request carries no reasoning field"
+        )),
+        EffortSupport::Toggle => Some(format!(
+            "{model} only has a reasoning switch; {effort} will be treated as on"
+        )),
+        EffortSupport::Levels(levels) => {
+            if levels.contains(&effort) {
+                return None;
+            }
+            match clamp_level(effort, levels) {
+                Some(level) => Some(format!(
+                    "{model} does not take {effort}; {level} will be used"
+                )),
+                None => Some(format!("{model} does not take {effort}")),
+            }
+        }
+    }
+}
+
 fn requested_event(request: &PendingRequest) -> AgentEvent {
     let request_id = request.request_id;
     match &request.request {
@@ -312,9 +350,39 @@ mod tests {
     use oven_proto::{AppEvent, AppEventKind};
 
     use crate::core::state::app_state;
-    use oven_agent::{Agent, AnswerResponse, ApprovalDecision, LoopLimitDecision};
-    use oven_llm::Router;
+    use oven_agent::Agent;
+    use oven_llm::{CompletionsProvider, Provider, Router};
+    use oven_proto::{AnswerResponse, ApprovalDecision, LoopLimitDecision};
     use tokio::sync::{mpsc, oneshot};
+
+    fn router_with(provider: Box<dyn Provider>) -> Router {
+        let mut router = Router::new();
+        router.register(provider);
+        router
+    }
+
+    #[test]
+    fn a_switch_to_a_switch_only_model_says_so() {
+        let router = router_with(Box::new(CompletionsProvider::zhipu(String::from("k"))));
+        let warning = effort_warning(&router, "glm-5.3", Some(ReasoningEffort::High)).unwrap();
+        assert!(warning.contains("only has a reasoning switch"), "{warning}");
+    }
+
+    #[test]
+    fn a_switch_to_a_model_that_takes_the_level_says_nothing() {
+        let router = router_with(Box::new(CompletionsProvider::deepseek(String::from("k"))));
+        assert!(
+            effort_warning(&router, "deepseek-v4-flash", Some(ReasoningEffort::High)).is_none()
+        );
+    }
+
+    #[test]
+    fn a_switch_names_the_level_the_model_will_use() {
+        let router = router_with(Box::new(CompletionsProvider::deepseek(String::from("k"))));
+        let warning =
+            effort_warning(&router, "deepseek-v4-flash", Some(ReasoningEffort::Medium)).unwrap();
+        assert!(warning.contains("low"), "{warning}");
+    }
 
     fn shared() -> Shared {
         let agent = Agent::new(Router::new(), Vec::new());

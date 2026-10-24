@@ -1,8 +1,8 @@
-//! encoder：将 domain 层的 `Request` 转换为 OpenAI Responses API 的 wire
-//! 格式 `CreateResponseRequest`。
+//! encoder: turns the domain `Request` into the OpenAI Responses API wire
+//! format `CreateResponseRequest`.
 //!
-//! 本模块是纯函数集合，不做任何 I/O；不读取或处理
-//! `Request.provider_options` 字段（该字段的合并逻辑位于 transport 层）。
+//! Pure functions, no I/O. `options.provider_options` is not read here — the
+//! transport layer merges it.
 
 use std::sync::Arc;
 
@@ -13,8 +13,10 @@ use super::types::{
     WireReasoning,
 };
 use crate::domain::message::{ContentBlock, ImageSource, Message, Role};
-use crate::domain::request::{ReasoningEffort, Request, ThinkingMode};
+use crate::domain::options::CallOptions;
+use crate::domain::request::Request;
 use crate::domain::tool::{Tool, ToolChoice};
+use crate::provider::vendor::Channels;
 
 /// `encode_request` 及其子函数的编码失败原因。
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
@@ -28,16 +30,21 @@ pub enum EncodeError {
     UnsupportedToolResultContent(String),
 }
 
-/// 将 `Request` 编码为 OpenAI Responses API 的 wire 请求体。
+/// Encodes a `Request` into the OpenAI Responses API wire request body.
 ///
-/// - `req.system` → 顶层 `instructions`
-/// - `messages` 中每条消息按角色分发到 `encode_message`
-/// - `tools` / `tool_choice` / `reasoning` 逐一映射
-/// - `sampling.stop` 不被 Responses API 支持，忽略
-/// - `stream = true` 时 wire 的 `stream` 字段为 `true`
+/// - `req.system` → the top level `instructions`
+/// - every message in `messages` goes to `encode_message` by its role
+/// - `tools` / `tool_choice` / `reasoning` map one by one
+/// - `sampling.stop` is not supported by the Responses API and is ignored
+/// - `stream = true` sets the wire `stream` field to `true`
 ///
-/// 不读取或处理 `req.provider_options`（由 transport 层负责合并）。
-pub(crate) fn encode_request(req: &Request, stream: bool) -> Result<ResponseRequest, EncodeError> {
+/// `options.provider_options` is not read here — the transport layer merges it.
+pub(crate) fn encode_request(
+    req: &Request,
+    options: &CallOptions,
+    reasoning: Channels,
+    stream: bool,
+) -> Result<ResponseRequest, EncodeError> {
     let mut input: Vec<ResponseInputItem> = Vec::new();
 
     for message in &req.messages {
@@ -51,15 +58,17 @@ pub(crate) fn encode_request(req: &Request, stream: bool) -> Result<ResponseRequ
     };
 
     Ok(ResponseRequest {
-        model: req.model.wire_id().to_owned(),
+        model: options.model.wire_id().to_owned(),
         instructions: req.system.clone(),
         input: if input.is_empty() { None } else { Some(input) },
         tools,
         tool_choice: encode_tool_choice(&req.tool_choice),
-        reasoning: encode_reasoning(req.reasoning_effort, req.thinking),
-        temperature: req.sampling.temperature,
-        top_p: req.sampling.top_p,
-        max_output_tokens: req.sampling.max_tokens,
+        reasoning: reasoning.level.map(|effort| WireReasoning {
+            effort: effort.to_string(),
+        }),
+        temperature: options.sampling.temperature,
+        top_p: options.sampling.top_p,
+        max_output_tokens: options.sampling.max_tokens,
         stream,
     })
 }
@@ -330,30 +339,14 @@ fn encode_tool_choice(choice: &ToolChoice) -> Option<serde_json::Value> {
     }
 }
 
-/// 编码 `reasoning` 参数：
-///
-/// - 有 `reasoning_effort` 时按枚举输出对应档位（`none`/`low`/`medium`/
-///   `high`）；
-/// - 无 `reasoning_effort` 但 `thinking == Disabled` 时输出
-///   `{"effort":"none"}`；
-/// - 其余情况（`thinking == Enabled` 或未设置）不输出 `reasoning` 字段。
-fn encode_reasoning(
-    reasoning_effort: Option<ReasoningEffort>,
-    thinking: Option<ThinkingMode>,
-) -> Option<WireReasoning> {
-    let effort = match reasoning_effort {
-        Some(effort) => Some(effort.to_string()),
-        None if thinking == Some(ThinkingMode::Disabled) => Some(ReasoningEffort::None.to_string()),
-        None => None,
-    };
-
-    effort.map(|effort| WireReasoning { effort })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::request::SamplingParams;
+    use crate::domain::options::CallOptions;
+
+    fn sample_options() -> CallOptions {
+        CallOptions::new("gpt-4")
+    }
 
     // --- 纯文本请求 ---
 
@@ -364,7 +357,7 @@ mod tests {
             messages: vec![Message::user_text("hi")],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.instructions.as_deref(), Some("be helpful"));
         assert_eq!(wire.input.as_ref().unwrap().len(), 1);
     }
@@ -375,7 +368,7 @@ mod tests {
             messages: vec![Message::user_text("hello")],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         assert_eq!(input.len(), 1);
         match &input[0] {
@@ -390,7 +383,7 @@ mod tests {
     #[test]
     fn empty_messages_omit_input() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(wire.input.is_none());
         assert!(wire.instructions.is_none());
     }
@@ -411,7 +404,7 @@ mod tests {
             }])],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         match &input[0] {
             ResponseInputItem::FunctionCall { arguments, .. } => assert_eq!(arguments, raw),
@@ -437,7 +430,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         assert_eq!(input.len(), 4);
 
@@ -520,7 +513,7 @@ mod tests {
             messages: vec![Message::system("be terse")],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let input = wire.input.unwrap();
         match &input[0] {
             ResponseInputItem::Message { role, content } => {
@@ -694,7 +687,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         let tools = wire.tools.unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].kind, "function");
@@ -716,7 +709,7 @@ mod tests {
             tool_choice: ToolChoice::Auto,
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(wire.tool_choice.is_none());
     }
 
@@ -726,7 +719,7 @@ mod tests {
             tool_choice: ToolChoice::None,
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.tool_choice, Some(serde_json::json!("none")));
     }
 
@@ -736,7 +729,7 @@ mod tests {
             tool_choice: ToolChoice::Any,
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.tool_choice, Some(serde_json::json!("required")));
     }
 
@@ -746,67 +739,37 @@ mod tests {
             tool_choice: ToolChoice::Tool("get_weather".to_string()),
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(
             wire.tool_choice,
             Some(serde_json::json!({"type": "function", "name": "get_weather"}))
         );
     }
 
-    // --- reasoning / thinking ---
+    // --- reasoning ---
 
     #[test]
-    fn reasoning_effort_levels_map_to_wire() {
-        for (effort, expected) in [
-            (ReasoningEffort::None, "none"),
-            (ReasoningEffort::Low, "low"),
-            (ReasoningEffort::Medium, "medium"),
-            (ReasoningEffort::High, "high"),
-        ] {
-            let req = Request {
-                reasoning_effort: Some(effort),
-                ..Default::default()
-            };
-            let wire = encode_request(&req, false).unwrap();
-            assert_eq!(wire.reasoning.unwrap().effort, expected);
+    fn each_level_word_reaches_the_reasoning_field() {
+        for word in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let req = Request::default();
+            let wire = encode_request(
+                &req,
+                &sample_options(),
+                Channels {
+                    level: Some(word),
+                    toggle: None,
+                },
+                false,
+            )
+            .unwrap();
+            assert_eq!(wire.reasoning.unwrap().effort, word);
         }
     }
 
     #[test]
-    fn thinking_disabled_maps_to_reasoning_none() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Disabled),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert_eq!(wire.reasoning.unwrap().effort, "none");
-    }
-
-    #[test]
-    fn reasoning_effort_wins_over_thinking_disabled() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Disabled),
-            reasoning_effort: Some(ReasoningEffort::High),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert_eq!(wire.reasoning.unwrap().effort, "high");
-    }
-
-    #[test]
-    fn thinking_enabled_without_effort_omits_reasoning() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Enabled),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert!(wire.reasoning.is_none());
-    }
-
-    #[test]
-    fn no_reasoning_fields_omit_reasoning() {
+    fn unset_sends_no_reasoning_field() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(wire.reasoning.is_none());
     }
 
@@ -815,15 +778,14 @@ mod tests {
     #[test]
     fn sampling_maps_temperature_top_p_max_output_tokens() {
         let req = Request {
-            sampling: SamplingParams {
-                temperature: Some(0.5),
-                top_p: Some(0.9),
-                max_tokens: Some(100),
-                stop: Some(vec!["STOP".to_string()]),
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, true).unwrap();
+        let options = sample_options()
+            .temperature(0.5)
+            .top_p(0.9)
+            .max_tokens(100)
+            .stop(vec!["STOP".to_string()]);
+        let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.temperature, Some(0.5));
         assert_eq!(wire.top_p, Some(0.9));
         assert_eq!(wire.max_output_tokens, Some(100));
@@ -840,7 +802,7 @@ mod tests {
     #[test]
     fn stream_false_by_default() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(!wire.stream);
     }
 

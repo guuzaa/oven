@@ -23,8 +23,8 @@ use std::io::{self, Write};
 
 use futures::StreamExt;
 use oven_llm::{
-    ContentBlock, Delta, Message, Provider, ProviderBuilder, ProviderName, Request, StopReason,
-    StreamCollector, StreamEvent, Tool,
+    CallOptions, ContentBlock, Delta, Message, Provider, ProviderBuilder, ProviderName, Request,
+    StopReason, StreamCollector, StreamEvent, Tool,
 };
 use serde_json::{Value, json};
 
@@ -54,13 +54,11 @@ async fn main() {
 
     // 3. 非流式 complete 调用。
     let request = Request::builder()
-        .model("deepseek-v4-flash")
         .message(Message::user_text("用一句话介绍 Rust 语言。"))
-        .temperature(0.0)
-        .build()
-        .expect("model is set");
+        .build();
+    let options = CallOptions::new("deepseek-v4-flash").temperature(0.0);
 
-    match provider.complete(&request).await {
+    match provider.complete(&request, &options).await {
         Ok(response) => {
             println!(
                 "complete() succeeded: id={} stop_reason={:?} usage={:?}",
@@ -97,8 +95,9 @@ async fn main() {
 async fn collect_streamed_response<P: Provider + ?Sized>(
     provider: &P,
     request: &Request,
+    options: &CallOptions,
 ) -> Result<oven_llm::Response, oven_llm::ProviderError> {
-    let mut stream = provider.stream(request).await?;
+    let mut stream = provider.stream(request, options).await?;
     let mut collector = StreamCollector::new();
 
     print!("  assistant: ");
@@ -130,17 +129,15 @@ async fn collect_streamed_response<P: Provider + ?Sized>(
 /// 则执行并把结果以 `function_call_output` 回传，直到模型结束本轮生成。
 async fn run_tool_loop<P: Provider + ?Sized>(provider: &P) {
     let mut request = Request::builder()
-        .model("deepseek-v4-flash")
         .message(Message::user_text(
             "请调用 get_weather 工具查询杭州今天的天气，然后告诉我结果。",
         ))
         .tools(vec![weather_tool()])
-        .temperature(0.0)
-        .build()
-        .expect("model is set");
+        .build();
+    let options = CallOptions::new("deepseek-v4-flash").temperature(0.0);
 
     loop {
-        let response = match collect_streamed_response(provider, &request).await {
+        let response = match collect_streamed_response(provider, &request, &options).await {
             Ok(response) => response,
             Err(err) => {
                 eprintln!("stream() failed (expected without a real API key): {err}");

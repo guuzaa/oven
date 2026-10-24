@@ -2,22 +2,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use oven_agent::{
-    Agent, AgentId, AnswerTool, InstructionDoc, ListModelsTool, MEMORY_PROMPT, Record, RoleSpec,
-    Skill, SkillReadTool, SubagentSpawner, TOP_LEVEL_PROMPT, TaskOutputTool, TaskTool,
-    TodoWriteTool, Tool, ToolPermission, load_instructions, router_handle, subagent_preamble,
+    Agent, InstructionDoc, MEMORY_PROMPT, RoleSpec, SubagentSpawner, TOP_LEVEL_PROMPT, Tool,
+    load_instructions, router_handle, subagent_preamble,
 };
 #[cfg(test)]
 use oven_llm::Provider;
 use oven_llm::{Role, Router};
 use oven_mem::MemoryStore;
+use oven_proto::{AgentId, Record, ToolPermission};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::App;
+use crate::ToolRegistry;
 use crate::capabilities::mcp::McpRegistry;
 use crate::capabilities::mcp::client::{DefaultMcpConnector, McpConnector};
 use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
+use crate::capabilities::skills::{Skill, SkillRegistry};
 use crate::capabilities::subagent::{Role as SubagentRole, SubagentParts, Subagents};
+use crate::capabilities::tools::{
+    AnswerTool, ListModelsTool, SkillReadTool, TaskOutputTool, TaskTool, TodoWriteTool,
+};
 use crate::core::config::AppConfig;
 use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
@@ -27,7 +32,6 @@ use crate::core::session::{Session, SessionStore, canonical_root, session_span};
 use crate::platform::dirs;
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
-use crate::{SkillRegistry, ToolRegistry};
 use oven_proto::AppId;
 
 /// Tools a subagent never mounts: the ones that speak to the user, manage

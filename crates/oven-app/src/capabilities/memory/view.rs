@@ -1,4 +1,4 @@
-use oven_agent::ToolView;
+use oven_proto::ToolView;
 use serde_json::Value;
 
 use super::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};

@@ -3,11 +3,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use crate::core::turn::TurnContext;
-
-use super::{Tool, ToolCaps, ToolOutcome, ToolView, labeled};
+use super::labeled;
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
 use oven_proto::AgentError;
-use oven_proto::{AnswerResponse, Question, QuestionOption};
+use oven_proto::{AnswerResponse, Question, QuestionOption, ToolView};
 
 const USER_ANSWER_PREFIX: &str = "the user answered: ";
 const USER_SKIPPED: &str = "the user skipped the question without answering";
@@ -166,7 +165,8 @@ fn clamp(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::interaction::{NO_USER_TO_ANSWER, PendingRequest, UserRequest};
+    use crate::capabilities::tools::test_context;
+    use oven_agent::{NO_USER_TO_ANSWER, PendingRequest, UserRequest};
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, oneshot};
@@ -208,13 +208,9 @@ mod tests {
                 .send(response)
                 .unwrap();
         });
-        let outcome = run_with(
-            &tx,
-            json!({ "question": QUESTION }),
-            TurnContext::for_test(),
-        )
-        .await
-        .unwrap();
+        let outcome = run_with(&tx, json!({ "question": QUESTION }), test_context())
+            .await
+            .unwrap();
         asker.await.unwrap();
         outcome
     }
@@ -388,7 +384,7 @@ mod tests {
                 .unwrap();
         });
         let verbose = "context ".repeat(MAX_QUESTION_CHARS);
-        let outcome = run_with(&tx, json!({ "question": verbose }), TurnContext::for_test())
+        let outcome = run_with(&tx, json!({ "question": verbose }), test_context())
             .await
             .unwrap();
         assert_eq!(outcome.output, format!("{USER_ANSWER_PREFIX}{ANSWER}"));
@@ -406,13 +402,9 @@ mod tests {
                 .send(AnswerResponse::Answered { answer })
                 .unwrap();
         });
-        let outcome = run_with(
-            &tx,
-            json!({ "question": QUESTION }),
-            TurnContext::for_test(),
-        )
-        .await
-        .unwrap();
+        let outcome = run_with(&tx, json!({ "question": QUESTION }), test_context())
+            .await
+            .unwrap();
         assert_eq!(
             outcome.output.chars().count(),
             USER_ANSWER_PREFIX.chars().count() + MAX_ANSWER_CHARS
@@ -428,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn without_a_frontend_the_tool_fails() {
         let error = AnswerTool
-            .run(&json!({ "question": QUESTION }), &TurnContext::for_test())
+            .run(&json!({ "question": QUESTION }), &test_context())
             .await
             .unwrap_err();
         assert_eq!(error.message, NO_USER_TO_ANSWER);
@@ -437,7 +429,7 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_turn_stops_waiting() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let cx = TurnContext::for_test();
+        let cx = test_context();
         cx.cancellation.cancel();
         let error = run_with(&tx, json!({ "question": QUESTION }), cx)
             .await
@@ -449,7 +441,7 @@ mod tests {
     async fn malformed_arguments_never_reach_the_user() {
         let (tx, mut rx) = mpsc::unbounded_channel::<PendingRequest>();
         assert!(
-            run_with(&tx, json!({ "question": "   " }), TurnContext::for_test())
+            run_with(&tx, json!({ "question": "   " }), test_context())
                 .await
                 .is_err()
         );

@@ -9,9 +9,11 @@ mod exit;
 mod memory;
 mod model;
 mod plan;
+mod profile;
 mod setup;
 
-use oven_agent::{Agent, AgentId, AgentMode};
+use oven_agent::Agent;
+use oven_proto::{AgentId, AgentMode};
 
 use crate::capabilities::subagent::Subagents;
 use crate::core::config::ProviderConfig;
@@ -25,6 +27,7 @@ pub use exit::Exit;
 pub use memory::Memory;
 pub(crate) use model::{Model, ModelDirective};
 pub use plan::Plan;
+pub use profile::Profile;
 pub use setup::Setup;
 
 /// What a command may reach: the conversation driver it configures, and the
@@ -74,6 +77,12 @@ pub enum CommandOutcome {
         model: String,
         reasoning_effort: Option<oven_llm::ReasoningEffort>,
     },
+    /// The profiles this vendor has, and which one is in effect.
+    ProfileQuery,
+    /// Switch to a quality profile.
+    ProfileChanged {
+        name: String,
+    },
     ProviderChanged {
         provider: ProviderConfig,
     },
@@ -110,6 +119,7 @@ impl SlashRegistry {
         r.register(Box::new(Compact));
         r.register(Box::new(Exit));
         r.register(Box::new(Model));
+        r.register(Box::new(Profile));
         r.register(Box::new(Setup));
         r.register(Box::new(Plan));
         r.register(Box::new(Agents));
@@ -193,15 +203,16 @@ mod tests {
     use async_trait::async_trait;
     use futures::stream::BoxStream;
     use oven_llm::{
-        Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
-        Result as LlmResult, Router, StreamEvent,
+        CallOptions, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request,
+        Response, Result as LlmResult, Router, StreamEvent,
     };
+    use oven_proto::{TodoItem, TodoList, TodoStatus};
 
     struct MockProvider;
 
     #[async_trait]
     impl Provider for MockProvider {
-        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+        async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "unused".into(),
@@ -211,6 +222,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
             Err(ProviderError::Api {
                 status: 500,
@@ -290,11 +302,12 @@ mod tests {
     fn commands_returns_names_and_descriptions() {
         let reg = SlashRegistry::with_builtin();
         let cmds = reg.commands();
-        assert_eq!(cmds.len(), 8);
+        assert_eq!(cmds.len(), 9);
         assert!(cmds.iter().any(|(n, d)| n == "clear" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "compact" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, _)| n == "exit"));
         assert!(cmds.iter().any(|(n, d)| n == "model" && !d.is_empty()));
+        assert!(cmds.iter().any(|(n, d)| n == "profile" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "setup" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "plan" && !d.is_empty()));
         assert!(cmds.iter().any(|(n, d)| n == "agents" && !d.is_empty()));
@@ -306,11 +319,11 @@ mod tests {
         let reg = SlashRegistry::with_builtin();
         let mut agent = fresh_agent();
         agent.push_history(Message::user_text("hi"));
-        agent.set_todos(oven_agent::TodoList {
-            items: vec![oven_agent::TodoItem {
+        agent.set_todos(TodoList {
+            items: vec![TodoItem {
                 id: "a".into(),
                 content: "one".into(),
-                status: oven_agent::TodoStatus::Pending,
+                status: TodoStatus::Pending,
             }],
         });
         let subagents = Subagents::bare(agent.id(), agent.router_handle());

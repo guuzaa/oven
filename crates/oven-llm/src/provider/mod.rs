@@ -11,6 +11,9 @@ mod responses;
 mod retry;
 mod router;
 pub mod validate;
+mod vendor;
+#[cfg(test)]
+mod yakbak;
 
 pub use builder::ProviderBuilder;
 pub use completions::CompletionsProvider;
@@ -21,28 +24,39 @@ pub use retry::RetryingProvider;
 pub use router::{Client, Router, RouterError, RouterHandle};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use validate::{ValidationError, estimate_input_tokens, validate_request};
+pub use vendor::{Dialect, EffortSupport, VendorProfile, clamp_level};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use std::fmt;
 
-use crate::domain::{ModelId, Request, Response, StreamEvent};
+use crate::domain::{CallOptions, ModelId, Request, Response, StreamEvent};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1";
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 const MOONSHOT_BASE_URL: &str = "https://api.moonshot.cn/v1";
 const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
 const GROK_BASE_URL: &str = "https://api.x.ai/v1";
 
-/// 统一的 LLM 调用抽象：harness/应用代码只依赖该 trait 与 domain 类型，
-/// 永远不接触任何 wire format 类型。
+/// The one abstraction for an LLM call: harness and application code depend
+/// on this trait and the domain types only, and never touch a wire format
+/// type.
+///
+/// A call has two halves: `req` is the conversation, `options` say who to
+/// ask (the model) and how to ask (sampling, reasoning effort, private
+/// fields). Another model does not mean another conversation.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// 发送一次非流式请求，返回完整响应。
-    async fn complete(&self, req: &Request) -> Result<Response>;
+    async fn complete(&self, req: &Request, options: &CallOptions) -> Result<Response>;
 
     /// 发送一次流式请求，返回统一的 `StreamEvent` 流。
-    async fn stream(&self, req: &Request) -> Result<BoxStream<'static, Result<StreamEvent>>>;
+    async fn stream(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent>>>;
 
     /// 该 provider 静态已知的模型列表，默认空，由具体实现覆写。
     fn known_models(&self) -> Vec<ModelInfo> {
@@ -69,15 +83,16 @@ macro_rules! impl_boxed_provider {
     ($($impl_head:tt)*) => {
         #[async_trait]
         impl $($impl_head)* {
-            async fn complete(&self, req: &Request) -> Result<Response> {
-                Provider::complete(&**self, req).await
+            async fn complete(&self, req: &Request, options: &CallOptions) -> Result<Response> {
+                Provider::complete(&**self, req, options).await
             }
 
             async fn stream(
                 &self,
                 req: &Request,
+                options: &CallOptions,
             ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-                Provider::stream(&**self, req).await
+                Provider::stream(&**self, req, options).await
             }
 
             fn known_models(&self) -> Vec<ModelInfo> {
@@ -116,17 +131,19 @@ pub enum ProviderName {
     Zhipu,
     Anthropic,
     Grok,
+    MiniMax,
     Custom(String),
 }
 
 /// The vendors oven ships, in the order they are offered.
-const KNOWN_VENDORS: [ProviderName; 6] = [
+const KNOWN_VENDORS: [ProviderName; 7] = [
     ProviderName::DeepSeek,
     ProviderName::OpenAI,
     ProviderName::Moonshot,
     ProviderName::Zhipu,
     ProviderName::Anthropic,
     ProviderName::Grok,
+    ProviderName::MiniMax,
 ];
 
 impl ProviderName {
@@ -145,6 +162,7 @@ impl ProviderName {
             ProviderName::Zhipu => "zhipu",
             ProviderName::Anthropic => "anthropic",
             ProviderName::Grok => "xai",
+            ProviderName::MiniMax => "minimax",
             ProviderName::Custom(name) => name.as_str(),
         }
     }
@@ -160,6 +178,7 @@ impl ProviderName {
             ProviderName::Moonshot => Some(MOONSHOT_BASE_URL),
             ProviderName::Zhipu => Some(ZHIPU_BASE_URL),
             ProviderName::Grok => Some(GROK_BASE_URL),
+            ProviderName::MiniMax => Some(MINIMAX_BASE_URL),
             _ => None,
         }
     }
@@ -169,6 +188,7 @@ impl ProviderName {
             ProviderName::DeepSeek
             | ProviderName::Moonshot
             | ProviderName::Zhipu
+            | ProviderName::MiniMax
             | ProviderName::Custom(_) => Some(ProviderKind::Completions),
             ProviderName::OpenAI | ProviderName::Grok => Some(ProviderKind::Responses),
             ProviderName::Anthropic => None,
@@ -197,6 +217,7 @@ impl From<&str> for ProviderName {
             "zhipu" | "glm" => ProviderName::Zhipu,
             "anthropic" => ProviderName::Anthropic,
             "grok" | "xai" => ProviderName::Grok,
+            "minimax" => ProviderName::MiniMax,
             other => ProviderName::Custom(other.to_string()),
         }
     }
@@ -211,6 +232,7 @@ impl Serialize for ProviderName {
             ProviderName::Zhipu => serializer.serialize_str("zhipu"),
             ProviderName::Anthropic => serializer.serialize_str("anthropic"),
             ProviderName::Grok => serializer.serialize_str("xai"),
+            ProviderName::MiniMax => serializer.serialize_str("minimax"),
             ProviderName::Custom(name) => {
                 serializer.serialize_str(&format!("custom({})", name.to_lowercase()))
             }
@@ -228,6 +250,7 @@ impl<'de> Deserialize<'de> for ProviderName {
             "zhipu" => ProviderName::Zhipu,
             "anthropic" => ProviderName::Anthropic,
             "grok" | "xai" => ProviderName::Grok,
+            "minimax" => ProviderName::MiniMax,
             _ => match raw
                 .strip_prefix("custom(")
                 .and_then(|s| s.strip_suffix(')'))
@@ -248,6 +271,7 @@ impl fmt::Display for ProviderName {
             ProviderName::Zhipu => f.write_str("Zhipu"),
             ProviderName::Anthropic => f.write_str("Anthropic"),
             ProviderName::Grok => f.write_str("Grok"),
+            ProviderName::MiniMax => f.write_str("MiniMax"),
             ProviderName::Custom(name) => write!(f, "Custom({})", name),
         }
     }
@@ -285,7 +309,7 @@ mod tests {
 
     #[async_trait]
     impl Provider for StubProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response> {
+        async fn complete(&self, _req: &Request, _options: &CallOptions) -> Result<Response> {
             unimplemented!("not needed for this test")
         }
 
@@ -293,7 +317,11 @@ mod tests {
             None
         }
 
-        async fn stream(&self, _req: &Request) -> Result<BoxStream<'static, Result<StreamEvent>>> {
+        async fn stream(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
             unimplemented!("not needed for this test")
         }
 
@@ -501,6 +529,7 @@ mod tests {
             ProviderName::Zhipu => vec![ProviderName::Zhipu],
             ProviderName::Anthropic => vec![ProviderName::Anthropic],
             ProviderName::Grok => vec![ProviderName::Grok],
+            ProviderName::MiniMax => vec![ProviderName::MiniMax],
             ProviderName::Custom(_) => Vec::new(),
         }
     }

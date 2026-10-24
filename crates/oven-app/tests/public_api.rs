@@ -19,14 +19,36 @@ use oven_app::session::{self, Session};
 
 use oven_app::{
     AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse, AnswerTool,
-    ApprovalDecision, CallOutcome, CancellationToken, LoopLimitDecision, NodeInfo, NodeStatus,
-    Question, QuestionOption, RoleSpec, Skill, SkillRegistry, StepStop, StreamEvent, TodoItem,
-    TodoList, TodoStatus, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId,
-    UserRequestId, UserResponse, present_tool,
+    ApprovalDecision, BUILTIN_TOOLS, BashTool, BuiltinTool, CallOutcome, CancellationToken,
+    FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, ListModelsTool,
+    LoopLimitDecision, NodeInfo, NodeStatus, Question, QuestionOption, RoleSpec, SKILL_FILE, Skill,
+    SkillRegistry, StepStop, StreamEvent, TaskOutputTool, TaskTool, TodoItem, TodoList, TodoStatus,
+    TodoWriteTool, ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId, UserRequestId,
+    UserResponse, WebFetchTool, present_tool,
 };
 
 #[test]
 fn public_paths_resolve() {
     assert!(oven_app::dirs::logs_dir().is_some() || oven_app::dirs::logs_dir().is_none());
     assert!(complete::matches("model", "mo"));
+
+    assert_eq!(SKILL_FILE, "SKILL.md");
+
+    assert_eq!(
+        present_tool(
+            FileReadTool::NAME,
+            &serde_json::json!({ "path": "src/lib.rs" })
+        )
+        .summary,
+        "Read src/lib.rs"
+    );
+
+    assert!(!BUILTIN_TOOLS.is_empty());
+    assert_eq!(BUILTIN_TOOLS[0].name, FileReadTool::NAME);
+    assert_eq!(WebFetchTool::NAME, "web_fetch");
+    assert!(
+        BUILTIN_TOOLS
+            .iter()
+            .any(|tool| tool.name == WebFetchTool::NAME)
+    );
 }

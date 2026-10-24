@@ -33,8 +33,8 @@
 
 # Architectures
 - `oven-proto`: protocol vocabulary; events, state, commands
-- `oven-agent`: agent loop and tools
+- `oven-agent`: agent loop; the tool protocol
 - `oven-host`: host system interaction infrastructure
 - `oven-mem`: durable memory; files, index, catalog
-- `oven-app`: app layer; service composition, mcp, slash commands
+- `oven-app`: app layer; service composition, tools, mcp, slash commands
 - `oven-tui`: entry point; render events and state; send commands

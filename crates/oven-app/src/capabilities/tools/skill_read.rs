@@ -8,10 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::capabilities::tools::{Tool, ToolOutcome};
+use oven_agent::{Tool, ToolOutcome, TurnContext};
 use oven_proto::AgentError;
-
-use crate::core::turn::TurnContext;
 
 /// Reads the full content of a skill's `SKILL.md` by id. The system prompt
 /// only lists skill descriptions; this tool is how the model gets the body.
@@ -66,11 +64,9 @@ impl Tool for SkillReadTool {
 
 #[cfg(test)]
 mod tests {
-    fn turn() -> TurnContext {
-        TurnContext::for_test()
-    }
     use super::*;
     use crate::capabilities::skills::SKILL_FILE;
+    use crate::capabilities::tools::test_context;
     use serde_json::json;
 
     #[tokio::test]
@@ -82,7 +78,7 @@ mod tests {
         let tool = SkillReadTool::new(sources);
 
         let ToolOutcome { output: out, .. } = tool
-            .run(&json!({"skill_id": "files"}), &turn())
+            .run(&json!({"skill_id": "files"}), &test_context())
             .await
             .unwrap();
         assert_eq!(out, "full body\n");
@@ -90,7 +86,7 @@ mod tests {
         // Content is re-read from disk on every call.
         std::fs::write(&file, "updated body\n").unwrap();
         let ToolOutcome { output: out, .. } = tool
-            .run(&json!({"skill_id": "files"}), &turn())
+            .run(&json!({"skill_id": "files"}), &test_context())
             .await
             .unwrap();
         assert_eq!(out, "updated body\n");
@@ -100,7 +96,7 @@ mod tests {
     async fn unknown_skill_errors() {
         let tool = SkillReadTool::new(Arc::new(BTreeMap::new()));
         let err = tool
-            .run(&json!({"skill_id": "nope"}), &turn())
+            .run(&json!({"skill_id": "nope"}), &test_context())
             .await
             .unwrap_err();
         assert!(err.message.contains("unknown skill"));

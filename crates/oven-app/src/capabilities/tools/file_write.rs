@@ -4,12 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{
-    Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, labeled, require_str, resolve_within,
-};
-
-use crate::core::turn::TurnContext;
+use super::{labeled, require_str, resolve_within};
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
 use oven_proto::AgentError;
+use oven_proto::{ToolPermission, ToolView};
 
 pub struct FileWriteTool {
     root: PathBuf,
@@ -81,11 +79,9 @@ impl Tool for FileWriteTool {
 
 #[cfg(test)]
 mod tests {
-    fn turn() -> TurnContext {
-        TurnContext::for_test()
-    }
     use super::super::FileReadTool;
     use super::*;
+    use crate::capabilities::tools::test_context;
     use serde_json::json;
 
     fn tmp_dir() -> tempdir::TempDir {
@@ -129,7 +125,7 @@ mod tests {
         let ToolOutcome { output: out, .. } = write
             .run(
                 &json!({"path": "hello.txt", "content": "line one\nline two"}),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -138,7 +134,7 @@ mod tests {
         let ToolOutcome {
             output: content, ..
         } = read
-            .run(&json!({"path": "hello.txt"}), &turn())
+            .run(&json!({"path": "hello.txt"}), &test_context())
             .await
             .unwrap();
         assert_eq!(

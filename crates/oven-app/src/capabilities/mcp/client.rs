@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
-use oven_agent::{AgentError, Tool, ToolCaps, ToolOutcome, ToolPermission, TurnContext};
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
+use oven_proto::{AgentError, ToolPermission};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, ResourceContents};
 use rmcp::service::{RoleClient, RunningService, serve_client};
 use rmcp::transport::TokioChildProcess;

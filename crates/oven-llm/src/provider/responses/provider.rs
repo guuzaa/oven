@@ -21,7 +21,7 @@ use super::decoder::{self, StreamDecoder};
 use super::encoder;
 use super::types::{ResponseEvent, ResponseObject};
 use crate::ProviderName;
-use crate::domain::{ModelId, Request, Response, StreamEvent};
+use crate::domain::{CallOptions, ModelId, Request, Response, StreamEvent};
 use crate::provider::catalog;
 use crate::provider::endpoint::Endpoint;
 use crate::provider::model::ModelInfo;
@@ -56,6 +56,7 @@ impl ResponsesProvider {
             ProviderName::Anthropic
             | ProviderName::Moonshot
             | ProviderName::Zhipu
+            | ProviderName::MiniMax
             | ProviderName::Custom(_) => Err(ProviderError::UnsupportedProvider {
                 kind: ProviderKind::Responses,
                 name: provider_name,
@@ -139,17 +140,25 @@ impl ResponsesProvider {
         )
     }
 
-    /// 将 `Request` 编码为最终发送的 JSON 请求体：先由 `encoder::encode_request`
-    /// 产出标准 wire JSON，再把 `req.provider_options` 中的每个键值对合并进
-    /// 去。`provider_options` 的键与标准字段重名时会覆盖标准字段。
-    fn build_body(&self, req: &Request, stream: bool) -> Result<serde_json::Value, ProviderError> {
-        let wire = encoder::encode_request(req, stream)?;
+    /// Encodes a `Request` into the JSON request body that goes out: the
+    /// standard wire JSON from `encoder::encode_request`, then every key of
+    /// `options.provider_options` merged into it. A `provider_options` key
+    /// that names a standard field overwrites it.
+    pub(crate) fn build_body(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+        model: Option<&ModelInfo>,
+        stream: bool,
+    ) -> Result<serde_json::Value, ProviderError> {
+        let reasoning = self.endpoint.reasoning_channels(options, model);
+        let wire = encoder::encode_request(req, options, reasoning, stream)?;
         let body = serde_json::to_value(wire).map_err(|err| {
             ProviderError::ResponsesEncode(encoder::EncodeError::InvalidContent(err.to_string()))
         })?;
         Ok(Endpoint::merge_provider_options(
             body,
-            &req.provider_options,
+            &options.provider_options,
         ))
     }
 
@@ -168,9 +177,15 @@ impl ResponsesProvider {
 #[async_trait]
 impl Provider for ResponsesProvider {
     /// 发送一次非流式请求（强制 `stream = false`）。
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        self.endpoint.validate_known_model(req, false)?;
-        let body = self.build_body(req, false)?;
+    async fn complete(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
+        let model = self.resolve_model(&options.model);
+        self.endpoint
+            .validate_known_model(req, options, model, false)?;
+        let body = self.build_body(req, options, model, false)?;
         let response = self.post_responses(&body).await?;
 
         let body_bytes = response.bytes().await?;
@@ -188,9 +203,12 @@ impl Provider for ResponsesProvider {
     async fn stream(
         &self,
         req: &Request,
+        options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        self.endpoint.validate_known_model(req, true)?;
-        let body = self.build_body(req, true)?;
+        let model = self.resolve_model(&options.model);
+        self.endpoint
+            .validate_known_model(req, options, model, true)?;
+        let body = self.build_body(req, options, model, true)?;
         let response = self.post_responses(&body).await?;
 
         let byte_stream = Box::pin(response.bytes_stream());
@@ -298,6 +316,7 @@ mod tests {
         catalog::models_for(&ProviderName::Grok, ProviderKind::Responses)
     }
     use crate::domain::message::{ContentBlock, Message};
+    use crate::domain::reasoning::ReasoningEffort;
     use crate::domain::stream::StreamCollector;
     use crate::provider::http;
     use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderName, HeaderValue};
@@ -311,10 +330,25 @@ mod tests {
 
     fn sample_request() -> Request {
         Request {
-            model: ModelId::from("deepseek-v4-flash"),
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         }
+    }
+
+    fn sample_options() -> CallOptions {
+        CallOptions::new("deepseek-v4-flash")
+    }
+
+    /// The wire body of one call. The model is resolved against the catalog
+    /// once, and both the validation and the reasoning channels read that
+    /// same metadata.
+    fn wire_body(
+        provider: &ResponsesProvider,
+        req: &Request,
+        options: &CallOptions,
+    ) -> serde_json::Value {
+        let model = provider.resolve_model(&options.model);
+        provider.build_body(req, options, model, false).unwrap()
     }
 
     // --- constructors ---
@@ -457,6 +491,31 @@ mod tests {
     // --- build_body + provider_options ---
 
     #[test]
+    fn a_request_sends_the_reasoning_field() {
+        let provider = ResponsesProvider::with_base_url(
+            "https://example.com",
+            ProviderName::Custom("example".into()),
+            api_key("k"),
+        );
+        let req = sample_request();
+        let options = sample_options().reasoning_effort(ReasoningEffort::High);
+        let body = wire_body(&provider, &req, &options);
+        assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn an_unset_effort_sends_no_reasoning_field() {
+        let provider = ResponsesProvider::with_base_url(
+            "https://example.com",
+            ProviderName::Custom("example".into()),
+            api_key("k"),
+        );
+        let req = sample_request();
+        let body = wire_body(&provider, &req, &sample_options());
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
     fn build_body_with_empty_provider_options_has_no_extra_fields() {
         let provider = ResponsesProvider::with_base_url(
             "https://example.com",
@@ -464,7 +523,7 @@ mod tests {
             api_key("k"),
         );
         let req = sample_request();
-        let body = provider.build_body(&req, false).unwrap();
+        let body = wire_body(&provider, &req, &sample_options());
         let object = body.as_object().unwrap();
         assert_eq!(object["model"], "deepseek-v4-flash");
         assert!(object.get("text").is_none());
@@ -477,9 +536,9 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut req = sample_request();
-        req.provider_options.insert("top_k".to_string(), json!(40));
-        let body = provider.build_body(&req, false).unwrap();
+        let req = sample_request();
+        let options = sample_options().provider_option("top_k", json!(40));
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["top_k"], 40);
     }
 
@@ -490,11 +549,11 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut req = sample_request();
-        req.sampling.temperature = Some(0.5);
-        req.provider_options
-            .insert("temperature".to_string(), json!(1.5));
-        let body = provider.build_body(&req, false).unwrap();
+        let req = sample_request();
+        let options = sample_options()
+            .temperature(0.5)
+            .provider_option("temperature", json!(1.5));
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["temperature"], 1.5);
     }
 
@@ -505,12 +564,12 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut req = sample_request();
-        req.provider_options.insert(
+        let req = sample_request();
+        let options = sample_options().provider_option(
             "text".to_string(),
             json!({"format": {"type": "json_object"}}),
         );
-        let body = provider.build_body(&req, false).unwrap();
+        let body = wire_body(&provider, &req, &options);
         assert_eq!(body["text"]["format"]["type"], "json_object");
     }
 
@@ -530,7 +589,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let err = provider.complete(&sample_request()).await.unwrap_err();
+        let err = provider
+            .complete(&sample_request(), &sample_options())
+            .await
+            .unwrap_err();
         match err {
             ProviderError::Auth(body) => assert_eq!(body, "bad key"),
             other => panic!("expected Auth error, got {other:?}"),
@@ -551,7 +613,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let err = provider.complete(&sample_request()).await.unwrap_err();
+        let err = provider
+            .complete(&sample_request(), &sample_options())
+            .await
+            .unwrap_err();
         match err {
             ProviderError::RateLimit { retry_after_ms } => assert_eq!(retry_after_ms, None),
             other => panic!("expected RateLimit error, got {other:?}"),
@@ -572,7 +637,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let err = provider.complete(&sample_request()).await.unwrap_err();
+        let err = provider
+            .complete(&sample_request(), &sample_options())
+            .await
+            .unwrap_err();
         match err {
             ProviderError::Api { status, body } => {
                 assert_eq!(status, 500);
@@ -624,7 +692,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let response = provider.complete(&sample_request()).await.unwrap();
+        let response = provider
+            .complete(&sample_request(), &sample_options())
+            .await
+            .unwrap();
         assert_eq!(response.id, "resp_1");
         assert_eq!(response.model, "deepseek-v4-flash");
         assert_eq!(response.content.len(), 2);
@@ -672,7 +743,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let err = provider.complete(&sample_request()).await.unwrap_err();
+        let err = provider
+            .complete(&sample_request(), &sample_options())
+            .await
+            .unwrap_err();
         match err {
             ProviderError::ResponsesDecode(decoder::DecodeError::Failed { message }) => {
                 assert_eq!(message, "boom");
@@ -701,7 +775,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut event_stream = provider.stream(&sample_request()).await.unwrap();
+        let mut event_stream = provider
+            .stream(&sample_request(), &sample_options())
+            .await
+            .unwrap();
 
         let mut collector = StreamCollector::new();
         let mut saw_message_stop = false;
@@ -766,7 +843,10 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let mut event_stream = provider.stream(&sample_request()).await.unwrap();
+        let mut event_stream = provider
+            .stream(&sample_request(), &sample_options())
+            .await
+            .unwrap();
         let mut events = Vec::new();
         while let Some(event) = event_stream.next().await {
             events.push(event);
@@ -803,7 +883,7 @@ mod tests {
             ProviderName::Custom("example".into()),
             api_key("k"),
         );
-        let result = provider.stream(&sample_request()).await;
+        let result = provider.stream(&sample_request(), &sample_options()).await;
         match result {
             Err(ProviderError::RateLimit { .. }) => {}
             Err(other) => panic!("expected RateLimit error, got {other:?}"),

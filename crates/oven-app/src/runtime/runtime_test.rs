@@ -1,5 +1,6 @@
 use crate::capabilities::subagent::{SubagentParts, Subagents};
-use crate::core::config::{AppConfig, ProviderConfig, ProviderSelection};
+use crate::capabilities::tools::{TaskTool, TodoWriteTool};
+use crate::core::config::{AppConfig, ProfileBinding, ProviderConfig, ProviderSelection};
 use crate::core::event::EventBus;
 use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL};
 use crate::core::session::{Session, canonical_root};
@@ -20,13 +21,15 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use futures::Stream;
 use futures::stream::BoxStream;
-use oven_agent::{
-    Agent, AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, PendingInput, Record,
-    TaskTool, TodoWriteTool, Tool, ToolOutcome, TurnContext, TurnEvent, TurnId,
-};
+use oven_agent::{Agent, PendingInput, Tool, ToolOutcome, TurnContext};
 use oven_llm::{
-    ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError, ProviderName,
-    Request, Response, Role, Router, StopReason, StreamEvent, Usage,
+    CallOptions, ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError,
+    ProviderName, Request, Response, Role, Router, StopReason, StreamEvent, Usage,
+};
+use oven_proto::{
+    AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse,
+    ApprovalDecision, LoopLimitDecision, MAX_ITERS_EXCEEDED, Record, ToolEvent, TurnEvent, TurnId,
+    UserResponse,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -159,7 +162,11 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
-    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         self.responses
             .lock()
             .unwrap()
@@ -173,6 +180,7 @@ impl Provider for MockProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
@@ -203,17 +211,22 @@ impl RecordingProvider {
 
 #[async_trait]
 impl Provider for RecordingProvider {
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        _req: &Request,
+        options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         self.seen
             .lock()
             .unwrap()
-            .push(format!("request:{}", req.model.as_str()));
-        Ok(text_response(&format!("echo:{}", req.model.as_str())))
+            .push(format!("request:{}", options.model.as_str()));
+        Ok(text_response(&format!("echo:{}", options.model.as_str())))
     }
 
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
@@ -254,15 +267,20 @@ impl WindowedProvider {
 
 #[async_trait]
 impl Provider for WindowedProvider {
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
-        self.inner.complete(req).await
+    async fn complete(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
+        self.inner.complete(req, options).await
     }
 
     async fn stream(
         &self,
         req: &Request,
+        options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        self.inner.stream(req).await
+        self.inner.stream(req, options).await
     }
 
     fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
@@ -466,7 +484,7 @@ async fn handle_exposes_slash_commands() {
     assert_eq!(
         names,
         [
-            "clear", "compact", "exit", "model", "setup", "plan", "agents", "memory"
+            "clear", "compact", "exit", "model", "profile", "setup", "plan", "agents", "memory"
         ]
     );
     assert!(commands.iter().all(|(_, d)| !d.is_empty()));
@@ -495,7 +513,7 @@ async fn plan_slash_on_idle_switches() {
 }
 
 #[tokio::test]
-async fn model_slash_switch_uses_request_model() {
+async fn model_slash_switch_uses_the_selected_model() {
     let seen = recorder();
     let mut agents = agent_from(Box::new(RecordingProvider::new(seen.clone())));
     agents.main.set_model("gpt-4o");
@@ -1169,6 +1187,97 @@ async fn spawn_applies_configured_reasoning_effort() {
 }
 
 #[tokio::test]
+async fn a_profile_switch_moves_the_model_and_keeps_the_profile() {
+    let tmp = tempdir::TempDir::new("app-profile-switch").unwrap();
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig {
+            active_provider: ProviderSelection {
+                name: "mock".into(),
+            },
+            providers: [(
+                "mock".into(),
+                ProviderConfig {
+                    name: Some("mock".into()),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            profiles: [(
+                "balanced".into(),
+                [(
+                    "mock".into(),
+                    ProfileBinding {
+                        model: "mock-model".into(),
+                        effort: Some(oven_llm::ReasoningEffort::High),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+            ..AppConfig::default()
+        })
+        .await;
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+
+    handle.prompt("/profile balanced").await.unwrap();
+    assert_eq!(handle.state().levels.model, "mock/mock-model");
+    assert_eq!(
+        handle.state().levels.reasoning_effort,
+        Some(oven_llm::ReasoningEffort::High)
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_profile_without_a_binding_for_the_vendor_changes_nothing() {
+    let tmp = tempdir::TempDir::new("app-profile-missing").unwrap();
+    let app = AppBuilder::new(tmp.path())
+        .with_config(AppConfig {
+            active_provider: ProviderSelection {
+                name: "mock".into(),
+            },
+            providers: [(
+                "mock".into(),
+                ProviderConfig {
+                    name: Some("mock".into()),
+                    reasoning_effort: Some(oven_llm::ReasoningEffort::Medium),
+                    ..Default::default()
+                },
+            )]
+            .into_iter()
+            .collect(),
+            profiles: [(
+                "balanced".into(),
+                [(
+                    "other".into(),
+                    ProfileBinding {
+                        model: "other-model".into(),
+                        effort: Some(oven_llm::ReasoningEffort::High),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            )]
+            .into_iter()
+            .collect(),
+            ..AppConfig::default()
+        })
+        .await;
+    let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
+
+    let err = handle.prompt("/profile balanced").await.unwrap_err();
+    assert!(err.to_string().contains("has no binding"), "{err}");
+    assert_eq!(
+        handle.state().levels.reasoning_effort,
+        Some(oven_llm::ReasoningEffort::Medium)
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn session_persists_across_spawns() {
     let tmp = tempdir::TempDir::new("app-runtime-sess").unwrap();
     let app = AppBuilder::new(tmp.path());
@@ -1564,7 +1673,11 @@ async fn cancel_during_turn_returns_idle() {
 
     #[async_trait]
     impl Provider for BlockProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let rx = self.release.lock().unwrap().take();
             if let Some(rx) = rx {
                 let _ = rx.await;
@@ -1575,6 +1688,7 @@ async fn cancel_during_turn_returns_idle() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -1639,7 +1753,11 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
 
     #[async_trait]
     impl Provider for BlockOnceProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let rx = self.release.lock().unwrap().take();
             if let Some(rx) = rx {
                 let _ = rx.await;
@@ -1650,6 +1768,7 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -1715,7 +1834,11 @@ async fn a_steered_chat_is_appended_when_tool_results_are_uploaded() {
 
     #[async_trait]
     impl Provider for Capture {
-        async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             self.seen.lock().unwrap().push(req.clone());
             let rx = self.release.lock().unwrap().take();
             if let Some(rx) = rx {
@@ -1734,6 +1857,7 @@ async fn a_steered_chat_is_appended_when_tool_results_are_uploaded() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -2040,7 +2164,11 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
 
     #[async_trait]
     impl Provider for BlockOnceProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let rx = self.release.lock().unwrap().take();
             if let Some(rx) = rx {
                 let _ = rx.await;
@@ -2051,6 +2179,7 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -2126,7 +2255,11 @@ async fn model_slash_switches_immediately_during_turn() {
 
     #[async_trait]
     impl Provider for AwaitProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             if let Some(tx) = self.entered.lock().unwrap().take() {
                 let _ = tx.send(());
             }
@@ -2140,6 +2273,7 @@ async fn model_slash_switches_immediately_during_turn() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -2258,7 +2392,11 @@ impl GatedWindowProvider {
 
 #[async_trait]
 impl Provider for GatedWindowProvider {
-    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             return Ok(tool_response(
                 "call_1",
@@ -2279,6 +2417,7 @@ impl Provider for GatedWindowProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
@@ -2376,7 +2515,11 @@ async fn set_mode_applies_during_in_flight_turn() {
 
     #[async_trait]
     impl Provider for AwaitProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             if let Some(tx) = self.entered.lock().unwrap().take() {
                 let _ = tx.send(());
             }
@@ -2390,6 +2533,7 @@ async fn set_mode_applies_during_in_flight_turn() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -2492,10 +2636,8 @@ async fn repro_ask_mode_bash_requests_approval() {
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind {
-            if let AgentEvent::Tool(oven_agent::ToolEvent::ApprovalRequested {
-                request_id: id,
-                ..
-            }) = &env.event
+            if let AgentEvent::Tool(ToolEvent::ApprovalRequested { request_id: id, .. }) =
+                &env.event
             {
                 request_id = Some(*id);
                 break;
@@ -2513,7 +2655,7 @@ async fn repro_ask_mode_bash_requests_approval() {
     );
     handle.respond(
         request_id,
-        oven_agent::UserResponse::Approval(oven_agent::ApprovalDecision::Approved),
+        UserResponse::Approval(ApprovalDecision::Approved),
     );
 
     while let Some(ev) = rx.recv().await {
@@ -2550,9 +2692,8 @@ async fn answering_a_closed_request_is_refused() {
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind
-            && let AgentEvent::Tool(oven_agent::ToolEvent::ApprovalRequested {
-                request_id: id, ..
-            }) = &env.event
+            && let AgentEvent::Tool(ToolEvent::ApprovalRequested { request_id: id, .. }) =
+                &env.event
         {
             request_id = Some(*id);
             break;
@@ -2561,7 +2702,7 @@ async fn answering_a_closed_request_is_refused() {
     let request_id = request_id.expect("approval requested");
     let approval = || Command::Respond {
         request_id,
-        response: oven_agent::UserResponse::Approval(oven_agent::ApprovalDecision::Approved),
+        response: UserResponse::Approval(ApprovalDecision::Approved),
     };
 
     let applied = handle.apply(approval()).await.unwrap();
@@ -2600,7 +2741,7 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
         if let AppEventKind::Agent(env) = &ev.kind {
-            if let AgentEvent::Tool(oven_agent::ToolEvent::QuestionAsked {
+            if let AgentEvent::Tool(ToolEvent::QuestionAsked {
                 request_id: id,
                 question,
             }) = &env.event
@@ -2624,7 +2765,7 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
 
     handle.respond(
         request_id,
-        oven_agent::UserResponse::Answer(oven_agent::AnswerResponse::Answered {
+        UserResponse::Answer(AnswerResponse::Answered {
             answer: ANSWER.into(),
         }),
     );
@@ -2701,7 +2842,7 @@ async fn loop_limit_continue_completes_turn() {
     );
     handle.respond(
         request_id,
-        oven_agent::UserResponse::LoopLimit(oven_agent::LoopLimitDecision::Continue),
+        UserResponse::LoopLimit(LoopLimitDecision::Continue),
     );
 
     while let Some(ev) = rx.recv().await {
@@ -2720,7 +2861,7 @@ async fn prompt_exits_loop_limit_without_hanging() {
     let tmp = tempdir::TempDir::new("app-runtime-loop-limit-prompt").unwrap();
     let handle = spawn_loop_limit_app(&tmp).await;
     let err = handle.prompt("read it").await.unwrap_err();
-    assert_eq!(err.to_string(), oven_agent::MAX_ITERS_EXCEEDED);
+    assert_eq!(err.to_string(), MAX_ITERS_EXCEEDED);
     assert!(handle.state().levels.phase.is_idle());
     handle.shutdown().await;
 }
@@ -2800,7 +2941,11 @@ async fn cancel_does_not_roll_back_todos() {
 
     #[async_trait]
     impl Provider for WriteThenBlock {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let n = {
                 let mut step = self.step.lock().unwrap();
                 let n = *step;
@@ -2826,6 +2971,7 @@ async fn cancel_does_not_roll_back_todos() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -3167,7 +3313,11 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
 
     #[async_trait]
     impl Provider for BlockProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let rx = self.release.lock().unwrap().take();
             if let Some(rx) = rx {
                 let _ = rx.await;
@@ -3178,6 +3328,7 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -3397,7 +3548,11 @@ async fn bang_shell_queues_behind_agent_turn() {
     }
     #[async_trait]
     impl Provider for BlockProvider {
-        async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            _req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let rx = self.release.lock().unwrap().take().unwrap();
             let _ = rx.await;
             Ok(text_response("done"))
@@ -3405,6 +3560,7 @@ async fn bang_shell_queues_behind_agent_turn() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -3615,7 +3771,11 @@ impl RendezvousProvider {
 
 #[async_trait]
 impl Provider for RendezvousProvider {
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         if is_subagent(req) {
             self.arrived.wait().await;
             return Ok(text_response("the subagent's report"));
@@ -3633,6 +3793,7 @@ impl Provider for RendezvousProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
@@ -3709,7 +3870,11 @@ impl GatedProvider {
 
 #[async_trait]
 impl Provider for GatedProvider {
-    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         if self.first.swap(false, Ordering::SeqCst) {
             self.gate.notified().await;
         }
@@ -3726,6 +3891,7 @@ impl Provider for GatedProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
@@ -3812,7 +3978,11 @@ async fn a_background_subagent_notice_reaches_a_later_turn() {
 
     #[async_trait]
     impl Provider for ByCallerProvider {
-        async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+        async fn complete(
+            &self,
+            req: &Request,
+            _options: &CallOptions,
+        ) -> Result<Response, ProviderError> {
             let queue = if req.tools.iter().any(|tool| tool.name == TaskTool::NAME) {
                 &self.driver
             } else {
@@ -3831,6 +4001,7 @@ async fn a_background_subagent_notice_reaches_a_later_turn() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
             Err(ProviderError::Api {
                 status: 500,
@@ -3964,7 +4135,11 @@ impl SlowSubagentProvider {
 
 #[async_trait]
 impl Provider for SlowSubagentProvider {
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         if is_subagent(req) {
             tokio::time::sleep(self.delay).await;
             return Ok(text_response("the subagent's report"));
@@ -3982,6 +4157,7 @@ impl Provider for SlowSubagentProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
@@ -4121,7 +4297,11 @@ impl UnsentProvider {
 
 #[async_trait]
 impl Provider for UnsentProvider {
-    async fn complete(&self, req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         if is_subagent(req) {
             self.release.notified().await;
             return Ok(text_response("the subagent's report"));
@@ -4146,6 +4326,7 @@ impl Provider for UnsentProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
@@ -4583,7 +4764,11 @@ struct RoundProvider {
 
 #[async_trait]
 impl Provider for RoundProvider {
-    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
             body: "complete disabled".into(),
@@ -4593,6 +4778,7 @@ impl Provider for RoundProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         let round = self
             .rounds
@@ -5148,7 +5334,11 @@ impl Drop for HeldRequest {
 
 #[async_trait]
 impl Provider for SummaryGate {
-    async fn complete(&self, _req: &Request) -> Result<Response, ProviderError> {
+    async fn complete(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
         Err(ProviderError::Api {
             status: 500,
             body: "complete disabled".into(),
@@ -5158,6 +5348,7 @@ impl Provider for SummaryGate {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let round = self

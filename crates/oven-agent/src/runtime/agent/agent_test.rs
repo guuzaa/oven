@@ -1,19 +1,17 @@
+use super::stub_tools::{AskTool, StubTool, TodoTool};
 use super::*;
 use crate::RunPolicy;
-use crate::StepStop;
-use crate::TurnId;
-use crate::capabilities::tools::{
-    AnswerTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool, ToolOutcome,
-};
 use crate::core::subagent::NOTICE_MARK;
 use crate::core::turn::{PendingInbox, PendingInput, TurnContext};
+use crate::core::view::{ToolCaps, ToolOutcome};
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt, iter};
 use oven_llm::{
-    Delta, ModelId, ModelInfo, ProviderError, ProviderName, Result as LlmResult, StopReason,
-    StreamEvent as LlmStreamEvent,
+    CallOptions, Delta, ModelId, ModelInfo, ProviderError, ProviderName, Result as LlmResult,
+    StopReason, StreamEvent as LlmStreamEvent,
 };
 use oven_proto::ToolCallId;
+use oven_proto::TurnId;
 use oven_proto::{NullSink, VecEventSink};
 use std::time::Duration;
 
@@ -21,7 +19,8 @@ use oven_llm::{ContentBlock, Message, Provider, Request, Response, Role, Usage};
 
 use crate::core::turn::TurnOutput;
 use oven_proto::AgentError;
-use oven_proto::{ApprovalDecision, LoopLimitDecision};
+use oven_proto::ToolPermission;
+use oven_proto::{ApprovalDecision, LoopLimitDecision, MAX_ITERS_EXCEEDED, StepStop};
 use oven_proto::{StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use serde_json::json;
 use std::collections::VecDeque;
@@ -31,21 +30,7 @@ use tokio_util::sync::CancellationToken;
 use tokio::sync::oneshot;
 
 use crate::core::interaction::{PendingRequest, UserRequest};
-use oven_proto::{AnswerResponse, Question};
-
-const APPROVED_FILE: &str = "approved.txt";
-const APPROVED_CONTENT: &str = "approved";
-
-fn write_approved_command() -> &'static str {
-    #[cfg(windows)]
-    {
-        "Set-Content -Path approved.txt -Value approved -Encoding ascii -NoNewline"
-    }
-    #[cfg(not(windows))]
-    {
-        "printf approved > approved.txt"
-    }
-}
+use oven_proto::{AnswerResponse, Question, QuestionOption};
 
 /// Bounds a test turn so a provider script that runs short fails on the
 /// script rather than on an unbounded loop.
@@ -209,7 +194,7 @@ impl MockProvider {
 
 #[async_trait]
 impl Provider for MockProvider {
-    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         self.responses
             .lock()
             .unwrap()
@@ -223,6 +208,7 @@ impl Provider for MockProvider {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -252,7 +238,7 @@ impl SlowComplete {
 
 #[async_trait]
 impl Provider for SlowComplete {
-    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         tokio::time::sleep(self.delay).await;
         Ok(self.response.clone())
     }
@@ -260,6 +246,7 @@ impl Provider for SlowComplete {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -285,7 +272,7 @@ struct ScriptedStream {
 
 #[async_trait]
 impl Provider for ScriptedStream {
-    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         Err(ProviderError::Api {
             status: 500,
             body: "complete disabled in mock".into(),
@@ -295,6 +282,7 @@ impl Provider for ScriptedStream {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         let mut events = vec![Ok(message_start())];
         for (index, delta) in self.deltas.iter().enumerate() {
@@ -339,7 +327,7 @@ impl QueuedStreams {
 
 #[async_trait]
 impl Provider for QueuedStreams {
-    async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         Err(ProviderError::Api {
             status: 500,
             body: "complete disabled in mock".into(),
@@ -349,6 +337,7 @@ impl Provider for QueuedStreams {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         let events = self
             .rounds
@@ -459,18 +448,14 @@ fn tmp_dir() -> tempdir::TempDir {
 
 #[tokio::test]
 async fn agent_loop_executes_tool_then_finishes() {
-    let tmp = tmp_dir();
-    let root = tmp.path();
-    std::fs::write(root.join("note.txt"), "hello world").unwrap();
-
     let mock = MockProvider::new(vec![
         tool_response("call_1", "file_read", json!({"path": "note.txt"})),
         text_response("done"),
     ]);
 
     let tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(FileReadTool::new(root)),
-        Arc::new(FileWriteTool::new(root)),
+        Arc::new(StubTool::new("file_read", "hello world")),
+        Arc::new(StubTool::new("file_write", "written")),
     ];
     let mut agent = Agent::new(router_with(Box::new(mock)), tools);
     let result = run_text(&mut agent, "read note.txt").await;
@@ -479,10 +464,7 @@ async fn agent_loop_executes_tool_then_finishes() {
 }
 
 #[tokio::test]
-async fn a_landed_edit_reports_the_lines_it_moved() {
-    let tmp = tmp_dir();
-    std::fs::write(tmp.path().join("note.txt"), "one\ntwo\n").unwrap();
-
+async fn a_landed_detail_reaches_the_transcript() {
     let mock = MockProvider::new(vec![
         tool_response(
             "call_1",
@@ -492,7 +474,9 @@ async fn a_landed_edit_reports_the_lines_it_moved() {
         text_response("done"),
     ]);
 
-    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileEditTool::new(tmp.path()))];
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(
+        StubTool::new("file_edit", "edited").with_detail("2 - two\n2 + 2"),
+    )];
     let mut agent = Agent::new(router_with(Box::new(mock)), tools);
     let mut sink = VecEventSink::default();
     run_plain(&mut agent, "edit note.txt", &mut sink)
@@ -508,10 +492,6 @@ async fn a_landed_edit_reports_the_lines_it_moved() {
         })
         .expect("the landing event reports what the call shows");
     assert_eq!(detail, "2 - two\n2 + 2");
-    assert_eq!(
-        std::fs::read_to_string(tmp.path().join("note.txt")).unwrap(),
-        "one\n2\n"
-    );
 }
 
 #[tokio::test]
@@ -527,7 +507,11 @@ async fn ask_rejects_hidden_write_tool_without_writing() {
     ]);
     let mut agent = Agent::new(
         router_with(Box::new(mock)),
-        vec![Arc::new(FileWriteTool::new(tmp.path()))],
+        vec![Arc::new(
+            StubTool::new("file_write", "written")
+                .with_permission(ToolPermission::Write)
+                .creating(tmp.path().join("created.txt")),
+        )],
     );
     agent.set_mode(AgentMode::Ask);
 
@@ -544,15 +528,18 @@ async fn ask_rejects_hidden_write_tool_without_writing() {
 #[tokio::test]
 async fn ask_requires_approval_before_running_bash() {
     let tmp = tmp_dir();
-    let marker = tmp.path().join(APPROVED_FILE);
-    let command = write_approved_command();
+    let marker = tmp.path().join("approved.txt");
     let mock = MockProvider::new(vec![
-        tool_response("call_1", "bash", json!({"command": command})),
+        tool_response("call_1", "bash", json!({"command": "anything"})),
         text_response("done"),
     ]);
     let mut agent = Agent::new(
         router_with(Box::new(mock)),
-        vec![Arc::new(BashTool::new(tmp.path()))],
+        vec![Arc::new(
+            StubTool::new("bash", "ran")
+                .with_permission(ToolPermission::Execute)
+                .creating(marker.clone()),
+        )],
     );
     agent.set_mode(AgentMode::Ask);
     let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
@@ -571,7 +558,7 @@ async fn ask_requires_approval_before_running_bash() {
     responder.send(ApprovalDecision::Approved).unwrap();
 
     assert_eq!(turn.await.unwrap().text(), "done");
-    assert_eq!(std::fs::read_to_string(&marker).unwrap(), APPROVED_CONTENT);
+    assert!(marker.exists(), "the approved call ran");
 }
 
 #[tokio::test]
@@ -589,7 +576,22 @@ async fn the_answer_tool_blocks_the_turn_until_the_user_replies() {
         ),
         text_response("done"),
     ]);
-    let mut agent = Agent::new(router_with(Box::new(mock)), vec![Arc::new(AnswerTool)]);
+    let mut agent = Agent::new(
+        router_with(Box::new(mock)),
+        vec![Arc::new(AskTool::new(
+            QUESTION,
+            vec![
+                QuestionOption {
+                    label: ANSWER.into(),
+                    description: None,
+                },
+                QuestionOption {
+                    label: "sqlite".into(),
+                    description: None,
+                },
+            ],
+        ))],
+    );
     let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
     let ctx = turn_ctx(&agent).with_requests(Arc::new(requests));
     let mut sink = VecEventSink::default();
@@ -631,16 +633,12 @@ async fn the_answer_tool_blocks_the_turn_until_the_user_replies() {
 
 #[tokio::test]
 async fn event_sequence_for_tool_calling_turn() {
-    let tmp = tmp_dir();
-    let root = tmp.path();
-    std::fs::write(root.join("note.txt"), "hello world").unwrap();
-
     let mock = MockProvider::new(vec![
         tool_response("call_1", "file_read", json!({"path": "note.txt"})),
         text_response("all good"),
     ]);
 
-    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(root))];
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(StubTool::new("file_read", "hello world"))];
     let mut agent = Agent::new(router_with(Box::new(mock)), tools).with_id(AgentId(7));
 
     let mut sink = VecEventSink::default();
@@ -659,14 +657,14 @@ async fn event_sequence_for_tool_calling_turn() {
             name,
             view,
             ..
-        }) if name == "file_read" && view.summary == "Read note.txt"
+        }) if name == "file_read" && view.summary == "file_read"
     )));
     assert!(events.iter().any(|e| matches!(
         e,
         AgentEvent::Tool(ToolEvent::Finished {
             result: ToolResult::Success { output },
             ..
-        }) if output == "file: note.txt\nlines: 1-1\n\nL1→hello world"
+        }) if output == "hello world"
     )));
     assert!(events.iter().any(|e| matches!(
         e,
@@ -769,8 +767,8 @@ impl Tool for ExclusiveTool {
         std::sync::Arc::new(json!({"type": "object"}))
     }
 
-    fn caps(&self) -> crate::capabilities::tools::ToolCaps {
-        crate::capabilities::tools::ToolCaps {
+    fn caps(&self) -> ToolCaps {
+        ToolCaps {
             exclusive: self.exclusive,
             ..Default::default()
         }
@@ -994,9 +992,6 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
     let broken = super::step::invalid_json_arguments(BROKEN_ARGUMENTS).unwrap();
     assert_eq!(broken, super::step::INVALID_JSON_ARGUMENTS);
 
-    let tmp = tmp_dir();
-    std::fs::write(tmp.path().join(NOTE_NAME), NOTE_BODY).unwrap();
-
     let valid_arguments = format!(r#"{{"path":"{NOTE_NAME}"}}"#);
     let provider = QueuedStreams::new(vec![
         vec![
@@ -1005,7 +1000,7 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
                 index: 0,
                 block: ContentBlock::ToolUse {
                     id: "call_ok".into(),
-                    name: FileReadTool::NAME.into(),
+                    name: "file_read".into(),
                     input: serde_json::Value::String(String::new()),
                     raw_arguments: None,
                 },
@@ -1020,7 +1015,7 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
                 index: 3,
                 block: ContentBlock::ToolUse {
                     id: "call_bad".into(),
-                    name: FileReadTool::NAME.into(),
+                    name: "file_read".into(),
                     input: serde_json::Value::String(String::new()),
                     raw_arguments: None,
                 },
@@ -1053,7 +1048,7 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
         ],
     ]);
 
-    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(tmp.path()))];
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(StubTool::new("file_read", NOTE_BODY))];
     let mut agent = Agent::new(router_with(Box::new(provider)), tools);
     let mut sink = VecEventSink::default();
     let result = run_plain(&mut agent, "read the note", &mut sink)
@@ -1135,7 +1130,7 @@ async fn tool_call_markup_written_as_text_is_not_shown() {
                 index: 1,
                 block: ContentBlock::ToolUse {
                     id: "call_bad".into(),
-                    name: BashTool::NAME.into(),
+                    name: "bash".into(),
                     input: serde_json::Value::String(String::new()),
                     raw_arguments: None,
                 },
@@ -1168,8 +1163,7 @@ async fn tool_call_markup_written_as_text_is_not_shown() {
         ],
     ]);
 
-    let tmp = tmp_dir();
-    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(BashTool::new(tmp.path()))];
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(StubTool::new("bash", "listed"))];
     let mut agent = Agent::new(router_with(Box::new(provider)), tools);
     let mut sink = VecEventSink::default();
     let result = run_plain(&mut agent, "list files", &mut sink)
@@ -1290,7 +1284,7 @@ async fn stream_auth_failure_is_not_requested_again() {
 
     #[async_trait]
     impl Provider for AuthOnStream {
-        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+        async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
             self.completes.fetch_add(1, Ordering::SeqCst);
             Err(ProviderError::Auth("bad key".into()))
         }
@@ -1298,6 +1292,7 @@ async fn stream_auth_failure_is_not_requested_again() {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
             Err(ProviderError::Auth("bad key".into()))
         }
@@ -1473,13 +1468,11 @@ async fn completed_usage_is_the_last_turn_not_session_total() {
 
 #[tokio::test]
 async fn usage_is_reported_as_each_response_arrives() {
-    let tmp = tmp_dir();
-    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
     let mock = MockProvider::new(vec![
         tool_response("call_1", "file_read", json!({"path": "note.txt"})),
         text_response("done"),
     ]);
-    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(tmp.path()))];
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(StubTool::new("file_read", "hello"))];
     let mut agent = Agent::new(router_with(Box::new(mock)), tools);
     let mut sink = VecEventSink::default();
     run_plain(&mut agent, "read note.txt", &mut sink)
@@ -1540,12 +1533,9 @@ async fn failed_turn_has_one_terminal_event() {
     ));
 }
 
-fn looping_read_agent(responses: Vec<Response>) -> (Agent, tempdir::TempDir) {
-    let tmp = tmp_dir();
-    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
-    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FileReadTool::new(tmp.path()))];
-    let agent = Agent::new(router_with(Box::new(MockProvider::new(responses))), tools);
-    (agent, tmp)
+fn looping_read_agent(responses: Vec<Response>) -> Agent {
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(StubTool::new("file_read", "hello"))];
+    Agent::new(router_with(Box::new(MockProvider::new(responses))), tools)
 }
 
 fn read_note(id: &str) -> Response {
@@ -1554,7 +1544,7 @@ fn read_note(id: &str) -> Response {
 
 #[tokio::test]
 async fn loop_limit_without_sender_fails() {
-    let (mut agent, _tmp) = looping_read_agent(vec![
+    let mut agent = looping_read_agent(vec![
         read_note("c1"),
         read_note("c2"),
         read_note("c3"),
@@ -1565,18 +1555,18 @@ async fn loop_limit_without_sender_fails() {
     let err = run_with(&mut agent, "read it", &ctx, &mut sink)
         .await
         .unwrap_err();
-    assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
+    assert_eq!(err.message, MAX_ITERS_EXCEEDED);
     assert_valid_event_sequence(&sink.events);
     assert!(matches!(
         sink.events.last(),
         Some(AgentEvent::Turn(TurnEvent::Failed { error, .. }))
-            if error.message == crate::MAX_ITERS_EXCEEDED
+            if error.message == MAX_ITERS_EXCEEDED
     ));
 }
 
 #[tokio::test]
 async fn loop_limit_continue_runs_another_round() {
-    let (mut agent, _tmp) = looping_read_agent(vec![
+    let mut agent = looping_read_agent(vec![
         read_note("c1"),
         read_note("c2"),
         read_note("c3"),
@@ -1608,7 +1598,7 @@ async fn loop_limit_continue_runs_another_round() {
 
 #[tokio::test]
 async fn loop_limit_exit_fails() {
-    let (mut agent, _tmp) = looping_read_agent(vec![
+    let mut agent = looping_read_agent(vec![
         read_note("c1"),
         read_note("c2"),
         read_note("c3"),
@@ -1629,12 +1619,12 @@ async fn loop_limit_exit_fails() {
         responder.send(LoopLimitDecision::Exit).unwrap();
         turn.await.unwrap_err()
     };
-    assert_eq!(err.message, crate::MAX_ITERS_EXCEEDED);
+    assert_eq!(err.message, MAX_ITERS_EXCEEDED);
     assert_valid_event_sequence(&sink.events);
     assert!(matches!(
         sink.events.last(),
         Some(AgentEvent::Turn(TurnEvent::Failed { error, .. }))
-            if error.message == crate::MAX_ITERS_EXCEEDED
+            if error.message == MAX_ITERS_EXCEEDED
     ));
 }
 
@@ -1656,7 +1646,7 @@ impl CaptureSystem {
 
 #[async_trait]
 impl Provider for CaptureSystem {
-    async fn complete(&self, req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         *self.system.lock().unwrap() = Some(req.system.clone());
         Ok(text_response("ok"))
     }
@@ -1664,6 +1654,7 @@ impl Provider for CaptureSystem {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -1723,7 +1714,7 @@ impl CaptureTools {
 
 #[async_trait]
 impl Provider for CaptureTools {
-    async fn complete(&self, req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         self.names
             .lock()
             .unwrap()
@@ -1734,6 +1725,7 @@ impl Provider for CaptureTools {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -1751,18 +1743,15 @@ impl Provider for CaptureTools {
 }
 
 fn agent_with_todo_write(provider: Box<dyn Provider>) -> Agent {
-    Agent::new(
-        router_with(provider),
-        vec![Arc::new(crate::capabilities::tools::TodoWriteTool)],
-    )
+    Agent::new(router_with(provider), vec![Arc::new(TodoTool)])
 }
 
-fn agent_with_file_and_todo(provider: Box<dyn Provider>, root: &std::path::Path) -> Agent {
+fn agent_with_file_and_todo(provider: Box<dyn Provider>) -> Agent {
     Agent::new(
         router_with(provider),
         vec![
-            Arc::new(FileReadTool::new(root)),
-            Arc::new(crate::capabilities::tools::TodoWriteTool),
+            Arc::new(StubTool::new("file_read", "hello")),
+            Arc::new(TodoTool),
         ],
     )
 }
@@ -1783,16 +1772,15 @@ async fn default_request_omits_todo_write_tool() {
 
 #[tokio::test]
 async fn ask_request_hides_write_tools_but_keeps_bash() {
-    let tmp = tmp_dir();
     let (mock, names) = CaptureTools::new();
     let mut agent = Agent::new(
         router_with(Box::new(mock)),
         vec![
-            Arc::new(FileReadTool::new(tmp.path())),
-            Arc::new(FileEditTool::new(tmp.path())),
-            Arc::new(FileWriteTool::new(tmp.path())),
-            Arc::new(BashTool::new(tmp.path())),
-            Arc::new(TodoWriteTool),
+            Arc::new(StubTool::new("file_read", "read")),
+            Arc::new(StubTool::new("file_edit", "edited").with_permission(ToolPermission::Write)),
+            Arc::new(StubTool::new("file_write", "written").with_permission(ToolPermission::Write)),
+            Arc::new(StubTool::new("bash", "ran").with_permission(ToolPermission::Execute)),
+            Arc::new(TodoTool),
         ],
     );
     agent.set_mode(AgentMode::Ask);
@@ -1910,7 +1898,7 @@ impl CaptureRequests {
 
 #[async_trait]
 impl Provider for CaptureRequests {
-    async fn complete(&self, req: &Request) -> LlmResult<Response> {
+    async fn complete(&self, req: &Request, _options: &CallOptions) -> LlmResult<Response> {
         self.seen.lock().unwrap().push(req.clone());
         if let Some(tx) = self.entered.lock().unwrap().take() {
             let _ = tx.send(());
@@ -1932,6 +1920,7 @@ impl Provider for CaptureRequests {
     async fn stream(
         &self,
         _req: &Request,
+        _options: &CallOptions,
     ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
         Err(ProviderError::Api {
             status: 500,
@@ -2009,11 +1998,9 @@ async fn queued_prompts_are_appended_after_tool_results() {
         tool_response("c1", "file_read", json!({"path": "note.txt"})),
         text_response("done"),
     ]);
-    let tmp = tmp_dir();
-    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
     let mut agent = Agent::new(
         router_with(Box::new(mock)),
-        vec![Arc::new(FileReadTool::new(tmp.path()))],
+        vec![Arc::new(StubTool::new("file_read", "hello"))],
     );
     let ctx = turn_ctx(&agent).with_inbox(parked(vec![
         PendingInput::User(FIRST.into()),
@@ -2076,11 +2063,9 @@ async fn a_subagent_notice_rides_the_tool_result_upload_marked() {
         tool_response("c1", "file_read", json!({"path": "note.txt"})),
         text_response("done"),
     ]);
-    let tmp = tmp_dir();
-    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
     let mut agent = Agent::new(
         router_with(Box::new(mock)),
-        vec![Arc::new(FileReadTool::new(tmp.path()))],
+        vec![Arc::new(StubTool::new("file_read", "hello"))],
     );
     let ctx = turn_ctx(&agent);
     let ctx = ctx.with_inbox(parked(vec![PendingInput::Notice {
@@ -2125,11 +2110,9 @@ async fn a_notice_that_outlived_its_turn_is_still_told() {
         tool_response("c1", "file_read", json!({"path": "note.txt"})),
         text_response("done"),
     ]);
-    let tmp = tmp_dir();
-    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
     let mut agent = Agent::new(
         router_with(Box::new(mock)),
-        vec![Arc::new(FileReadTool::new(tmp.path()))],
+        vec![Arc::new(StubTool::new("file_read", "hello"))],
     );
     let ctx = turn_ctx(&agent).with_inbox(parked(vec![PendingInput::Notice {
         text: NOTICE.into(),
@@ -2158,11 +2141,9 @@ async fn rewind_past_a_notice_returns_the_prompt_it_followed() {
         tool_response("c1", "file_read", json!({"path": "note.txt"})),
         text_response("done"),
     ]);
-    let tmp = tmp_dir();
-    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
     let mut agent = Agent::new(
         router_with(Box::new(mock)),
-        vec![Arc::new(FileReadTool::new(tmp.path()))],
+        vec![Arc::new(StubTool::new("file_read", "hello"))],
     );
     let ctx = turn_ctx(&agent).with_inbox(parked(vec![PendingInput::Notice {
         text: NOTICE.into(),
@@ -2314,7 +2295,7 @@ async fn in_flight_set_mode_applies_to_next_step() {
     *mock.entered.lock().unwrap() = Some(entered_tx);
     *mock.release.lock().unwrap() = Some(release_rx);
 
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     assert_eq!(agent.mode(), AgentMode::Agent);
 
     let mut sink = NullSink;
@@ -2348,7 +2329,7 @@ async fn one_tool_round_without_todo_write_does_not_remind() {
         tool_response("c1", "file_read", json!({"path": "note.txt"})),
         text_response("done"),
     ]);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
@@ -2379,7 +2360,7 @@ async fn reminder_clears_after_successful_todo_write() {
         tool_response("c2", "todo_write", todos),
         text_response("done"),
     ]);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
@@ -2422,7 +2403,7 @@ async fn leaving_plan_keeps_list_drops_prompt_and_reminder() {
         text_response("done"),
         text_response("later"),
     ]);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
@@ -2451,7 +2432,7 @@ async fn rewind_clears_todo_notice() {
         text_response("done"),
         text_response("again"),
     ]);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
@@ -2478,7 +2459,7 @@ async fn clear_history_clears_todo_misses() {
         text_response("done"),
         text_response("fresh"),
     ]);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
@@ -2508,7 +2489,7 @@ async fn todo_list_is_sent_only_after_it_changes() {
         tool_response("c3", "todo_write", second),
         text_response("done"),
     ]);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     run_text(&mut agent, "plan it").await;
 
@@ -2534,7 +2515,7 @@ async fn reminder_waits_for_the_miss_threshold() {
     let mut responses = file_read_rounds(misses + 1);
     responses.push(text_response("done"));
     let (mock, seen) = CaptureRequests::new(responses);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
@@ -2567,7 +2548,7 @@ async fn todo_write_resets_the_reminder_streak() {
     ));
     responses.push(text_response("done"));
     let (mock, seen) = CaptureRequests::new(responses);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],
@@ -2594,7 +2575,7 @@ async fn rewind_clears_a_reminder_streak() {
     ));
     responses.push(text_response("again"));
     let (mock, seen) = CaptureRequests::new(responses);
-    let mut agent = agent_with_file_and_todo(Box::new(mock), tmp.path());
+    let mut agent = agent_with_file_and_todo(Box::new(mock));
     agent.set_mode(AgentMode::Plan);
     agent.set_todos(oven_proto::TodoList {
         items: vec![pending_item()],

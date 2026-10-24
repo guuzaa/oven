@@ -4,11 +4,11 @@
 //! Each skill is a directory containing a `SKILL.md` file with a
 //! `description:` YAML frontmatter. Only the description is injected into
 //! the system prompt (as `- **<id>**: <description>` lines); the full document
-//! body is never loaded up front. [`SkillReadTool`](crate::capabilities::tools::SkillReadTool)
-//! reads it from the paths reported by [`SkillRegistry::sources`].
+//! body is never loaded up front. The `skill_read` tool reads it from the
+//! paths reported by [`SkillRegistry::sources`].
 //!
 //! Discovery is directory-driven: [`SkillRegistry::load_from_dirs`] scans
-//! each directory's immediate subdirectories. The app layer decides which
+//! each directory's immediate subdirectories. The app decides which
 //! directories to search (user data dir, project `.oven/skills`, ...) and
 //! later dirs override earlier skills with the same id.
 //!
@@ -23,10 +23,10 @@ use oven_host::split_frontmatter;
 use tokio::fs;
 
 /// Canonical filename of the guidance document inside a skill directory.
-pub(crate) const SKILL_FILE: &str = "SKILL.md";
+pub const SKILL_FILE: &str = "SKILL.md";
 
 /// A guidance module. Skills are discovered once at startup and their
-/// descriptions are merged into the [`Agent`](crate::Agent) system prompt.
+/// descriptions are merged into the agent's system prompt.
 pub trait Skill: Send + Sync {
     /// Stable identifier, e.g. `"files"`. Matches the skill directory name.
     fn id(&self) -> &str;

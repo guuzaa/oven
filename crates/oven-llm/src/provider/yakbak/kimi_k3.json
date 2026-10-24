@@ -1,0 +1,31 @@
+{
+  "request": {
+    "model": "kimi-k3",
+    "messages": [{ "role": "user", "content": "求 1+1。" }],
+    "tool_choice": "auto",
+    "reasoning_effort": "high",
+    "stream": false
+  },
+  "response": {
+    "id": "chatcmpl-kimi-k3",
+    "object": "chat.completion",
+    "created": 1767225600,
+    "model": "kimi-k3",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "1+1=2。",
+          "reasoning_content": "用户问的是加法，结果是 2。"
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 12,
+      "completion_tokens": 24,
+      "total_tokens": 36
+    }
+  }
+}

@@ -8,10 +8,12 @@ use std::sync::{Arc, MutexGuard, PoisonError};
 use oven_llm::{Client, ModelId, ReasoningEffort, Router};
 use tokio::sync::watch;
 
-use crate::commands::{CommandOutcome, Model, ModelDirective, SlashRegistry};
+use crate::commands::{CommandOutcome, Model, ModelDirective, Profile, SlashRegistry};
 use crate::core::config::{AppConfig, ProviderConfig};
 use crate::core::event::EventBus;
+use crate::core::profile;
 use crate::core::state::context_window_of;
+use crate::runtime::shared::effort_warning;
 use oven_proto::AppState;
 use oven_proto::Input;
 use oven_proto::{AppEventKind, SubagentEvent};
@@ -47,6 +49,10 @@ impl Shared {
         };
         if name == Model::NAME {
             self.model_command(args).await;
+            return true;
+        }
+        if name == Profile::NAME {
+            self.profile_command(args).await;
             return true;
         }
         match slash.run_shared(&self.subagents, name, args) {
@@ -95,8 +101,26 @@ impl Shared {
         model: String,
         reasoning_effort: Option<ReasoningEffort>,
     ) {
+        self.switch_to(model, reasoning_effort, None).await
+    }
+
+    /// Apply a model switch. `profile` names the profile the switch came from;
+    /// a manual switch passes `None`, which unbinds the profile: the user asked
+    /// for a model, not for a quality level.
+    async fn switch_to(
+        &self,
+        model: String,
+        reasoning_effort: Option<ReasoningEffort>,
+        profile: Option<&str>,
+    ) {
         let router = self.router_snapshot();
-        let outcome = resolve_model_switch(&router, &mut self.config(), model, reasoning_effort);
+        let outcome = resolve_model_switch(
+            &router,
+            &mut self.config(),
+            model,
+            reasoning_effort,
+            profile,
+        );
         self.selection.switch_model(
             ModelId::from(outcome.model.as_str()),
             outcome.reasoning_effort,
@@ -109,14 +133,73 @@ impl Shared {
         let saved = save_provider_overlay(
             self.user_config_path.as_deref(),
             &outcome.overlay,
+            profile,
             &self.events,
         )
         .await;
         let mut text = format_model_switched(&outcome.model, outcome.reasoning_effort);
+        if let Some(warning) = effort_warning(&router, &outcome.model, outcome.reasoning_effort) {
+            let _ = write!(text, "\n{warning}");
+        }
         if let Some(path) = saved {
             let _ = write!(text, "\nsaved to {}", path.display());
         }
         self.notify(text);
+    }
+
+    /// The profiles this vendor has, and which one is in effect.
+    pub(crate) fn describe_profiles(&self) -> String {
+        let config = self.config();
+        let provider = profile::active_provider(&config);
+        let available = profile::available(&config.profiles, &provider);
+        let current = config.active_profile.as_deref().unwrap_or("none");
+        format!(
+            "profiles for {provider}: {}\ncurrent profile: {current}",
+            if available.is_empty() {
+                "none".to_string()
+            } else {
+                available.join(", ")
+            }
+        )
+    }
+
+    /// Switch to a quality profile: look up what it means for the active
+    /// vendor and apply it.
+    ///
+    /// A vendor without that binding is refused — a profile is a promise about
+    /// quality, and without a binding we cannot keep it here, so nothing is
+    /// written.
+    pub(crate) async fn switch_profile(&self, name: String) {
+        let (model, effort) = {
+            let config = self.config();
+            let provider = profile::active_provider(&config);
+            let Some(binding) = profile::binding(&config.profiles, &name, &provider) else {
+                let available = profile::available(&config.profiles, &provider);
+                self.events.emit_error(format!(
+                    "profile '{name}' has no binding for {provider}; available: {}",
+                    if available.is_empty() {
+                        "none".to_string()
+                    } else {
+                        available.join(", ")
+                    }
+                ));
+                return;
+            };
+            (profile::qualified_model(binding, &provider), binding.effort)
+        };
+        self.switch_to(model, effort, Some(&name)).await
+    }
+
+    /// The `/profile` command, which needs the configuration rather than the
+    /// conversation driver.
+    pub(crate) async fn profile_command(&self, args: &str) {
+        let name = args.trim();
+        if name.is_empty() {
+            let text = self.describe_profiles();
+            self.notify(text);
+            return;
+        }
+        self.switch_profile(name.to_string()).await
     }
 }
 
@@ -178,6 +261,7 @@ fn resolve_model_switch(
     config: &mut AppConfig,
     model: String,
     reasoning_effort: Option<ReasoningEffort>,
+    profile: Option<&str>,
 ) -> ModelSwitchOutcome {
     let id = ModelId::from(model.as_str());
     let name = id
@@ -206,6 +290,7 @@ fn resolve_model_switch(
     let reasoning_effort = provider.reasoning_effort;
     let overlay = provider.clone();
     config.active_provider.name = name;
+    config.active_profile = profile.map(str::to_string);
     ModelSwitchOutcome {
         model,
         reasoning_effort,
@@ -224,10 +309,11 @@ fn format_model_switched(model: &str, reasoning_effort: Option<ReasoningEffort>)
 pub(crate) async fn save_provider_overlay(
     user_config_path: Option<&Path>,
     overlay: &ProviderConfig,
+    active_profile: Option<&str>,
     events: &EventBus,
 ) -> Option<PathBuf> {
     let path = user_config_path?;
-    match AppConfig::save_provider_at(path, overlay).await {
+    match AppConfig::save_provider_at(path, overlay, active_profile).await {
         Ok(()) => Some(path.to_path_buf()),
         Err(e) => {
             events.emit_error(e.to_string());

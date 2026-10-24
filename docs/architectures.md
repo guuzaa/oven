@@ -68,10 +68,9 @@ dependency tree. It is documented in [`oven-proto.md`](./oven-proto.md).
 
 ```text
 runtime        the Agent driver: one provider round trip and the tools it asked for
-capabilities   what an agent can call: the Tool protocol, the built-in tools,
-               skills, the subagent spawner protocol
 core           nouns and their pure rules: identity, events, history and its
-               records, the turn context, the user-request protocol, tool views
+               records, the turn context, the user-request protocol, tool views,
+               the tool protocol
 ```
 
 | Layer | Path | Owns |
@@ -81,11 +80,10 @@ core           nouns and their pure rules: identity, events, history and its
 | | `runtime/agent/step.rs` | one round trip and the tools it asked for: gating, approvals, calls in flight, result order |
 | | `runtime/agent/notify.rs` | the thinking window, per-call logging, the tool-output cap |
 | | `runtime/compact.rs` | compaction: replace the history with an LLM-written summary |
-| `capabilities` | `capabilities/tools/` | the `Tool` protocol, the built-in tools, `present_tool` |
-| | `capabilities/skills.rs` | skills: named guidance merged into the system prompt |
 | `core` | `core/history/` | the message buffer, and the rules that project it into records |
 | | `core/turn.rs` | `TurnContext`, `RunPolicy`, `Step`, `TurnOutput` |
 | | `core/interaction.rs` | the user-request protocol: one request out, one reply back |
+| | `core/tool.rs` | the `Tool` protocol: what a call is, what it may do, what it leaves behind |
 | | `core/subagent.rs`, `core/retry.rs` | the spawner protocol; `RetryingProvider` |
 
 A noun a lower layer needs lives in the lower layer: `ToolCaps` is core
@@ -94,8 +92,9 @@ tools that produce it. The nouns a **frontend** needs live one layer lower
 still, in `oven-proto`: `AgentEvent`, `ToolView`, `ToolPermission`,
 `AgentMode`, `TodoList` and `NodeInfo` are all part of the protocol, so the
 crate that speaks it owns them. The
-public surface is pinned by `crates/oven-agent/tests/public_api.rs`, so moving
-a module behind a layer cannot move a path.
+public surface is pinned by `crates/oven-agent/tests/public_api.rs` and
+`crates/oven-proto/tests/public_api.rs`, so moving a module behind a layer
+cannot move a path.
 
 ### `oven-tui` layers
 
@@ -140,8 +139,9 @@ oven-tui ──► oven-app ──► oven-agent ──► oven-llm
 
 `oven-proto` sits below `oven-agent` and below `oven-app`: the agent reports
 its events through it, and the app publishes its state and its commands
-through it. Nothing above it re-implements the vocabulary — `oven-agent` and
-`oven-app` re-export what they used to own, so no public path moved.
+through it. Nothing above it re-implements the vocabulary, and nothing above
+it re-exports it either: `oven-agent` and `oven-app` name the protocol where
+they use it, so a crate that needs an event depends on `oven-proto` for it.
 
 `oven-host` may depend on operating-system and third-party implementation crates such as Tokio and `ignore`, but those types do not appear in its public API. Consumers use host-owned types such as `WalkEntry`, `PathError`, and `CommandError`. Pattern matching remains an Agent concern.
 
@@ -160,14 +160,16 @@ through it. Nothing above it re-implements the vocabulary — `oven-agent` and
 
 The host facade deliberately does not know about `AgentError`, `Tool`, `AgentEvent`, `AppEvent`, or `AppState`. This keeps the infrastructure reusable and prevents a dependency cycle.
 
-`oven-agent` retains the `Tool` trait because it describes the Agent protocol. Concrete tools adapt that protocol to host capabilities:
+`oven-agent` retains the `Tool` trait because it describes the Agent protocol.
+The capabilities themselves live in `oven-app`, so the driver never names a tool
+it was not handed. Concrete tools adapt that protocol to host capabilities:
 
 ```text
 oven-agent::Tool
   ├── FileReadTool / FileEditTool / SkillReadTool ──► tokio::fs
   ├── FileWriteTool / FileEditTool                ──► oven-host write
   ├── BashTool                                    ──► oven-host process
-  ├── GlobTool / GrepTool                         ──► oven-agent matching + oven-host walk
+  ├── GlobTool / GrepTool                         ──► globset + regex + oven-host walk
   ├── WebFetchTool                                ──► reqwest
   ├── TaskTool / TaskOutputTool                   ──► oven-agent SubagentSpawner (oven-app implements it)
   └── memory_read / memory_write / memory_forget  ──► oven-mem MemoryStore

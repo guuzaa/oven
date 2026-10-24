@@ -1,8 +1,8 @@
-//! encoder：将 domain 层的 `Request` 转换为 OpenAI Chat Completions 的
-//! wire 格式 `ChatCompletionRequest`。
+//! encoder: turns the domain `Request` into the OpenAI Chat Completions wire
+//! format `ChatCompletionRequest`.
 //!
-//! 本模块是纯函数集合，不做任何 I/O；不读取或处理
-//! `Request.provider_options` 字段（该字段的合并逻辑位于 transport 层）。
+//! Pure functions, no I/O. `options.provider_options` is not read here — the
+//! transport layer merges it.
 
 #![allow(dead_code)]
 
@@ -15,8 +15,10 @@ use super::types::{
     WireTool, WireToolCall, WireToolCallFunction,
 };
 use crate::domain::message::{ContentBlock, Message, Role};
+use crate::domain::options::CallOptions;
 use crate::domain::request::Request;
 use crate::domain::tool::{Tool, ToolChoice};
+use crate::provider::vendor::Channels;
 
 /// `encode_request` 及其子函数的编码失败原因。
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
@@ -31,16 +33,18 @@ pub enum CompletionsEncodeError {
     UnsupportedToolResultContent(String),
 }
 
-/// 将 `Request` 编码为 OpenAI Chat Completions 的 wire 请求体。
+/// Encodes a `Request` into the OpenAI Chat Completions wire request body.
 ///
-/// - `system` 字段（如果有值）生成消息列表的第一条 `role: "system"` 消息
-/// - `messages` 中每条消息按角色分发给 `encode_message`
-/// - `tools` / `tool_choice` / `sampling.stop` 逐一映射
-/// - `stream = true` 时附带 `stream_options.include_usage = true`
+/// - a `system` field, when set, becomes the first message with `role: "system"`
+/// - every message in `messages` goes to `encode_message` by its role
+/// - `tools` / `tool_choice` / `sampling.stop` map one by one
+/// - `stream = true` adds `stream_options.include_usage = true`
 ///
-/// 不读取或处理 `req.provider_options`（由 transport 层负责合并）。
+/// `options.provider_options` is not read here — the transport layer merges it.
 pub(crate) fn encode_request(
     req: &Request,
+    options: &CallOptions,
+    reasoning: Channels,
     stream: bool,
 ) -> Result<ChatCompletionRequest, CompletionsEncodeError> {
     let mut messages = Vec::new();
@@ -63,7 +67,7 @@ pub(crate) fn encode_request(
         Some(req.tools.iter().map(encode_tool).collect())
     };
 
-    let stop = match &req.sampling.stop {
+    let stop = match &options.sampling.stop {
         None => None,
         Some(values) if values.is_empty() => None,
         Some(values) if values.len() == 1 => Some(StopValue::Single(values[0].clone())),
@@ -78,20 +82,23 @@ pub(crate) fn encode_request(
         None
     };
 
-    let thinking = req.thinking.map(|t| WireThinking {
-        mode: t.to_string(),
+    let thinking = reasoning.toggle.map(|on| WireThinking {
+        mode: if on {
+            "enabled".to_string()
+        } else {
+            "disabled".to_string()
+        },
     });
 
-    let reasoning_effort = req.reasoning_effort.map(|e| e.to_string());
-
+    let reasoning_effort = reasoning.level.map(str::to_string);
     Ok(ChatCompletionRequest {
-        model: req.model.wire_id().to_owned(),
+        model: options.model.wire_id().to_owned(),
         messages,
         tools,
         tool_choice: Some(encode_tool_choice(&req.tool_choice)),
-        temperature: req.sampling.temperature,
-        top_p: req.sampling.top_p,
-        max_tokens: req.sampling.max_tokens,
+        temperature: options.sampling.temperature,
+        top_p: options.sampling.top_p,
+        max_tokens: options.sampling.max_tokens,
         stop,
         thinking,
         reasoning_effort,
@@ -351,7 +358,11 @@ fn encode_tool_choice(choice: &ToolChoice) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::request::{ReasoningEffort, SamplingParams, ThinkingMode};
+    use crate::domain::options::CallOptions;
+
+    fn sample_options() -> CallOptions {
+        CallOptions::new("gpt-4")
+    }
 
     // --- encode_request: system field (Requirement 3.1) ---
 
@@ -362,7 +373,7 @@ mod tests {
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.messages[0].role, "system");
         assert_eq!(wire.messages[0].content, Some("be helpful".to_string()));
         assert_eq!(wire.messages[1].role, "user");
@@ -374,7 +385,7 @@ mod tests {
             messages: vec![Message::user(vec![ContentBlock::text("hi")])],
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.messages.len(), 1);
         assert_eq!(wire.messages[0].role, "user");
     }
@@ -410,26 +421,20 @@ mod tests {
     #[test]
     fn stop_single_value_serializes_as_single() {
         let req = Request {
-            sampling: SamplingParams {
-                stop: Some(vec!["STOP".to_string()]),
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, true).unwrap();
+        let options = sample_options().stop(vec!["STOP".to_string()]);
+        let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.stop, Some(StopValue::Single("STOP".to_string())));
     }
 
     #[test]
     fn stop_multiple_values_serializes_as_multiple() {
         let req = Request {
-            sampling: SamplingParams {
-                stop: Some(vec!["A".to_string(), "B".to_string()]),
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let options = sample_options().stop(vec!["A".to_string(), "B".to_string()]);
+        let wire = encode_request(&req, &options, Channels::default(), false).unwrap();
         assert_eq!(
             wire.stop,
             Some(StopValue::Multiple(vec!["A".to_string(), "B".to_string()]))
@@ -439,20 +444,17 @@ mod tests {
     #[test]
     fn stop_none_maps_to_none() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert_eq!(wire.stop, None);
     }
 
     #[test]
     fn stop_empty_vec_maps_to_none() {
         let req = Request {
-            sampling: SamplingParams {
-                stop: Some(vec![]),
-                ..Default::default()
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, false).unwrap();
+        let options = sample_options().stop(vec![]);
+        let wire = encode_request(&req, &options, Channels::default(), false).unwrap();
         assert_eq!(wire.stop, None);
     }
 
@@ -775,52 +777,44 @@ mod tests {
     #[test]
     fn encode_request_maps_tools_and_sampling() {
         let req = Request {
-            model: crate::domain::ModelId::from("gpt-4"),
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: None,
                 input_schema: Arc::new(serde_json::json!({})),
             }],
-            sampling: SamplingParams {
-                temperature: Some(0.5),
-                top_p: Some(0.9),
-                max_tokens: Some(100),
-                stop: None,
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, true).unwrap();
+        let options = CallOptions::new("gpt-4")
+            .temperature(0.5)
+            .top_p(0.9)
+            .max_tokens(100);
+        let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.model, "gpt-4");
     }
 
     #[test]
     fn encode_request_sends_wire_id_not_slug() {
-        let req = Request {
-            model: crate::domain::ModelId::from("deepseek/deepseek-v4-flash:responses"),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
+        let req = Request::default();
+        let options = CallOptions::new("deepseek/deepseek-v4-flash:responses");
+        let wire = encode_request(&req, &options, Channels::default(), false).unwrap();
         assert_eq!(wire.model, "deepseek-v4-flash");
     }
 
     #[test]
     fn encode_request_maps_rest() {
         let req = Request {
-            model: crate::domain::ModelId::from("gpt-4"),
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: None,
                 input_schema: Arc::new(serde_json::json!({})),
             }],
-            sampling: SamplingParams {
-                temperature: Some(0.5),
-                top_p: Some(0.9),
-                max_tokens: Some(100),
-                stop: None,
-            },
             ..Default::default()
         };
-        let wire = encode_request(&req, true).unwrap();
+        let options = CallOptions::new("gpt-4")
+            .temperature(0.5)
+            .top_p(0.9)
+            .max_tokens(100);
+        let wire = encode_request(&req, &options, Channels::default(), true).unwrap();
         assert_eq!(wire.model, "gpt-4");
         assert_eq!(wire.tools.unwrap().len(), 1);
         assert_eq!(wire.temperature, Some(0.5));
@@ -838,83 +832,85 @@ mod tests {
     #[test]
     fn encode_request_no_stream_has_no_stream_options() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
         assert!(!wire.stream);
         assert_eq!(wire.stream_options, None);
     }
 
     #[test]
-    fn encode_request_thinking_enabled() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Enabled),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        let thinking = wire.thinking.unwrap();
-        assert_eq!(thinking.mode, "enabled");
-    }
-
-    #[test]
-    fn encode_request_thinking_disabled() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Disabled),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        let thinking = wire.thinking.unwrap();
-        assert_eq!(thinking.mode, "disabled");
-    }
-
-    #[test]
-    fn encode_request_thinking_none_is_absent() {
+    fn encode_request_sends_the_level_channel() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(
+            &req,
+            &sample_options(),
+            Channels {
+                level: Some("high"),
+                toggle: None,
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(wire.reasoning_effort, Some("high".to_string()));
         assert!(wire.thinking.is_none());
     }
 
     #[test]
-    fn encode_request_reasoning_effort_high() {
-        let req = Request {
-            reasoning_effort: Some(ReasoningEffort::High),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert_eq!(wire.reasoning_effort, Some("high".to_string()));
-    }
-
-    #[test]
-    fn encode_request_reasoning_effort_none_is_absent() {
+    fn encode_request_sends_the_toggle_channel() {
         let req = Request::default();
-        let wire = encode_request(&req, false).unwrap();
+        let wire = encode_request(
+            &req,
+            &sample_options(),
+            Channels {
+                level: None,
+                toggle: Some(true),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(wire.thinking.unwrap().mode, "enabled");
         assert!(wire.reasoning_effort.is_none());
     }
 
     #[test]
-    fn encode_request_all_reasoning_effort_levels() {
-        for (effort, expected) in [
-            (ReasoningEffort::None, "none"),
-            (ReasoningEffort::Low, "low"),
-            (ReasoningEffort::Medium, "medium"),
-            (ReasoningEffort::High, "high"),
-        ] {
-            let req = Request {
-                reasoning_effort: Some(effort),
-                ..Default::default()
-            };
-            let wire = encode_request(&req, false).unwrap();
-            assert_eq!(wire.reasoning_effort, Some(expected.to_string()));
-        }
+    fn encode_request_off_turns_the_switch_off() {
+        let req = Request::default();
+        let wire = encode_request(
+            &req,
+            &sample_options(),
+            Channels {
+                level: Some("none"),
+                toggle: Some(false),
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(wire.thinking.unwrap().mode, "disabled");
+        assert_eq!(wire.reasoning_effort, Some("none".to_string()));
     }
 
     #[test]
-    fn encode_request_thinking_and_reasoning_effort_together() {
-        let req = Request {
-            thinking: Some(ThinkingMode::Enabled),
-            reasoning_effort: Some(ReasoningEffort::Medium),
-            ..Default::default()
-        };
-        let wire = encode_request(&req, false).unwrap();
-        assert_eq!(wire.thinking.unwrap().mode, "enabled");
-        assert_eq!(wire.reasoning_effort, Some("medium".to_string()));
+    fn encode_request_unset_sends_no_reasoning_field() {
+        let req = Request::default();
+        let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
+        assert!(wire.thinking.is_none());
+        assert!(wire.reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn encode_request_each_level_word_reaches_the_wire() {
+        for word in ["none", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let req = Request::default();
+            let wire = encode_request(
+                &req,
+                &sample_options(),
+                Channels {
+                    level: Some(word),
+                    toggle: None,
+                },
+                false,
+            )
+            .unwrap();
+            assert_eq!(wire.reasoning_effort, Some(word.to_string()));
+        }
     }
 }

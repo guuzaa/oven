@@ -5,8 +5,8 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use oven_llm::{
-    Client, ContentBlock, Delta, Message, Provider, ReasoningEffort, Request, Response, Role,
-    StreamCollector, StreamEvent as LlmStreamEvent, ThinkingMode,
+    CallOptions, Client, ContentBlock, Delta, Message, Provider, Request, Response, Role,
+    StreamCollector, StreamEvent as LlmStreamEvent,
 };
 
 use oven_host::as_ms;
@@ -48,22 +48,25 @@ impl Agent {
         prompt_template::compose_system(base, mode)
     }
 
-    /// Plan mode asks for a todo update after several tool rounds skipped
-    /// `todo_write`. The note is appended to that request only.
+    /// Plan mode asks for a todo update after several tool rounds skipped the
+    /// checklist. The note is appended to that request only.
     fn wants_plan_reminder(&self, mode: AgentMode) -> bool {
         mode == AgentMode::Plan
             && self.todo_misses >= prompt_template::PLAN_REMINDER_AFTER_MISSES
             && !self.todos.is_empty()
     }
 
+    /// The options this turn runs with: the model it goes to, the reasoning
+    /// effort the selection carries, and the sampling defaults.
+    pub(crate) fn build_options(&self) -> CallOptions {
+        let (model, reasoning_effort) = self.selection.model();
+        let mut options = CallOptions::new(model);
+        options.reasoning_effort = reasoning_effort;
+        options
+    }
+
     pub(crate) fn build_request(&self) -> Request {
         let mode = self.selection.mode();
-        let (model, reasoning_effort) = self.selection.model();
-        let thinking = if reasoning_effort.is_some_and(|effort| effort != ReasoningEffort::None) {
-            ThinkingMode::Enabled
-        } else {
-            ThinkingMode::Disabled
-        };
         let mut messages: Vec<Message> = self
             .history
             .messages()
@@ -90,17 +93,12 @@ impl Agent {
             );
         }
         let mut builder = Request::builder()
-            .model(model)
             .messages(messages)
-            .tools(self.llm_tools(mode))
-            .thinking(thinking);
+            .tools(self.llm_tools(mode));
         if let Some(system) = self.system_prompt(mode) {
             builder = builder.system(system);
         }
-        if let Some(effort) = reasoning_effort {
-            builder = builder.reasoning_effort(effort);
-        }
-        builder.build().expect("model is set")
+        builder.build()
     }
 
     pub(super) async fn complete_response(
@@ -122,15 +120,16 @@ impl Agent {
         sink: &mut impl EventSink,
     ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
         let req = self.build_request();
+        let options = self.build_options();
         let router = self.router();
         if router
-            .resolve_model(&req.model)
+            .resolve_model(&options.model)
             .is_some_and(|info| !info.capabilities.supports_streaming)
         {
-            return complete_unstreamed(&req, router.as_ref(), sink).await;
+            return complete_unstreamed(&req, &options, router.as_ref(), sink).await;
         }
 
-        match router.stream(&req).await {
+        match router.stream(&req, &options).await {
             Ok(mut stream) => {
                 let mut collector = StreamCollector::new();
                 let mut thinking = ThinkingSpan::default();
@@ -252,11 +251,12 @@ impl ToolCallGate {
 
 async fn complete_unstreamed(
     req: &Request,
+    options: &CallOptions,
     router: &Client,
     sink: &mut impl EventSink,
 ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
     let started = Instant::now();
-    let mut response = router.complete(req).await?;
+    let mut response = router.complete(req, options).await?;
     strip_tool_call_text(&mut response);
     let reasoning = response.thinking();
     let span = (!reasoning.is_empty()).then(|| thinking_span(started.elapsed()));
@@ -279,9 +279,26 @@ async fn complete_unstreamed(
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolCallGate, is_tool_call_envelope};
+    use super::{Agent, ToolCallGate, is_tool_call_envelope};
+    use oven_llm::{ModelId, ReasoningEffort, Router};
 
     const ENVELOPE: &str = "<tool_call>\n<function=bash>\n<parameter=command>\nls\n</parameter>\n</function>\n</tool_call>";
+
+    /// The model and the effort this turn goes out with are the ones that
+    /// were selected: the model is no longer dropped, and the effort is no
+    /// longer read apart from the model — a switch moves both.
+    #[test]
+    fn the_options_carry_the_selected_model_and_effort() {
+        let agent = Agent::new(Router::new(), Vec::new());
+        agent
+            .selection()
+            .switch_model(ModelId::new("kimi-k3"), Some(ReasoningEffort::High));
+
+        let options = agent.build_options();
+
+        assert_eq!(options.model.as_str(), "kimi-k3");
+        assert_eq!(options.reasoning_effort, Some(ReasoningEffort::High));
+    }
 
     #[test]
     fn prose_passes_without_waiting() {

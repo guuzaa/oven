@@ -1916,23 +1916,16 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "globset",
- "htmd",
  "mockall",
  "oven-host",
  "oven-llm",
  "oven-proto",
- "regex",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempdir",
- "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tracing",
- "wiremock",
 ]
 
 [[package]]
@@ -1942,6 +1935,8 @@ dependencies = [
  "async-trait",
  "axum",
  "futures",
+ "globset",
+ "htmd",
  "http",
  "mockall",
  "nucleo",
@@ -1951,9 +1946,12 @@ dependencies = [
  "oven-llm",
  "oven-mem",
  "oven-proto",
+ "regex",
+ "reqwest 0.12.28",
  "rmcp",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempdir",
  "thiserror 2.0.21",
  "tokio",
@@ -1962,6 +1960,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows-sys 0.61.2",
+ "wiremock",
 ]
 
 [[package]]

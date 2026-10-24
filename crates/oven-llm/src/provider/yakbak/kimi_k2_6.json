@@ -1,0 +1,27 @@
+{
+  "request": {
+    "model": "kimi-k2.6",
+    "messages": [{ "role": "user", "content": "求 1+1。" }],
+    "tool_choice": "auto",
+    "thinking": { "type": "disabled" },
+    "stream": false
+  },
+  "response": {
+    "id": "chatcmpl-kimi-k2-6",
+    "object": "chat.completion",
+    "created": 1767225600,
+    "model": "kimi-k2.6",
+    "choices": [
+      {
+        "index": 0,
+        "message": { "role": "assistant", "content": "1+1=2。" },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 11,
+      "completion_tokens": 8,
+      "total_tokens": 19
+    }
+  }
+}

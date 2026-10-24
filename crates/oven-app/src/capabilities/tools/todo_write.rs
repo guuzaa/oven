@@ -2,11 +2,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-use super::{Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView};
-
-use crate::core::turn::TurnContext;
+use oven_agent::{Tool, ToolCaps, ToolEffect, ToolOutcome, TurnContext};
 use oven_proto::AgentError;
-use oven_proto::TodoList;
+use oven_proto::{TodoList, ToolPermission, ToolView};
 
 pub struct TodoWriteTool;
 
@@ -42,6 +40,10 @@ impl Tool for TodoWriteTool {
             permission: ToolPermission::Write,
             exclusive: true,
         }
+    }
+
+    fn effect(&self, input: &Value) -> Option<ToolEffect> {
+        TodoList::parse(input).ok().map(ToolEffect::Todos)
     }
 
     fn description(&self) -> &'static str {

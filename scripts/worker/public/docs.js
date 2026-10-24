@@ -25,9 +25,9 @@ const TRACE = [
   {
     chapter: "start",
     title: "oven starts",
-    text: "AppBuilder loads the config, the AGENTS.md / CLAUDE.md instructions, skills, MCP servers and the memory index, then builds the system prompt once — base, environment, instructions, skills, memory catalog. It mounts the tools, creates the driver agent and the subagent roles on the one event bus they publish on, and starts the runtime actor, which waits on its inbox.",
+    text: "AppBuilder loads the config — the providers, the quality profiles and the one in effect — the AGENTS.md / CLAUDE.md instructions, skills, MCP servers and the memory index, then builds the system prompt once — base, environment, instructions, skills, memory catalog. It mounts the tools, creates the driver agent and the subagent roles on the one event bus they publish on, and starts the runtime actor, which waits on its inbox.",
     lanes: ["app", "mem", "host"],
-    events: ["AppState { phase: Idle, mode: Plan, … }"],
+    events: ["AppState { levels: { phase: Idle, mode: Plan, … } }"],
     where: ["crates/oven-app/src/api/builder.rs", "crates/oven-mem/src/store.rs"],
     log: [["d", "~/tiny-cli · 2 memories · 3 skills · 1 MCP server"]],
     status: "plan · idle",
@@ -35,7 +35,7 @@ const TRACE = [
   {
     chapter: "input",
     title: "You press Enter",
-    text: "The composer hands the text to App::submit, which classifies it once: a registered /command, !cmd for your own shell, otherwise chat. The driver is idle, so it goes to the runtime's inbox; a chat typed while tools run is parked and rides along with the next request.",
+    text: "The composer hands the text to App::submit, which classifies it once: a registered /command — /profile picks a quality level, /model a model and an effort — !cmd for your own shell, otherwise chat. The driver is idle, so it goes to the runtime's inbox; a chat typed while tools run is parked and rides along with the next request.",
     lanes: ["tui", "app"],
     events: ['Input::Chat("add a --json flag to `tiny ls`")'],
     where: ["crates/oven-tui/src/runtime/ui/keys.rs", "crates/oven-app/src/api/input.rs"],
@@ -45,7 +45,7 @@ const TRACE = [
   {
     chapter: "input",
     title: "The runtime starts a turn",
-    text: "start_turn mints a TurnId, moves the phase to Running and builds the TurnContext: a cancel token, the shared Selection (mode and model), the RunPolicy (200 steps by default) and the request sink approvals and questions go through. It then awaits the turn in a select! that also watches shutdown and registry wake-ups.",
+    text: "start_turn mints a TurnId, moves the phase to Running and builds the TurnContext: a cancel token, the shared Selection (mode, model and reasoning effort), the RunPolicy (200 steps by default) and the request sink approvals and questions go through. It then awaits the turn in a select! that also watches shutdown and registry wake-ups.",
     lanes: ["app"],
     events: ["phase = Running { turn_id: 7 }"],
     where: ["crates/oven-app/src/runtime/turn.rs"],
@@ -62,10 +62,10 @@ const TRACE = [
   {
     chapter: "loop",
     title: "Step 1 · build the request",
-    text: "Mode and model are read fresh from the Selection, so Shift+Tab or /model mid-turn lands here. The system prompt is the frozen base plus the # Plan Mode rules, and the checklist when there is one. Tools are filtered by mode: todo_write only in plan, writers hidden in ask.",
+    text: "Mode, model and reasoning effort are read fresh from the Selection, so Shift+Tab, /model or /profile mid-turn lands here. The request is the conversation and the model it goes to; the effort travels beside it as the options, so one request can go out with a different effort. The system prompt is the frozen base plus the # Plan Mode rules, and the checklist rides along as a user message when there is one. Tools are filtered by mode: todo_write only in plan, writers hidden in ask.",
     lanes: ["agent"],
     events: ["Turn(StepStarted { index: 1 })"],
-    where: ["crates/oven-agent/src/runtime/agent/request.rs", "crates/oven-agent/src/core/prompt_template/plan.rs"],
+    where: ["crates/oven-agent/src/runtime/agent/request.rs", "crates/oven-agent/src/core/prompt_template/plan.md"],
   },
   {
     chapter: "loop",
@@ -82,7 +82,7 @@ const TRACE = [
     text: "Each call is resolved to its tool, then gated: plan mode lets both run without asking. Started goes out for both and they run at once. The checklist is replaced when the step commits — after both calls land, so the widget appears before the step ends.",
     lanes: ["agent", "tui"],
     events: ["Tool(Started { todo_write })", "Tool(Started { task })", "Tool(Finished { todo_write })", "Tool(Finished { task: Success })", "TodosChanged { 3 items }"],
-    where: ["crates/oven-agent/src/runtime/agent/step.rs", "crates/oven-agent/src/capabilities/tools/todo_write.rs"],
+    where: ["crates/oven-agent/src/runtime/agent/step.rs", "crates/oven-app/src/capabilities/tools/todo_write.rs"],
     log: [
       ["t", "todo_write · 3 todos (1 in_progress, 0 completed)"],
       ["t", "Agent explore: find how ls prints"],
@@ -100,7 +100,7 @@ const TRACE = [
     text: "task hands a SpawnRequest to the subagent supervisor, which registers explore#1 as pending, takes a concurrency slot and runs a fresh Agent with read-only tools and its own history. Its events go straight to the bus under its own agent id, so the TUI routes them to the strip and its viewer, never to the main transcript.",
     lanes: ["app", "agent", "host"],
     events: ["explore#1 · Turn(Started)", "explore#1 · Tool(Started { grep })", "wake → AppState.subagents"],
-    where: ["crates/oven-agent/src/capabilities/tools/task.rs", "crates/oven-app/src/capabilities/subagent.rs"],
+    where: ["crates/oven-app/src/capabilities/tools/task.rs", "crates/oven-app/src/capabilities/subagent.rs"],
     strip: "◆ explore#1 · running 4.2s · 3 tools · find how ls prints",
   },
   {
@@ -119,7 +119,7 @@ const TRACE = [
     text: "The model calls file_edit and todo_write. file_edit is exclusive, so two edits from one reply never overlap and neither loses the other's change. The write goes through oven-host, which keeps paths inside the workspace, and the tool's view carries the diff the transcript paints.",
     lanes: ["agent", "host", "tui"],
     events: ["Turn(StepStarted { index: 2 })", "Tool(Started { file_edit })", "Tool(Finished { file_edit })", "TodosChanged { … }"],
-    where: ["crates/oven-agent/src/capabilities/tools/file_edit.rs", "crates/oven-host/src/filesystem.rs"],
+    where: ["crates/oven-app/src/capabilities/tools/file_edit.rs", "crates/oven-host/src/filesystem.rs"],
     log: [
       ["t", "Edit src/ls.rs"],
       ["+", "  + #[arg(long)] json: bool,"],
@@ -138,7 +138,7 @@ const TRACE = [
     text: "bash has execute permission: it runs unattended in agent and plan mode, while ask mode parks the turn on an approval prompt (phase Awaiting) until you answer. The command runs to completion and its output comes back as one result, capped at 64 KiB on the way into the history. This step used tools but did not touch the checklist.",
     lanes: ["agent", "host", "tui"],
     events: ["Tool(Started { bash })", "Tool(Finished { bash: Success })"],
-    where: ["crates/oven-agent/src/capabilities/tools/bash.rs", "crates/oven-host/src/command.rs"],
+    where: ["crates/oven-app/src/capabilities/tools/bash.rs", "crates/oven-host/src/command.rs"],
     log: [
       ["t", "Ran cargo test"],
       ["o", "  test ls::prints_json ... ok"],
@@ -152,7 +152,7 @@ const TRACE = [
     text: "Five tool rounds have used tools but not todo_write, so this request appends a user message wrapped in <reminder> — it lives only in the request, never in the history. The counter then starts over. The model marks every item done and, in the same reply, saves something it learned.",
     lanes: ["agent", "llm", "tui"],
     events: ["Turn(StepStarted { index: 4 })", "Tool(Started { todo_write })", "Tool(Started { memory_write })", "Tool(Finished { todo_write })", "Tool(Finished { memory_write: created })", "TodosChanged { all completed }"],
-    where: ["crates/oven-agent/src/core/prompt_template/plan.rs"],
+    where: ["crates/oven-agent/src/core/prompt_template/plan.md"],
     log: [["t", "todo_write · 3 todos (0 in_progress, 3 completed)"]],
     todos: [
       ["x", "Find where ls renders output"],
@@ -183,9 +183,9 @@ const TRACE = [
   {
     chapter: "finish",
     title: "The runtime wraps up",
-    text: "The runtime appends only the new history records to the session file, plus a checklist snapshot, then publishes the new AppState: history, todos, usage, context size. Past 80% of the context window it compacts now. The phase goes back to Idle and anything queued during the turn runs next.",
+    text: "The runtime appends only the new history records to the session file, plus a checklist snapshot, then publishes the new AppState: the levels — phase, mode, model, effort, checklist, usage, context size — beside the conversation. Past 80% of the context window it compacts now. The phase goes back to Idle and anything queued during the turn runs next.",
     lanes: ["app", "host"],
-    events: ["AppState { todos, last_turn_usage, context_tokens, … }", "phase = Idle"],
+    events: ["AppState { levels: AppLevels { … }, history }", "phase = Idle"],
     where: ["crates/oven-app/src/runtime/mod.rs", "crates/oven-app/src/core/session.rs"],
     status: "plan · idle · context 18%",
   },
@@ -227,8 +227,10 @@ select! { _ = cancelled() => Err(cancelled()), res = turn => res }`,
     label: "build_request",
     tag: "step",
     title: "Build the request",
-    text: "Mode, model and reasoning effort come from the shared Selection, read again every step. The system prompt is the frozen base plus the mode overlay. A checklist edit is a user message on the next request only. Five tool rounds without todo_write append a reminder on the following request, then the count restarts. Tools the mode hides are not sent at all.",
-    code: `Request {
+    text: "Mode, model and reasoning effort come from the shared Selection, read again every step. The request is the conversation and the model it goes to; the options are how we ask — the reasoning effort lives there, so one request can go out with different options. The system prompt is the frozen base plus the mode overlay. A checklist edit is a user message on the next request only. Five tool rounds without todo_write append a reminder on the following request, then the count restarts. Tools the mode hides are not sent at all.",
+    code: `let request = self.build_request();
+let options = self.build_options();   // CallOptions { reasoning_effort }
+Request {
     model,
     system: compose_system(base, mode),
     messages: [history_without_system, todo_list?, user_reminder?],
@@ -241,9 +243,9 @@ select! { _ = cancelled() => Err(cancelled()), res = turn => res }`,
     tag: "llm",
     title: "Stream the reply",
     text: "Thinking and text deltas are forwarded as they arrive. Text or a tool-call delta closes the thinking window. If the stream cannot start, the agent falls back to a one-shot completion; the router retries transient provider errors.",
-    code: `match router.stream(&req).await {
+    code: `match router.stream(&req, &options).await {
     Ok(stream) => forward ThinkingDelta / TextDelta,
-    Err(_) => Provider::complete(&router, &req).await?,
+    Err(_) => Provider::complete(&router, &req, &options).await?,
 }`,
   },
   {
@@ -348,6 +350,58 @@ const MODES = {
   agent: "Everything is offered and nothing asks first. Writes still show up as tool calls in the transcript.",
   plan: "Agent mode plus todo_write and the plan rules. task may only start read-only roles.",
   ask: "Read-only tools run; bash asks for approval; writers, task and MCP tools are not even sent to the model.",
+};
+
+// One profile, as the config writes it: a name we choose, and one line per
+// vendor. The table below is the example config; the page shows what the
+// name means on each vendor.
+const PROFILE = {
+  name: "balanced",
+  table: `[profiles.balanced]
+deepseek = { model = "deepseek-v4-flash", effort = "medium" }
+moonshot  = { model = "kimi-k3",          effort = "high"   }`,
+};
+
+// How each vendor reads a reasoning effort, and what the profile means there.
+const VENDORS = {
+  deepseek: {
+    title: "DeepSeek · the level channel",
+    text: "The levels are not continuous — none, low, high, max, and no medium. A level the model does not have is clamped down to the closest one it has, by strength rather than by index, so medium falls to low.",
+    code: `reasoning_effort: "high"`,
+    takes: "none · low · high · max",
+    profile: { model: "deepseek-v4-flash", effort: "medium", note: "deepseek has no medium, so the effort is clamped down to low and the switch says so" },
+  },
+  moonshot: {
+    title: "Moonshot · a channel per model",
+    text: "kimi-k3 takes levels, kimi-k2.6 has only a switch, and kimi-k2.7-code always thinks and takes neither. The thinking comes back in reasoning_content and is carried back verbatim.",
+    code: `reasoning_effort: "max"        // kimi-k3
+thinking: { type: "enabled" }   // kimi-k2.6`,
+    takes: "kimi-k3: low · high · max · kimi-k2.6: on / off",
+    profile: { model: "kimi-k3", effort: "high", note: "kimi-k3 takes high, so the effort lands as it was asked" },
+  },
+  zhipu: {
+    title: "Zhipu · the switch channel",
+    text: "GLM has no levels: it takes thinking.type and nothing else. Sending reasoning_effort would be dropped in silence, so oven does not send it — and the switch says so out loud.",
+    code: `thinking: { type: "enabled" }`,
+    takes: "on / off",
+    profile: null,
+  },
+  xai: {
+    title: "xAI · the level channel",
+    text: "Grok takes low, medium, high and xhigh. The build models reason at a fixed depth, so they take no reasoning field at all: the request carries nothing and the model decides.",
+    code: `reasoning: { effort: "high" }   // the Responses protocol`,
+    takes: "low · medium · high · xhigh",
+    profile: null,
+  },
+  minimax: {
+    title: "MiniMax · both channels",
+    text: "MiniMax-M3 has only a switch; MiniMax-M3.1-Flash thinks always and takes a level. Every request carries reasoning_split, so the thinking comes back as thinking and not as text.",
+    code: `reasoning_effort: "high"          // MiniMax-M3.1-Flash
+thinking: { type: "disabled" }      // MiniMax-M3
+reasoning_split: true`,
+    takes: "M3.1-Flash: low · medium · high · xhigh · max · M3: on / off",
+    profile: null,
+  },
 };
 
 const PAR_CALLS = [
@@ -455,7 +509,7 @@ const QUIZ = [
 
 const PHASES = [
   { id: "idle", label: "Idle", text: "Nothing running; the composer is free. A chat or a !shell line starts a turn; slash commands run and stay idle." },
-  { id: "running", label: "Running", text: "The driver's turn (or your !shell command) is in flight. Mode switches, /model, /agents and cancel apply at once; everything else waits in the inbox. Subagents never appear here." },
+  { id: "running", label: "Running", text: "The driver's turn (or your !shell command) is in flight. Mode switches, /model, /profile, /agents and cancel apply at once; everything else waits in the inbox. Subagents never appear here." },
   { id: "awaiting", label: "Awaiting", text: "Parked on you: a tool approval, the step limit or the model's question. Your reply returns it to Running; a rejection or cancel ends the turn." },
   { id: "cancelling", label: "Cancelling", text: "Esc Esc cancelled the turn's token. The turn reports Cancelled and the phase returns to Idle; its subagents stop too." },
   { id: "compacting", label: "Compacting", text: "After a turn past the threshold, or on /compact: the history becomes one summary message in a fresh session file. There is no turn to cancel." },
@@ -811,6 +865,26 @@ function initTools() {
   });
 }
 
+function initModel() {
+  const tabs = document.getElementById("model-vendors");
+  if (!tabs) {
+    return;
+  }
+  document.getElementById("profile-config").textContent = PROFILE.table;
+  tabList(tabs, Object.keys(VENDORS), (id) => {
+    const vendor = VENDORS[id];
+    document.getElementById("model-tag").textContent = id;
+    document.getElementById("model-title").textContent = vendor.title;
+    document.getElementById("model-text").textContent = vendor.text;
+    document.getElementById("model-code").textContent = vendor.code;
+    document.getElementById("model-takes").textContent = `takes: ${vendor.takes}`;
+    const note = document.getElementById("profile-note");
+    note.textContent = vendor.profile
+      ? `On ${id}, /profile ${PROFILE.name} picks ${vendor.profile.model} with ${vendor.profile.effort} — ${vendor.profile.note}.`
+      : `On ${id} the table has no line for ${PROFILE.name}, so the switch is refused: a profile is a promise about quality, and without a binding oven cannot keep it here.`;
+  });
+}
+
 function schedule(calls) {
   let lockFree = 0;
   return calls.map((call) => {
@@ -998,6 +1072,7 @@ function initPhases() {
 initTrace();
 initLoop();
 initTools();
+initModel();
 initParallel();
 initPlan();
 initSubagents();

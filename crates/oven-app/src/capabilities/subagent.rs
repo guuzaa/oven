@@ -12,12 +12,14 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use oven_agent::{
-    Agent, AgentError, AgentEvent, AgentId, CancellationToken, EventSink, NodeHandle, NodeInfo,
-    NodeOutcome, NodeReport, NodeStatus, PendingInput, RoleSpec, RouterHandle, RunPolicy,
-    SpawnRequest, SubagentSpawner, Tool, ToolEvent, TurnContext, TurnEvent, TurnId,
+    Agent, CancellationToken, NodeHandle, NodeOutcome, NodeReport, PendingInput, RoleSpec,
+    RouterHandle, RunPolicy, SpawnRequest, SubagentSpawner, Tool, TurnContext,
 };
 use oven_host::{as_ms, now_ms};
 use oven_llm::{ModelId, Usage};
+use oven_proto::{
+    AgentError, AgentEvent, AgentId, EventSink, NodeInfo, NodeStatus, ToolEvent, TurnEvent, TurnId,
+};
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use crate::core::event::{BusSink, EventBus};
@@ -555,8 +557,9 @@ impl EventSink for CountingSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_agent::{Agent, PendingInbox, ToolCallId, ToolResult, ToolView};
+    use oven_agent::{Agent, PendingInbox};
     use oven_llm::Router;
+    use oven_proto::{ToolCallId, ToolResult, ToolView};
 
     fn bare() -> Arc<Subagents> {
         let agent = Agent::new(Router::new(), Vec::new());

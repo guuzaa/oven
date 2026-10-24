@@ -1,4 +1,4 @@
-use oven_agent::AgentMode;
+use oven_proto::AgentMode;
 
 use super::{CommandContext, CommandOutcome, SlashCommand};
 use crate::core::error::AppError;
@@ -43,15 +43,16 @@ mod tests {
     use futures::stream::BoxStream;
     use oven_agent::Agent;
     use oven_llm::{
-        ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
+        CallOptions, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request, Response,
         Result as LlmResult, Router, StreamEvent,
     };
+    use oven_proto::{TodoItem, TodoList, TodoStatus};
 
     struct MockProvider;
 
     #[async_trait]
     impl Provider for MockProvider {
-        async fn complete(&self, _req: &Request) -> LlmResult<Response> {
+        async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
             Err(ProviderError::Api {
                 status: 500,
                 body: "unused".into(),
@@ -61,6 +62,7 @@ mod tests {
         async fn stream(
             &self,
             _req: &Request,
+            _options: &CallOptions,
         ) -> LlmResult<BoxStream<'static, LlmResult<StreamEvent>>> {
             Err(ProviderError::Api {
                 status: 500,
@@ -96,11 +98,11 @@ mod tests {
     #[test]
     fn no_args_reports_current_mode_and_list() {
         let mut agent = fresh_agent();
-        agent.set_todos(oven_agent::TodoList {
-            items: vec![oven_agent::TodoItem {
+        agent.set_todos(TodoList {
+            items: vec![TodoItem {
                 id: "a".into(),
                 content: "one".into(),
-                status: oven_agent::TodoStatus::Pending,
+                status: TodoStatus::Pending,
             }],
         });
         let subagents = Subagents::bare(agent.id(), agent.router_handle());

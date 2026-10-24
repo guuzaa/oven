@@ -4,12 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{
-    Tool, ToolCaps, ToolOutcome, ToolPermission, ToolView, labeled, require_str, resolve_within,
-};
-
-use crate::core::turn::TurnContext;
+use super::{labeled, require_str, resolve_within};
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
 use oven_proto::AgentError;
+use oven_proto::{ToolPermission, ToolView};
 
 pub struct FileEditTool {
     root: PathBuf,
@@ -224,9 +222,7 @@ impl Tool for FileEditTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn turn() -> TurnContext {
-        TurnContext::for_test()
-    }
+    use crate::capabilities::tools::test_context;
     use serde_json::json;
 
     fn tmp_dir() -> tempdir::TempDir {
@@ -276,7 +272,7 @@ mod tests {
         let outcome = edit
             .run(
                 &json!({"path": "a.txt", "edit": [{ "old_string": "two", "new_string": "2" }]}),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -298,7 +294,7 @@ mod tests {
                     "path": "a.txt",
                     "edit": [{ "old_string": "b\nc", "new_string": "B\nC\nD" }]
                 }),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -322,7 +318,7 @@ mod tests {
                         { "old_string": "y", "new_string": "Y" },
                     ]
                 }),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap();
@@ -340,7 +336,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "a.txt", "edit": [{ "old_string": "zzz", "new_string": "x" }]}),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap_err();
@@ -355,7 +351,7 @@ mod tests {
         let edit = FileEditTool::new(tmp.path());
         edit.run(
             &json!({"path": "a.txt", "edit": [{ "old_string": "two", "new_string": "2" }]}),
-            &turn(),
+            &test_context(),
         )
         .await
         .unwrap();
@@ -370,7 +366,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "a.txt", "edit": [{ "old_string": "a", "new_string": "b" }]}),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap_err();
@@ -392,7 +388,7 @@ mod tests {
                         { "old_string": "a", "new_string": "c" },
                     ]
                 }),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap_err();
@@ -408,7 +404,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "a.txt", "edit": [{ "old_string": "zzz", "new_string": "x" }]}),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap_err();
@@ -423,7 +419,7 @@ mod tests {
         let err = edit
             .run(
                 &json!({"path": "../a.txt", "edit": [{ "old_string": "a", "new_string": "b" }]}),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap_err();
@@ -457,7 +453,7 @@ mod tests {
                     { "old_string": "gamma", "new_string": "three" },
                 ]
             }),
-            &turn(),
+            &test_context(),
         )
         .await
         .unwrap();
@@ -478,7 +474,7 @@ mod tests {
                     { "old_string": "b b", "new_string": "c" },
                 ]
             }),
-            &turn(),
+            &test_context(),
         )
         .await
         .unwrap();
@@ -500,7 +496,7 @@ mod tests {
                         { "old_string": "zzz", "new_string": "x" },
                     ]
                 }),
-                &turn(),
+                &test_context(),
             )
             .await
             .unwrap_err();
@@ -522,7 +518,7 @@ mod tests {
             json!({"path": "a.txt", "edit": "alpha"}),
             json!({"path": "a.txt", "edit": [{"old_string": "alpha"}]}),
         ] {
-            let err = edit.run(&args, &turn()).await.unwrap_err();
+            let err = edit.run(&args, &test_context()).await.unwrap_err();
             assert!(
                 err.message.contains("edit"),
                 "unexpected message for {args}: {}",

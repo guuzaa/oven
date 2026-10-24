@@ -45,7 +45,9 @@ pub use mode::{AgentMode, ToolAccess};
 pub use permission::ToolPermission;
 pub use record::{Record, SessionMeta};
 pub use sink::{EventSink, NullSink, VecEventSink};
-pub use state::{AppLevels, AppPhase, AppState, HistoryChangeReason, ProviderView, SessionState};
+pub use state::{
+    AppLevels, AppPhase, AppState, HistoryChangeReason, ModelChoice, ProviderView, SessionState,
+};
 pub use subagent::{NodeInfo, NodeStatus, READ_RESULT_HINT, progress};
 pub use todo::{TodoItem, TodoList, TodoStatus};
 pub use view::ToolView;

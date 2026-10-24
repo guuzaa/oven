@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- `oven-app`: quality profiles — a name we choose (`balanced`, `deep`…) and what it means for each vendor, so the same quality is a different model on a different vendor. `/profile <name>` switches to one, `/profile` lists what the active vendor has, and a vendor without that binding is refused rather than quietly kept
+- `oven-llm`: replay tests that pin both halves of a call — a recorded exchange per vendor (`kimi-k3`, `kimi-k2.6`, `MiniMax-M3`, `grok-4.6`) replays the request body and the response through the encoders and the decoders, so a change in either shows up as a failing test instead of a broken call
+- `oven-llm`: MiniMax is a vendor now — `minimax` in the setup wizard, the OpenAI-compatible endpoint (`https://api.minimax.io/v1`), and the reasoning parameters MiniMax actually takes: `thinking.type` on the models that can turn thinking off, `reasoning_effort` on the ones that take a depth, and `reasoning_split` on every request so the thinking comes back as thinking rather than as text
+- `oven-llm`: the reasoning effort is one axis — `ReasoningEffort::None` is now `Off` (the wire word stays `"none"`), and `Minimal`, `XHigh`, `Max` and `Budget(u32)` join it. An effort that is not set means "no preference": no field reaches the wire at all; before, the Responses protocol turned it into `effort: "none"` and forced the upstream default off
 - `oven-proto`: the protocol vocabulary moves into a crate of its own — the events, the state and the commands a frontend shares with the runtime. It is a leaf, on `oven-llm` and serde alone, so a frontend can be written without the agent runtime in its dependency tree. Documented in [`docs/oven-proto.md`](docs/oven-proto.md)
 - `Command` is one enum for every request a frontend can make, and `App::apply` applies one: `Submit`, `Steer`, `Rewind`, `Cancel`, `CancelCompaction`, `SetMode`, `Respond`, `StopSubagent`, `StopSubagents`. A transport turns what it received into a `Command` and nothing else, and `CommandResult::Refused` says the request did not apply — the driver was idle, or the request it answered was already closed
 - `AppState` splits in two: `levels` holds the phase, the mode, the model, the provider, the checklist and the usage — small, and cheap enough to forward on every change — and the conversation stays beside it, read once when a frontend connects
@@ -10,14 +14,40 @@
 - Every protocol type has a serde form, and the wire format is pinned by tests
 
 ### Changed
+- `oven-app`: a manual `/model` unbinds the profile — the user asked for a model, not for a quality level — and switching vendors re-expands the profile for the new vendor
+- **Breaking:** `oven-llm`: the sampling parameters are no longer sent by default — the vendor's own default is the right one, and the Kimi family fixes its temperature per model (thinking 1.0, non-thinking 0.6) and rejects any other value
+- `oven-llm`: the Moonshot and xAI reasoning parameters are calibrated from the vendor docs — Kimi K3 takes `reasoning_effort` (`low`/`high`/`max`, no `medium`), `kimi-k2.6` takes the `thinking.type` switch, `kimi-k2.7-code` always thinks and takes neither, and the Grok models with no effort option say so
+- `oven-llm`: a model whose reasoning depth is fixed gets no reasoning field at all — a new `EffortSupport::Fixed`, next to `Unknown`, `Unsupported`, `Toggle` and `Levels`
+- `oven-tui`: the status bar shows the effort as it was asked for; a switch-only model reads as `on`, and a model that does not reason (or whose depth is fixed) shows no effort at all
+- **Breaking:** `oven-llm`: the request and the options are separate arguments — `Provider::complete` and `Provider::stream` take `(&Request, &CallOptions)`. The request is the conversation; the options name the model it goes to and how to ask (sampling, reasoning effort, private fields). The same conversation can go out to another model or with other options, and a turn rebuilds only the conversation
+- **Breaking:** `oven-llm`: the model moves from the request to the options — `CallOptions::new(model)` is the only way to make one, so a call always names its model, and `Request::builder().build()` cannot fail any more: `Request` is the conversation alone, and `BuilderError` is gone
+- **Breaking:** `oven-llm`: `ModelId` moves out of `domain::request` into `domain::model`; the crate-root paths are unchanged
+- **Breaking:** `oven-llm`: `SamplingParams` and `CallOptions` move out of `domain::request` into `domain::options`; the crate-root paths are unchanged
+- `oven-llm`: the model's own capability decides which reasoning channel a request uses — a model with levels takes the level channel, a model with only a switch takes the switch channel — and the vendor dialect is the fallback for a model nobody knows. MiniMax needs both: `MiniMax-M3` has a switch, `MiniMax-M3.1-Flash` has levels
+- **Breaking:** `oven-proto`: `AppLevels.models` is a list of `ModelChoice` — id, provider, and what the model can express — rather than a list of pairs, so a frontend can offer the levels a model actually takes
+- `oven-app`, `oven-tui`: the model picker lists the reasoning levels the model takes and nothing else, and the status bar reads the effort the way the model reads it: a switch-only model shows `on`, and a level the model does not take shows the one it will use
+- `oven-llm`: the reasoning effort reaches the wire through the vendor's own dialect — Zhipu gets `thinking.type` and no `reasoning_effort`, OpenAI and DeepSeek get `reasoning_effort` and no `thinking`, and a vendor nobody verified yet keeps sending both. A level the model does not have is clamped down to the closest one it has, and the request path never fails on it
+- **Breaking:** `oven-llm`: the reasoning effort is one axis — `ReasoningEffort::None` is now `Off` (the wire word stays `"none"`), and `Minimal`, `XHigh`, `Max` and `Budget(u32)` join it. An effort that is not set means "no preference" and reaches the wire as no field at all; before, the Responses protocol turned it into `effort: "none"` and forced the upstream default off
+- **Breaking:** `oven-llm`: `Request` splits into the conversation and its `CallOptions` — `sampling`, `reasoning_effort` and `provider_options` live under `Request::options`. `Request::thinking` and `ThinkingMode` are gone: the thinking switch is derived from the effort, so the two protocols can no longer disagree about it
+- `oven-llm`: a compaction asks for `Off` instead of switching the thinking switch off by hand
+- `oven-app`, `oven-tui`: `/model` and the model picker take the whole vocabulary (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and a token budget written as a number), and an effort that is not set reads as "unspecified" rather than "none"
 - **Breaking:** `AppState` is `{ levels, history }` rather than one flat struct, and `AppState::provider` is a `ProviderView` — the API key stays in the app layer, and a frontend is told only whether a credential is configured
 - **Breaking:** `App::provider_config` is gone; `App::provider_view` hands out the credential-free view instead, so no public method on the facade returns the key
 - **Breaking:** `App::respond` returns whether the answer was delivered — `false` when the request was already closed, or the answer did not fit it
 - `AppState` and `AppLevels` have a serde form, so a transport forwards them as bytes
 - **Breaking:** `NodeInfo::elapsed_ms`, `NodeInfo::progress` and `NodeInfo::notice` take the current time (`elapsed_ms(now_ms)`): a protocol crate does not read the clock
-- `oven-agent` and `oven-app` re-export what they used to own, so `oven_app::AppEvent` and `oven_agent::AgentEvent` still resolve and no public path moved
+- **Breaking:** `oven-agent` no longer re-exports the protocol vocabulary — `oven_agent::AgentEvent` and the rest are gone, and a crate that names an event depends on `oven-proto` for it. `oven-app` keeps re-exporting what it hands a frontend, so `oven_app::AppEvent` still resolves
 - `oven-llm` talks HTTP over `reqwest` instead of `isahc` (0.6.0): the crate now needs a Tokio runtime, `ProviderError::Transport` carries a `reqwest::Error`, and `ProviderError::Io` is gone. The `curl-sys`, `libz-sys` and `libnghttp2-sys` builds leave the tree, so a build needs no C toolchain and no CMake
 - The Windows release artifact is built with the MSVC toolchain and is named `oven-<tag>-x86_64-pc-windows-msvc.zip`; an ARM64 build (`aarch64-pc-windows-msvc`) ships beside it. The `x86_64-pc-windows-gnu` target is dropped, and the PowerShell installer picks the MSVC build the machine needs
+- **Breaking:** the built-in tools move from `oven-agent` to `oven-app`: `file_read`, `file_write`, `file_edit`, `bash`, `glob`, `grep`, `web_fetch`, `todo_write`, `answer`, `task`, `task_output`, `list_models` and `skill_read` are reached through `oven_app::…` now, and `BUILTIN_TOOLS` and `present_tool` live there too. `oven-agent` keeps the `Tool` protocol and the nouns around it, so the driver never names a tool it was not handed
+- **Breaking:** `Skill` and `SkillRegistry` move to `oven-app` as well. The agent layer never consumed a skill — it took a rendered list for the system prompt and nothing else — so the registry and the `skill_read` tool belong with the rest of the app's capabilities
+- `Tool::effect` says what a call leaves behind: `todo_write` hands back the checklist it wrote, and the driver records it and emits `TodosChanged` without naming the tool
+- `Tool::view` falls back to the tool's own name, so a tool describes itself instead of being looked up in a global table
+
+### Fixed
+- Switching to a model that does not take the chosen reasoning effort now says so — the request path degrades silently, so the switch is where the difference is said out loud: `glm-5.3 only has a reasoning switch; high will be treated as on`
+- GLM no longer receives a `reasoning_effort` it does not read: it takes `thinking.type` only, so the level used to be dropped in silence while the status bar showed it as if it had taken effect
+- A `todo_write` call that was refused no longer rewrites the checklist: the driver takes the checklist from the tool it ran, so a call to a tool that is not mounted leaves the plan alone
 
 ## [0.1.1] - 2026-10-22
 

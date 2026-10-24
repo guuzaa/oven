@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use oven_agent::{CancellationToken, PendingInbox, TurnContext, TurnId};
+use oven_agent::{CancellationToken, PendingInbox, TurnContext};
 use oven_host::run_shell_command;
 use oven_llm::Message;
+use oven_proto::TurnId;
 
 use crate::commands::CommandContext;
 use crate::core::event::BusSink;

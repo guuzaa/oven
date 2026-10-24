@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use oven_llm::{Client, Message, ModelId, ReasoningEffort, Router, RouterHandle};
 
-use crate::capabilities::tools::Tool;
 use crate::core::history::History;
 use crate::core::prompt_template::PLAN_REMINDER_AFTER_MISSES;
 use crate::core::selection::Selection;
+use crate::core::tool::Tool;
 use oven_proto::AgentEvent;
 use oven_proto::AgentId;
 use oven_proto::AgentMode;
@@ -42,7 +42,7 @@ pub struct Agent {
     system: Option<String>,
     todos: TodoList,
     todo_written_this_turn: bool,
-    /// Plan-mode tool rounds since the last `todo_write` or reminder.
+    /// Plan-mode tool rounds since the last checklist write or reminder.
     todo_misses: u8,
     /// The checklist changed and the next request should show it once.
     pub(crate) todo_notice: bool,
@@ -258,6 +258,9 @@ impl Agent {
         removed
     }
 }
+
+#[cfg(test)]
+mod stub_tools;
 
 #[cfg(test)]
 #[path = "agent_test.rs"]

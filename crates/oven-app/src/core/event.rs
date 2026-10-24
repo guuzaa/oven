@@ -6,8 +6,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oven_agent::{AgentEvent, AgentId, EventSink, TurnId};
-use oven_proto::{AppEvent, AppEventKind};
+use oven_proto::{AgentEvent, AgentId, AppEvent, AppEventKind, EventSink, TurnId};
 use tokio::sync::mpsc;
 
 pub(crate) type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<AppEvent>>>>;
