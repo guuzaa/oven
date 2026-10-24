@@ -1,8 +1,57 @@
 # Changelog
 
-## [0.6.0] - 2026-10-23
+## [0.6.0] - 2026-10-24
+
+### Added
+- `ProviderName::MiniMax` and the MiniMax preset: `base_url = https://api.minimax.io/v1`
+  (OpenAI-compatible), with `MiniMax-M3` (a thinking switch) and `MiniMax-M3.1-Flash`
+  (levels) in the catalog. Every MiniMax request carries `reasoning_split`, so the thinking
+  comes back as `reasoning_content` instead of as text.
+- `EffortSupport` says what a model can express: `Unknown`, `Unsupported`, `Fixed` (it
+  reasons, the depth is not ours to pick), `Toggle` (a switch, no levels) and `Levels`.
+  `ModelInfo::effort_support` carries it and `ModelInfo::with_effort_support` sets it.
+- `Dialect` says which channel the wire uses: `Level` (`reasoning_effort`), `Toggle`
+  (`thinking.type`) or `Both`. `VendorProfile::for_protocol` pairs a protocol with the
+  vendor's dialect.
+- `ReasoningEffort` grows `Minimal`, `XHigh`, `Max` and `Budget(u32)`. `off` and `zero`
+  are aliases of `none`, `x-high` of `xhigh`, and a token budget is written as a number.
+  `LADDER` is the strength ladder, and `ParseEffortError` is the error a bad word gives.
+- Replay tests over recorded exchanges (`kimi-k3`, `kimi-k2.6`, `minimax-m3`, `grok-4.6`):
+  the request body has to come out the same and the response has to decode into the same
+  domain objects, so a change in either encoder or decoder shows up as a failing test
+  instead of a broken call.
 
 ### Changed
+- **Breaking:** the request and the options are separate arguments — `Provider::complete`
+  and `Provider::stream` take `(&Request, &CallOptions)`. The request is the conversation;
+  the options name the model it goes to and how to ask (sampling, reasoning effort,
+  private fields). The same conversation can go out to another model or with other
+  options without being rebuilt.
+- **Breaking:** the model moves from the request to the options — `CallOptions::new(model)`
+  is the only way to make one, so a call always names its model, and
+  `Request::builder().build()` cannot fail any more: `Request` is the conversation alone.
+- **Breaking:** `ReasoningEffort::None` is now `Off` (the wire word stays `none`). An
+  effort that is not set means "no preference" and reaches the wire as no field at all;
+  before, the Responses protocol folded it into `effort: "none"` and forced the upstream
+  default off.
+- **Breaking:** `SamplingParams` and `CallOptions` move out of `domain::request` into
+  `domain::options`, and `ModelId` into `domain::model`. The crate-root paths are
+  unchanged.
+- The reasoning effort reaches the wire through the vendor's own dialect: Zhipu gets
+  `thinking.type` and no `reasoning_effort`, OpenAI, DeepSeek, Moonshot and xAI get
+  `reasoning_effort` and no `thinking`, MiniMax follows the model's own capability, and
+  a vendor nobody verified yet — or a proxy that speaks either — keeps sending both. A
+  level the model does not have is clamped down to the closest one it has — the set is not
+  a ladder (DeepSeek has no `medium`), so the clamp compares strength, not position — and
+  the request path never fails on it.
+- The sampling parameters are no longer sent by default: the vendor's own default is the
+  right one, and the Kimi family fixes its temperature per model (thinking 1.0,
+  non-thinking 0.6) and rejects any other value.
+- The Moonshot and xAI reasoning parameters are calibrated from the vendor docs: Kimi K3
+  takes `reasoning_effort` (`low`/`high`/`max`, no `medium`) and refuses `thinking`,
+  `kimi-k2.6` takes the `thinking.type` switch, `kimi-k2.7-code` always thinks and takes
+  neither, the Grok models with an effort take `low`/`medium`/`high`/`xhigh`, and the ones
+  without one (`grok-build-0.1`) reason at a depth we cannot pick.
 - **Breaking:** the HTTP transport is `reqwest` instead of `isahc`, and the crate now needs a
   Tokio runtime. The client is built on Tokio's reactor, so a request issued outside a Tokio
   runtime panics instead of returning an error; backoff and timeouts wait on the Tokio timer. A
@@ -11,10 +60,21 @@
 - **Breaking:** `ProviderError::Transport` carries a `reqwest::Error` instead of an `isahc::Error`.
 
 ### Removed
+- `ThinkingMode` and `Request::thinking`. The thinking switch is derived from the effort,
+  so the two protocols can no longer disagree about whether reasoning is on.
+- `BuilderError`. `RequestBuilder::build()` cannot fail any more.
 - `ProviderError::Io`. The isahc response body was an `AsyncRead` and its I/O errors were the
   only source for this variant; a `reqwest` response body is a byte stream.
 - The `isahc`, `futures-lite` and `futures-timer` dependencies. The crate no longer pulls
   `curl-sys`, `libz-sys` or `libnghttp2-sys`, so it needs no C toolchain and no CMake.
+
+### Fixed
+- GLM no longer receives a `reasoning_effort` it does not read: it takes `thinking.type`
+  only, so the level used to be dropped in silence while the caller showed it as if it had
+  taken effect.
+- A model whose reasoning depth is fixed gets no reasoning field at all
+  (`EffortSupport::Fixed`), and a model that refuses `thinking: disabled` is not told to
+  stop thinking.
 
 ## [0.5.0] - 2026-10-05
 
