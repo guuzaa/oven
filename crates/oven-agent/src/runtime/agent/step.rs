@@ -334,6 +334,17 @@ enum Gate {
     Refused(ToolResult),
 }
 
+/// Runs a tool and says when it started, so the time it is credited with is
+/// the time it worked, not the time it waited for its turn.
+async fn run_tool(
+    tool: &Arc<dyn Tool>,
+    input: &serde_json::Value,
+    cx: &TurnContext,
+) -> (Result<ToolOutcome, AgentError>, Instant) {
+    let started = Instant::now();
+    (tool.run(input, cx).await, started)
+}
+
 /// What a finished call leaves for the commit phase. The output is kept as
 /// the string the history needs rather than the whole result, which the
 /// transcript has already been handed.
@@ -407,6 +418,11 @@ async fn gate_calls(planned: &[PlannedCall], ctx: &TurnContext) -> Result<Vec<Ga
 /// exclusive, which take a turn each: two edits to one file must see each
 /// other's work, and two questions would leave the first one unanswered.
 ///
+/// An exclusive call runs on its own, not just away from the other
+/// exclusive ones: it takes the write lock, and the calls that share the
+/// read lock wait for it. A file write beside a file read would otherwise
+/// read the file before the write landed.
+///
 /// Every call leaves a record, in the order the model asked for them, so a
 /// caller commits a history entry per call without re-checking which ran.
 async fn run_calls(
@@ -417,7 +433,7 @@ async fn run_calls(
 ) -> Vec<CallRecord> {
     let mut pending: Vec<Option<CallRecord>> = planned.iter().map(|_| None).collect();
     let mut running = FuturesUnordered::new();
-    let exclusive = Arc::new(tokio::sync::Mutex::new(()));
+    let lock = Arc::new(tokio::sync::RwLock::new(()));
     for (index, (call, gate)) in planned.iter().zip(gates).enumerate() {
         sink.emit(AgentEvent::Tool(ToolEvent::Started {
             call_id: call.call_id,
@@ -438,20 +454,23 @@ async fn run_calls(
             Gate::Run(tool) => {
                 let input = call.input.clone();
                 let cx = ctx.clone();
-                let exclusive = call.exclusive.then(|| Arc::clone(&exclusive));
+                let exclusive = call.exclusive;
+                let lock = Arc::clone(&lock);
                 running.push(async move {
-                    let _guard = match &exclusive {
-                        Some(lock) => Some(lock.lock().await),
-                        None => None,
+                    let outcome = if exclusive {
+                        let _guard = lock.write().await;
+                        run_tool(&tool, &input, &cx).await
+                    } else {
+                        let _guard = lock.read().await;
+                        run_tool(&tool, &input, &cx).await
                     };
-                    let started = Instant::now();
-                    (index, tool.run(&input, &cx).await, started)
+                    (index, outcome)
                 });
             }
         }
     }
 
-    while let Some((index, outcome, started)) = running.next().await {
+    while let Some((index, (outcome, started))) = running.next().await {
         let call = &planned[index];
         let (result, detail) = match outcome {
             Ok(ToolOutcome { output, detail }) => (

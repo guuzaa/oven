@@ -374,8 +374,9 @@ from 1. The calls inside one step run at the same time — `Started` is reported
 for all of them, then `Finished` as each lands — so a response that asks for
 three subagents gets three working at once. Approvals are still asked one at a
 time, tools that declare `ToolCaps::exclusive` (the ones that rewrite a file
-from what they read, and the one that asks the user something) take a turn
-each, and the tool results enter the history in the order the model asked for
+from what they read, and the one that asks the user something) run on their
+own — they wait for the calls that share the step, and those wait for them —
+and the tool results enter the history in the order the model asked for
 them, which is the order a provider expects them back in. They are what lets a driver — or a strip on screen — report loop
 progress and a stop reason without reading the agent.
 

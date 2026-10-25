@@ -859,6 +859,44 @@ async fn exclusive_tools_take_turns_and_the_rest_overlap() {
     );
 }
 
+/// An exclusive call runs on its own, not just away from the other
+/// exclusive ones: a file write beside a file read would otherwise read the
+/// file before the write landed.
+#[tokio::test]
+async fn an_exclusive_call_does_not_overlap_the_others() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(ExclusiveTool {
+            name: "write_a",
+            log: Arc::clone(&log),
+            exclusive: true,
+        }),
+        Arc::new(ExclusiveTool {
+            name: "read_a",
+            log: Arc::clone(&log),
+            exclusive: false,
+        }),
+    ];
+    let mock = MockProvider::new(vec![
+        calls_response(&[("c1", "write_a"), ("c2", "read_a")]),
+        text_response("done"),
+    ]);
+    let mut agent = Agent::new(router_with(Box::new(mock)), tools);
+    run_plain(&mut agent, "go", &mut VecEventSink::default())
+        .await
+        .unwrap();
+    let log = log.lock().unwrap();
+    assert_eq!(log.len(), 4, "{log:?}");
+    assert!(
+        log[0].starts_with("enter") && log[1].starts_with("leave"),
+        "the exclusive call must be finished before the next one starts: {log:?}"
+    );
+    assert!(
+        log[2].starts_with("enter") && log[3].starts_with("leave"),
+        "the calls must not share the step: {log:?}"
+    );
+}
+
 /// Calls finish in whatever order they finish, but a provider expects one
 /// tool result per call in the order it asked, so the history has to put
 /// them back in that order.

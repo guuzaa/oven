@@ -194,7 +194,7 @@ commit_calls  write history and StepCall in the order the model requested
 Three fixed constraints:
 
 - **Approvals are serial**: only one `approve/reject` prompt can exist at a time. Throwing N at once would let later ones overwrite the frontend's single `pending_approval`, stranding the earlier answerer and hanging the turn forever.
-- **Exclusive tools take turns**: `ToolCaps::exclusive` tools (`file_edit` / `file_write` / `todo_write` / `answer`) run one at a time within a step. The first three are "read—modify—write", so two concurrent edits to one file would clobber each other; `answer` needs the frontend's undivided attention (an overwritten `pending_question` strands the earlier question and the whole turn ends "cancelled"). Everything else — `bash`, readers, MCP, `task`/`task_output` — runs in parallel.
+- **Exclusive tools run on their own**: a `ToolCaps::exclusive` tool (`file_edit` / `file_write` / `todo_write` / `answer`) waits for the calls that share its step, and they wait for it. The first three are "read—modify—write", so two concurrent edits to one file would clobber each other; `answer` needs the frontend's undivided attention (an overwritten `pending_question` strands the earlier question and the whole turn ends "cancelled"). Everything else — `bash`, readers, MCP, `task`/`task_output` — runs in parallel with each other.
 - **History follows request order**: a provider requires each `tool_result` to match its `tool_use` one-to-one and in order, so completion order (the `Finished` events) and commit order (history) are two different things.
 
 The system prompt only promises that batching **independent** calls runs in parallel, so exclusivity lives on the tool's own declaration rather than the model having to guess.
