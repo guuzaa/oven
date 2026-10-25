@@ -4,15 +4,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use oven_llm::{Message, Usage};
 use oven_proto::{
-    AgentEvent, AgentId, AgentMode, AppEvent, AppEventKind, AppId, AppState, Command,
-    CommandResult, Input, LoopLimitDecision, NodeInfo, ProviderView, ShellEvent, StreamEvent,
-    TodoList, TurnEvent, TurnId, UserRequestId, UserResponse,
+    AgentId, AgentMode, AppEvent, AppId, AppState, Command, CommandResult, Input, NodeInfo,
+    ProviderView, TodoList, TurnId, UserRequestId, UserResponse,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::api::builder::AppBuilder;
 use crate::api::input;
+use crate::client::Headless;
 use crate::commands::SlashRegistry;
 use crate::core::error::AppError;
 use crate::core::event::Subscribers;
@@ -83,37 +83,49 @@ impl App {
         self.state.borrow().levels.subagents.as_ref().clone()
     }
 
-    /// Classifies `text` and hands it to the runtime, returning what it was
-    /// taken for so a frontend can draw it the same way.
-    pub async fn submit(&self, text: impl AsRef<str>) -> Result<Input, AppError> {
-        let input = input::classify(text.as_ref(), &self.slash);
+    /// Classifies `text` the way the runtime will: a chat, a `!` shell line
+    /// or a slash command.
+    ///
+    /// The app owns the slash registry, so a frontend asks it rather than
+    /// reading the text itself. A submission is classified once: a message
+    /// that was parked and taken back is submitted as it was classified.
+    pub fn classify(&self, text: &str) -> Input {
+        input::classify(text, &self.slash)
+    }
+
+    /// Queues an input for the driver: it runs as a turn of its own.
+    ///
+    /// The input is returned as it was queued, so a frontend draws it the
+    /// way the runtime will treat it.
+    pub async fn submit(&self, input: Input) -> Result<Input, AppError> {
         self.dispatch(input.clone()).await?;
         Ok(input)
+    }
+
+    /// Parks a chat with the running turn, so the turn appends it to its own
+    /// history instead of running it as a turn of its own.
+    ///
+    /// `false` when the driver is idle, or when the input is not a chat.
+    pub fn steer(&self, input: &Input) -> bool {
+        let Input::Chat(text) = input else {
+            return false;
+        };
+        if !self.shared.is_busy() {
+            return false;
+        }
+        self.shared.push_prompt(text.clone());
+        true
+    }
+
+    /// Takes a parked chat back. `false` when the running turn already took
+    /// it.
+    pub fn unpark(&self, text: &str) -> bool {
+        self.shared.claim_prompt(text)
     }
 
     /// Drops the last turn from the conversation once the driver is free.
     pub async fn rewind(&self) -> Result<(), AppError> {
         self.dispatch(Input::Rewind).await
-    }
-
-    /// Parks a chat typed while a turn is running, so the next tool-result
-    /// upload can carry it. `false` when the driver is idle, or when `text`
-    /// is a slash command or a shell line — those still wait for the driver.
-    pub fn steer(&self, text: &str) -> bool {
-        if !self.shared.is_busy() {
-            return false;
-        }
-        let Input::Chat(text) = input::classify(text, &self.slash) else {
-            return false;
-        };
-        self.shared.push_prompt(text);
-        true
-    }
-
-    /// Drops a chat [`steer`](Self::steer) parked. `false` when the running
-    /// turn already appended it.
-    pub fn claim_steer(&self, text: &str) -> bool {
-        self.shared.claim_prompt(text)
     }
 
     /// Applies an input on the spot if it needs no driver while one is busy;
@@ -160,7 +172,12 @@ impl App {
         self.shared.stop_subagents();
     }
 
-    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<AppEvent> {
+    /// Subscribes to the events a frontend can see.
+    ///
+    /// The event is shared, not copied: a subscriber reads the same event
+    /// the bus published, so a stream of text deltas and a tool result cost
+    /// one reference count rather than a copy each.
+    pub fn subscribe(&self) -> mpsc::UnboundedReceiver<Arc<AppEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.subscribers
             .lock()
@@ -216,84 +233,16 @@ impl App {
         self.state.borrow().levels.session.id.clone()
     }
 
+    /// Asks the app something and waits for the answer.
+    ///
+    /// The answer is read off the event stream by a [`Headless`] client, so
+    /// a frontend that wants the same thing builds one instead of writing
+    /// the loop again.
     pub async fn prompt(&self, input: impl Into<String>) -> Result<String, AppError> {
-        let mut rx = self.subscribe();
-        let main = self.state().levels.agent_id;
-        self.submit(input.into()).await?;
-
-        let mut text = String::new();
-        let mut in_turn = false;
-        loop {
-            match rx.recv().await {
-                Some(AppEvent {
-                    kind: AppEventKind::Agent(env),
-                    ..
-                }) if env.agent_id == main => match env.event {
-                    AgentEvent::Turn(TurnEvent::Started) => {
-                        in_turn = true;
-                        text.clear();
-                    }
-                    AgentEvent::Stream(StreamEvent::TextDelta { text: t }) => {
-                        text.push_str(&t);
-                    }
-                    AgentEvent::Turn(TurnEvent::Completed { .. } | TurnEvent::Cancelled { .. }) => {
-                        self.wait_until_idle().await;
-                        return Ok(text);
-                    }
-                    AgentEvent::Turn(TurnEvent::Failed { error, .. }) => {
-                        self.wait_until_idle().await;
-                        return Err(AppError::Runtime(error.message));
-                    }
-                    AgentEvent::Turn(TurnEvent::LoopLimitReached { request_id, .. }) => {
-                        self.respond(request_id, UserResponse::LoopLimit(LoopLimitDecision::Exit));
-                    }
-                    _ => {}
-                },
-                Some(AppEvent {
-                    kind: AppEventKind::Shell(ev),
-                    ..
-                }) => match ev {
-                    ShellEvent::Started { .. } => {
-                        in_turn = true;
-                    }
-                    ShellEvent::Finished { output, .. } => {
-                        self.wait_until_idle().await;
-                        return Ok(output);
-                    }
-                    ShellEvent::Failed { error, output, .. } => {
-                        self.wait_until_idle().await;
-                        return Err(AppError::Runtime(if output.is_empty() {
-                            error
-                        } else {
-                            output
-                        }));
-                    }
-                },
-                Some(AppEvent {
-                    kind: AppEventKind::Notification { text: t },
-                    ..
-                }) if !in_turn => return Ok(t),
-                Some(AppEvent {
-                    kind: AppEventKind::Error { message },
-                    ..
-                }) => return Err(AppError::Runtime(message)),
-                Some(AppEvent {
-                    kind: AppEventKind::Exited,
-                    ..
-                }) if !in_turn => {
-                    return Ok(if text.is_empty() {
-                        "goodbye".into()
-                    } else {
-                        text
-                    });
-                }
-                Some(_) => {}
-                None => return Err(AppError::ChannelClosed),
-            }
-        }
+        Headless::new(self.clone()).ask(&input.into()).await
     }
 
-    async fn wait_until_idle(&self) {
+    pub(crate) async fn wait_until_idle(&self) {
         let mut state = self.state.clone();
         loop {
             if state.borrow().levels.phase.is_idle() {
@@ -309,10 +258,17 @@ impl App {
     /// transport turns what it received into a [`Command`] and hands it here.
     pub async fn apply(&self, command: Command) -> Result<CommandResult, AppError> {
         let outcome = match command {
-            Command::Submit { text } => CommandResult::Submitted(self.submit(text).await?),
-            Command::Steer { text } => {
-                if self.steer(&text) {
-                    CommandResult::Applied
+            Command::Submit { input } => CommandResult::Submitted(self.submit(input).await?),
+            Command::Steer { input } => {
+                if self.steer(&input) {
+                    CommandResult::Parked(input)
+                } else {
+                    CommandResult::Refused
+                }
+            }
+            Command::Unpark { text } => {
+                if self.unpark(&text) {
+                    CommandResult::Unparked(Input::Chat(text))
                 } else {
                     CommandResult::Refused
                 }

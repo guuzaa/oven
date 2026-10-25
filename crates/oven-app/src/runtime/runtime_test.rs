@@ -400,7 +400,7 @@ async fn wait_for_active_subagent(handle: &App) {
     .await;
 }
 
-async fn wait_turn_id(sub: &mut mpsc::UnboundedReceiver<AppEvent>) -> TurnId {
+async fn wait_turn_id(sub: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>) -> TurnId {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match sub.recv().await {
@@ -419,7 +419,7 @@ async fn wait_turn_id(sub: &mut mpsc::UnboundedReceiver<AppEvent>) -> TurnId {
     .expect("timeout waiting for TurnStarted")
 }
 
-async fn wait_settled(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
+async fn wait_settled(sub: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>) {
     tokio::time::timeout(settle_timeout(), async {
         loop {
             match sub.recv().await {
@@ -432,10 +432,7 @@ async fn wait_settled(sub: &mut mpsc::UnboundedReceiver<AppEvent>) {
                 {
                     return;
                 }
-                Some(AppEvent {
-                    kind: AppEventKind::Error { .. },
-                    ..
-                }) => return,
+                Some(ev) if matches!(ev.kind, AppEventKind::Error { .. }) => return,
                 Some(_) => {}
                 None => panic!("channel closed before settle"),
             }
@@ -596,7 +593,7 @@ async fn slash_exit_emits_exit_event() {
     let handle = spawn_app(&app, Box::new(mock)).await;
 
     let mut rx = handle.subscribe();
-    handle.submit("/exit").await.unwrap();
+    handle.submit(handle.classify("/exit")).await.unwrap();
 
     let mut saw_exit = false;
     while let Some(ev) = rx.recv().await {
@@ -672,7 +669,10 @@ async fn usage_reaches_subscribers_before_the_turn_completes() {
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![first, last]))).await;
 
     let mut rx = handle.subscribe();
-    handle.submit("read note.txt").await.unwrap();
+    handle
+        .submit(handle.classify("read note.txt"))
+        .await
+        .unwrap();
     let mut events = Vec::new();
     while let Some(ev) = rx.recv().await {
         let completed = is_turn_completed(&ev);
@@ -682,7 +682,7 @@ async fn usage_reaches_subscribers_before_the_turn_completes() {
         }
     }
 
-    let completed_at = events.iter().position(is_turn_completed);
+    let completed_at = events.iter().position(|ev| is_turn_completed(ev));
     let usage_at = events.iter().position(|ev| {
         matches!(
             &ev.kind,
@@ -894,7 +894,7 @@ async fn setup_slash_persists_and_registers_provider() {
 
     let mut rx = handle.subscribe();
     handle
-        .submit("/setup name=deepseek api_key=sk-test")
+        .submit(handle.classify("/setup name=deepseek api_key=sk-test"))
         .await
         .unwrap();
     let mut out = String::new();
@@ -1024,7 +1024,7 @@ async fn setup_uses_target_provider_reasoning_effort() {
 
     let mut rx = handle.subscribe();
     handle
-        .submit("/setup name=deepseek api_key=sk-test")
+        .submit(handle.classify("/setup name=deepseek api_key=sk-test"))
         .await
         .unwrap();
     loop {
@@ -1047,7 +1047,7 @@ async fn setup_uses_target_provider_reasoning_effort() {
 
 async fn wait_setup(handle: &App, input: &str) -> String {
     let mut rx = handle.subscribe();
-    handle.submit(input).await.unwrap();
+    handle.submit(handle.classify(input)).await.unwrap();
     loop {
         match rx.recv().await {
             Some(ev) => {
@@ -1467,7 +1467,7 @@ async fn slash_clear_starts_new_session() {
 
     // `/clear` switches the runtime to a fresh uuid v7 session.
     let mut rx = handle.subscribe();
-    handle.submit("/clear").await.unwrap();
+    handle.submit(handle.classify("/clear")).await.unwrap();
     wait_settled(&mut rx).await;
 
     // Turn 3 continues in the same handle and persists to the new session.
@@ -1576,7 +1576,7 @@ async fn clear_without_new_messages_has_no_id_and_no_file() {
 
     // `/clear` switches to a fresh empty session; nothing written after.
     let mut rx = handle.subscribe();
-    handle.submit("/clear").await.unwrap();
+    handle.submit(handle.classify("/clear")).await.unwrap();
     wait_settled(&mut rx).await;
     assert!(
         handle.session_id().is_none(),
@@ -1716,7 +1716,7 @@ async fn cancel_during_turn_returns_idle() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
-    handle.submit("block").await.unwrap();
+    handle.submit(handle.classify("block")).await.unwrap();
     let turn_id = wait_turn_id(&mut sub).await;
     handle.cancel(turn_id);
 
@@ -1728,10 +1728,7 @@ async fn cancel_during_turn_returns_idle() {
                 saw_cancelled = true;
                 break;
             }
-            Ok(Some(AppEvent {
-                kind: AppEventKind::Error { .. },
-                ..
-            })) => saw_error = true,
+            Ok(Some(ev)) if matches!(ev.kind, AppEventKind::Error { .. }) => saw_error = true,
             Ok(Some(_)) => {}
             Ok(None) => break,
             Err(_) => panic!("timeout waiting for cancel"),
@@ -1797,10 +1794,10 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
 
-    handle.submit("first").await.unwrap();
+    handle.submit(handle.classify("first")).await.unwrap();
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    handle.submit("second").await.unwrap();
+    handle.submit(handle.classify("second")).await.unwrap();
 
     drop(tx);
 
@@ -1822,63 +1819,66 @@ async fn user_input_during_turn_is_buffered_and_runs_after() {
     handle.shutdown().await;
 }
 
+/// A provider that records the requests it is given and waits for a release
+/// before it answers, so a turn can be held open while the app is asked
+/// something else.
+struct SteerCapture {
+    seen: Arc<Mutex<Vec<Request>>>,
+    release: Mutex<Option<oneshot::Receiver<()>>>,
+    responses: Mutex<std::collections::VecDeque<Response>>,
+}
+
+#[async_trait]
+impl Provider for SteerCapture {
+    async fn complete(
+        &self,
+        req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
+        self.seen.lock().unwrap().push(req.clone());
+        let rx = self.release.lock().unwrap().take();
+        if let Some(rx) = rx {
+            let _ = rx.await;
+        }
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more mock responses".into(),
+            })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "no stream".into(),
+        })
+    }
+
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("steer-capture".into())
+    }
+}
+
 #[tokio::test]
 async fn a_steered_chat_is_appended_when_tool_results_are_uploaded() {
     const FOLLOW_UP: &str = "also check the tests";
-
-    struct Capture {
-        seen: Arc<Mutex<Vec<Request>>>,
-        release: Mutex<Option<oneshot::Receiver<()>>>,
-        responses: Mutex<std::collections::VecDeque<Response>>,
-    }
-
-    #[async_trait]
-    impl Provider for Capture {
-        async fn complete(
-            &self,
-            req: &Request,
-            _options: &CallOptions,
-        ) -> Result<Response, ProviderError> {
-            self.seen.lock().unwrap().push(req.clone());
-            let rx = self.release.lock().unwrap().take();
-            if let Some(rx) = rx {
-                let _ = rx.await;
-            }
-            self.responses
-                .lock()
-                .unwrap()
-                .pop_front()
-                .ok_or_else(|| ProviderError::Api {
-                    status: 500,
-                    body: "no more mock responses".into(),
-                })
-        }
-
-        async fn stream(
-            &self,
-            _req: &Request,
-            _options: &CallOptions,
-        ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-            Err(ProviderError::Api {
-                status: 500,
-                body: "no stream".into(),
-            })
-        }
-
-        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-            ModelInfo::non_streaming(&self.provider_name(), id)
-        }
-
-        fn provider_name(&self) -> ProviderName {
-            ProviderName::Custom("steer-capture".into())
-        }
-    }
 
     let tmp = tempdir::TempDir::new("app-runtime-steer").unwrap();
     std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (release_tx, release_rx) = oneshot::channel();
-    let provider = Capture {
+    let provider = SteerCapture {
         seen: Arc::clone(&seen),
         release: Mutex::new(Some(release_rx)),
         responses: Mutex::new(
@@ -1893,7 +1893,10 @@ async fn a_steered_chat_is_appended_when_tool_results_are_uploaded() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
-    handle.submit("read note.txt").await.unwrap();
+    handle
+        .submit(handle.classify("read note.txt"))
+        .await
+        .unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -1906,9 +1909,12 @@ async fn a_steered_chat_is_appended_when_tool_results_are_uploaded() {
     .await
     .expect("the first request never started");
 
-    assert!(handle.steer(FOLLOW_UP), "a chat parks while the turn runs");
     assert!(
-        !handle.steer("/clear"),
+        handle.steer(&handle.classify(FOLLOW_UP)),
+        "a chat parks while the turn runs"
+    );
+    assert!(
+        !handle.steer(&handle.classify("/clear")),
         "a slash command is not a user message"
     );
     drop(release_tx);
@@ -1942,6 +1948,115 @@ async fn a_steered_chat_is_appended_when_tool_results_are_uploaded() {
         user_texts(&history(&handle)),
         vec!["read note.txt", FOLLOW_UP]
     );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_submit_command_queues_the_input_it_was_given() {
+    let tmp = tempdir::TempDir::new("app-submit-command").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![text_response("one")]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+
+    let input = handle.classify("hi");
+    let result = handle
+        .apply(Command::Submit {
+            input: input.clone(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result, CommandResult::Submitted(input));
+    assert_eq!(handle.prompt("hi").await.unwrap(), "one");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_steer_command_is_refused_when_the_driver_is_idle() {
+    let tmp = tempdir::TempDir::new("app-steer-idle").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![text_response("one")]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+
+    let result = handle
+        .apply(Command::Steer {
+            input: handle.classify("hi"),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result, CommandResult::Refused);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_unpark_command_takes_a_parked_chat_back() {
+    const FOLLOW_UP: &str = "also check the tests";
+
+    let tmp = tempdir::TempDir::new("app-unpark-command").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (release_tx, release_rx) = oneshot::channel();
+    let provider = SteerCapture {
+        seen: Arc::clone(&seen),
+        release: Mutex::new(Some(release_rx)),
+        responses: Mutex::new(
+            vec![
+                tool_response("c1", "file_read", serde_json::json!({"path": "note.txt"})),
+                text_response("done"),
+            ]
+            .into(),
+        ),
+    };
+
+    let app = AppBuilder::new(tmp.path());
+    let handle = spawn_app(&app, Box::new(provider)).await;
+    handle
+        .apply(Command::Submit {
+            input: handle.classify("read note.txt"),
+        })
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if !seen.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first request never started");
+
+    let parked = handle
+        .apply(Command::Steer {
+            input: handle.classify(FOLLOW_UP),
+        })
+        .await
+        .unwrap();
+    assert_eq!(parked, CommandResult::Parked(Input::Chat(FOLLOW_UP.into())));
+
+    let taken = handle
+        .apply(Command::Unpark {
+            text: FOLLOW_UP.into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        taken,
+        CommandResult::Unparked(Input::Chat(FOLLOW_UP.into()))
+    );
+
+    let again = handle
+        .apply(Command::Unpark {
+            text: FOLLOW_UP.into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(again, CommandResult::Refused, "it is taken back only once");
+
+    drop(release_tx);
     handle.shutdown().await;
 }
 
@@ -2001,7 +2116,7 @@ async fn clear_updates_recent_index_to_fresh_session() {
     assert_eq!(handle.prompt("first").await.unwrap(), "one");
 
     let mut rx = handle.subscribe();
-    handle.submit("/clear").await.unwrap();
+    handle.submit(handle.classify("/clear")).await.unwrap();
     wait_settled(&mut rx).await;
     assert_eq!(handle.prompt("hello").await.unwrap(), "fresh");
     let fresh = handle.session_id().expect("new session after /clear");
@@ -2044,7 +2159,7 @@ fn user_texts<M: Borrow<Message>>(messages: &[M]) -> Vec<String> {
         .collect()
 }
 
-async fn wait_rewound(sub: &mut mpsc::UnboundedReceiver<AppEvent>) -> HistoryChangeReason {
+async fn wait_rewound(sub: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>) -> HistoryChangeReason {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             match sub.recv().await {
@@ -2209,7 +2324,7 @@ async fn rewind_during_turn_is_queued_until_turn_ends() {
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
 
-    handle.submit("block").await.unwrap();
+    handle.submit(handle.classify("block")).await.unwrap();
     tokio::task::yield_now().await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     handle.rewind().await.unwrap();
@@ -2312,10 +2427,13 @@ async fn model_slash_switches_immediately_during_turn() {
         None,
     );
     let mut sub = handle.subscribe();
-    handle.submit("block").await.unwrap();
+    handle.submit(handle.classify("block")).await.unwrap();
     entered_rx.await.expect("turn entered complete");
 
-    handle.submit("/model gpt-4o-turbo low").await.unwrap();
+    handle
+        .submit(handle.classify("/model gpt-4o-turbo low"))
+        .await
+        .unwrap();
 
     let mut saw_switch_notice = false;
     let mut completed_before_switch = false;
@@ -2326,10 +2444,8 @@ async fn model_slash_switches_immediately_during_turn() {
                     completed_before_switch = true;
                 }
             }
-            Ok(Some(AppEvent {
-                kind: AppEventKind::Notification { text },
-                ..
-            })) if text == MODEL_SWITCHED_NOTICE => {
+            Ok(Some(ev)) if matches!(&ev.kind, AppEventKind::Notification { text } if *text == MODEL_SWITCHED_NOTICE) =>
+            {
                 saw_switch_notice = true;
                 break;
             }
@@ -2456,11 +2572,11 @@ async fn mid_turn_model_switch_publishes_the_new_context_window() {
     );
     let mut rx = handle.subscribe();
 
-    handle.submit("work").await.unwrap();
+    handle.submit(handle.classify("work")).await.unwrap();
     entered_rx.await.expect("second provider response started");
 
     handle
-        .submit(format!("/model {MODEL_WITH_LARGE_WINDOW} low"))
+        .submit(handle.classify(&format!("/model {MODEL_WITH_LARGE_WINDOW} low")))
         .await
         .unwrap();
     loop {
@@ -2567,7 +2683,7 @@ async fn set_mode_applies_during_in_flight_turn() {
         AppConfig::default(),
         None,
     );
-    handle.submit("block").await.unwrap();
+    handle.submit(handle.classify("block")).await.unwrap();
     entered_rx.await.expect("turn entered complete");
     handle.set_mode(AgentMode::Plan);
 
@@ -2631,7 +2747,7 @@ async fn repro_ask_mode_bash_requests_approval() {
     let handle = spawn_app(&app, Box::new(mock)).await;
     let mut rx = handle.subscribe();
     handle.set_mode(AgentMode::Ask);
-    handle.submit("run it").await.unwrap();
+    handle.submit(handle.classify("run it")).await.unwrap();
 
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
@@ -2687,7 +2803,7 @@ async fn answering_a_closed_request_is_refused() {
     let handle = spawn_app(&app, Box::new(mock)).await;
     let mut rx = handle.subscribe();
     handle.set_mode(AgentMode::Ask);
-    handle.submit("run it").await.unwrap();
+    handle.submit(handle.classify("run it")).await.unwrap();
 
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
@@ -2736,7 +2852,10 @@ async fn answer_tool_asks_the_user_and_hands_back_their_reply() {
     ]);
     let handle = spawn_app(&app, Box::new(mock)).await;
     let mut rx = handle.subscribe();
-    handle.submit("set up the database").await.unwrap();
+    handle
+        .submit(handle.classify("set up the database"))
+        .await
+        .unwrap();
 
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
@@ -2817,7 +2936,7 @@ async fn loop_limit_continue_completes_turn() {
     let tmp = tempdir::TempDir::new("app-runtime-loop-limit-continue").unwrap();
     let handle = spawn_loop_limit_app(&tmp).await;
     let mut rx = handle.subscribe();
-    handle.submit("read it").await.unwrap();
+    handle.submit(handle.classify("read it")).await.unwrap();
 
     let mut request_id = None;
     while let Some(ev) = rx.recv().await {
@@ -3008,7 +3127,7 @@ async fn cancel_does_not_roll_back_todos() {
         None,
     );
     let mut sub = handle.subscribe();
-    handle.submit("plan").await.unwrap();
+    handle.submit(handle.classify("plan")).await.unwrap();
 
     let mut turn_id = None;
     loop {
@@ -3223,7 +3342,7 @@ async fn slash_clear_does_not_copy_todos_to_new_session() {
     );
 }
 
-fn agent_envelopes(events: &[AppEvent]) -> Vec<&AgentEventEnvelope> {
+fn agent_envelopes(events: &[Arc<AppEvent>]) -> Vec<&AgentEventEnvelope> {
     events
         .iter()
         .filter_map(|e| match &e.kind {
@@ -3353,7 +3472,7 @@ async fn cancelled_turn_lifecycle_matches_invariants() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(provider)).await;
     let mut sub = handle.subscribe();
-    handle.submit("block").await.unwrap();
+    handle.submit(handle.classify("block")).await.unwrap();
 
     let mut events = Vec::new();
     let mut cancelled = false;
@@ -3459,7 +3578,7 @@ async fn bang_shell_nonzero_exit_is_finished_not_agent_turn() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     let mut rx = handle.subscribe();
-    handle.submit("!exit 7").await.unwrap();
+    handle.submit(handle.classify("!exit 7")).await.unwrap();
     wait_settled(&mut rx).await;
     let parsed = LocalShell::try_parse(&user_texts(&history(&handle))[0]).unwrap();
     assert_eq!(parsed.exit_code, Some(7));
@@ -3477,7 +3596,7 @@ async fn bang_shell_cancel_commits_cancelled_envelope() {
     let app = AppBuilder::new(tmp.path());
     let handle = spawn_app(&app, Box::new(MockProvider::new(vec![]))).await;
     let mut rx = handle.subscribe();
-    handle.submit("!sleep 60").await.unwrap();
+    handle.submit(handle.classify("!sleep 60")).await.unwrap();
 
     let turn_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
@@ -3586,9 +3705,12 @@ async fn bang_shell_queues_behind_agent_turn() {
     )
     .await;
     let mut sub = handle.subscribe();
-    handle.submit("block").await.unwrap();
+    handle.submit(handle.classify("block")).await.unwrap();
     let _ = wait_turn_id(&mut sub).await;
-    handle.submit("!echo queued").await.unwrap();
+    handle
+        .submit(handle.classify("!echo queued"))
+        .await
+        .unwrap();
     let _ = tx.send(());
     wait_settled(&mut sub).await;
     wait_settled(&mut sub).await;
@@ -4212,15 +4334,15 @@ async fn agents_applies_mid_turn_while_clear_waits() {
         None,
     );
     let mut rx = handle.subscribe();
-    handle.submit("delegate it").await.unwrap();
+    handle.submit(handle.classify("delegate it")).await.unwrap();
 
     wait_for_active_subagent(&handle).await;
     assert!(
         handle.state().levels.phase.is_active(),
         "the turn is still running"
     );
-    handle.submit("/agents").await.unwrap();
-    handle.submit("/clear").await.unwrap();
+    handle.submit(handle.classify("/agents")).await.unwrap();
+    handle.submit(handle.classify("/clear")).await.unwrap();
 
     let mut listed = false;
     let mut cleared_queued = false;
@@ -4362,13 +4484,13 @@ async fn shutdown_reports_prompts_that_never_ran() {
     );
     let main = handle.agent_id();
     let mut rx = handle.subscribe();
-    handle.submit("one").await.unwrap();
+    handle.submit(handle.classify("one")).await.unwrap();
 
     // Both arrive while the first turn is still waiting on its subagent, so
     // neither can start a turn yet.
     wait_for_active_subagent(&handle).await;
-    handle.submit("two").await.unwrap();
-    handle.submit("three").await.unwrap();
+    handle.submit(handle.classify("two")).await.unwrap();
+    handle.submit(handle.classify("three")).await.unwrap();
 
     // Let the subagent go: the runtime takes the first of the two messages
     // and starts a turn for it, which stays open. The second waits behind it.
@@ -4416,7 +4538,7 @@ async fn cancelling_a_turn_cancels_its_subagent() {
         AppConfig::default(),
         None,
     );
-    handle.submit("delegate it").await.unwrap();
+    handle.submit(handle.classify("delegate it")).await.unwrap();
 
     wait_for_active_subagent(&handle).await;
     let turn_id = handle
@@ -4678,7 +4800,7 @@ fn assert_replayable<M: Borrow<Message>>(messages: &[M]) {
     );
 }
 
-async fn wait_cancelled(sub: &mut mpsc::UnboundedReceiver<AppEvent>, handle: &App) {
+async fn wait_cancelled(sub: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>, handle: &App) {
     tokio::time::timeout(settle_timeout(), async {
         loop {
             match sub.recv().await {
@@ -4911,7 +5033,7 @@ async fn cancel_on_the_first_turn_during_streaming_persists_the_prompt() {
     let session = Session::open(&dir, SESSION_ID).await.unwrap();
     let handle = spawn_app_session(&app, Box::new(provider), session).await;
     let mut sub = handle.subscribe();
-    handle.submit(PROMPT).await.unwrap();
+    handle.submit(handle.classify(PROMPT)).await.unwrap();
     let turn_id = wait_turn_id(&mut sub).await;
     tokio::time::timeout(settle_timeout(), started_rx)
         .await
@@ -5012,7 +5134,7 @@ async fn cancel_during_a_tool_call_keeps_completed_calls_only() {
         None,
     );
     let mut sub = handle.subscribe();
-    handle.submit(PROMPT).await.unwrap();
+    handle.submit(handle.classify(PROMPT)).await.unwrap();
     let turn_id = wait_turn_id(&mut sub).await;
     tokio::time::timeout(settle_timeout(), entered_rx)
         .await
@@ -5102,7 +5224,7 @@ async fn cancel_on_a_later_turn_keeps_earlier_turns() {
     assert_eq!(handle.last_turn_usage(), kept);
 
     let mut sub = handle.subscribe();
-    handle.submit(SECOND_PROMPT).await.unwrap();
+    handle.submit(handle.classify(SECOND_PROMPT)).await.unwrap();
     let turn_id = wait_turn_id(&mut sub).await;
     tokio::time::timeout(settle_timeout(), started_rx)
         .await
@@ -5241,7 +5363,7 @@ impl CancelReport {
 
 async fn wait_compaction_cancelled(
     handle: &App,
-    rx: &mut mpsc::UnboundedReceiver<AppEvent>,
+    rx: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>,
 ) -> CancelReport {
     let mut report = CancelReport {
         cancel_count: 0,
@@ -5474,10 +5596,13 @@ async fn cancel_compaction_leaves_the_session(kind: CompactKind, point: CompactP
                 handle.prompt(COMPACT_PROMPT_TEXT).await.unwrap(),
                 COMPACT_KEPT
             );
-            handle.submit("/compact").await.unwrap();
+            handle.submit(handle.classify("/compact")).await.unwrap();
         }
         CompactKind::Auto => {
-            handle.submit(COMPACT_PROMPT_TEXT).await.unwrap();
+            handle
+                .submit(handle.classify(COMPACT_PROMPT_TEXT))
+                .await
+                .unwrap();
         }
     }
     tokio::time::timeout(settle_timeout(), started)
@@ -5575,7 +5700,7 @@ async fn shutdown_during_compaction_leaves_the_session() {
         handle.prompt(COMPACT_PROMPT_TEXT).await.unwrap(),
         COMPACT_KEPT
     );
-    handle.submit("/compact").await.unwrap();
+    handle.submit(handle.classify("/compact")).await.unwrap();
     tokio::time::timeout(settle_timeout(), armed.started)
         .await
         .expect("the summary request should start")

@@ -12,12 +12,21 @@ use crate::{AgentId, AgentMode, Input, TurnId, UserRequestId, UserResponse};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Command {
-    /// Submit text. The app classifies it — a chat, a `!` shell line or a
-    /// slash command — and reports what it took it for.
-    Submit { text: String },
-    /// Park a chat typed while a turn is running, so the next tool-result
-    /// upload can carry it. Refused when the driver is idle.
-    Steer { text: String },
+    /// Queue an input for the driver: it runs as a turn of its own.
+    ///
+    /// The input is classified, not raw text: the app owns the slash
+    /// registry, so a frontend asks the app to classify and sends the
+    /// result. A message that was parked and taken back is submitted as it
+    /// was classified, so no text is ever read twice.
+    Submit { input: Input },
+    /// Park a chat with the running turn, so the turn appends it to its own
+    /// history instead of running it as a turn of its own.
+    ///
+    /// Refused when the driver is idle, or when the input is not a chat.
+    Steer { input: Input },
+    /// Take a parked chat back out of the turn it was parked with. It runs
+    /// again only if the frontend submits it.
+    Unpark { text: String },
     /// Drop the last turn from the conversation.
     Rewind,
     /// Stop the running turn.
@@ -41,9 +50,16 @@ pub enum Command {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum CommandResult {
-    /// The submission was classified; a frontend draws it the way the runtime
-    /// will treat it.
+    /// The input was queued: the driver runs it as a turn of its own. A
+    /// frontend draws it the way the runtime will treat it.
     Submitted(Input),
+    /// The chat was parked with the running turn: the turn appends it to its
+    /// own history. A frontend keeps it until the turn says it appended it,
+    /// or takes it back with [`Command::Unpark`].
+    Parked(Input),
+    /// The parked chat was taken back. Nothing runs until the frontend
+    /// submits it again.
+    Unparked(Input),
     /// The command was applied; there is nothing to draw.
     Applied,
     /// The command did not apply: the driver was idle, or the request it
@@ -77,5 +93,24 @@ mod tests {
             serde_json::from_str::<CommandResult>(&json).unwrap(),
             result
         );
+    }
+
+    #[test]
+    fn a_parked_chat_survives_the_wire() {
+        let result = CommandResult::Parked(Input::Chat("hi".into()));
+        let json = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CommandResult>(&json).unwrap(),
+            result
+        );
+    }
+
+    #[test]
+    fn a_submission_survives_the_wire() {
+        let command = Command::Submit {
+            input: Input::Chat("hi".into()),
+        };
+        let json = serde_json::to_string(&command).unwrap();
+        assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), command);
     }
 }

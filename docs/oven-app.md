@@ -15,7 +15,7 @@ handle the facade hands out.
 A frontend reaches the app through one handle, `App`, in three ways:
 
 ```
-App::submit(text)  ──▶ inbox ──▶ Runtime::run ──▶ AppEvent ──▶ App::subscribe()
+App::apply(Command) ──▶ inbox ──▶ Runtime::run ──▶ AppEvent ──▶ App::subscribe()
                                    │
 App::cancel / set_mode /           ├─ Agent (turns, tools, todos, history)
     respond / stop_subagent(s) ──▶ ├─ shell (host process)
@@ -23,6 +23,11 @@ App::cancel / set_mode /           ├─ Agent (turns, tools, todos, history)
      through `Shared`)             ├─ SessionStore (JSONL on disk)
                                    └─ Shared.state: watch::Sender<AppState>
 ```
+
+Every request a frontend makes is a `Command`, and `App::apply` is the one
+entry that applies it. The methods beside it — `submit`, `steer`, `unpark`,
+`cancel`, `respond` — are the same commands spelled out for callers that stay
+in Rust.
 
 What has to wait for the conversation driver goes through the inbox, one input
 at a time. What does not — cancelling, switching mode, answering a request,
@@ -36,6 +41,7 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 | `src/lib.rs` | re-exports the public surface. |
 | `src/api/app.rs` | the `App` handle: `apply(Command)`, control methods, event subscriptions, state accessors. |
 | `src/api/input.rs` | classifies submitted text into an `Input`. |
+| `src/client.rs` | `Headless`: a client that asks the app something and reads the answer off the event stream. |
 | `src/api/builder.rs` | service composition: config → tools, MCP servers, skills, memory, agent. |
 | `src/runtime/mod.rs` | the runtime actor — input loop, dispatch, persistence. |
 | `src/runtime/turn.rs` | what happens while a turn or a `!` command runs. |
@@ -97,9 +103,8 @@ headless run always terminates.
 
 ## Inputs and events
 
-`App::submit(text)` classifies the text once, with the slash registry the
-runtime shares, into an `Input`, and returns it so a frontend can draw it the
-way the runtime will treat it:
+`App::classify(text)` classifies the text once, with the slash registry the
+runtime shares, into an `Input`:
 
 ```rust
 pub enum Input {
@@ -110,6 +115,10 @@ pub enum Input {
 }
 ```
 
+A frontend classifies with `App::classify` and submits the result, so a
+message is read once: `App::submit(input)` queues it for the driver and
+returns it, so a frontend can draw it the way the runtime will treat it.
+
 While a turn runs, `submit` first tries to apply the input on the spot
 (`Shared::apply_now`): `/model` and any command that never asks for the agent
 (`/agents`, `/exit`). Anything else goes to the inbox, with a
@@ -118,11 +127,13 @@ and rewinds, and waits for the driver.
 
 A chat typed while a turn runs is different: `App::steer` parks it on `Shared`
 instead of the inbox, so the running turn picks it up when it uploads its next
-tool results, and `App::claim_steer` drops one the turn never took. It parks
+tool results, and `App::unpark` takes one the turn never took back. It parks
 plain chats only: a slash command or a shell line still waits for the driver.
 
 `core/event.rs` fans events out to every subscriber on its own `UnboundedSender`,
-auto-pruning dead ones:
+auto-pruning dead ones. The event is shared, not copied: a subscriber reads the
+same `Arc<AppEvent>` the bus published, so a stream of text deltas and a tool
+result cost one reference count rather than a copy each.
 
 | `AppEventKind` | Emitted when |
 | --- | --- |

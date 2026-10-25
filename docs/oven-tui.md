@@ -224,10 +224,10 @@ turn occupies the top of the viewport stays pinned there, including after the
 turn ends. Scrolling into another turn swaps that pin to the other prompt. The
 row itself also remains at its place in the transcript.
 
-`App::submit` classifies the text into an `oven_app::Input`, and `push_submitted`
-draws that: `Chat` starts a User turn, `Shell` starts a Shell turn, and
-registered control commands (`/model`, `/setup`, `/clear`, …) and `Rewind` stay
-out of the transcript. Queue entries create their row only
+`App::classify` classifies the text into an `oven_app::Input`, and
+`push_submitted` draws it: `Chat` starts a User turn, `Shell` starts a Shell
+turn, and registered control commands (`/model`, `/setup`, `/clear`, …) and
+`Rewind` stay out of the transcript. Queue entries create their row only
 when they are actually sent.
 
 Startup and every `AppEventKind::HistoryChanged` rebuild the transcript directly

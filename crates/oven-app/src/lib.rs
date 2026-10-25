@@ -17,6 +17,7 @@
 
 mod api;
 mod capabilities;
+mod client;
 mod commands;
 mod core;
 mod platform;
@@ -31,6 +32,7 @@ pub use capabilities::tools::{
     ToolRegistry, WebFetchTool,
 };
 pub use capabilities::view::present_tool;
+pub use client::Headless;
 pub use core::config::McpServerConfig;
 pub use core::error::AppError;
 pub use core::mention::FileMentions;

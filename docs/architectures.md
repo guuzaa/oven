@@ -26,7 +26,7 @@ documented in [`oven-proto.md`](./oven-proto.md).
                         ┌──────────────┐
                         │   oven-tui   │
                         └──────┬───────┘
-                               │ App::apply(Command) · cancel · set_mode · respond
+                               │ App::apply(Command) · App::classify
                                ▼
                      ┌──────────────────┐
                      │   App Runtime    │
@@ -189,13 +189,15 @@ instance each, so spawning never reconnects an MCP server.
 AppBuilder ──open──► App ──apply(Command)──► inbox ──► Runtime
                      │
                      ├── cancel() · set_mode() · respond() · stop_subagent(s)()  → Shared
-                     ├── subscribe()    → AppEvent
+                     ├── subscribe()    → Arc<AppEvent>
                      └── watch_state()  → AppState
 ```
 
 `App::apply` is the one entry a transport needs: it takes a protocol
 `Command` and reports what it did. The methods beside it are the same
-commands spelled out, for callers that stay in Rust.
+commands spelled out, for callers that stay in Rust. A frontend that wants to
+submit something asks `App::classify` for the classification first: the app
+owns the slash registry, so it is the one that reads the text.
 
 ## IDs
 
@@ -216,7 +218,25 @@ A turn is an app-level user request. The runtime allocates `TurnId` and passes i
 
 # Inputs
 
-TUI / CLI → runtime, through `App::submit(text)`, which classifies the text once with the slash registry the runtime shares:
+TUI / CLI → runtime, through a `Command`. Every request a frontend makes is
+one, and `App::apply` is the single entry that applies it:
+
+```rust
+pub enum Command {
+    Submit { input: Input },
+    Steer { input: Input },
+    Unpark { text: String },
+    Rewind,
+    Cancel { turn_id: TurnId },
+    CancelCompaction,
+    SetMode { mode: AgentMode },
+    Respond { request_id: UserRequestId, response: UserResponse },
+    StopSubagent { id: AgentId },
+    StopSubagents,
+}
+```
+
+A command carries an `Input`, not raw text:
 
 ```rust
 pub enum Input {
@@ -227,9 +247,13 @@ pub enum Input {
 }
 ```
 
-Classification never happens twice, so callers never sniff strings: `submit` returns the `Input` it sent, and the TUI draws it accordingly. A trimmed body starting with `/` and naming a registered command is `Slash`; an unknown `/x` stays `Chat`.
+The app owns the slash registry, so it is the one that classifies: a frontend
+asks `App::classify` for the classification and sends the result. No text is
+read twice — a message that was parked and taken back goes out as it was
+classified — and callers never sniff strings. A trimmed body starting with `/`
+and naming a registered command is `Slash`; an unknown `/x` stays `Chat`.
 
-There is no `SetModel` / `SetProvider` / `ClearSession` input. Those mutations are slash commands (`/model`, `/setup`, `/clear`). Control that needs no conversation driver is a method on `App`, applied by the caller: `cancel(turn_id)`, `set_mode`, `respond`, `stop_subagent`, `stop_subagents`, `shutdown`.
+There is no `SetModel` / `SetProvider` / `ClearSession` input. Those mutations are slash commands (`/model`, `/setup`, `/clear`). Control that needs no conversation driver is a command applied by the caller: `Cancel`, `SetMode`, `Respond`, `StopSubagent`, `StopSubagents`.
 
 A `Shell` input is a **local shell request**, not a slash command and not an LLM turn. The app runtime invokes `oven-host::run_shell_command` in the workspace root (bash on Unix, falling back to sh; PowerShell on Windows). `oven-host` owns process management and output decoding; the app retains timeout/cancellation choices, shell events, exit-code mapping, and persistence. It commits one user message describing the command and its result.
 
@@ -239,14 +263,20 @@ A running turn holds `&mut Agent` exclusively. `App` splits what it is given on 
 
 | What | While a turn is running |
 | --- | --- |
-| `cancel(turn_id)` | cancel immediately, only if `turn_id` is the running turn |
-| `set_mode` | apply immediately via the shared `Selection` + `AppState` |
-| `respond(request_id, response)` | answers the turn's pending request; phase returns to `Running` |
+| `Cancel { turn_id }` | cancel immediately, only if `turn_id` is the running turn |
+| `SetMode` | apply immediately via the shared `Selection` + `AppState` |
+| `Respond { request_id, response }` | answers the turn's pending request; phase returns to `Running` |
+| `Steer { input }` | park a chat with the running turn; it is appended after the next tool results |
 | `Slash /model …` | apply immediately via `RouterHandle` + `Selection` |
 | `Slash /agents …`, `Slash /exit` | apply immediately: neither asks for the agent, which is what `CommandContext::agent()` reports |
 | `Rewind` | queue; emit `Notification` |
 | other `Input` (chat, other slash, bang-shell) | queue; slash commands get a `Notification` |
 | `shutdown` | cancel the turn and exit |
+
+`Submit` queues the input for the driver; `Steer` parks a chat with the running
+turn instead, and `Unpark` takes a parked chat back when the turn never took it.
+A parked chat that the turn did take is already in the conversation, so it is
+never run twice.
 
 The mode and model live in a `Selection` the agent and its `TurnContext` share, so they can change without `&mut Agent`. The agent re-reads them at each step. `TurnContext` also carries the `RequestSink` (`TurnContext::with_requests`), so a turn asks the user through it and consumes the reply directly. `RouterHandle` (`Arc<RwLock<Arc<Router>>>`) is the same idea for the router: a cheap snapshot is enough to qualify a `/model` id while the turn is in flight. Router mutation (`/setup`) still needs `&mut Agent` via `Agent::replace_router`, so it waits.
 
@@ -295,7 +325,7 @@ the turn while it still holds the request.
 A command that never asks for the agent — `/agents`, `/exit` — is applied mid-turn
 instead of queued: `CommandContext::agent()` returns `AgentBusy` for the ones that
 do need it, and `App::submit` reads that as "wait". Queued inputs drain after the
-turn ends, in arrival order. Keyboard mode toggle is `App::set_mode` and applies live; `/plan` is a slash command and therefore waits until the agent is free.
+turn ends, in arrival order. Keyboard mode toggle is `Command::SetMode` and applies live; `/plan` is a slash command and therefore waits until the agent is free.
 
 ---
 
@@ -415,7 +445,10 @@ There is no `Idle` event. Turn completion is `TurnEvent::Completed | Cancelled |
 subagent's `agent_id`, so a view can render one with the same code as the
 driver's transcript.
 
-Subscribers get a lossless unbounded channel. `App::state()` / `watch_state()` is the current snapshot.
+Subscribers get a lossless unbounded channel, and the event is shared rather
+than copied: a subscriber reads the same `Arc<AppEvent>` the bus published, so
+a stream of text deltas and a tool result cost one reference count rather than
+a copy each. `App::state()` / `watch_state()` is the current snapshot.
 
 Publishing is one hop: every turn's `EventSink` is a `BusSink` over the shared
 `EventBus`, so a subagent's events reach the frontend while the runtime is busy
@@ -654,7 +687,7 @@ sequenceDiagram
     participant Runtime
     participant Agent
 
-    TUI->>Runtime: submit("fix foo") → Chat
+    TUI->>Runtime: apply(Submit { input: Chat }) 
     Runtime->>Runtime: TurnId::next()
     Runtime->>Runtime: phase = Running(id)
     Runtime->>Agent: run(input, ctx, sink)
@@ -702,7 +735,7 @@ sequenceDiagram
     participant Runtime
     participant Shell
 
-    TUI->>Runtime: submit("!ls") → Shell
+    TUI->>Runtime: apply(Submit { input: Shell })
     Runtime->>Runtime: TurnId::next()
     Runtime->>Runtime: phase = Running(id)
     Runtime-->>TUI: Shell(Started)

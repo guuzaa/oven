@@ -93,8 +93,7 @@ impl Ui {
                     } else {
                         ApprovalDecision::Rejected
                     };
-                    self.app
-                        .respond(*request_id, UserResponse::Approval(decision));
+                    self.respond(*request_id, UserResponse::Approval(decision));
                     PromptFlow::Closed
                 }
                 ChoicePopupAction::Cancel => {
@@ -110,8 +109,7 @@ impl Ui {
                     } else {
                         LoopLimitDecision::Exit
                     };
-                    self.app
-                        .respond(*request_id, UserResponse::LoopLimit(decision));
+                    self.respond(*request_id, UserResponse::LoopLimit(decision));
                     PromptFlow::Closed
                 }
                 ChoicePopupAction::Cancel => {

@@ -174,7 +174,7 @@ async fn a_typed_answer_is_not_submitted_as_a_prompt() {
     ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert!(ui.prompt.is_none(), "the answer closes the question");
-    assert!(ui.pending.is_empty(), "the answer must not be queued");
+    assert!(ui.queue.is_empty(), "the answer must not be queued");
     assert!(
         ui.transcript.rewind_text().is_none(),
         "the answer must not start a transcript turn"
@@ -192,7 +192,7 @@ async fn a_typed_answer_is_not_queued_while_the_turn_runs() {
     ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert!(
-        ui.pending.is_empty(),
+        ui.queue.is_empty(),
         "an answer is never a queued prompt, even mid-turn"
     );
     assert!(ui.prompt.is_none());
@@ -609,6 +609,62 @@ async fn an_open_popup_keeps_arrows_and_enter() {
     );
 }
 
+/// A message waiting for the driver.
+fn queued(text: &str) -> Queued {
+    Queued::held(text.to_string(), Input::Chat(text.to_string()))
+}
+
+/// A message parked with the running turn.
+fn parked(text: &str) -> Queued {
+    Queued {
+        dispatch: Dispatch::Parked,
+        ..queued(text)
+    }
+}
+
+/// A message that goes out even while a turn is running.
+fn immediate(text: &str, echo: bool) -> Queued {
+    Queued::now(text.to_string(), Input::Chat(text.to_string()), echo)
+}
+
+#[tokio::test]
+async fn a_typed_message_is_classified_once_and_goes_out_as_it_was_classified() {
+    let root = tempdir::TempDir::new("oven-ui-classify").unwrap();
+    let mut ui = test_ui(&root).await;
+    ui.input.set_text(TEST_ANSWER);
+
+    ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(ui.queue.len(), 1);
+    assert_eq!(
+        ui.queue[0].input,
+        Input::Chat(TEST_ANSWER.into()),
+        "the text is classified once, when the user sends it"
+    );
+
+    ui.maybe_flush().await;
+
+    assert!(ui.queue.is_empty(), "the message goes out");
+    assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
+}
+
+#[tokio::test]
+async fn a_chat_typed_while_the_turn_runs_waits_for_the_driver() {
+    let root = tempdir::TempDir::new("oven-ui-busy-chat").unwrap();
+    let mut ui = test_ui(&root).await;
+    ui.state.busy = true;
+    ui.input.set_text(TEST_ANSWER);
+
+    ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
+    ui.maybe_flush().await;
+
+    assert_eq!(ui.queue.len(), 1, "the chat waits for the driver");
+    assert!(
+        !ui.queue[0].is_parked(),
+        "nothing was parked: the driver was not running"
+    );
+}
+
 #[tokio::test]
 async fn ordinary_text_still_starts_a_turn() {
     let root = tempdir::TempDir::new("oven-ui-prompt").unwrap();
@@ -626,14 +682,13 @@ async fn busy_follows_the_apps_phase_and_flushes_the_queue_when_it_ends() {
     let root = tempdir::TempDir::new("oven-ui-sync").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending
-        .push(Queued::held(TEST_ANSWER.to_string(), false));
+    ui.queue.push(queued(TEST_ANSWER));
 
     ui.sync_state().await;
 
     assert!(!ui.state.busy, "an idle app is not busy");
     assert!(
-        ui.pending.is_empty(),
+        ui.queue.is_empty(),
         "the queue is sent once the app is idle"
     );
     assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
@@ -644,12 +699,12 @@ async fn a_prompt_already_appended_is_not_sent_again_when_idle() {
     let root = tempdir::TempDir::new("oven-ui-steer-flush").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.push(Queued::held(TEST_ANSWER.to_string(), true));
+    ui.queue.push(parked(TEST_ANSWER));
 
     ui.sync_state().await;
 
     assert!(
-        ui.pending.is_empty(),
+        ui.queue.is_empty(),
         "a prompt the turn already took is dropped"
     );
     assert!(
@@ -663,7 +718,7 @@ async fn an_appended_prompt_leaves_the_queue_and_joins_the_transcript() {
     let root = tempdir::TempDir::new("oven-ui-steer-event").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.push(Queued::held(TEST_ANSWER.to_string(), true));
+    ui.queue.push(parked(TEST_ANSWER));
 
     ui.apply_event(&AppEvent::agent_with(
         ui.views.main_id(),
@@ -673,15 +728,12 @@ async fn an_appended_prompt_leaves_the_queue_and_joins_the_transcript() {
         }),
     ));
 
-    assert!(ui.pending.is_empty(), "the queue row goes away");
+    assert!(ui.queue.is_empty(), "the queue row goes away");
     assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
 }
 
 fn pending_texts(ui: &Ui) -> Vec<&str> {
-    ui.pending
-        .iter()
-        .map(|queued| queued.text.as_str())
-        .collect()
+    ui.queue.iter().map(|queued| queued.text.as_str()).collect()
 }
 
 #[tokio::test]
@@ -689,11 +741,11 @@ async fn an_immediate_item_skips_the_held_ones_while_busy() {
     let root = tempdir::TempDir::new("oven-ui-immediate").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending.extend([
-        Queued::held(HELD_FIRST.to_string(), false),
-        Queued::now(SENT_FIRST.to_string(), true),
-        Queued::held(HELD_SECOND.to_string(), false),
-        Queued::now(SENT_LAST.to_string(), true),
+    ui.queue.extend([
+        queued(HELD_FIRST),
+        immediate(SENT_FIRST, true),
+        queued(HELD_SECOND),
+        immediate(SENT_LAST, true),
     ]);
 
     ui.maybe_flush().await;
@@ -710,17 +762,17 @@ async fn an_immediate_item_skips_the_held_ones_while_busy() {
 async fn a_quiet_submit_is_sent_without_a_transcript_row() {
     let root = tempdir::TempDir::new("oven-ui-quiet").unwrap();
     let mut ui = test_ui(&root).await;
-    ui.pending.push(Queued::now(TEST_ANSWER.to_string(), false));
+    ui.queue.push(immediate(TEST_ANSWER, false));
 
     ui.maybe_flush().await;
 
-    assert!(ui.pending.is_empty(), "a quiet submit is still sent");
+    assert!(ui.queue.is_empty(), "a quiet submit is still sent");
     assert!(
         ui.transcript.rewind_text().is_none(),
         "a quiet submit is not drawn"
     );
 
-    ui.pending.push(Queued::now(TEST_ANSWER.to_string(), true));
+    ui.queue.push(immediate(TEST_ANSWER, true));
     ui.maybe_flush().await;
 
     assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));
@@ -731,14 +783,13 @@ async fn a_model_switch_typed_mid_turn_jumps_the_queue() {
     let root = tempdir::TempDir::new("oven-ui-model-busy").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending
-        .push(Queued::held(TEST_ANSWER.to_string(), false));
+    ui.queue.push(queued(TEST_ANSWER));
     ui.input.set_text(MODEL_SWITCH);
 
     ui.handle_key(key(KeyCode::Enter, KeyModifiers::NONE));
 
     assert_eq!(pending_texts(&ui), [TEST_ANSWER, MODEL_SWITCH]);
-    assert!(ui.pending[1].is_immediate() && !ui.pending[1].is_echoed());
+    assert!(ui.queue[1].is_immediate() && !ui.queue[1].is_echoed());
 
     ui.maybe_flush().await;
 
@@ -877,17 +928,16 @@ async fn queued_text_waits_for_the_esc_confirm() {
     let root = tempdir::TempDir::new("oven-ui-esc-queue").unwrap();
     let mut ui = test_ui(&root).await;
     ui.state.busy = true;
-    ui.pending
-        .push(Queued::held(TEST_ANSWER.to_string(), false));
+    ui.queue.push(queued(TEST_ANSWER));
 
     ui.handle_key(esc());
 
-    assert_eq!(ui.pending.len(), 1, "one press must not touch the queue");
+    assert_eq!(ui.queue.len(), 1, "one press must not touch the queue");
     assert!(ui.esc_armed());
 
     ui.handle_key(esc());
 
-    assert!(ui.pending.is_empty(), "the confirm pops the queue");
+    assert!(ui.queue.is_empty(), "the confirm pops the queue");
 }
 
 #[tokio::test]

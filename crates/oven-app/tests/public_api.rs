@@ -5,7 +5,7 @@
 
 use oven_app::{
     App, AppBuilder, AppError, AppEvent, AppEventKind, AppId, AppPhase, AppState, CompactionEvent,
-    FileMentions, HistoryChangeReason, Input, LocalShell, McpServerConfig, SessionState,
+    FileMentions, Headless, HistoryChangeReason, Input, LocalShell, McpServerConfig, SessionState,
     ShellEvent, ShellInput, SubagentEvent, ToolRegistry, display_shell_line,
 };
 

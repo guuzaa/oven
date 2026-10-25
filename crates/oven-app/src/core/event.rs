@@ -9,7 +9,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use oven_proto::{AgentEvent, AgentId, AppEvent, AppEventKind, EventSink, TurnId};
 use tokio::sync::mpsc;
 
-pub(crate) type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<AppEvent>>>>;
+/// The channels the bus fans out to.
+///
+/// The event is shared, not copied: a subscriber that reads a 64 KB tool
+/// result or a stream of text deltas takes a handle, so the bus hands the
+/// same event to every subscriber at the cost of one reference count.
+pub(crate) type Subscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<Arc<AppEvent>>>>>;
 
 /// An agent's report, published straight to the frontend.
 ///
@@ -60,12 +65,12 @@ impl EventBus {
     }
 
     pub(crate) fn emit(&self, kind: AppEventKind) {
-        let event = AppEvent { kind };
+        let event = Arc::new(AppEvent { kind });
         let mut subscribers = self
             .subscribers
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        subscribers.retain(|subscriber| subscriber.send(event.clone()).is_ok());
+        subscribers.retain(|subscriber| subscriber.send(Arc::clone(&event)).is_ok());
     }
 
     /// Emits an agent event the runtime raises itself, rather than one it

@@ -408,7 +408,7 @@ mod tests {
         shared.state.borrow().levels.phase.clone()
     }
 
-    fn subscribe(shared: &Shared) -> mpsc::UnboundedReceiver<AppEvent> {
+    fn subscribe(shared: &Shared) -> mpsc::UnboundedReceiver<Arc<AppEvent>> {
         let (tx, rx) = mpsc::unbounded_channel();
         shared
             .events
@@ -419,7 +419,7 @@ mod tests {
         rx
     }
 
-    fn resolved_ids(rx: &mut mpsc::UnboundedReceiver<AppEvent>) -> Vec<UserRequestId> {
+    fn resolved_ids(rx: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>) -> Vec<UserRequestId> {
         let mut ids = Vec::new();
         while let Ok(event) = rx.try_recv() {
             if let AppEventKind::RequestResolved { request_id } = event.kind {

@@ -5,7 +5,7 @@ use std::time::Instant;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use oven_app::AppEvent;
+use oven_app::{AppEvent, Command};
 use ratatui::layout::Rect;
 
 use crate::core::component::{Action, KeyResult};
@@ -16,7 +16,7 @@ use crate::core::paste::{self, Burst};
 use crate::widgets::input::Overlay;
 
 use super::prompt::PromptFlow;
-use super::{Queued, Ui};
+use super::{Outbox, Queued, Ui};
 
 /// Lines a modified arrow scrolls a subagent's transcript by. A plain arrow
 /// switches agents instead.
@@ -102,7 +102,9 @@ impl Ui {
                 }
                 _ if is_mode_toggle(key) => {
                     self.state.mode = self.state.mode.toggle();
-                    self.app.set_mode(self.state.mode);
+                    self.outbox.push(Outbox::Command(Command::SetMode {
+                        mode: self.state.mode,
+                    }));
                     KeyResult::Handled
                 }
                 KeyCode::Esc if self.input.overlay() == Overlay::None => self.handle_esc(esc_armed),
@@ -136,8 +138,13 @@ impl Ui {
                 if self.answer_question_with(&text) {
                     return false;
                 }
-                let steered = self.app.steer(&text);
-                self.pending.push(Queued::held(text, steered));
+                let input = self.app.classify(&text);
+                // The running turn may take the chat; it says so by
+                // appending it, and the queue keeps it until it does.
+                self.outbox.push(Outbox::Steer {
+                    input: input.clone(),
+                });
+                self.queue.push(Queued::held(text, input));
                 false
             }
             KeyResult::Action(Action::Submit(text)) => {
@@ -147,14 +154,16 @@ impl Ui {
                 self.views.release();
                 self.status.clear_reply();
                 self.input.clear();
-                self.pending.push(Queued::now(text, true));
+                let input = self.app.classify(&text);
+                self.queue.push(Queued::now(text, input, true));
                 false
             }
             KeyResult::Action(Action::QuietSubmit(text)) => {
                 if self.answer_question_with(&text) {
                     return false;
                 }
-                self.pending.push(Queued::now(text, false));
+                let input = self.app.classify(&text);
+                self.queue.push(Queued::now(text, input, false));
                 false
             }
             KeyResult::Action(Action::Notify(text)) => {
@@ -221,7 +230,8 @@ impl Ui {
             }
             KeyCode::Char('x') if key.modifiers.is_empty() => {
                 if let Some(id) = self.views.focused_id() {
-                    self.app.stop_subagent(id);
+                    self.outbox
+                        .push(Outbox::Command(Command::StopSubagent { id }));
                 }
                 return KeyResult::Handled;
             }
@@ -286,10 +296,14 @@ impl Ui {
                 KeyResult::Handled
             }
             EscAction::PopQueue => {
-                if let Some(queued) = self.pending.pop()
-                    && (!queued.is_steered() || self.app.claim_steer(&queued.text))
-                {
-                    self.input.set_text(&queued.text);
+                if let Some(queued) = self.queue.pop() {
+                    if queued.is_parked() {
+                        // The turn may have taken it already; take it back
+                        // before it goes into the composer.
+                        self.outbox.push(Outbox::Unpark { text: queued.text });
+                    } else {
+                        self.input.set_text(&queued.text);
+                    }
                 }
                 KeyResult::Handled
             }
@@ -309,7 +323,7 @@ impl Ui {
 
     pub(super) fn esc_action(&self) -> EscAction {
         EscAction::new(
-            self.pending.last().map(|queued| queued.text.as_str()),
+            self.queue.last().map(|queued| queued.text.as_str()),
             self.views.focused_id().is_some(),
             self.state.busy,
             self.rewinding,

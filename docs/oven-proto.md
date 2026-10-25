@@ -56,8 +56,9 @@ never grows past what the app already answers.
 
 ```rust
 pub enum Command {
-    Submit { text: String },
-    Steer { text: String },
+    Submit { input: Input },
+    Steer { input: Input },
+    Unpark { text: String },
     Rewind,
     Cancel { turn_id: TurnId },
     CancelCompaction,
@@ -71,15 +72,22 @@ pub enum Command {
 `App::apply` applies one:
 
 ```rust
-let outcome = app.apply(Command::Submit { text: "fix foo".into() }).await?;
+let outcome = app.apply(Command::Submit { input: app.classify("fix foo") }).await?;
 ```
 
-`Submit` classifies the text once — a chat, a `!` shell line or a slash
-command — and reports the classification as `CommandResult::Submitted(Input)`,
-so a frontend draws it the way the runtime will treat it. `Steer` parks a
-chat typed while a turn is running; the app refuses it when the driver is
-idle, and says so with `CommandResult::Refused`. `Respond` is refused the
-same way when the request it answers was already closed.
+A command carries an `Input`, not raw text: the app owns the slash registry,
+so it is the one that classifies. A frontend asks `App::classify` for the
+classification and sends the result, and a message that was parked and taken
+back goes out as it was classified — no text is ever read twice.
+
+`Submit` queues the input for the driver and reports it as
+`CommandResult::Submitted(Input)`, so a frontend draws it the way the runtime
+will treat it. `Steer` parks a chat typed while a turn is running and reports
+`CommandResult::Parked(Input)`; the app refuses it when the driver is idle, or
+when the input is not a chat, and says so with `CommandResult::Refused`.
+`Unpark` takes a parked chat back and hands it over as
+`CommandResult::Unparked(Input)`. `Respond` is refused the same way when the
+request it answers was already closed.
 
 ### Events
 
@@ -218,9 +226,9 @@ buried in the app layer.
 The terminal uses it today, in process:
 
 ```rust
-let events = app.subscribe();               // AppEvent
+let events = app.subscribe();               // Arc<AppEvent>
 let state = app.watch_state();              // AppState
-app.apply(Command::Submit { text }).await?; // Command
+app.apply(Command::Submit { input }).await?; // Command
 ```
 
 A web backend adds a transport on top and changes nothing below it:

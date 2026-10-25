@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::EventStream;
 use futures::StreamExt;
-use oven_app::{AnswerResponse, App, AppEvent, AppPhase, AppState, UserRequestId, UserResponse};
+use oven_app::{
+    AnswerResponse, App, AppEvent, AppPhase, AppState, Command, CommandResult, Input,
+    UserRequestId, UserResponse,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -25,7 +28,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(80);
 
 pub struct Ui {
     app: App,
-    events: mpsc::UnboundedReceiver<AppEvent>,
+    events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
     /// The app's levels — phase, mode, model, subagents — which the UI reads
     /// as they stand rather than replaying what changed.
     state_rx: watch::Receiver<AppState>,
@@ -34,7 +37,12 @@ pub struct Ui {
     /// Esc is ignored until `Rewound` arrives so a second rewind cannot
     /// desync the transcript from the backend.
     rewinding: bool,
-    pending: Vec<Queued>,
+    /// The messages waiting to go to the app: the ones the user typed while
+    /// the driver was busy.
+    queue: Vec<Queued>,
+    /// The requests waiting to go to the app. The key handler is
+    /// synchronous, so a request waits here until the event loop sends it.
+    outbox: Vec<Outbox>,
     /// Esc confirmed a rewind. `handle_key` stays sync and the flush sends it.
     pending_rewind: bool,
     /// Deadline for the Esc press that confirms a previous one.
@@ -83,7 +91,8 @@ impl Ui {
             state,
             quit: false,
             rewinding: false,
-            pending: Vec::new(),
+            queue: Vec::new(),
+            outbox: Vec::new(),
             pending_rewind: false,
             esc_confirm_until: None,
 
@@ -122,7 +131,7 @@ impl Ui {
         // Whatever the user queued and never sent dies with the app, so say
         // so where they can still read it: the alternate screen is gone by
         // now, and a notice drawn a moment before quitting would not be.
-        let queued = std::mem::take(&mut self.pending);
+        let queued = std::mem::take(&mut self.queue);
         let session_id = self.app.session_id();
         let unsent = self.app.shutdown().await + queued.len();
         if unsent > 0 {
@@ -160,16 +169,19 @@ impl Ui {
                     }
                 }
                 Some(ev) = term_events.next() => {
-                    if self.handle_term_event(ev?)? {
+                    let quit = self.handle_term_event(ev?)?;
+                    // The requests the last key made go out before the app
+                    // is shut down: a cancel or a stop must not be lost.
+                    self.maybe_flush().await;
+                    if quit {
                         break;
                     }
-                    self.maybe_flush().await;
                     dirty = false;
                     self.draw_frame(terminal)?;
                 }
                 result = self.events.recv() => {
                     match result {
-                        Some(ev) => self.apply_event(&ev),
+                        Some(ev) => self.apply_event(ev.as_ref()),
                         None => self.disconnected(),
                     }
                     self.drain_events();
@@ -198,7 +210,7 @@ impl Ui {
     fn drain_events(&mut self) {
         loop {
             match self.events.try_recv() {
-                Ok(ev) => self.apply_event(&ev),
+                Ok(ev) => self.apply_event(ev.as_ref()),
                 Err(mpsc::error::TryRecvError::Empty) => break,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     self.disconnected();
@@ -224,20 +236,66 @@ impl Ui {
         self.maybe_flush().await;
     }
 
+    /// Sends what is waiting to go to the app.
+    ///
+    /// The requests go first: a chat parked with the running turn has to be
+    /// parked before the queue is looked at, so the turn knows it may take
+    /// it.
     async fn maybe_flush(&mut self) {
         if self.pending_rewind {
             self.pending_rewind = false;
-            if self.app.rewind().await.is_err() {
+            if self.app.apply(Command::Rewind).await.is_err() {
                 self.rewinding = false;
             }
         }
-        if self.pending.is_empty() {
+        if !self.outbox.is_empty() {
+            let requests = std::mem::take(&mut self.outbox);
+            for request in requests {
+                self.send(request).await;
+            }
+        }
+        self.flush_queue().await;
+    }
+
+    /// Sends one request to the app.
+    async fn send(&mut self, request: Outbox) {
+        match request {
+            Outbox::Command(command) => {
+                let _ = self.app.apply(command).await;
+            }
+            Outbox::Steer { input } => {
+                let parked = matches!(
+                    self.app
+                        .apply(Command::Steer {
+                            input: input.clone()
+                        })
+                        .await,
+                    Ok(CommandResult::Parked(_))
+                );
+                if parked && let Some(text) = chat_text(&input) {
+                    self.mark_parked(text);
+                }
+            }
+            Outbox::Unpark { text } => {
+                if matches!(
+                    self.app.apply(Command::Unpark { text: text.clone() }).await,
+                    Ok(CommandResult::Unparked(_))
+                ) {
+                    self.input.set_text(&text);
+                }
+            }
+        }
+    }
+
+    /// Sends the messages that are waiting for the driver.
+    async fn flush_queue(&mut self) {
+        if self.queue.is_empty() {
             return;
         }
-        if self.state.busy && self.pending.iter().all(|queued| !queued.is_immediate()) {
+        if self.state.busy && self.queue.iter().all(|queued| !queued.is_immediate()) {
             return;
         }
-        let queued = std::mem::take(&mut self.pending);
+        let queued = std::mem::take(&mut self.queue);
         let mut rest = Vec::new();
         let mut iter = queued.into_iter();
         while let Some(queued) = iter.next() {
@@ -245,15 +303,17 @@ impl Ui {
                 rest.push(queued);
                 continue;
             }
-            if queued.is_steered() && !self.app.claim_steer(&queued.text) {
-                continue;
-            }
-            match self.app.submit(&queued.text).await {
-                Ok(input) => {
+            let input = match self.take_back(&queued).await {
+                Some(input) => input,
+                None => continue,
+            };
+            match self.app.apply(Command::Submit { input }).await {
+                Ok(CommandResult::Submitted(input)) => {
                     if queued.is_echoed() {
                         self.push_submitted(&input);
                     }
                 }
+                Ok(_) => {}
                 Err(_) => {
                     rest.push(queued);
                     rest.extend(iter);
@@ -262,18 +322,46 @@ impl Ui {
             }
         }
         if !rest.is_empty() {
-            rest.append(&mut self.pending);
-            self.pending = rest;
+            rest.append(&mut self.queue);
+            self.queue = rest;
+        }
+    }
+
+    /// Takes a parked chat back out of the turn it was parked with, so it
+    /// can go out as a message of its own.
+    ///
+    /// `None` when the turn already took it: the chat is in the
+    /// conversation, and running it again would say it twice.
+    async fn take_back(&self, queued: &Queued) -> Option<Input> {
+        if !queued.is_parked() {
+            return Some(queued.input.clone());
+        }
+        match self
+            .app
+            .apply(Command::Unpark {
+                text: queued.text.clone(),
+            })
+            .await
+        {
+            Ok(CommandResult::Unparked(input)) => Some(input),
+            _ => None,
+        }
+    }
+
+    /// Marks the queued chat as parked with the running turn.
+    fn mark_parked(&mut self, text: &str) {
+        if let Some(queued) = self.queue.iter_mut().find(|queued| queued.text == text) {
+            queued.dispatch = Dispatch::Parked;
         }
     }
 
     fn drop_appended(&mut self, text: &str) {
         if let Some(index) = self
-            .pending
+            .queue
             .iter()
-            .position(|queued| queued.is_steered() && queued.text == text)
+            .position(|queued| queued.is_parked() && queued.text == text)
         {
-            self.pending.remove(index);
+            self.queue.remove(index);
         }
     }
 
@@ -281,28 +369,37 @@ impl Ui {
     /// first, then the subagents it may have spawned. `App::shutdown` cancels
     /// the supervisor as a backstop, but a subagent that is asked to stop is
     /// stopped in the registry too, which is what the last frame shows.
-    fn shutdown_in_flight(&self) {
+    fn shutdown_in_flight(&mut self) {
         if self.state.busy {
             self.send_cancel();
         }
         if !self.views.is_empty() {
-            self.app.stop_subagents();
+            self.outbox.push(Outbox::Command(Command::StopSubagents));
         }
     }
 
-    pub(super) fn send_cancel(&self) {
+    pub(super) fn send_cancel(&mut self) {
         let phase = self.state_rx.borrow().levels.phase.clone();
         if let Some(turn_id) = phase.turn_id() {
-            self.app.cancel(turn_id);
+            self.outbox
+                .push(Outbox::Command(Command::Cancel { turn_id }));
             return;
         }
         if matches!(phase, AppPhase::Compacting) {
-            self.app.cancel_compaction();
+            self.outbox.push(Outbox::Command(Command::CancelCompaction));
         }
     }
 
-    pub(super) fn respond_question(&self, request_id: UserRequestId, response: AnswerResponse) {
-        self.app.respond(request_id, UserResponse::Answer(response));
+    /// Answers the request a running turn is waiting on.
+    fn respond(&mut self, request_id: UserRequestId, response: UserResponse) {
+        self.outbox.push(Outbox::Command(Command::Respond {
+            request_id,
+            response,
+        }));
+    }
+
+    pub(super) fn respond_question(&mut self, request_id: UserRequestId, response: AnswerResponse) {
+        self.respond(request_id, UserResponse::Answer(response));
     }
 
     fn esc_armed(&self) -> bool {
@@ -313,7 +410,11 @@ impl Ui {
 
 /// A message waiting for its turn.
 struct Queued {
+    /// The text the user typed, drawn in the queue band.
     text: String,
+    /// The classification of `text`. A message is classified once, when the
+    /// user sends it, and goes out as it was classified.
+    input: Input,
     /// When it goes out, and what happens to it.
     dispatch: Dispatch,
 }
@@ -324,10 +425,9 @@ enum Dispatch {
     /// Parked with the running turn, which appends it after the next tool
     /// results. A slash command or shell line stays local until the driver
     /// is free.
-    Parked {
-        /// Whether the running turn may steer into it.
-        steered: bool,
-    },
+    Parked,
+    /// Waiting for the driver: it goes out once the driver is free.
+    Held,
     /// Sent on the next flush even while a turn is running (`/model`, `/setup`).
     Immediate {
         /// Drawn into the transcript when it goes out. A quiet submit is not.
@@ -336,16 +436,18 @@ enum Dispatch {
 }
 
 impl Queued {
-    fn held(text: String, steered: bool) -> Self {
+    fn held(text: String, input: Input) -> Self {
         Self {
             text,
-            dispatch: Dispatch::Parked { steered },
+            input,
+            dispatch: Dispatch::Held,
         }
     }
 
-    fn now(text: String, echo: bool) -> Self {
+    fn now(text: String, input: Input, echo: bool) -> Self {
         Self {
             text,
+            input,
             dispatch: Dispatch::Immediate { echo },
         }
     }
@@ -356,16 +458,38 @@ impl Queued {
     }
 
     /// Whether the running turn may steer into it.
-    fn is_steered(&self) -> bool {
-        matches!(self.dispatch, Dispatch::Parked { steered: true })
+    fn is_parked(&self) -> bool {
+        matches!(self.dispatch, Dispatch::Parked)
     }
 
     /// Whether it is drawn into the transcript when it goes out.
     fn is_echoed(&self) -> bool {
         match self.dispatch {
-            Dispatch::Parked { .. } => true,
+            Dispatch::Parked | Dispatch::Held => true,
             Dispatch::Immediate { echo } => echo,
         }
+    }
+}
+
+/// A request waiting to go to the app.
+///
+/// The key handler is synchronous, so a request waits here until the event
+/// loop sends it.
+enum Outbox {
+    /// A protocol command.
+    Command(Command),
+    /// A chat to park with the running turn.
+    Steer { input: Input },
+    /// A parked chat to take back out of the turn it was parked with, so it
+    /// goes back into the composer.
+    Unpark { text: String },
+}
+
+/// The text of an input, when it is a chat.
+fn chat_text(input: &Input) -> Option<&str> {
+    match input {
+        Input::Chat(text) => Some(text),
+        _ => None,
     }
 }
 
