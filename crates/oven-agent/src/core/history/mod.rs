@@ -210,7 +210,7 @@ impl History {
     pub fn system_message(&self) -> Option<String> {
         self.messages()
             .find(|m| m.role == Role::System)
-            .and_then(|m| m.system_prompt())
+            .map(|m| m.text())
     }
 
     /// The messages as shared handles. A snapshot of the conversation then

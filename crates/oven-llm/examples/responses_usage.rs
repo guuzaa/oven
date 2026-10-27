@@ -53,7 +53,7 @@ async fn main() {
 
     // 3. 非流式 complete 调用。
     let request = Request::builder()
-        .message(Message::user_text("用一句话介绍 Rust 语言。"))
+        .push_message(Message::user_text("用一句话介绍 Rust 语言。"))
         .build();
     let options = CallOptions::new("deepseek-v4-flash").temperature(0.0);
 
@@ -117,10 +117,10 @@ async fn collect_streamed_response<P: Provider + ?Sized>(
 /// 则执行并把结果以 `function_call_output` 回传，直到模型结束本轮生成。
 async fn run_tool_loop<P: Provider + ?Sized>(provider: &P) {
     let mut request = Request::builder()
-        .message(Message::user_text(
+        .push_message(Message::user_text(
             "请调用 get_weather 工具查询杭州今天的天气，然后告诉我结果。",
         ))
-        .tools(vec![weather_tool()])
+        .set_tools(vec![weather_tool()])
         .build();
     let options = CallOptions::new("deepseek-v4-flash").temperature(0.0);
 
@@ -135,7 +135,7 @@ async fn run_tool_loop<P: Provider + ?Sized>(provider: &P) {
 
         // 关键顺序：先提交完整的 assistant 消息（含 function_call），再执行工具
         // 并追加 function_call_output，保证多轮 wire 顺序正确。
-        request.message(Message::assistant(response.content.clone()));
+        request.push_message(Message::assistant(response.content.clone()));
 
         if !response.has_tool_calls() {
             println!("tool loop finished");
@@ -145,7 +145,7 @@ async fn run_tool_loop<P: Provider + ?Sized>(provider: &P) {
         for call in response.tool_calls() {
             println!("  tool call: {}({})", call.name(), call.input());
             let (output, is_error) = execute_demo_tool(call.name(), call.input());
-            request.message(Message::tool_result(call.id(), output, is_error));
+            request.push_message(Message::tool_result(call.id(), output, is_error));
         }
     }
 }

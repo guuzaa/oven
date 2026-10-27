@@ -11,6 +11,12 @@ use super::tool::{Tool, ToolChoice};
 /// [`CallOptions`](super::options::CallOptions), next to the sampling
 /// parameters and the reasoning effort. Another model does not mean another
 /// conversation.
+///
+/// `system` is the system prompt of the conversation: the protocols carry it
+/// apart from the messages (the Responses API's `instructions`, the first
+/// `system` message of a Chat Completions request). A `Role::System` *message*
+/// is a different thing — one message of the conversation that happens to be a
+/// system message.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Request {
     pub system: Option<String>,
@@ -27,25 +33,25 @@ impl Request {
     }
 
     /// 追加一条消息。
-    pub fn message(&mut self, msg: Message) -> &mut Self {
+    pub fn push_message(&mut self, msg: Message) -> &mut Self {
         self.messages.push(msg);
         self
     }
 
     /// 替换全部消息。
-    pub fn messages(&mut self, msgs: Vec<Message>) -> &mut Self {
+    pub fn set_messages(&mut self, msgs: Vec<Message>) -> &mut Self {
         self.messages = msgs;
         self
     }
 
     /// 追加一个工具。
-    pub fn tool(&mut self, tool: Tool) -> &mut Self {
+    pub fn push_tool(&mut self, tool: Tool) -> &mut Self {
         self.tools.push(tool);
         self
     }
 
     /// 替换全部工具。
-    pub fn tools(&mut self, tools: Vec<Tool>) -> &mut Self {
+    pub fn set_tools(&mut self, tools: Vec<Tool>) -> &mut Self {
         self.tools = tools;
         self
     }
@@ -63,12 +69,15 @@ impl Request {
 
 /// Builds a [`Request`]. See [`Request::builder()`].
 ///
+/// The methods say what they do: `push_*` adds one, `set_*` replaces the
+/// whole collection.
+///
 /// ```rust
 /// use oven_llm::*;
 ///
 /// let req = Request::builder()
 ///     .system("be helpful")
-///     .message(Message::user(vec![ContentBlock::text("hello")]))
+///     .push_message(Message::user(vec![ContentBlock::text("hello")]))
 ///     .build();
 /// ```
 #[derive(Debug, Default)]
@@ -87,24 +96,25 @@ impl RequestBuilder {
     }
 
     /// 追加一条消息。
-    pub fn message(mut self, msg: Message) -> Self {
+    pub fn push_message(mut self, msg: Message) -> Self {
         self.messages.push(msg);
         self
     }
 
+    /// 追加一条用户文本消息。
     pub fn prompt(mut self, msg: impl Into<String>) -> Self {
         self.messages.push(Message::user_text(msg.into()));
         self
     }
 
     /// 追加一个工具。
-    pub fn tool(mut self, tool: Tool) -> Self {
+    pub fn push_tool(mut self, tool: Tool) -> Self {
         self.tools.push(tool);
         self
     }
 
     /// 替换全部工具。
-    pub fn tools(mut self, tools: Vec<Tool>) -> Self {
+    pub fn set_tools(mut self, tools: Vec<Tool>) -> Self {
         self.tools = tools;
         self
     }
@@ -116,7 +126,7 @@ impl RequestBuilder {
     }
 
     /// 替换全部消息。
-    pub fn messages(mut self, messages: Vec<Message>) -> Self {
+    pub fn set_messages(mut self, messages: Vec<Message>) -> Self {
         self.messages = messages;
         self
     }
@@ -174,9 +184,9 @@ mod tests {
     fn builder_chain_produces_correct_request() {
         let req = Request::builder()
             .system("be helpful")
-            .message(Message::user(vec![ContentBlock::text("hello")]))
-            .message(Message::assistant(vec![ContentBlock::text("hi")]))
-            .tool(Tool {
+            .push_message(Message::user(vec![ContentBlock::text("hello")]))
+            .push_message(Message::assistant(vec![ContentBlock::text("hi")]))
+            .push_tool(Tool {
                 name: "search".into(),
                 description: Some("Search the web".into()),
                 input_schema: Arc::new(serde_json::json!({"type": "object"})),
@@ -203,10 +213,10 @@ mod tests {
     }
 
     #[test]
-    fn message_appends() {
+    fn push_message_appends() {
         let mut req = Request::default();
-        req.message(Message::user(vec![ContentBlock::text("hello")]))
-            .message(Message::assistant(vec![ContentBlock::text("hi")]));
+        req.push_message(Message::user(vec![ContentBlock::text("hello")]))
+            .push_message(Message::assistant(vec![ContentBlock::text("hi")]));
 
         assert_eq!(req.messages.len(), 2);
         assert_eq!(req.messages[0].role, Role::User);
@@ -214,10 +224,10 @@ mod tests {
     }
 
     #[test]
-    fn messages_replaces() {
+    fn set_messages_replaces() {
         let mut req = Request::default();
-        req.message(Message::user(vec![ContentBlock::text("old")]))
-            .messages(vec![Message::user(vec![ContentBlock::text("new")])]);
+        req.push_message(Message::user(vec![ContentBlock::text("old")]))
+            .set_messages(vec![Message::user(vec![ContentBlock::text("new")])]);
 
         assert_eq!(req.messages.len(), 1);
         // Verify the new content is present (check via serialization roundtrip).
@@ -226,14 +236,14 @@ mod tests {
     }
 
     #[test]
-    fn tool_appends() {
+    fn push_tool_appends() {
         let mut req = Request::default();
-        req.tool(Tool {
+        req.push_tool(Tool {
             name: "a".into(),
             description: None,
             input_schema: Arc::new(serde_json::json!({})),
         })
-        .tool(Tool {
+        .push_tool(Tool {
             name: "b".into(),
             description: None,
             input_schema: Arc::new(serde_json::json!({})),
@@ -245,14 +255,14 @@ mod tests {
     }
 
     #[test]
-    fn tools_replaces() {
+    fn set_tools_replaces() {
         let mut req = Request::default();
-        req.tool(Tool {
+        req.push_tool(Tool {
             name: "old".into(),
             description: None,
             input_schema: Arc::new(serde_json::json!({})),
         })
-        .tools(vec![Tool {
+        .set_tools(vec![Tool {
             name: "new".into(),
             description: None,
             input_schema: Arc::new(serde_json::json!({})),
@@ -267,10 +277,10 @@ mod tests {
         // Construction phase — use builder
         let mut req = Request::builder()
             .system("You are a coding assistant.")
-            .message(Message::user(vec![ContentBlock::text(
+            .push_message(Message::user(vec![ContentBlock::text(
                 "Write hello world in Rust.",
             )]))
-            .tool(Tool {
+            .push_tool(Tool {
                 name: "run_code".into(),
                 description: Some("Execute code".into()),
                 input_schema: Arc::new(serde_json::json!({"type": "object"})),
@@ -278,13 +288,13 @@ mod tests {
             .build();
 
         // Simulate agent loop mutation
-        req.message(Message::assistant(vec![
+        req.push_message(Message::assistant(vec![
             ContentBlock::thinking("Let me write code."),
             ContentBlock::text(
                 "Here is the code:\n```rust\nfn main() { println!(\"Hello!\"); }\n```",
             ),
         ]))
-        .message(Message::user(vec![ContentBlock::text("Run it.")]));
+        .push_message(Message::user(vec![ContentBlock::text("Run it.")]));
 
         assert_eq!(req.messages.len(), 3);
         assert_eq!(req.messages[0].role, Role::User);

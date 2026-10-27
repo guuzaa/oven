@@ -23,6 +23,7 @@
   whatever came back asks `Response::has_tool_calls()` — that is what the agent does, so
   a call the provider stopped short of is not dropped without the model learning that it
   failed.
+- `Message::text()` reads the text out of a message, whatever role it has.
 
 ### Changed
 - **Breaking:** `ContentBlock::ToolUse` holds a `ToolUse` instead of four loose fields.
@@ -33,6 +34,26 @@
   `&ToolUse`; `Response::has_tool_use()` is `Response::has_tool_calls()`.
 - **Breaking:** `ContentBlock::tool_arguments` and `ContentBlock::parse_tool_arguments`
   are gone. The first is `ToolUse::wire_arguments()`, the second is `ToolUse::from_raw()`.
+- **Breaking:** the `Request` and `RequestBuilder` methods say what they do: `message`
+  is `push_message`, `messages` is `set_messages`, `tool` is `push_tool`, `tools` is
+  `set_tools`. Appending one and replacing the whole collection no longer differ by a
+  single letter, and the two types no longer answer to the same name with a different
+  meaning. `system`, `prompt` and `tool_choice` keep their names.
+- **Breaking:** `Message::system_prompt()` is gone. It read a system prompt out of a
+  message, which made a system *message* look like a second place to put the system
+  prompt of a request. `Message::text()` reads the text of any message; whether it is
+  the system one is the role's business, and the caller's.
+
+### Fixed
+- A request's system prompt has one place to live: `Request.system`. The protocols carry
+  it apart from the messages — the Responses API's `instructions`, the first `system`
+  message of a Chat Completions request — so it is not the same thing as a `Role::System`
+  message, which is one message of the conversation.
+- The `ContentBlock` docs said a `ToolResult` block lives under a `Role::User` message.
+  It lives under a `Role::Tool` message (`Message::tool_result` builds one), which is
+  what the encoders, the transcript and the turn accounting all read. A `Role::User`
+  message may carry one too — the Anthropic shape — and the encoders translate it, but
+  that is the alternative, not the rule.
 
 ## [0.6.0] - 2026-10-24
 

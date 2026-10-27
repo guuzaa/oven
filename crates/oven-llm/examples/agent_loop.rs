@@ -46,7 +46,7 @@ async fn main() -> ExampleResult<()> {
             workspace_root.display()
         ))
         .prompt(task)
-        .tools(coding_tools())
+        .set_tools(coding_tools())
         .build();
     let options = CallOptions::new("deepseek-v4-flash")
         .temperature(0.1)
@@ -58,7 +58,7 @@ async fn main() -> ExampleResult<()> {
 
         // 关键顺序：先提交完整的 assistant 消息（含 tool_use），再执行工具并追加结果。
         // OpenAI 兼容接口要求 role=tool 紧跟在发起该调用的 assistant 消息之后。
-        request.message(Message::assistant(response.content.clone()));
+        request.push_message(Message::assistant(response.content.clone()));
 
         if !response.has_tool_calls() {
             break;
@@ -67,7 +67,7 @@ async fn main() -> ExampleResult<()> {
         for call in response.tool_calls() {
             println!("tool: {}({})", call.name(), call.input());
             let (output, is_error) = execute_tool(&workspace_root, call.name(), call.input());
-            request.message(Message::tool_result(call.id(), output, is_error));
+            request.push_message(Message::tool_result(call.id(), output, is_error));
         }
     }
 

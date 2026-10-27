@@ -92,8 +92,8 @@ impl Agent {
             );
         }
         let mut builder = Request::builder()
-            .messages(messages)
-            .tools(self.llm_tools(mode));
+            .set_messages(messages)
+            .set_tools(self.llm_tools(mode));
         if let Some(system) = self.system_prompt(mode) {
             builder = builder.system(system);
         }

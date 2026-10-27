@@ -261,7 +261,7 @@ out typed:
 if response.has_tool_calls() {
     for call in response.tool_calls() {
         let (output, is_error) = run_tool(call.name(), call.input());
-        request.message(Message::tool_result(call.id(), output, is_error));
+        request.push_message(Message::tool_result(call.id(), output, is_error));
     }
 }
 ```

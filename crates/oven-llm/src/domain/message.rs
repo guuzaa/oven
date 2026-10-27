@@ -16,8 +16,10 @@ pub enum Role {
 
 /// 统一内容块 —— 参照 Anthropic 的粒度设计，足以表达任意 provider 的消息内容。
 ///
-/// `ToolResult` 统一挂在 `Role::User` 消息下；由各 provider 的 encoder 负责
-/// 翻译为其 wire 表示（例如 OpenAI 的 `role: "tool"` 消息）。
+/// `ToolResult` 挂在 `Role::Tool` 消息下（[`Message::tool_result`] 就是这样
+/// 造的）：由各 provider 的 encoder 负责翻译为其 wire 表示（例如 OpenAI 的
+/// `role: "tool"` 消息、Responses 的 `function_call_output`）。`Role::User`
+/// 消息里也可以放 `ToolResult` 块（Anthropic 的形状），encoder 同样能翻译。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -259,21 +261,17 @@ impl Message {
         }])
     }
 
-    /// Constructs system prompt from this `Message` only when its role is `Role::System`.
-    /// Otherwise, it returns `None`
-    pub fn system_prompt(&self) -> Option<String> {
-        match self.role {
-            Role::System => Some(
-                self.content
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect(),
-            ),
-            _ => None,
-        }
+    /// 这条消息的文本：按出现顺序拼接所有 `Text` 内容块。
+    ///
+    /// 非文本内容块（思考、图片、工具调用与结果）不计入。
+    pub fn text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -585,7 +583,7 @@ mod tests {
     fn message_system_constructor() {
         let msg = Message::system("be helpful");
         assert_eq!(msg.role, Role::System);
-        assert_eq!(msg.system_prompt(), Some("be helpful".into()));
+        assert_eq!(msg.text(), "be helpful");
         match &msg.content[..] {
             [ContentBlock::Text { text }] => assert_eq!(text, "be helpful"),
             _ => panic!("expected single text block"),
@@ -597,14 +595,14 @@ mod tests {
         let msg = Message::user(vec![ContentBlock::text("hi")]);
         assert_eq!(msg.role, Role::User);
         assert_eq!(msg.content.len(), 1);
-        assert!(msg.system_prompt().is_none());
+        assert_eq!(msg.text(), "hi");
     }
 
     #[test]
     fn message_user_text_constructor() {
         let msg = Message::user_text("hi");
         assert_eq!(msg.role, Role::User);
-        assert!(msg.system_prompt().is_none());
+        assert_eq!(msg.text(), "hi");
         match &msg.content[..] {
             [ContentBlock::Text { text }] => assert_eq!(text, "hi"),
             _ => panic!("expected single text block"),
@@ -616,7 +614,7 @@ mod tests {
         let msg = Message::assistant(vec![ContentBlock::text("hi")]);
         assert_eq!(msg.role, Role::Assistant);
         assert_eq!(msg.content.len(), 1);
-        assert!(msg.system_prompt().is_none());
+        assert_eq!(msg.text(), "hi");
     }
 
     #[test]
@@ -627,7 +625,7 @@ mod tests {
             [ContentBlock::Text { text }] => assert_eq!(text, "hi"),
             _ => panic!("expected single text block"),
         }
-        assert!(msg.system_prompt().is_none());
+        assert_eq!(msg.text(), "hi");
     }
 
     #[test]
@@ -639,7 +637,7 @@ mod tests {
         }]);
         assert_eq!(msg.role, Role::Tool);
         assert_eq!(msg.content.len(), 1);
-        assert!(msg.system_prompt().is_none());
+        assert!(msg.text().is_empty());
     }
 
     #[test]
