@@ -11,7 +11,7 @@ use super::types::{
     ChatCompletionChunk, ChatCompletionResponse, WireResponseToolCall, WireStreamDelta,
     WireStreamToolCall, WireUsage,
 };
-use crate::domain::message::{ContentBlock, Role};
+use crate::domain::message::{ContentBlock, Role, ToolUse};
 use crate::domain::response::{Response, StopReason, Usage};
 use crate::domain::stream::{Delta, StreamEvent, StreamPhase};
 
@@ -118,13 +118,11 @@ pub(crate) fn decode_response(
 /// 判定）才能命中模型输出边界的单元。原文不是合法 JSON 时同样留下，`input`
 /// 为 `{}`，重放走紧凑的空对象，调用方把这次调用作为工具错误交回模型。
 fn decode_tool_call(tool_call: WireResponseToolCall) -> ContentBlock {
-    let (input, raw_arguments) = ContentBlock::parse_tool_arguments(tool_call.function.arguments);
-    ContentBlock::ToolUse {
-        id: tool_call.id,
-        name: tool_call.function.name,
-        input,
-        raw_arguments,
-    }
+    ContentBlock::ToolUse(ToolUse::from_raw(
+        tool_call.id,
+        tool_call.function.name,
+        tool_call.function.arguments,
+    ))
 }
 
 /// 将 `WireUsage` 转换为 domain 层的 `Usage`。
@@ -402,12 +400,11 @@ impl StreamDecoder {
         self.open_blocks.insert(index);
         events.push(StreamEvent::ContentBlockStart {
             index,
-            block: ContentBlock::ToolUse {
-                id: id.unwrap_or_default().to_string(),
-                name: name.unwrap_or_default().to_string(),
-                input: serde_json::Value::String(String::new()),
-                raw_arguments: None,
-            },
+            block: ContentBlock::ToolUse(ToolUse::new(
+                id.unwrap_or_default(),
+                name.unwrap_or_default(),
+                serde_json::Value::String(String::new()),
+            )),
         });
         index
     }
@@ -529,15 +526,10 @@ mod tests {
         let wire = wire_response(vec![choice(message, Some("tool_calls"))], None);
         let response = decode_response(wire).unwrap();
         match &response.content[0] {
-            ContentBlock::ToolUse {
-                id,
-                input,
-                raw_arguments,
-                ..
-            } => {
-                assert_eq!(id, "call_1");
-                assert_eq!(input, &serde_json::json!({}));
-                assert_eq!(raw_arguments.as_deref(), Some("{"));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "call_1");
+                assert_eq!(call.input(), &serde_json::json!({}));
+                assert_eq!(call.raw_arguments(), Some("{"));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -812,12 +804,10 @@ mod tests {
         let response = decode_response(wire).unwrap();
         assert_eq!(response.content.len(), 1);
         match &response.content[0] {
-            ContentBlock::ToolUse {
-                id, name, input, ..
-            } => {
-                assert_eq!(id, "call_1");
-                assert_eq!(name, "get_weather");
-                assert_eq!(input, &serde_json::json!({"city": "Beijing"}));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "call_1");
+                assert_eq!(call.name(), "get_weather");
+                assert_eq!(call.input(), &serde_json::json!({"city": "Beijing"}));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -844,8 +834,8 @@ mod tests {
         let wire = wire_response(vec![choice(message, Some("tool_calls"))], None);
         let response = decode_response(wire).unwrap();
         match &response.content[0] {
-            ContentBlock::ToolUse { raw_arguments, .. } => {
-                assert_eq!(raw_arguments.as_deref(), Some(raw));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.raw_arguments(), Some(raw));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -1008,9 +998,9 @@ mod tests {
             StreamEvent::ContentBlockStart { index, block } => {
                 assert_eq!(*index, 0);
                 match block {
-                    ContentBlock::ToolUse { id, name, .. } => {
-                        assert_eq!(id, "call_1");
-                        assert_eq!(name, "get_weather");
+                    ContentBlock::ToolUse(call) => {
+                        assert_eq!(call.id(), "call_1");
+                        assert_eq!(call.name(), "get_weather");
                     }
                     other => panic!("expected ToolUse block, got {other:?}"),
                 }

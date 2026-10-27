@@ -131,7 +131,7 @@ fn encode_user_message(
                     "Thinking block is not allowed in a Role::User message".to_string(),
                 ));
             }
-            ContentBlock::ToolUse { .. } => {
+            ContentBlock::ToolUse(_) => {
                 return Err(EncodeError::InvalidContent(
                     "ToolUse block is not allowed in a Role::User message".to_string(),
                 ));
@@ -271,18 +271,13 @@ fn encode_assistant_message(
         match block {
             ContentBlock::Thinking { .. } => { /* 不回传思维内容 */ }
             ContentBlock::Text { text } => text_parts.push(text.clone()),
-            ContentBlock::ToolUse {
-                id,
-                name,
-                input,
-                raw_arguments,
-            } => {
+            ContentBlock::ToolUse(call) => {
                 flush_assistant_text(&mut text_parts, out);
                 out.push(ResponseInputItem::FunctionCall {
-                    call_id: id.clone(),
-                    name: name.clone(),
-                    // 优先原样回传 wire 原始文本，见 [`ContentBlock::tool_arguments`]。
-                    arguments: ContentBlock::tool_arguments(input, raw_arguments.as_deref()),
+                    call_id: call.id().to_owned(),
+                    name: call.name().to_owned(),
+                    // 优先原样回传 wire 原始文本，见 [`ToolUse::wire_arguments`]。
+                    arguments: call.wire_arguments(),
                 });
             }
             other => {
@@ -342,6 +337,7 @@ fn encode_tool_choice(choice: &ToolChoice) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::message::ToolUse;
     use crate::domain::options::CallOptions;
 
     fn sample_options() -> CallOptions {
@@ -396,12 +392,9 @@ mod tests {
     fn encode_replays_raw_function_call_arguments() {
         let raw = r#"{ "city": "Hangzhou" }"#;
         let req = Request {
-            messages: vec![Message::assistant(vec![ContentBlock::ToolUse {
-                id: "call_1".to_string(),
-                name: "get_weather".to_string(),
-                input: serde_json::from_str(raw).unwrap(),
-                raw_arguments: Some(raw.to_string()),
-            }])],
+            messages: vec![Message::assistant(vec![ContentBlock::ToolUse(
+                ToolUse::from_raw("call_1", "get_weather", raw.to_string()),
+            )])],
             ..Default::default()
         };
         let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();

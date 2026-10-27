@@ -9,7 +9,7 @@ use oven_agent::{
 };
 use oven_llm::{
     CallOptions, ContentBlock, ModelId, ModelInfo, Provider, ProviderError, ProviderName, Request,
-    Response, Role, StopReason, StreamEvent, Usage,
+    Response, Role, StopReason, StreamEvent, ToolUse, Usage,
 };
 use oven_mem::{MemoryRoots, MemoryStore};
 use oven_proto::{NullSink, TurnId};
@@ -392,12 +392,7 @@ fn tool_response(name: &str, input: serde_json::Value) -> Response {
         id: "resp".into(),
         model: "mock".into(),
         role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: "c1".into(),
-            name: name.into(),
-            input,
-            raw_arguments: None,
-        }],
+        content: vec![ContentBlock::ToolUse(ToolUse::new("c1", name, input))],
         stop_reason: Some(StopReason::ToolUse),
         usage: Some(Usage {
             input_tokens: 1,

@@ -15,7 +15,9 @@ use oven_proto::TurnId;
 use oven_proto::{NullSink, VecEventSink};
 use std::time::Duration;
 
-use oven_llm::{ContentBlock, Message, Provider, Request, Response, Role, Usage};
+use oven_llm::{
+    ContentBlock, Message, Provider, Request, Response, Role, ToolArgumentsError, ToolUse, Usage,
+};
 
 use crate::core::turn::TurnOutput;
 use oven_proto::AgentError;
@@ -365,12 +367,9 @@ fn delta_block(delta: &Delta) -> ContentBlock {
     match delta {
         Delta::ThinkingDelta { .. } => ContentBlock::thinking(ACCUMULATED_LATER),
         Delta::TextDelta { .. } => ContentBlock::text(ACCUMULATED_LATER),
-        Delta::InputJsonDelta { .. } => ContentBlock::ToolUse {
-            id: "call_1".into(),
-            name: "bash".into(),
-            input: json!({}),
-            raw_arguments: None,
-        },
+        Delta::InputJsonDelta { .. } => {
+            ContentBlock::ToolUse(ToolUse::new("call_1", "bash", json!({})))
+        }
     }
 }
 
@@ -403,12 +402,7 @@ fn tool_response(id: &str, name: &str, input: serde_json::Value) -> Response {
         id: "resp".into(),
         model: "mock".into(),
         role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: id.into(),
-            name: name.into(),
-            input,
-            raw_arguments: None,
-        }],
+        content: vec![ContentBlock::ToolUse(ToolUse::new(id, name, input))],
         stop_reason: Some(StopReason::ToolUse),
         usage: Some(Usage {
             input_tokens: 10,
@@ -694,12 +688,7 @@ fn calls_response(calls: &[(&str, &str)]) -> Response {
     Response {
         content: calls
             .iter()
-            .map(|(id, name)| ContentBlock::ToolUse {
-                id: (*id).into(),
-                name: (*name).into(),
-                input: json!({}),
-                raw_arguments: None,
-            })
+            .map(|(id, name)| ContentBlock::ToolUse(ToolUse::new(*id, *name, json!({}))))
             .collect(),
         ..tool_response(calls[0].0, calls[0].1, json!({}))
     }
@@ -1027,8 +1016,11 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
     const RECOVERED: &str = "recovered";
     const BROKEN_ARGUMENTS: &str = "{";
 
-    let broken = super::step::invalid_json_arguments(BROKEN_ARGUMENTS).unwrap();
-    assert_eq!(broken, super::step::INVALID_JSON_ARGUMENTS);
+    assert_eq!(
+        ToolUse::from_raw("call_bad", "file_read", BROKEN_ARGUMENTS.to_string()).arguments(),
+        Err(ToolArgumentsError::InvalidJson)
+    );
+    let broken = super::step::INVALID_JSON_ARGUMENTS;
 
     let valid_arguments = format!(r#"{{"path":"{NOTE_NAME}"}}"#);
     let provider = QueuedStreams::new(vec![
@@ -1036,12 +1028,11 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
             message_start(),
             LlmStreamEvent::ContentBlockStart {
                 index: 0,
-                block: ContentBlock::ToolUse {
-                    id: "call_ok".into(),
-                    name: "file_read".into(),
-                    input: serde_json::Value::String(String::new()),
-                    raw_arguments: None,
-                },
+                block: ContentBlock::ToolUse(ToolUse::new(
+                    "call_ok",
+                    "file_read",
+                    serde_json::Value::String(String::new()),
+                )),
             },
             LlmStreamEvent::ContentBlockDelta {
                 index: 0,
@@ -1051,12 +1042,11 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
             },
             LlmStreamEvent::ContentBlockStart {
                 index: 3,
-                block: ContentBlock::ToolUse {
-                    id: "call_bad".into(),
-                    name: "file_read".into(),
-                    input: serde_json::Value::String(String::new()),
-                    raw_arguments: None,
-                },
+                block: ContentBlock::ToolUse(ToolUse::new(
+                    "call_bad",
+                    "file_read",
+                    serde_json::Value::String(String::new()),
+                )),
             },
             LlmStreamEvent::ContentBlockDelta {
                 index: 3,
@@ -1100,7 +1090,7 @@ async fn invalid_tool_arguments_return_a_tool_error_and_the_turn_continues() {
             AgentEvent::Tool(ToolEvent::Finished {
                 result: ToolResult::Failed { error, .. },
                 ..
-            }) if error == &broken
+            }) if error == broken
         )),
         "broken arguments are a tool error, not a failed turn"
     );
@@ -1166,12 +1156,11 @@ async fn tool_call_markup_written_as_text_is_not_shown() {
             },
             LlmStreamEvent::ContentBlockStart {
                 index: 1,
-                block: ContentBlock::ToolUse {
-                    id: "call_bad".into(),
-                    name: "bash".into(),
-                    input: serde_json::Value::String(String::new()),
-                    raw_arguments: None,
-                },
+                block: ContentBlock::ToolUse(ToolUse::new(
+                    "call_bad",
+                    "bash",
+                    serde_json::Value::String(String::new()),
+                )),
             },
             LlmStreamEvent::ContentBlockDelta {
                 index: 1,

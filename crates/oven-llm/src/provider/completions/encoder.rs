@@ -167,7 +167,7 @@ fn encode_user_message(
                     "Thinking block is not allowed in a Role::User message".to_string(),
                 ));
             }
-            ContentBlock::ToolUse { .. } => {
+            ContentBlock::ToolUse(_) => {
                 return Err(CompletionsEncodeError::InvalidContent(
                     "ToolUse block is not allowed in a Role::User message".to_string(),
                 ));
@@ -277,7 +277,7 @@ fn encode_tool_message(
 /// （`Image`、`ToolResult`）返回 `EncodeError::InvalidContent`。
 ///
 /// `tool_calls[].function.arguments` 优先原样回传内容块里的 wire 原始文本
-/// （见 [`ContentBlock::tool_arguments`]）：provider 的隐式上下文缓存按「完整
+/// （见 [`ToolUse::wire_arguments`]）：provider 的隐式上下文缓存按「完整
 /// 匹配缓存单元」判定，重新序列化会让模型输出边界的单元失配。
 fn encode_assistant_message(message: &Message) -> Result<WireMessage, CompletionsEncodeError> {
     let mut text = String::new();
@@ -288,18 +288,13 @@ fn encode_assistant_message(message: &Message) -> Result<WireMessage, Completion
         match block {
             ContentBlock::Thinking { thinking } => reasoning.push_str(thinking),
             ContentBlock::Text { text: t } => text.push_str(t),
-            ContentBlock::ToolUse {
-                id,
-                name,
-                input,
-                raw_arguments,
-            } => {
+            ContentBlock::ToolUse(call) => {
                 tool_calls.push(WireToolCall {
-                    id: id.clone(),
+                    id: call.id().to_owned(),
                     kind: "function".to_string(),
                     function: WireToolCallFunction {
-                        name: name.clone(),
-                        arguments: ContentBlock::tool_arguments(input, raw_arguments.as_deref()),
+                        name: call.name().to_owned(),
+                        arguments: call.wire_arguments(),
                     },
                 });
             }
@@ -358,6 +353,7 @@ fn encode_tool_choice(choice: &ToolChoice) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::message::ToolUse;
     use crate::domain::options::CallOptions;
 
     fn sample_options() -> CallOptions {
@@ -609,12 +605,11 @@ mod tests {
         // key 是 schema 顺序。重放必须原样回传，重新序列化会让 provider 的
         // 「模型输出结束位置」缓存单元失配。
         let raw = r#"{"path": "src/main.rs", "limit": 10}"#;
-        let message = Message::assistant(vec![ContentBlock::ToolUse {
-            id: "call_1".to_string(),
-            name: "read_file".to_string(),
-            input: serde_json::from_str(raw).unwrap(),
-            raw_arguments: Some(raw.to_string()),
-        }]);
+        let message = Message::assistant(vec![ContentBlock::ToolUse(ToolUse::from_raw(
+            "call_1",
+            "read_file",
+            raw.to_string(),
+        ))]);
         let wire = encode_assistant_message(&message).unwrap();
         let tool_calls = wire.tool_calls.unwrap();
         assert_eq!(tool_calls[0].function.arguments, raw);

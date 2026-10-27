@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::message::{ContentBlock, Role};
+use super::message::{ContentBlock, Role, ToolUse};
 use super::response::{Response, StopReason, Usage};
 
 /// `StreamDecoder` 的生命周期阶段。
@@ -61,6 +61,41 @@ pub enum StreamEvent {
         usage: Option<Usage>,
     },
     MessageStop,
+}
+
+impl StreamEvent {
+    /// 事件里的文本增量；不是文本事件时为 `None`。
+    pub fn text_delta(&self) -> Option<&str> {
+        match self {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::TextDelta { text },
+                ..
+            } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// 事件里的思考增量；不是思考事件时为 `None`。
+    pub fn thinking_delta(&self) -> Option<&str> {
+        match self {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::ThinkingDelta { thinking },
+                ..
+            } => Some(thinking),
+            _ => None,
+        }
+    }
+
+    /// 事件里的工具参数增量；不是工具参数事件时为 `None`。
+    pub fn tool_input_delta(&self) -> Option<&str> {
+        match self {
+            StreamEvent::ContentBlockDelta {
+                delta: Delta::InputJsonDelta { partial_json },
+                ..
+            } => Some(partial_json),
+            _ => None,
+        }
+    }
 }
 
 /// [`StreamCollector::finish`] 可能返回的错误。
@@ -123,18 +158,13 @@ impl StreamCollector {
                 self.model = Some(model.clone());
             }
             StreamEvent::ContentBlockStart { index, block } => {
-                if let ContentBlock::ToolUse {
-                    input,
-                    raw_arguments,
-                    ..
-                } = block
-                {
+                if let ContentBlock::ToolUse(call) = block {
                     // 起始块可能已经带着 wire 原始文本（有的 provider 一次给全
                     // 参数），否则退回占位 `input`：流式阶段它只是一个空串或已到
                     // 达的参数片段，`InputJsonDelta` 会继续往后拼。
-                    let initial_arguments = match raw_arguments {
-                        Some(raw) => raw.clone(),
-                        None => match input {
+                    let initial_arguments = match call.raw_arguments() {
+                        Some(raw) => raw.to_owned(),
+                        None => match call.input() {
                             serde_json::Value::String(arguments) => arguments.clone(),
                             arguments => arguments.to_string(),
                         },
@@ -188,19 +218,13 @@ impl StreamCollector {
             // 空串没有可回传的原文。合法 JSON 逐字节保留，供缓存命中。非法
             // JSON（模型把参数截断在 `{` 之类）不让整轮失败：原文留下，由
             // agent 把它作为这次工具调用的错误交回模型。
-            let (input, raw) = ContentBlock::parse_tool_arguments(raw_arguments);
-            let Some(ContentBlock::ToolUse {
-                input: target,
-                raw_arguments: target_raw,
-                ..
-            }) = blocks.get_mut(&index)
-            else {
+            let Some(ContentBlock::ToolUse(call)) = blocks.get_mut(&index) else {
                 return Err(StreamCollectorError::Stream(format!(
                     "tool arguments collected for non-tool block {index}"
                 )));
             };
-            *target = input;
-            *target_raw = raw;
+            let (id, name) = (call.id.clone(), call.name.clone());
+            *call = ToolUse::from_raw(id, name, raw_arguments);
         }
 
         Ok(Response {
@@ -503,12 +527,10 @@ mod tests {
         assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
         assert_eq!(resp.content.len(), 1);
         match &resp.content[0] {
-            ContentBlock::ToolUse {
-                id, name, input, ..
-            } => {
-                assert_eq!(id, "tool_1");
-                assert_eq!(name, "read_file");
-                assert_eq!(input["path"], "src/main.rs");
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "tool_1");
+                assert_eq!(call.name(), "read_file");
+                assert_eq!(call.input()["path"], "src/main.rs");
             }
             _ => panic!("expected ToolUse block"),
         }
@@ -559,13 +581,9 @@ mod tests {
 
         let resp = c.finish().unwrap();
         match &resp.content[0] {
-            ContentBlock::ToolUse {
-                input,
-                raw_arguments,
-                ..
-            } => {
-                assert_eq!(raw_arguments.as_deref(), Some(raw));
-                assert_eq!(input["location"], "Hangzhou, Zhejiang");
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.raw_arguments(), Some(raw));
+                assert_eq!(call.input()["location"], "Hangzhou, Zhejiang");
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -582,12 +600,7 @@ mod tests {
         });
         c.push(&StreamEvent::ContentBlockStart {
             index: 0,
-            block: ContentBlock::ToolUse {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                input: serde_json::json!({ "path": "a.rs" }),
-                raw_arguments: Some(raw.into()),
-            },
+            block: ContentBlock::ToolUse(ToolUse::from_raw("call_1", "read_file", raw.to_string())),
         });
         c.push(&StreamEvent::MessageDelta {
             stop_reason: Some(StopReason::ToolUse),
@@ -596,8 +609,8 @@ mod tests {
 
         let resp = c.finish().unwrap();
         match &resp.content[0] {
-            ContentBlock::ToolUse { raw_arguments, .. } => {
-                assert_eq!(raw_arguments.as_deref(), Some(raw));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.raw_arguments(), Some(raw));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -626,13 +639,9 @@ mod tests {
 
         let resp = c.finish().unwrap();
         match &resp.content[0] {
-            ContentBlock::ToolUse {
-                input,
-                raw_arguments,
-                ..
-            } => {
-                assert_eq!(raw_arguments, &None);
-                assert_eq!(input, &serde_json::json!({}));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.raw_arguments(), None);
+                assert_eq!(call.input(), &serde_json::json!({}));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -690,22 +699,17 @@ mod tests {
         let resp = c.finish().unwrap();
         assert_eq!(resp.content.len(), 2);
         match &resp.content[0] {
-            ContentBlock::ToolUse { id, input, .. } => {
-                assert_eq!(id, "tool_ok");
-                assert_eq!(input["path"], "a.rs");
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "tool_ok");
+                assert_eq!(call.input()["path"], "a.rs");
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
         match &resp.content[1] {
-            ContentBlock::ToolUse {
-                id,
-                input,
-                raw_arguments,
-                ..
-            } => {
-                assert_eq!(id, "tool_bad");
-                assert_eq!(input, &serde_json::json!({}));
-                assert_eq!(raw_arguments.as_deref(), Some("{"));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "tool_bad");
+                assert_eq!(call.input(), &serde_json::json!({}));
+                assert_eq!(call.raw_arguments(), Some("{"));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }

@@ -231,7 +231,6 @@ select! { _ = cancelled() => Err(cancelled()), res = turn => res }`,
     code: `let request = self.build_request();
 let options = self.build_options();   // CallOptions { reasoning_effort }
 Request {
-    model,
     system: compose_system(base, mode),
     messages: [history_without_system, todo_list?, user_reminder?],
     tools: self.llm_tools(mode),
@@ -242,11 +241,11 @@ Request {
     label: "stream",
     tag: "llm",
     title: "Stream the reply",
-    text: "Thinking and text deltas are forwarded as they arrive. Text or a tool-call delta closes the thinking window. If the stream cannot start, the agent falls back to a one-shot completion; the router retries transient provider errors.",
-    code: `match router.stream(&req, &options).await {
-    Ok(stream) => forward ThinkingDelta / TextDelta,
-    Err(_) => Provider::complete(&router, &req, &options).await?,
-}`,
+    text: "Thinking and text deltas are forwarded as they arrive. Text or a tool-call delta closes the thinking window. A model that cannot stream goes out as a one-shot completion instead; the router retries transient provider errors.",
+    code: `complete_streaming(router.as_ref(), &req, &options, |event| {
+    forward ThinkingDelta / TextDelta,
+})
+.await?`,
   },
   {
     label: "commit reply",
@@ -262,7 +261,7 @@ sink.emit(AgentEvent::Usage { usage });`,
     tag: "decision",
     title: "Did it ask for tools?",
     text: "No tool calls means the step is final: the loop emits Completed with usage and duration and returns the text. Otherwise the calls are planned, gated, run and committed.",
-    code: `if !response.has_tool_use() {
+    code: `if !response.has_tool_calls() {
     return Ok(Step { text, calls: vec![], usage }); // is_final()
 }`,
   },

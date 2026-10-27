@@ -809,7 +809,7 @@ mod tests {
         ));
         assert!(matches!(
             &response.content[1],
-            ContentBlock::ToolUse { name, input, .. } if name == "get_weather" && input == &json!({})
+            ContentBlock::ToolUse(call) if call.name() == "get_weather" && call.input() == &json!({})
         ));
 
         let requests = mock_server.received_requests().await.unwrap();

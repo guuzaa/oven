@@ -5,7 +5,7 @@ use futures::stream::BoxStream;
 use mockall::mock;
 use oven_llm::{
     CallOptions, ContentBlock as LlmContentBlock, ModelId, ModelInfo, Provider, ProviderError,
-    ProviderName, Request, Response, Role, StopReason, Usage,
+    ProviderName, Request, Response, Role, StopReason, ToolUse, Usage,
 };
 
 use crate::AppBuilder;
@@ -186,12 +186,11 @@ async fn mcp_tools_mounted_on_agent() {
             id: "r1".into(),
             model: "mock".into(),
             role: Role::Assistant,
-            content: vec![LlmContentBlock::ToolUse {
-                id: "call-1".into(),
-                name: "test_echo".into(),
-                input: serde_json::json!({"text": "hi"}),
-                raw_arguments: None,
-            }],
+            content: vec![LlmContentBlock::ToolUse(ToolUse::new(
+                "call-1",
+                "test_echo",
+                serde_json::json!({"text": "hi"}),
+            ))],
             stop_reason: Some(StopReason::ToolUse),
             usage: Some(usage(2, 1)),
         },
@@ -295,12 +294,11 @@ url = "http://{addr}/mcp"
             id: "r1".into(),
             model: "mock".into(),
             role: Role::Assistant,
-            content: vec![LlmContentBlock::ToolUse {
-                id: "call-1".into(),
-                name: "test_echo".into(),
-                input: serde_json::json!({"text": "hi"}),
-                raw_arguments: None,
-            }],
+            content: vec![LlmContentBlock::ToolUse(ToolUse::new(
+                "call-1",
+                "test_echo",
+                serde_json::json!({"text": "hi"}),
+            ))],
             stop_reason: Some(StopReason::ToolUse),
             usage: Some(usage(2, 1)),
         },

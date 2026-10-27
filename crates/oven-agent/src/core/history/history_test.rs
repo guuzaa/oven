@@ -1,4 +1,4 @@
-use oven_llm::{ContentBlock, Role};
+use oven_llm::{ContentBlock, Role, ToolUse};
 
 use super::*;
 
@@ -12,12 +12,7 @@ fn usage(input: u32) -> Usage {
 }
 
 fn assistant_tools(id: &str, name: &str, input: serde_json::Value) -> Message {
-    Message::assistant(vec![ContentBlock::ToolUse {
-        id: id.to_string(),
-        name: name.to_string(),
-        input,
-        raw_arguments: None,
-    }])
+    Message::assistant(vec![ContentBlock::ToolUse(ToolUse::new(id, name, input))])
 }
 
 fn usage_inputs(h: &History) -> Vec<u32> {

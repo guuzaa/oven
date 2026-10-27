@@ -15,10 +15,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use futures::StreamExt;
 use oven_llm::{
-    ContentBlock, Delta, Message, Provider, ProviderBuilder, ProviderName, Request, StopReason,
-    StreamCollector, StreamEvent, Tool,
+    CallOptions, Message, Provider, ProviderBuilder, ProviderName, ReasoningEffort, Request, Tool,
+    complete_streaming,
 };
 use serde_json::{Value, json};
 
@@ -49,76 +48,54 @@ async fn main() -> ExampleResult<()> {
         .prompt(task)
         .tools(coding_tools())
         .build();
-    let options = oven_llm::CallOptions::new("deepseek-v4-flash")
+    let options = CallOptions::new("deepseek-v4-flash")
         .temperature(0.1)
-        .reasoning_effort(oven_llm::ReasoningEffort::High);
+        .reasoning_effort(ReasoningEffort::High);
 
     loop {
         let response = collect_streamed_response(provider.as_ref(), &request, &options).await?;
-        let requests_tools =
-            response.stop_reason == Some(StopReason::ToolUse) && response.has_tool_use();
         println!("usage: {:?}", response.usage);
 
         // 关键顺序：先提交完整的 assistant 消息（含 tool_use），再执行工具并追加结果。
         // OpenAI 兼容接口要求 role=tool 紧跟在发起该调用的 assistant 消息之后。
         request.message(Message::assistant(response.content.clone()));
 
-        if !requests_tools {
+        if !response.has_tool_calls() {
             break;
         }
 
-        for block in response.tool_uses() {
-            let ContentBlock::ToolUse {
-                id, name, input, ..
-            } = block
-            else {
-                continue;
-            };
-            println!("tool: {name}({input})");
-            let (output, is_error) = execute_tool(&workspace_root, name, input);
-            request.message(Message::tool_result(id, output, is_error));
+        for call in response.tool_calls() {
+            println!("tool: {}({})", call.name(), call.input());
+            let (output, is_error) = execute_tool(&workspace_root, call.name(), call.input());
+            request.message(Message::tool_result(call.id(), output, is_error));
         }
     }
 
     Ok(())
 }
 
-/// 消费一次流式响应，利用 [`StreamCollector`] 拼装完整的 assistant [`Response`]。
-///
-/// 文本和 thinking 增量会实时打印到终端；工具参数则静默累积。
 async fn collect_streamed_response<P: Provider + ?Sized>(
     provider: &P,
     request: &Request,
-    options: &oven_llm::CallOptions,
+    options: &CallOptions,
 ) -> ExampleResult<oven_llm::Response> {
-    let mut stream = provider.stream(request, options).await?;
-    let mut collector = StreamCollector::new();
-
     print!("\nassistant: ");
     io::stdout().flush()?;
 
-    while let Some(event) = stream.next().await {
-        let event = event?;
-
-        if let StreamEvent::ContentBlockDelta { delta, .. } = &event {
-            match delta {
-                Delta::ThinkingDelta { thinking } => {
-                    print!("\x1b[90m{thinking}\x1b[0m");
-                    io::stdout().flush()?;
-                }
-                Delta::TextDelta { text } => {
-                    print!("{text}");
-                    io::stdout().flush()?;
-                }
-                Delta::InputJsonDelta { .. } => {}
-            }
+    let response = complete_streaming(provider, request, options, |event| {
+        if let Some(thinking) = event.thinking_delta() {
+            print!("\x1b[90m{thinking}\x1b[0m");
+        } else if let Some(text) = event.text_delta() {
+            print!("{text}");
+        } else {
+            return;
         }
-
-        collector.push(&event);
-    }
+        let _ = io::stdout().flush();
+    })
+    .await?;
     println!();
 
-    Ok(collector.finish()?)
+    Ok(response)
 }
 
 fn coding_tools() -> Vec<Tool> {

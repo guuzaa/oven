@@ -21,10 +21,9 @@ use std::sync::Arc;
 
 use std::io::{self, Write};
 
-use futures::StreamExt;
 use oven_llm::{
-    CallOptions, ContentBlock, Delta, Message, Provider, ProviderBuilder, ProviderName, Request,
-    StopReason, StreamCollector, StreamEvent, Tool,
+    CallOptions, Message, Provider, ProviderBuilder, ProviderName, Request, Tool,
+    complete_streaming,
 };
 use serde_json::{Value, json};
 
@@ -72,13 +71,13 @@ async fn main() {
             if !text.is_empty() {
                 println!("  text: {text}");
             }
-            for block in response.tool_uses() {
-                if let ContentBlock::ToolUse {
-                    id, name, input, ..
-                } = block
-                {
-                    println!("  tool_use: {id} {name}({input})");
-                }
+            for call in response.tool_calls() {
+                println!(
+                    "  tool_use: {} {}({})",
+                    call.id(),
+                    call.name(),
+                    call.input()
+                );
             }
         }
         Err(err) => eprintln!("complete() failed (expected without a real API key): {err}"),
@@ -90,39 +89,28 @@ async fn main() {
     run_tool_loop(provider.as_ref()).await;
 }
 
-/// 消费一次流式响应并实时打印增量（thinking 灰色、text 正常色、工具参数静默
-/// 累积），最后用 [`StreamCollector`] 拼装完整的 assistant [`Response`]。
 async fn collect_streamed_response<P: Provider + ?Sized>(
     provider: &P,
     request: &Request,
     options: &CallOptions,
 ) -> Result<oven_llm::Response, oven_llm::ProviderError> {
-    let mut stream = provider.stream(request, options).await?;
-    let mut collector = StreamCollector::new();
-
     print!("  assistant: ");
     io::stdout().flush().expect("flush stdout");
 
-    while let Some(event) = stream.next().await {
-        let event = event?;
-        if let StreamEvent::ContentBlockDelta { delta, .. } = &event {
-            match delta {
-                Delta::ThinkingDelta { thinking } => {
-                    print!("\x1b[90m{thinking}\x1b[0m");
-                    io::stdout().flush().expect("flush stdout");
-                }
-                Delta::TextDelta { text } => {
-                    print!("{text}");
-                    io::stdout().flush().expect("flush stdout");
-                }
-                Delta::InputJsonDelta { .. } => {}
-            }
+    let response = complete_streaming(provider, request, options, |event| {
+        if let Some(thinking) = event.thinking_delta() {
+            print!("\x1b[90m{thinking}\x1b[0m");
+        } else if let Some(text) = event.text_delta() {
+            print!("{text}");
+        } else {
+            return;
         }
-        collector.push(&event);
-    }
+        io::stdout().flush().expect("flush stdout");
+    })
+    .await?;
     println!();
 
-    Ok(collector.finish()?)
+    Ok(response)
 }
 
 /// 流式工具调用循环：把每次流式响应追加为 assistant 消息，若响应请求调用工具
@@ -149,21 +137,15 @@ async fn run_tool_loop<P: Provider + ?Sized>(provider: &P) {
         // 并追加 function_call_output，保证多轮 wire 顺序正确。
         request.message(Message::assistant(response.content.clone()));
 
-        if response.stop_reason != Some(StopReason::ToolUse) || !response.has_tool_use() {
+        if !response.has_tool_calls() {
             println!("tool loop finished");
             return;
         }
 
-        for block in response.tool_uses() {
-            let ContentBlock::ToolUse {
-                id, name, input, ..
-            } = block
-            else {
-                continue;
-            };
-            println!("  tool call: {name}({input})");
-            let (output, is_error) = execute_demo_tool(name, input);
-            request.message(Message::tool_result(id, output, is_error));
+        for call in response.tool_calls() {
+            println!("  tool call: {}({})", call.name(), call.input());
+            let (output, is_error) = execute_demo_tool(call.name(), call.input());
+            request.message(Message::tool_result(call.id(), output, is_error));
         }
     }
 }

@@ -133,8 +133,8 @@ impl TodoList {
             .rev()
             .flat_map(|m| m.content.iter().rev())
             .find_map(|block| match block {
-                ContentBlock::ToolUse { name, input, .. } if name == TODO_WRITE_TOOL => {
-                    Self::parse(input).ok()
+                ContentBlock::ToolUse(call) if call.name() == TODO_WRITE_TOOL => {
+                    Self::parse(call.input()).ok()
                 }
                 _ => None,
             })
@@ -158,18 +158,17 @@ impl TodoList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_llm::Role;
+    use oven_llm::{Role, ToolUse};
     use serde_json::json;
 
     fn todo_use(id: &str, input: serde_json::Value) -> Message {
         Message {
             role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: id.into(),
-                name: TODO_WRITE_TOOL.into(),
+            content: vec![ContentBlock::ToolUse(ToolUse::new(
+                id,
+                TODO_WRITE_TOOL,
                 input,
-                raw_arguments: None,
-            }],
+            ))],
         }
     }
 

@@ -1,6 +1,7 @@
 //! `Role` / `ContentBlock` / `Message`：provider 无关的消息模型。
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// 消息角色。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -29,31 +30,134 @@ pub enum ContentBlock {
     Image {
         source: ImageSource,
     },
-    ToolUse {
-        id: String,
-        name: String,
-        input: serde_json::Value,
-        /// wire 上原样收到的 `arguments` JSON 文本，逐字节保留。
-        ///
-        /// provider 的隐式上下文缓存按「完整匹配一个缓存前缀单元」判定命中，
-        /// 其中「模型输出结束位置」的单元就是模型当时生成的那串 token。重放
-        /// assistant 消息时若重新序列化 `input`（紧凑分隔符、key 按字典序），
-        /// 文本与生成时不一致，该单元便永远无法完整匹配，整轮（思维链 + 正文 +
-        /// 工具调用）都会掉出缓存。所以 decoder 与 `StreamCollector` 把原始文本
-        /// 存放在这里，encoder 重放时优先原样回传。
-        ///
-        /// `None` 表示这条内容块不是从 wire 解析出来的（手工构造），encoder 会
-        /// 退回 `input` 的紧凑序列化。若调用方改写了 `input`，必须同时更新或清空
-        /// 本字段，否则重放出去的仍是旧参数。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        raw_arguments: Option<String>,
-    },
+    ToolUse(ToolUse),
     ToolResult {
         tool_use_id: String,
         content: Vec<ContentBlock>,
         #[serde(default)]
         is_error: bool,
     },
+}
+
+/// 模型发起的一次工具调用。
+///
+/// `raw_arguments` 是 wire 上原样收到的 `arguments` JSON 文本，逐字节保留。
+///
+/// provider 的隐式上下文缓存按「完整匹配一个缓存前缀单元」判定命中，其中
+/// 「模型输出结束位置」的单元就是模型当时生成的那串 token。重放 assistant 消息
+/// 时若重新序列化 `input`（紧凑分隔符、key 按字典序），文本与生成时不一致，
+/// 该单元便永远无法完整匹配，整轮（思维链 + 正文 + 工具调用）都会掉出缓存。
+/// 所以 decoder 与 `StreamCollector` 把原始文本存在这里，encoder 重放时优先
+/// 原样回传。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolUse {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) input: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) raw_arguments: Option<String>,
+}
+
+/// 工具参数不是合法 JSON 时的错误。
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum ToolArgumentsError {
+    /// 原文不是合法 JSON。原文本身可以从 [`ToolUse::raw_arguments`] 拿到。
+    #[error("tool arguments are not valid JSON")]
+    InvalidJson,
+}
+
+impl ToolUse {
+    /// 一次手工构造的工具调用：没有 wire 原文，重放时用 `input` 的紧凑序列化。
+    pub fn new(id: impl Into<String>, name: impl Into<String>, input: serde_json::Value) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            input,
+            raw_arguments: None,
+        }
+    }
+
+    /// 一次从 wire 解析出来的工具调用。
+    ///
+    /// `raw` 是模型生成的那串 `arguments` 文本。空白文本没有可回放的原文：
+    /// `input` 为 `{}`，原文为 `None`。非法 JSON 同样保留原文，调用方据此把
+    /// 这次调用作为工具错误交回模型；`input` 用 `{}`，重放时
+    /// [`wire_arguments`](Self::wire_arguments) 会退回它。
+    pub fn from_raw(id: impl Into<String>, name: impl Into<String>, raw: String) -> Self {
+        let (input, raw_arguments) = split_tool_arguments(raw);
+        Self {
+            id: id.into(),
+            name: name.into(),
+            input,
+            raw_arguments,
+        }
+    }
+
+    /// provider 给这次调用分配的 id，回传结果时原样带上。
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// 解析后的参数。参数不是合法 JSON 时这里是空对象：真正要跑的值用
+    /// [`arguments`](Self::arguments)，它在这种情况下报错。
+    pub fn input(&self) -> &serde_json::Value {
+        &self.input
+    }
+
+    /// wire 上的原始 `arguments` 文本；手工构造的调用没有。
+    pub fn raw_arguments(&self) -> Option<&str> {
+        self.raw_arguments.as_deref()
+    }
+
+    /// 改写参数，并清掉 wire 原文：原文与新参数不再对应，不能再原样回放。
+    pub fn set_input(&mut self, input: serde_json::Value) {
+        self.input = input;
+        self.raw_arguments = None;
+    }
+
+    /// 这次调用要跑的参数。原文不是合法 JSON 时返回错误；调用方据此把这次
+    /// 调用作为工具错误交回模型，而不是拿一个空参数去跑。
+    pub fn arguments(&self) -> Result<&serde_json::Value, ToolArgumentsError> {
+        if self.raw_is_json() {
+            Ok(&self.input)
+        } else {
+            Err(ToolArgumentsError::InvalidJson)
+        }
+    }
+
+    /// 重放这次调用时 wire 上应该发出的 `arguments` 文本。
+    ///
+    /// 优先逐字节回传 `raw_arguments`（模型当时生成的那串 JSON），否则退回
+    /// `input` 的紧凑序列化——重新序列化会让 provider 的缓存单元失配。残缺
+    /// 原文不能原样回放，否则下一次请求会被 provider 拒绝。
+    pub fn wire_arguments(&self) -> String {
+        match self.raw_arguments.as_deref() {
+            Some(raw) if self.arguments().is_ok() => raw.to_owned(),
+            _ => self.input.to_string(),
+        }
+    }
+
+    /// wire 上的原文是不是合法 JSON。必须与 [`from_raw`](Self::from_raw) 用同一个
+    /// 解析器，否则 `input` 与 `raw_arguments` 会互相矛盾。
+    fn raw_is_json(&self) -> bool {
+        match self.raw_arguments.as_deref() {
+            Some(raw) => serde_json::from_str::<serde_json::Value>(raw).is_ok(),
+            None => true,
+        }
+    }
+}
+
+fn split_tool_arguments(raw: String) -> (serde_json::Value, Option<String>) {
+    if raw.trim().is_empty() {
+        return (serde_json::json!({}), None);
+    }
+    let input =
+        serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    (input, Some(raw))
 }
 
 impl ContentBlock {
@@ -76,41 +180,15 @@ impl ContentBlock {
         name: impl Into<String>,
         input: serde_json::Value,
     ) -> ContentBlock {
-        ContentBlock::ToolUse {
-            id: id.into(),
-            name: name.into(),
-            input,
-            raw_arguments: None,
-        }
+        ContentBlock::ToolUse(ToolUse::new(id, name, input))
     }
 
-    /// 重放 `ToolUse` 时 wire 上应该发出的 `arguments` 文本。
-    ///
-    /// 优先逐字节回传 `raw_arguments`（decoder / `StreamCollector` 从 wire 上
-    /// 原样收下的那串文本，等同于模型当时生成的 JSON）；只有没有原始文本，或
-    /// 原文不是合法 JSON 时，才退回 `input` 的紧凑序列化。重新序列化会去掉
-    /// `": "` 的空格并按字典序重排 key，使 provider 的缓存单元失配，因此合法
-    /// 原文必须保持字节一致。残缺原文不能原样回放，否则下一次请求会被
-    /// provider 拒绝。
-    pub fn tool_arguments(input: &serde_json::Value, raw_arguments: Option<&str>) -> String {
-        match raw_arguments {
-            Some(raw) if serde_json::from_str::<serde_json::Value>(raw).is_ok() => raw.to_owned(),
-            _ => input.to_string(),
+    /// 这块是不是一次工具调用。
+    pub fn as_tool_use(&self) -> Option<&ToolUse> {
+        match self {
+            ContentBlock::ToolUse(call) => Some(call),
+            _ => None,
         }
-    }
-
-    /// 把 wire 上的 `arguments` 文本拆成工具要跑的值和需要回放的原文。
-    ///
-    /// 空白文本没有可回放的原文：`input` 为 `{}`，`raw` 为 `None`。合法 JSON
-    /// 逐字节保留原文。非法 JSON 同样保留原文，调用方据此把这次调用作为工具
-    /// 错误交回模型；`input` 用 `{}`，重放时 [`tool_arguments`](Self::tool_arguments)
-    /// 会退回它，而不是把残缺文本再发给 provider。
-    pub fn parse_tool_arguments(raw: String) -> (serde_json::Value, Option<String>) {
-        if raw.trim().is_empty() {
-            return (serde_json::json!({}), None);
-        }
-        let input = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
-        (input, Some(raw))
     }
 }
 
@@ -283,12 +361,11 @@ mod tests {
 
     #[test]
     fn content_block_tool_use_serializes_correctly() {
-        let block = ContentBlock::ToolUse {
-            id: "tool_1".to_string(),
-            name: "get_weather".to_string(),
-            input: serde_json::json!({ "city": "Beijing" }),
-            raw_arguments: None,
-        };
+        let block = ContentBlock::tool_use(
+            "tool_1",
+            "get_weather",
+            serde_json::json!({ "city": "Beijing" }),
+        );
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["type"], "tool_use");
         assert_eq!(json["id"], "tool_1");
@@ -299,30 +376,38 @@ mod tests {
     #[test]
     fn tool_use_constructor_leaves_raw_arguments_empty() {
         let block = ContentBlock::tool_use("t1", "read_file", serde_json::json!({ "path": "a" }));
-        match block {
-            ContentBlock::ToolUse {
-                id, raw_arguments, ..
-            } => {
-                assert_eq!(id, "t1");
-                assert_eq!(raw_arguments, None);
-            }
-            other => panic!("expected ToolUse, got {other:?}"),
-        }
+        let call = block.as_tool_use().expect("expected ToolUse");
+        assert_eq!(call.id(), "t1");
+        assert_eq!(call.name(), "read_file");
+        assert_eq!(call.raw_arguments(), None);
     }
 
     /// 重放必须优先原样回传 wire 上的原始文本，否则模型输出边界的缓存单元失配。
     #[test]
     fn tool_arguments_prefers_raw_wire_text() {
-        let input = serde_json::json!({ "path": "src/main.rs", "limit": 10 });
         let raw = r#"{"path": "src/main.rs", "limit": 10}"#;
+        let call = ToolUse::from_raw("t1", "read_file", raw.to_string());
         assert_eq!(
-            ContentBlock::tool_arguments(&input, Some(raw)),
+            call.wire_arguments(),
             raw,
             "raw text must be replayed byte for byte"
         );
-        // 没有原始文本时退回紧凑序列化：空格被去掉、key 按字典序重排。
         assert_eq!(
-            ContentBlock::tool_arguments(&input, None),
+            call.input(),
+            &serde_json::json!({ "path": "src/main.rs", "limit": 10 })
+        );
+    }
+
+    /// 没有原始文本时退回紧凑序列化：空格被去掉、key 按字典序重排。
+    #[test]
+    fn tool_arguments_falls_back_to_compact_serialization() {
+        let call = ToolUse::new(
+            "t1",
+            "read_file",
+            serde_json::json!({ "path": "src/main.rs", "limit": 10 }),
+        );
+        assert_eq!(
+            call.wire_arguments(),
             r#"{"limit":10,"path":"src/main.rs"}"#
         );
     }
@@ -330,32 +415,81 @@ mod tests {
     /// 残缺的 `arguments` 不能原样回放，否则下一次 provider 请求会因非法 JSON 失败。
     #[test]
     fn tool_arguments_falls_back_when_raw_is_not_json() {
-        let input = serde_json::json!({});
-        assert_eq!(ContentBlock::tool_arguments(&input, Some("{")), "{}");
+        let call = ToolUse::from_raw("t1", "read_file", "{".to_string());
+        assert_eq!(call.wire_arguments(), "{}");
     }
 
     #[test]
-    fn parse_tool_arguments_keeps_invalid_text_and_empty_input() {
-        let (input, raw) = ContentBlock::parse_tool_arguments("{".to_string());
-        assert_eq!(input, serde_json::json!({}));
-        assert_eq!(raw.as_deref(), Some("{"));
+    fn from_raw_keeps_invalid_text_and_empty_input() {
+        let call = ToolUse::from_raw("t1", "read_file", "{".to_string());
+        assert_eq!(call.input(), &serde_json::json!({}));
+        assert_eq!(call.raw_arguments(), Some("{"));
     }
 
     #[test]
-    fn parse_tool_arguments_drops_blank_text() {
-        let (input, raw) = ContentBlock::parse_tool_arguments("  ".to_string());
-        assert_eq!(input, serde_json::json!({}));
-        assert_eq!(raw, None);
+    fn from_raw_drops_blank_text() {
+        let call = ToolUse::from_raw("t1", "read_file", "  ".to_string());
+        assert_eq!(call.input(), &serde_json::json!({}));
+        assert_eq!(call.raw_arguments(), None);
+    }
+
+    /// 截断的参数不是工具能跑的值。
+    #[test]
+    fn arguments_reports_truncated_json() {
+        let call = ToolUse::from_raw("t1", "read_file", "{".to_string());
+        assert_eq!(call.arguments(), Err(ToolArgumentsError::InvalidJson));
+    }
+
+    #[test]
+    fn arguments_are_the_parsed_input() {
+        let call = ToolUse::from_raw("t1", "read_file", r#"{"path": "src/main.rs"}"#.to_string());
+        assert_eq!(call.arguments().unwrap()["path"], "src/main.rs");
+    }
+
+    /// 判定参数合法性必须和解析原文用同一个解析器，否则浮点溢出、嵌套过深
+    /// 这类原文会被放行。
+    #[test]
+    fn arguments_and_replay_agree_with_the_parser() {
+        let raws = [
+            r#"{"path": "src/main.rs"}"#.to_string(),
+            "{".to_string(),
+            r#"{"x":1e999}"#.to_string(),
+            "null".to_string(),
+            "[]".to_string(),
+            format!("{}{}", "[".repeat(200), "]".repeat(200)),
+        ];
+        for raw in raws {
+            let call = ToolUse::from_raw("t1", "read_file", raw.clone());
+            let parses = serde_json::from_str::<serde_json::Value>(&raw).is_ok();
+            assert_eq!(call.arguments().is_ok(), parses, "{raw}");
+            let replayed = call.wire_arguments();
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&replayed).is_ok(),
+                "{raw} replayed as {replayed}, which the provider would reject"
+            );
+            if parses {
+                assert_eq!(replayed, raw, "valid raw must be replayed byte for byte");
+            }
+        }
+    }
+
+    /// 改了参数就不能再原样回放旧原文。
+    #[test]
+    fn set_input_drops_the_raw_arguments() {
+        let mut call = ToolUse::from_raw("t1", "read_file", r#"{"path": "a"}"#.to_string());
+        call.set_input(serde_json::json!({ "path": "b" }));
+        assert_eq!(call.raw_arguments(), None);
+        assert_eq!(call.wire_arguments(), r#"{"path":"b"}"#);
+        assert_eq!(call.arguments().unwrap()["path"], "b");
     }
 
     #[test]
     fn tool_use_serializes_raw_arguments_only_when_present() {
-        let block = ContentBlock::ToolUse {
-            id: "t1".to_string(),
-            name: "read_file".to_string(),
-            input: serde_json::json!({ "path": "a" }),
-            raw_arguments: Some(r#"{ "path": "a" }"#.to_string()),
-        };
+        let block = ContentBlock::ToolUse(ToolUse::from_raw(
+            "t1",
+            "read_file",
+            r#"{ "path": "a" }"#.to_string(),
+        ));
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["raw_arguments"], r#"{ "path": "a" }"#);
 
@@ -374,27 +508,26 @@ mod tests {
             "input": { "path": "a" }
         });
         let block: ContentBlock = serde_json::from_value(json).unwrap();
-        match block {
-            ContentBlock::ToolUse { raw_arguments, .. } => assert_eq!(raw_arguments, None),
-            other => panic!("expected ToolUse, got {other:?}"),
-        }
+        let call = block.as_tool_use().expect("expected ToolUse");
+        assert_eq!(call.raw_arguments(), None);
+        assert_eq!(call.id(), "t1");
+        assert_eq!(call.name(), "read_file");
     }
 
     #[test]
     fn tool_use_round_trips_raw_arguments_through_serde() {
-        let block = ContentBlock::ToolUse {
-            id: "t1".to_string(),
-            name: "read_file".to_string(),
-            input: serde_json::json!({ "path": "a" }),
-            raw_arguments: Some(r#"{ "path": "a" }"#.to_string()),
-        };
+        let block = ContentBlock::ToolUse(ToolUse::from_raw(
+            "t1",
+            "read_file",
+            r#"{ "path": "a" }"#.to_string(),
+        ));
         let json = serde_json::to_string(&block).unwrap();
-        match serde_json::from_str::<ContentBlock>(&json).unwrap() {
-            ContentBlock::ToolUse { raw_arguments, .. } => {
-                assert_eq!(raw_arguments.as_deref(), Some(r#"{ "path": "a" }"#));
-            }
-            other => panic!("expected ToolUse, got {other:?}"),
-        }
+        let call = serde_json::from_str::<ContentBlock>(&json)
+            .unwrap()
+            .as_tool_use()
+            .expect("expected ToolUse")
+            .clone();
+        assert_eq!(call.raw_arguments(), Some(r#"{ "path": "a" }"#));
     }
 
     #[test]

@@ -52,8 +52,8 @@ fn content_block_char_count(block: &ContentBlock) -> usize {
         ContentBlock::Thinking { thinking } => thinking.chars().count(),
         ContentBlock::Text { text } => text.chars().count(),
         ContentBlock::Image { .. } => 0,
-        ContentBlock::ToolUse { name, input, .. } => {
-            name.chars().count() + input.to_string().chars().count()
+        ContentBlock::ToolUse(call) => {
+            call.name().chars().count() + call.input().to_string().chars().count()
         }
         ContentBlock::ToolResult { content, .. } => {
             content.iter().map(content_block_char_count).sum()
@@ -78,9 +78,9 @@ fn contains_image(blocks: &[ContentBlock]) -> bool {
     blocks.iter().any(|block| match block {
         ContentBlock::Image { .. } => true,
         ContentBlock::ToolResult { content, .. } => contains_image(content),
-        ContentBlock::Thinking { .. }
-        | ContentBlock::Text { .. }
-        | ContentBlock::ToolUse { .. } => false,
+        ContentBlock::Thinking { .. } | ContentBlock::Text { .. } | ContentBlock::ToolUse(_) => {
+            false
+        }
     })
 }
 

@@ -8,7 +8,7 @@ use oven_app::{
     ShellEvent, StepStop, StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, UserRequestId,
     present_tool,
 };
-use oven_llm::{ContentBlock, Message};
+use oven_llm::{ContentBlock, Message, ToolUse};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::CellDiffOption;
@@ -313,12 +313,11 @@ fn seed_unknown_tool_failure_matches_the_live_burst() {
     const REASON: &str = "unknown tool: write";
     let mut t = Transcript::new();
     t.seed(&[
-        Message::assistant(vec![ContentBlock::ToolUse {
-            id: "c1".into(),
-            name: "write".into(),
-            input: serde_json::json!({}),
-            raw_arguments: None,
-        }]),
+        Message::assistant(vec![ContentBlock::ToolUse(ToolUse::new(
+            "c1",
+            "write",
+            serde_json::json!({}),
+        ))]),
         Message::tool_result("c1", REASON, true),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
@@ -379,12 +378,11 @@ fn seed_renders_persisted_messages() {
             ContentBlock::Text {
                 text: "hi there".into(),
             },
-            ContentBlock::ToolUse {
-                id: "c1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({ "command": "ls" }),
-                raw_arguments: None,
-            },
+            ContentBlock::ToolUse(ToolUse::new(
+                "c1",
+                "bash",
+                serde_json::json!({ "command": "ls" }),
+            )),
         ]),
         Message::tool_result("c1", "done", false),
         Message::user(vec![
@@ -877,23 +875,21 @@ fn seeded_blank_text_between_edits_stays_one_activity() {
     let mut t = Transcript::new();
     t.seed(&[
         Message::user_text("fix it"),
-        Message::assistant(vec![ContentBlock::ToolUse {
-            id: "e1".into(),
-            name: "file_edit".into(),
-            input: file_edit_input(),
-            raw_arguments: None,
-        }]),
+        Message::assistant(vec![ContentBlock::ToolUse(ToolUse::new(
+            "e1",
+            "file_edit",
+            file_edit_input(),
+        ))]),
         Message::tool_result("e1", EDIT_SUCCESS, false),
         Message::assistant(vec![
             ContentBlock::Text {
                 text: "\r\n".into(),
             },
-            ContentBlock::ToolUse {
-                id: "e2".into(),
-                name: "file_edit".into(),
-                input: file_edit_input_at("src\\lib.rs"),
-                raw_arguments: None,
-            },
+            ContentBlock::ToolUse(ToolUse::new(
+                "e2",
+                "file_edit",
+                file_edit_input_at("src\\lib.rs"),
+            )),
         ]),
         Message::tool_result("e2", EDIT_SUCCESS, false),
         Message::assistant_text("done"),
@@ -1312,12 +1308,7 @@ fn seed_collapsibles_stay_collapsed() {
             ContentBlock::Thinking {
                 thinking: "one".into(),
             },
-            ContentBlock::ToolUse {
-                id: "e1".into(),
-                name: "file_edit".into(),
-                input: file_edit_input(),
-                raw_arguments: None,
-            },
+            ContentBlock::ToolUse(ToolUse::new("e1", "file_edit", file_edit_input())),
         ]),
         Message::tool_result(
             "e1",
@@ -1991,12 +1982,11 @@ fn failed_edit_counts_and_explains_itself() {
 fn seed_file_edit_aggregates_with_a_nested_diff() {
     let mut t = Transcript::new();
     t.seed(&[
-        Message::assistant(vec![ContentBlock::ToolUse {
-            id: "e1".into(),
-            name: "file_edit".into(),
-            input: file_edit_input(),
-            raw_arguments: None,
-        }]),
+        Message::assistant(vec![ContentBlock::ToolUse(ToolUse::new(
+            "e1",
+            "file_edit",
+            file_edit_input(),
+        ))]),
         Message::tool_result("e1", EDIT_SUCCESS, false),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
@@ -2261,18 +2251,8 @@ fn restored_tool_trajectory_matches_live_presentation() {
     let mut restored = Transcript::new();
     restored.seed(&[
         Message::assistant(vec![
-            ContentBlock::ToolUse {
-                id: "c1".into(),
-                name: "grep".into(),
-                input: grep,
-                raw_arguments: None,
-            },
-            ContentBlock::ToolUse {
-                id: "c2".into(),
-                name: "glob".into(),
-                input: glob,
-                raw_arguments: None,
-            },
+            ContentBlock::ToolUse(ToolUse::new("c1", "grep", grep)),
+            ContentBlock::ToolUse(ToolUse::new("c2", "glob", glob)),
         ]),
         Message::tool_result("c1", "event.rs:1:ToolEvent", false),
         Message::tool_result("c2", "crates/oven-agent/src/agent.rs", false),
@@ -2301,12 +2281,11 @@ fn restored_tool_trajectory_matches_live_presentation() {
 fn seed_todo_write_keeps_result() {
     let mut t = Transcript::new();
     t.seed(&[
-        Message::assistant(vec![ContentBlock::ToolUse {
-            id: "t1".into(),
-            name: "todo_write".into(),
-            input: todo_input(),
-            raw_arguments: None,
-        }]),
+        Message::assistant(vec![ContentBlock::ToolUse(ToolUse::new(
+            "t1",
+            "todo_write",
+            todo_input(),
+        ))]),
         Message::tool_result("t1", "updated", false),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
@@ -2321,24 +2300,21 @@ fn seed_failed_tool_counts_without_result() {
     let mut t = Transcript::new();
     t.seed(&[
         Message::assistant(vec![
-            ContentBlock::ToolUse {
-                id: "c1".into(),
-                name: "bash".into(),
-                input: serde_json::json!({ "command": "ls" }),
-                raw_arguments: None,
-            },
-            ContentBlock::ToolUse {
-                id: "c2".into(),
-                name: "bash".into(),
-                input: serde_json::json!({ "command": "pwd" }),
-                raw_arguments: None,
-            },
-            ContentBlock::ToolUse {
-                id: "c3".into(),
-                name: "file_read".into(),
-                input: serde_json::json!({ "path": "a" }),
-                raw_arguments: None,
-            },
+            ContentBlock::ToolUse(ToolUse::new(
+                "c1",
+                "bash",
+                serde_json::json!({ "command": "ls" }),
+            )),
+            ContentBlock::ToolUse(ToolUse::new(
+                "c2",
+                "bash",
+                serde_json::json!({ "command": "pwd" }),
+            )),
+            ContentBlock::ToolUse(ToolUse::new(
+                "c3",
+                "file_read",
+                serde_json::json!({ "path": "a" }),
+            )),
         ]),
         Message::tool_result("c1", "ok", false),
         Message::tool_result("c2", "boom", true),
@@ -2389,12 +2365,11 @@ fn seed_separates_complete_turns_not_tool_followup() {
             ContentBlock::Text {
                 text: "checking".into(),
             },
-            ContentBlock::ToolUse {
-                id: "c1".into(),
-                name: "bash".to_string(),
-                input: serde_json::json!({ "command": "ls" }),
-                raw_arguments: None,
-            },
+            ContentBlock::ToolUse(ToolUse::new(
+                "c1",
+                "bash".to_string(),
+                serde_json::json!({ "command": "ls" }),
+            )),
         ]),
         Message::tool_result("c1", "out", false),
         Message::assistant(vec![ContentBlock::Text {

@@ -241,10 +241,11 @@ impl Transcript {
                                     emitted = true;
                                 }
                             }
-                            ContentBlock::ToolUse {
-                                id, name, input, ..
-                            } => {
-                                self.note_tool_start(id, &present_tool(name, input));
+                            ContentBlock::ToolUse(call) => {
+                                self.note_tool_start(
+                                    call.id(),
+                                    &present_tool(call.name(), call.input()),
+                                );
                                 emitted = true;
                                 has_tool = true;
                             }

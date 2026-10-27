@@ -27,10 +27,11 @@ pub use validate::{ValidationError, estimate_input_tokens, validate_request};
 pub use vendor::{Dialect, EffortSupport, VendorProfile, clamp_level};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use futures::stream::BoxStream;
 use std::fmt;
 
-use crate::domain::{CallOptions, ModelId, Request, Response, StreamEvent};
+use crate::domain::{CallOptions, ModelId, Request, Response, StreamCollector, StreamEvent};
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1";
@@ -77,6 +78,44 @@ pub trait Provider: Send + Sync {
     }
 
     fn provider_name(&self) -> ProviderName;
+}
+
+/// 发送一次流式请求，逐个事件交给 `on_event`，并把整条流拼成一条完整的
+/// [`Response`]。
+///
+/// 每个事件先交给 `on_event`，再累积进响应，因此流里看到的内容与拼出的响应
+/// 永远一致。
+///
+/// ```
+/// # use oven_llm::*;
+/// # async fn example(provider: &dyn Provider, request: &Request, options: &CallOptions) {
+/// let response = complete_streaming(provider, request, options, |event| {
+///     if let Some(text) = event.text_delta() {
+///         print!("{text}");
+///     }
+/// })
+/// .await
+/// .unwrap();
+/// # }
+/// ```
+pub async fn complete_streaming<P, F>(
+    provider: &P,
+    req: &Request,
+    options: &CallOptions,
+    mut on_event: F,
+) -> Result<Response>
+where
+    P: Provider + ?Sized,
+    F: FnMut(&StreamEvent),
+{
+    let mut stream = provider.stream(req, options).await?;
+    let mut collector = StreamCollector::new();
+    while let Some(event) = stream.next().await {
+        let event = event?;
+        on_event(&event);
+        collector.push(&event);
+    }
+    Ok(collector.finish()?)
 }
 
 macro_rules! impl_boxed_provider {

@@ -4,7 +4,7 @@ use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 use serde::{Deserialize, Serialize};
 
-use super::message::{ContentBlock, Role};
+use super::message::{ContentBlock, Role, ToolUse};
 
 /// 一次调用的 token 用量统计。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -112,16 +112,21 @@ impl Response {
             .collect()
     }
 
-    /// 迭代响应中的所有 `ToolUse` 内容块。
-    pub fn tool_uses(&self) -> impl Iterator<Item = &ContentBlock> + '_ {
-        self.content
-            .iter()
-            .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+    pub fn tool_calls(&self) -> impl Iterator<Item = &ToolUse> + '_ {
+        self.content.iter().filter_map(ContentBlock::as_tool_use)
     }
 
-    /// 响应是否包含至少一个 `ToolUse` 内容块。
-    pub fn has_tool_use(&self) -> bool {
-        self.tool_uses().next().is_some()
+    pub fn has_tool_calls(&self) -> bool {
+        self.tool_calls().next().is_some()
+    }
+
+    /// 模型是不是因为要调工具才停下的。
+    ///
+    /// 严格判定：终止原因还必须是 `ToolUse`。provider 未必报成 `tool_calls`
+    /// ——缺字段、报成 `stop`、被 token 上限截断都不算数。「响应里有工具调用
+    /// 就跑」的循环应该问 [`has_tool_calls`](Self::has_tool_calls)。
+    pub fn stopped_for_tools(&self) -> bool {
+        self.stop_reason == Some(StopReason::ToolUse) && self.has_tool_calls()
     }
 }
 
@@ -434,40 +439,48 @@ mod tests {
     }
 
     #[test]
-    fn response_tool_uses_iterates_only_tool_use_blocks() {
+    fn response_tool_calls_iterates_only_tool_use_blocks() {
         let response = sample_response(vec![
             ContentBlock::text("hi"),
             ContentBlock::tool_use("t1", "a", serde_json::json!({"x": 1})),
             ContentBlock::thinking("..."),
             ContentBlock::tool_use("t2", "b", serde_json::json!({"y": 2})),
         ]);
-        let uses: Vec<_> = response.tool_uses().collect();
-        assert_eq!(uses.len(), 2);
-        match uses[0] {
-            ContentBlock::ToolUse { id, name, .. } => {
-                assert_eq!(id, "t1");
-                assert_eq!(name, "a");
-            }
-            _ => panic!("expected ToolUse"),
-        }
-        match uses[1] {
-            ContentBlock::ToolUse { id, name, .. } => {
-                assert_eq!(id, "t2");
-                assert_eq!(name, "b");
-            }
-            _ => panic!("expected ToolUse"),
-        }
+        let calls: Vec<_> = response.tool_calls().collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id(), "t1");
+        assert_eq!(calls[0].name(), "a");
+        assert_eq!(calls[1].id(), "t2");
+        assert_eq!(calls[1].name(), "b");
     }
 
     #[test]
-    fn response_has_tool_use() {
+    fn response_has_tool_calls() {
         let with = sample_response(vec![ContentBlock::tool_use(
             "t1",
             "f",
             serde_json::json!({}),
         )]);
         let without = sample_response(vec![ContentBlock::text("hi")]);
-        assert!(with.has_tool_use());
-        assert!(!without.has_tool_use());
+        assert!(with.has_tool_calls());
+        assert!(!without.has_tool_calls());
+    }
+
+    #[test]
+    fn stopped_for_tools_needs_both_the_reason_and_a_call() {
+        let mut response = sample_response(vec![ContentBlock::tool_use(
+            "t1",
+            "f",
+            serde_json::json!({}),
+        )]);
+        response.stop_reason = Some(StopReason::ToolUse);
+        assert!(response.stopped_for_tools());
+
+        response.stop_reason = Some(StopReason::EndTurn);
+        assert!(!response.stopped_for_tools());
+
+        response.stop_reason = Some(StopReason::ToolUse);
+        response.content = vec![ContentBlock::text("hi")];
+        assert!(!response.stopped_for_tools());
     }
 }

@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `complete_streaming(provider, request, options, on_event)` drives a streamed call and
+  returns the assembled `Response`. Every event goes to `on_event` first and is collected
+  afterwards, so what the caller saw and what the response holds can no longer drift
+  apart — the loop every caller used to write by hand.
+- `ToolUse` is a type of its own: `id()`, `name()`, `input()`, `raw_arguments()`,
+  `arguments()` and `set_input()`. The wire text the model generated is kept inside it,
+  so the cache-hit contract is the type's business and not the caller's.
+- `ToolUse::arguments()` reports a truncated argument object as
+  `ToolArgumentsError::InvalidJson` instead of handing the caller an empty object. The
+  verdict comes from the same parser that read the wire text, so arguments the provider's
+  own parser rejects — a number out of range, a nesting too deep — are reported too
+  rather than run with empty arguments.
+- `StreamEvent::text_delta()`, `thinking_delta()` and `tool_input_delta()` read the
+  delta out of an event without matching the nested enum.
+- `Response::tool_calls()` hands out typed tool calls, and `Response::stopped_for_tools()`
+  says whether the model stopped because it wants tools. It is the strict check: it also
+  wants the provider to have reported `tool_calls` as the stop reason. A loop that runs
+  whatever came back asks `Response::has_tool_calls()` — that is what the agent does, so
+  a call the provider stopped short of is not dropped without the model learning that it
+  failed.
+
+### Changed
+- **Breaking:** `ContentBlock::ToolUse` holds a `ToolUse` instead of four loose fields.
+  Its JSON is unchanged — `{"type": "tool_use", "id", "name", "input", "raw_arguments"}` —
+  so stored conversations still load. `ContentBlock::tool_use(id, name, input)` builds
+  one, and `ContentBlock::as_tool_use()` reads one out of a block.
+- **Breaking:** `Response::tool_uses()` is `Response::tool_calls()` and hands out
+  `&ToolUse`; `Response::has_tool_use()` is `Response::has_tool_calls()`.
+- **Breaking:** `ContentBlock::tool_arguments` and `ContentBlock::parse_tool_arguments`
+  are gone. The first is `ToolUse::wire_arguments()`, the second is `ToolUse::from_raw()`.
+
 ## [0.6.0] - 2026-10-24
 
 ### Added

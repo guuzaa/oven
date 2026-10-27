@@ -24,7 +24,7 @@ use futures::stream::BoxStream;
 use oven_agent::{Agent, PendingInput, Tool, ToolOutcome, TurnContext};
 use oven_llm::{
     CallOptions, ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError,
-    ProviderName, Request, Response, Role, Router, StopReason, StreamEvent, Usage,
+    ProviderName, Request, Response, Role, Router, StopReason, StreamEvent, ToolUse, Usage,
 };
 use oven_proto::{
     AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse,
@@ -2716,12 +2716,7 @@ fn tool_response(id: &str, name: &str, input: serde_json::Value) -> Response {
         id: "resp".into(),
         model: "mock".into(),
         role: Role::Assistant,
-        content: vec![ContentBlock::ToolUse {
-            id: id.into(),
-            name: name.into(),
-            input,
-            raw_arguments: None,
-        }],
+        content: vec![ContentBlock::ToolUse(ToolUse::new(id, name, input))],
         stop_reason: Some(StopReason::ToolUse),
         usage: Some(Usage {
             input_tokens: 10,
@@ -3864,12 +3859,7 @@ fn parallel_tool_response(calls: &[(&str, &str, serde_json::Value)]) -> Response
     Response {
         content: calls
             .iter()
-            .map(|(id, name, input)| ContentBlock::ToolUse {
-                id: (*id).into(),
-                name: (*name).into(),
-                input: input.clone(),
-                raw_arguments: None,
-            })
+            .map(|(id, name, input)| ContentBlock::ToolUse(ToolUse::new(*id, *name, input.clone())))
             .collect(),
         ..tool_response(calls[0].0, calls[0].1, calls[0].2.clone())
     }
@@ -4740,7 +4730,9 @@ fn replay_shape<M: Borrow<Message>>(messages: &[M]) -> Vec<(Role, String)> {
                 .iter()
                 .map(|block| match block {
                     ContentBlock::Text { text } => text.clone(),
-                    ContentBlock::ToolUse { id, name, .. } => format!("use {name} {id}"),
+                    ContentBlock::ToolUse(call) => {
+                        format!("use {} {}", call.name(), call.id())
+                    }
                     ContentBlock::ToolResult { tool_use_id, .. } => {
                         format!("result {tool_use_id}")
                     }
@@ -4767,7 +4759,7 @@ fn assert_replayable<M: Borrow<Message>>(messages: &[M]) {
                     .content
                     .iter()
                     .filter_map(|block| match block {
-                        ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                        ContentBlock::ToolUse(call) => Some(call.id().to_string()),
                         _ => None,
                     })
                     .collect();

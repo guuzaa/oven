@@ -237,6 +237,44 @@ let options = CallOptions::new("deepseek/deepseek-v4-flash").temperature(0.2);
 Provider-private fields ride along in the same options and are merged into the wire body:
 `.provider_option("top_k", serde_json::json!(40))`.
 
+## Streaming and tool calls
+
+`complete_streaming` drives a streamed call and hands back the assembled response. The callback
+sees every event as it arrives; the same events are collected into the response, so the two can
+never drift apart.
+
+```rust
+use oven_llm::{CallOptions, Request, complete_streaming};
+
+let response = complete_streaming(provider.as_ref(), &request, &options, |event| {
+    if let Some(text) = event.text_delta() {
+        print!("{text}");
+    }
+})
+.await?;
+```
+
+A response that asks for tools says so with `has_tool_calls()`, and the calls themselves come
+out typed:
+
+```rust
+if response.has_tool_calls() {
+    for call in response.tool_calls() {
+        let (output, is_error) = run_tool(call.name(), call.input());
+        request.message(Message::tool_result(call.id(), output, is_error));
+    }
+}
+```
+
+`stopped_for_tools()` is the strict variant: it also wants the provider to have reported
+`tool_calls` as the stop reason. A provider that leaves the reason out, or a call cut short by
+the token limit, would then be dropped without the model ever learning that its call failed — so
+run whatever came back instead.
+
+`call.arguments()` is the value to run the tool with. It fails with
+`ToolArgumentsError::InvalidJson` when the model truncated its argument object — that call
+should go back to the model as a tool error rather than run with empty arguments.
+
 Streaming, tool-calling, thinking/reasoning, and request validation are all on the same
 `Provider` / `Request` types. See the examples rather than another copy of the API here.
 

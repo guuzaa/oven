@@ -12,7 +12,7 @@ use thiserror::Error;
 use super::types::{
     ResponseEvent, ResponseObject, ResponseOutputItem, WireError, WireOutputContentPart, WireUsage,
 };
-use crate::domain::message::{ContentBlock, Role};
+use crate::domain::message::{ContentBlock, Role, ToolUse};
 use crate::domain::response::{Response, StopReason, Usage};
 use crate::domain::stream::{Delta, StreamEvent, StreamPhase};
 
@@ -129,13 +129,9 @@ pub(crate) fn decode_response(wire: ResponseObject) -> Result<Response, DecodeEr
                 // 原样保留 wire 上的 `arguments` 文本，供重放时逐字节回传
                 // （provider 隐式上下文缓存要求完整匹配缓存单元）。非法 JSON
                 // 同样留下，`input` 为 `{}`，由 agent 作为工具错误交回模型。
-                let (input, raw_arguments) = ContentBlock::parse_tool_arguments(arguments);
-                content.push(ContentBlock::ToolUse {
-                    id: call_id,
-                    name,
-                    input,
-                    raw_arguments,
-                });
+                content.push(ContentBlock::ToolUse(ToolUse::from_raw(
+                    call_id, name, arguments,
+                )));
                 saw_function_call = true;
             }
             ResponseOutputItem::WebSearchCall { .. } | ResponseOutputItem::Other => {}
@@ -428,12 +424,11 @@ impl StreamDecoder {
         name: Option<&str>,
         events: &mut Vec<StreamEvent>,
     ) -> usize {
-        let block = ContentBlock::ToolUse {
-            id: id.unwrap_or_default().to_string(),
-            name: name.unwrap_or_default().to_string(),
-            input: serde_json::Value::String(String::new()),
-            raw_arguments: None,
-        };
+        let block = ContentBlock::ToolUse(ToolUse::new(
+            id.unwrap_or_default(),
+            name.unwrap_or_default(),
+            serde_json::Value::String(String::new()),
+        ));
         self.ensure_block(output_index, block, events)
     }
 
@@ -611,12 +606,10 @@ mod tests {
         let response = decode_response(wire).unwrap();
         assert_eq!(response.content.len(), 1);
         match &response.content[0] {
-            ContentBlock::ToolUse {
-                id, name, input, ..
-            } => {
-                assert_eq!(id, "call_1");
-                assert_eq!(name, "get_weather");
-                assert_eq!(input, &serde_json::json!({"city": "Hangzhou"}));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "call_1");
+                assert_eq!(call.name(), "get_weather");
+                assert_eq!(call.input(), &serde_json::json!({"city": "Hangzhou"}));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -641,8 +634,8 @@ mod tests {
         );
         let response = decode_response(wire).unwrap();
         match &response.content[0] {
-            ContentBlock::ToolUse { raw_arguments, .. } => {
-                assert_eq!(raw_arguments.as_deref(), Some(raw));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.raw_arguments(), Some(raw));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -664,15 +657,10 @@ mod tests {
         );
         let response = decode_response(wire).unwrap();
         match &response.content[0] {
-            ContentBlock::ToolUse {
-                id,
-                input,
-                raw_arguments,
-                ..
-            } => {
-                assert_eq!(id, "call_1");
-                assert_eq!(input, &serde_json::json!({}));
-                assert_eq!(raw_arguments.as_deref(), Some("{"));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "call_1");
+                assert_eq!(call.input(), &serde_json::json!({}));
+                assert_eq!(call.raw_arguments(), Some("{"));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -802,9 +790,9 @@ mod tests {
             StreamEvent::ContentBlockStart { index, block } => {
                 assert_eq!(*index, 1);
                 match block {
-                    ContentBlock::ToolUse { id, name, .. } => {
-                        assert_eq!(id, "call_00_C3qv97zqcLotY0gqaJxB7908");
-                        assert_eq!(name, "get_weather");
+                    ContentBlock::ToolUse(call) => {
+                        assert_eq!(call.id(), "call_00_C3qv97zqcLotY0gqaJxB7908");
+                        assert_eq!(call.name(), "get_weather");
                     }
                     other => panic!("expected ToolUse block, got {other:?}"),
                 }
@@ -872,12 +860,10 @@ mod tests {
             ContentBlock::Text { text } if text == "I'll check the weather in Hangzhou, Zhejiang for you."
         ));
         match &response.content[1] {
-            ContentBlock::ToolUse {
-                id, name, input, ..
-            } => {
-                assert_eq!(id, "call_00_C3qv97zqcLotY0gqaJxB7908");
-                assert_eq!(name, "get_weather");
-                assert_eq!(input, &serde_json::json!({}));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "call_00_C3qv97zqcLotY0gqaJxB7908");
+                assert_eq!(call.name(), "get_weather");
+                assert_eq!(call.input(), &serde_json::json!({}));
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }
@@ -919,12 +905,13 @@ mod tests {
             ContentBlock::Thinking { thinking } if thinking == "The question is: \"What is the temperature in San Francisco?\"\n"
         ));
         match &response.content[1] {
-            ContentBlock::ToolUse {
-                id, name, input, ..
-            } => {
-                assert_eq!(id, "call-b9f824e6-aba8-4c03-865d-e9c485976c0f-0");
-                assert_eq!(name, "get_temperature");
-                assert_eq!(input, &serde_json::json!({"location": "San Francisco"}));
+            ContentBlock::ToolUse(call) => {
+                assert_eq!(call.id(), "call-b9f824e6-aba8-4c03-865d-e9c485976c0f-0");
+                assert_eq!(call.name(), "get_temperature");
+                assert_eq!(
+                    call.input(),
+                    &serde_json::json!({"location": "San Francisco"})
+                );
             }
             other => panic!("expected ToolUse block, got {other:?}"),
         }

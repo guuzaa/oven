@@ -9,7 +9,7 @@ pub mod response;
 pub mod stream;
 pub mod tool;
 
-pub use message::{ContentBlock, ImageSource, Message, Role};
+pub use message::{ContentBlock, ImageSource, Message, Role, ToolArgumentsError, ToolUse};
 pub use model::{ModelId, canonical_vendor};
 pub use options::{CallOptions, SamplingParams};
 pub use reasoning::{LADDER, ParseEffortError, ReasoningEffort};

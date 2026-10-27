@@ -3,10 +3,9 @@
 
 use std::time::Instant;
 
-use futures::StreamExt;
 use oven_llm::{
-    CallOptions, Client, ContentBlock, Delta, Message, Provider, Request, Response, Role,
-    StreamCollector, StreamEvent as LlmStreamEvent,
+    CallOptions, Client, ContentBlock, Message, Provider, Request, Response, Role,
+    complete_streaming,
 };
 
 use oven_host::as_ms;
@@ -129,50 +128,39 @@ impl Agent {
             return complete_unstreamed(&req, &options, router.as_ref(), sink).await;
         }
 
-        match router.stream(&req, &options).await {
-            Ok(mut stream) => {
-                let mut collector = StreamCollector::new();
-                let mut thinking = ThinkingSpan::default();
-                let mut calls = ToolCallGate::default();
-                while let Some(event) = stream.next().await {
-                    match event {
-                        Err(e) => return Err(e.into()),
-                        Ok(event) => {
-                            if let LlmStreamEvent::ContentBlockDelta { delta, .. } = &event {
-                                match delta {
-                                    Delta::ThinkingDelta { thinking: text } if !text.is_empty() => {
-                                        thinking.note();
-                                        sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
-                                            text: text.clone(),
-                                        }));
-                                    }
-                                    Delta::TextDelta { text } if !text.is_empty() => {
-                                        thinking.close(sink);
-                                        if let Some(text) = calls.push(text) {
-                                            sink.emit(AgentEvent::Stream(StreamEvent::TextDelta {
-                                                text,
-                                            }));
-                                        }
-                                    }
-                                    // A streamed tool call ends the reasoning phase.
-                                    Delta::InputJsonDelta { .. } => thinking.close(sink),
-                                    _ => {}
-                                }
-                            }
-                            collector.push(&event);
-                        }
+        let mut thinking = ThinkingSpan::default();
+        let mut calls = ToolCallGate::default();
+        let mut response = match complete_streaming(router.as_ref(), &req, &options, |event| {
+            if let Some(text) = event.thinking_delta() {
+                if !text.is_empty() {
+                    thinking.note();
+                    sink.emit(AgentEvent::Stream(StreamEvent::ThinkingDelta {
+                        text: text.to_string(),
+                    }));
+                }
+            } else if let Some(text) = event.text_delta() {
+                if !text.is_empty() {
+                    thinking.close(sink);
+                    if let Some(text) = calls.push(text) {
+                        sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
                     }
                 }
-                let span = thinking.finish(sink);
-                if let Some(text) = calls.finish() {
-                    sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
-                }
-                let mut response = collector.finish()?;
-                strip_tool_call_text(&mut response);
-                Ok((response, span))
+            } else if event.tool_input_delta().is_some() {
+                // A streamed tool call ends the reasoning phase.
+                thinking.close(sink);
             }
-            Err(error) => Err(error.into()),
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => return Err(error.into()),
+        };
+        let span = thinking.finish(sink);
+        if let Some(text) = calls.finish() {
+            sink.emit(AgentEvent::Stream(StreamEvent::TextDelta { text }));
         }
+        strip_tool_call_text(&mut response);
+        Ok((response, span))
     }
 }
 

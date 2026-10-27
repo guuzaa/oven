@@ -8,8 +8,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use oven_llm::{ContentBlock, Message, Response, Usage};
-use serde_json::Value;
+use oven_llm::{Message, Response, Usage};
 
 use super::Agent;
 use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
@@ -59,7 +58,7 @@ impl Agent {
 
         let text = response.text();
         let usage = response.usage;
-        if !response.has_tool_use() {
+        if !response.has_tool_calls() {
             return Ok(Step {
                 text,
                 calls: Vec::new(),
@@ -111,39 +110,38 @@ impl Agent {
     /// them runs.
     fn plan_calls(&self, response: &Response) -> Vec<PlannedCall> {
         response
-            .tool_uses()
-            .filter_map(|block| {
-                let ContentBlock::ToolUse {
-                    id,
-                    name,
-                    input,
-                    raw_arguments,
-                } = block
-                else {
-                    return None;
-                };
-                let argument_error = raw_arguments.as_deref().and_then(invalid_json_arguments);
-                let tool = self.tools.iter().find(|tool| tool.name() == name).cloned();
+            .tool_calls()
+            .map(|call| {
+                let argument_error = call
+                    .arguments()
+                    .err()
+                    .map(|_| INVALID_JSON_ARGUMENTS.to_string());
+                let tool = self
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name() == call.name())
+                    .cloned();
                 let caps = tool.as_ref().map(|tool| tool.caps());
                 let todos = tool
                     .as_ref()
-                    .and_then(|tool| tool.effect(input))
+                    .and_then(|tool| tool.effect(call.input()))
                     .map(|effect| match effect {
                         ToolEffect::Todos(list) => list,
                     });
-                Some(PlannedCall {
-                    id: id.clone(),
+                PlannedCall {
+                    id: call.id().to_string(),
                     call_id: ToolCallId::next(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    view: tool
-                        .as_ref()
-                        .map_or_else(|| ToolView::named(name), |tool| tool.view(input)),
+                    name: call.name().to_string(),
+                    input: call.input().clone(),
+                    view: tool.as_ref().map_or_else(
+                        || ToolView::named(call.name()),
+                        |tool| tool.view(call.input()),
+                    ),
                     todos,
                     exclusive: caps.is_some_and(|caps| caps.exclusive),
                     argument_error,
                     tool,
-                })
+                }
             })
             .collect()
     }
@@ -313,18 +311,9 @@ struct PlannedCall {
     /// from what it read would otherwise lose one of two edits to the same
     /// file, and a tool that asks the user something would lose the question.
     exclusive: bool,
-    /// Set when `raw_arguments` is not JSON. The call is reported as a tool
-    /// error and never runs, so a truncated argument object does not end the turn.
+    /// Set when the tool arguments are not valid JSON. The call never runs.
     argument_error: Option<String>,
     tool: Option<Arc<dyn Tool>>,
-}
-
-/// `Some` when `raw` is not JSON. The model gets only the reason, not the
-/// broken text it already knows it emitted.
-pub(super) fn invalid_json_arguments(raw: &str) -> Option<String> {
-    serde_json::from_str::<Value>(raw)
-        .is_err()
-        .then(|| INVALID_JSON_ARGUMENTS.to_string())
 }
 
 /// What a call may do: run with the tool it resolved to, or report without
