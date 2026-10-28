@@ -618,7 +618,13 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            ProviderError::RateLimit { retry_after_ms } => assert_eq!(retry_after_ms, None),
+            ProviderError::RateLimit {
+                retry_after_ms,
+                body,
+            } => {
+                assert_eq!(retry_after_ms, None);
+                assert_eq!(body, "Too Many Requests");
+            }
             other => panic!("expected RateLimit error, got {other:?}"),
         }
     }

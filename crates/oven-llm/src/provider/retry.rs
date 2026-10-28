@@ -63,6 +63,7 @@ fn status_of(err: &ProviderError) -> Option<u16> {
 fn backoff_for(policy: &RetryPolicy, attempt: u32, err: &ProviderError) -> Duration {
     if let ProviderError::RateLimit {
         retry_after_ms: Some(ms),
+        ..
     } = err
     {
         return Duration::from_millis(*ms);

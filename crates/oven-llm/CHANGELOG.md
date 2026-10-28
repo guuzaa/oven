@@ -26,6 +26,9 @@
 - `Message::text()` reads the text out of a message, whatever role it has.
 
 ### Changed
+- **Breaking:** `ProviderError::RateLimit` carries the reason the provider gave
+  (`body`) beside the wait it asked for. What it displays is the reason now:
+  `rate limited: quota exceeded`, not `rate limited, retry after Nonems`.
 - **Breaking:** `ContentBlock::ToolUse` holds a `ToolUse` instead of four loose fields.
   Its JSON is unchanged — `{"type": "tool_use", "id", "name", "input", "raw_arguments"}` —
   so stored conversations still load. `ContentBlock::tool_use(id, name, input)` builds
@@ -45,6 +48,13 @@
   the system one is the role's business, and the caller's.
 
 ### Fixed
+- A refused request says why, in the provider's own words. The response body
+  was passed on as it came: a JSON envelope around the message, or a proxy's
+  HTML error page. The reason is now the message inside `{"error":{"message":
+  "..."}}`, or the body collapsed onto one line and cut to 200 characters; a
+  body that says nothing falls back to the status (`Too Many Requests`).
+- The `Retry-After` header is read. `ProviderError::RateLimit` carries the
+  wait the provider asked for, and the retry waits that long.
 - An error says why it happened. `ProviderError::Stream`, `InvalidRequest`,
   `CompletionsEncode` and `ResponsesEncode` kept their reason in the source
   chain only, so the text a caller saw was `stream protocol error` or

@@ -7,11 +7,16 @@
 
 use reqwest::Url;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::{Response, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
+use serde_json::Value;
 
 use crate::ProviderName;
 use crate::provider::ProviderError;
 use crate::provider::model::ModelInfo;
+
+/// 拒绝请求的理由最多占多少字符。代理的错误页很长，里面那句话不长。
+const MAX_REASON_CHARS: usize = 200;
 
 /// `base_url` 拼出的端点不是合法 URL 时返回配置错误。
 ///
@@ -71,17 +76,76 @@ pub(crate) async fn check_status(
     }
 
     let status_code = status.as_u16();
+    let retry_after_ms = retry_after_ms(&response);
     let body = response.text().await.unwrap_or_default();
+    let reason = reason_from_body(&body, status);
     match status_code {
-        401 | 403 => Err(ProviderError::Auth(body)),
+        401 | 403 => Err(ProviderError::Auth(reason)),
         429 => Err(ProviderError::RateLimit {
-            retry_after_ms: None,
+            retry_after_ms,
+            body: reason,
         }),
         other => Err(ProviderError::Api {
             status: other,
-            body,
+            body: reason,
         }),
     }
+}
+
+/// 厂商让调用方等多久，单位毫秒。
+///
+/// `Retry-After` 头写的是秒；日期写法少见，读不出来就按自己的节奏等。
+fn retry_after_ms(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| seconds.saturating_mul(1000))
+}
+
+/// 厂商拒绝这次请求的理由，压成一行。
+///
+/// 多数厂商回 `{"error":{"message":"..."}}`，要读的是那句话，不是包着它的
+/// JSON。代理的 HTML 错误页是另一个极端：整页压成一行，再截到终端一行放得下。
+fn reason_from_body(body: &str, status: StatusCode) -> String {
+    let text = provider_message(body).unwrap_or_else(|| body.to_string());
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return status
+            .canonical_reason()
+            .unwrap_or("the provider said nothing")
+            .to_string();
+    }
+    if text.chars().count() > MAX_REASON_CHARS {
+        let head: String = text.chars().take(MAX_REASON_CHARS).collect();
+        return format!("{head}…");
+    }
+    text
+}
+
+/// 错误 body 里厂商给的那句话（有的话）。
+fn provider_message(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    if let Some(error) = value.get("error") {
+        let message = match error {
+            Value::String(message) => Some(message.as_str()),
+            Value::Object(fields) => fields.get("message")?.as_str(),
+            _ => None,
+        };
+        if let Some(message) = message {
+            return Some(message.to_string());
+        }
+    }
+    for key in ["message", "detail"] {
+        if let Some(message) = value.get(key).and_then(Value::as_str) {
+            return Some(message.to_string());
+        }
+    }
+    None
 }
 
 /// POST 已序列化的 `body_bytes` 到 `url`，并执行状态码检查。
@@ -150,6 +214,8 @@ struct ModelsListEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const MALFORMED_BASE_URL: &str = "http://[::1";
     const NON_HTTP_BASE_URL: &str = "ftp://example.com";
@@ -161,6 +227,113 @@ mod tests {
 
     fn map_json_err(err: serde_json::Error) -> ProviderError {
         ProviderError::InvalidProviderConfig(err.to_string())
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_reports_the_reason_the_provider_gave() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(
+                r#"{"error":{"message":"No endpoints found for that model.","code":404},"user_id":"u1"}"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let err = post_json(
+            &client(),
+            HeaderMap::new(),
+            format!("{}/chat/completions", server.uri()),
+            b"{}".to_vec(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, ProviderError::Api { status: 404, body } if body == "No endpoints found for that model."),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_page_is_one_line_and_cut_to_what_a_row_can_hold() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(502).set_body_string(format!(
+                "<html>\n<body>{}</body>\n</html>",
+                "gateway is down ".repeat(40)
+            )))
+            .mount(&server)
+            .await;
+
+        let err = post_json(
+            &client(),
+            HeaderMap::new(),
+            format!("{}/chat/completions", server.uri()),
+            b"{}".to_vec(),
+        )
+        .await
+        .unwrap_err();
+
+        let ProviderError::Api { body, .. } = &err else {
+            panic!("expected an api error, got {err}");
+        };
+        assert!(!body.contains('\n'), "the reason is one line: {body}");
+        assert!(body.chars().count() <= MAX_REASON_CHARS + 1, "{body}");
+        assert!(body.starts_with("<html> <body>"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_without_a_body_names_the_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let err = post_json(
+            &client(),
+            HeaderMap::new(),
+            format!("{}/chat/completions", server.uri()),
+            b"{}".to_vec(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, ProviderError::RateLimit { body, .. } if body == "Too Many Requests"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_reads_the_retry_after_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "7")
+                    .set_body_string(r#"{"error":{"message":"quota exceeded"}}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let err = post_json(
+            &client(),
+            HeaderMap::new(),
+            format!("{}/chat/completions", server.uri()),
+            b"{}".to_vec(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, ProviderError::RateLimit { retry_after_ms: Some(ms), body } if *ms == 7000 && body == "quota exceeded"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

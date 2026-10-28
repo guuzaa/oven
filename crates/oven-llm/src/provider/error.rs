@@ -23,8 +23,12 @@ pub enum ProviderError {
     #[error("authentication failed: {0}")]
     Auth(String),
     /// HTTP 429。
-    #[error("rate limited, retry after {retry_after_ms:?}ms")]
-    RateLimit { retry_after_ms: Option<u64> },
+    #[error("rate limited: {body}")]
+    RateLimit {
+        retry_after_ms: Option<u64>,
+        /// The reason the provider gave.
+        body: String,
+    },
     /// Completions API 响应解码失败。
     #[error("completions decoding error: {0}")]
     CompletionsDecode(#[source] CompletionsDecodeError),
@@ -112,19 +116,21 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_error_displays_retry_after() {
+    fn rate_limit_error_displays_the_reason() {
         let err = ProviderError::RateLimit {
             retry_after_ms: Some(1000),
+            body: "quota exceeded".into(),
         };
-        assert_eq!(err.to_string(), "rate limited, retry after Some(1000)ms");
+        assert_eq!(err.to_string(), "rate limited: quota exceeded");
     }
 
     #[test]
-    fn rate_limit_error_displays_none_retry_after() {
+    fn rate_limit_error_without_a_hint_still_says_why() {
         let err = ProviderError::RateLimit {
             retry_after_ms: None,
+            body: "Too Many Requests".into(),
         };
-        assert_eq!(err.to_string(), "rate limited, retry after Nonems");
+        assert_eq!(err.to_string(), "rate limited: Too Many Requests");
     }
 
     #[test]
