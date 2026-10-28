@@ -419,6 +419,30 @@ fn file_read_rounds(n: usize) -> Vec<Response> {
         .collect()
 }
 
+/// A reply that carries nothing: no text, no tool call.
+fn empty_response() -> Response {
+    Response {
+        id: "resp".into(),
+        model: "mock".into(),
+        role: Role::Assistant,
+        content: Vec::new(),
+        stop_reason: Some(StopReason::EndTurn),
+        usage: None,
+    }
+}
+
+/// A reply the provider cut off at its output token limit.
+fn cut_off_response(text: &str) -> Response {
+    Response {
+        id: "resp".into(),
+        model: "mock".into(),
+        role: Role::Assistant,
+        content: vec![ContentBlock::text(text)],
+        stop_reason: Some(StopReason::MaxTokens),
+        usage: None,
+    }
+}
+
 fn thinking_response(thinking: &str, text: &str) -> Response {
     let mut response = text_response(text);
     response.content.insert(0, ContentBlock::thinking(thinking));
@@ -2614,4 +2638,53 @@ async fn rewind_clears_a_reminder_streak() {
     let reqs = seen.lock().unwrap().clone();
     assert_eq!(reqs.len(), misses + 2);
     assert!(reqs.iter().all(|req| !has_plan_reminder(req)));
+}
+
+#[tokio::test]
+async fn a_reply_with_no_answer_fails_the_turn() {
+    let mut agent = Agent::new(
+        router_with(Box::new(MockProvider::new(vec![empty_response()]))),
+        Vec::new(),
+    );
+    let mut sink = VecEventSink::default();
+
+    let error = run_plain(&mut agent, "hi", &mut sink).await.unwrap_err();
+
+    assert_eq!(error.message, REPLY_EMPTY);
+    assert!(
+        matches!(
+            sink.events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Failed { .. }))
+        ),
+        "the turn must say it failed: {:?}",
+        sink.events
+    );
+    assert_eq!(
+        agent.history().len(),
+        1,
+        "a reply with no answer stays out of the conversation"
+    );
+}
+
+#[tokio::test]
+async fn a_reply_cut_off_by_the_token_limit_fails_the_turn() {
+    let mut agent = Agent::new(
+        router_with(Box::new(MockProvider::new(vec![cut_off_response(
+            "half a sen",
+        )]))),
+        Vec::new(),
+    );
+    let mut sink = VecEventSink::default();
+
+    let error = run_plain(&mut agent, "hi", &mut sink).await.unwrap_err();
+
+    assert_eq!(error.message, REPLY_CUT_OFF);
+    assert!(
+        matches!(
+            sink.events.last(),
+            Some(AgentEvent::Turn(TurnEvent::Failed { .. }))
+        ),
+        "the turn must say it failed: {:?}",
+        sink.events
+    );
 }

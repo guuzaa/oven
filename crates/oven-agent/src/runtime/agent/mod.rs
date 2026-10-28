@@ -25,6 +25,8 @@ mod notify;
 mod request;
 mod step;
 
+pub use step::{REPLY_CUT_OFF, REPLY_EMPTY};
+
 /// A handle onto `router`, for callers that need the conversation driver and
 /// the agents it spawns to share one router from the start.
 pub fn router_handle(router: Router) -> RouterHandle {

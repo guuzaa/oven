@@ -1036,6 +1036,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_yields_error_when_the_reply_ends_without_a_finish_reason() {
+        let mock_server = MockServer::start().await;
+        let sse_body = concat!(
+            "data: {\"id\":\"chatcmpl-1\",\"model\":\"gpt-4\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let provider = CompletionsProvider::with_base_url(
+            mock_server.uri(),
+            ProviderName::Custom("example".into()),
+            api_key("k"),
+        );
+        let mut event_stream = provider
+            .stream(&sample_request(), &sample_options())
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = event_stream.next().await {
+            events.push(event);
+        }
+
+        let last = events.last().unwrap();
+        match last {
+            Err(ProviderError::CompletionsDecode(err)) => {
+                assert_eq!(err.to_string(), "stream ended before the model finished");
+            }
+            other => panic!("expected a decode error, got {other:?}"),
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(StreamEvent::MessageStop))),
+            "a cut-off reply must not look finished"
+        );
+    }
+
+    #[tokio::test]
     async fn stream_maps_error_status_codes() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))

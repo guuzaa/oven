@@ -5723,3 +5723,37 @@ async fn shutdown_during_compaction_leaves_the_session() {
             .any(|(_, body)| body.contains(COMPACT_PARTIAL))
     );
 }
+
+/// A reply that carries nothing: no text, no tool call.
+fn empty_response() -> Response {
+    Response {
+        id: "resp".into(),
+        model: "mock".into(),
+        role: Role::Assistant,
+        content: Vec::new(),
+        stop_reason: Some(StopReason::EndTurn),
+        usage: Some(Usage {
+            input_tokens: 10,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn a_turn_whose_reply_says_nothing_fails_instead_of_reporting_success() {
+    let tmp = tempdir::TempDir::new("app-runtime-empty-reply").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![empty_response()]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+
+    let error = handle.prompt("hi").await.unwrap_err();
+
+    assert!(
+        error.to_string().contains(oven_agent::REPLY_EMPTY),
+        "the turn must say the reply was empty: {error}"
+    );
+    assert!(handle.state().levels.phase.is_idle());
+    handle.shutdown().await;
+}

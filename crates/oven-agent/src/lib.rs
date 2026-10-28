@@ -37,6 +37,6 @@ pub use core::turn::{
 };
 pub use core::view::{ToolCaps, ToolEffect, ToolOutcome};
 pub use oven_llm::RouterHandle;
-pub use runtime::agent::{Agent, router_handle};
+pub use runtime::agent::{Agent, REPLY_CUT_OFF, REPLY_EMPTY, router_handle};
 pub use runtime::compact::{CompactStats, NOTHING_TO_COMPACT};
 pub use tokio_util::sync::CancellationToken;

@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use oven_llm::{
-    CallOptions, Client, ContentBlock, Message, Provider, Request, Response, Role,
+    CallOptions, Client, ContentBlock, Message, ModelId, Provider, Request, Response, Role,
     complete_streaming,
 };
 
@@ -61,7 +61,17 @@ impl Agent {
         let (model, reasoning_effort) = self.selection.model();
         let mut options = CallOptions::new(model);
         options.reasoning_effort = reasoning_effort;
+        options.sampling.max_tokens = self.max_output_tokens(&options.model);
         options
+    }
+
+    /// The model's output cap, asked for explicitly. Without it the provider
+    /// applies its own default, which is lower than the model allows and cuts
+    /// a long answer off mid-sentence.
+    fn max_output_tokens(&self, model: &ModelId) -> Option<u32> {
+        let router = self.router();
+        let limit = router.resolve_model(model)?.max_output_tokens;
+        (limit > 0).then_some(limit)
     }
 
     pub(crate) fn build_request(&self) -> Request {
@@ -286,6 +296,34 @@ mod tests {
 
         assert_eq!(options.model.as_str(), "kimi-k3");
         assert_eq!(options.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn the_options_ask_for_the_models_output_cap() {
+        let mut router = Router::new();
+        router.register(oven_llm::CompletionsProvider::deepseek(String::from("k")));
+        let cap = router
+            .resolve_model(&ModelId::new("deepseek-v4-flash"))
+            .expect("the catalog knows the model")
+            .max_output_tokens;
+        assert!(cap > 0, "the catalog declares an output cap");
+
+        let mut agent = Agent::new(router, Vec::new());
+        agent.set_model("deepseek-v4-flash");
+
+        let options = agent.build_options();
+
+        assert_eq!(options.sampling.max_tokens, Some(cap));
+    }
+
+    #[test]
+    fn an_unknown_model_asks_for_no_limit() {
+        let mut agent = Agent::new(Router::new(), Vec::new());
+        agent.set_model("no-such-model");
+
+        let options = agent.build_options();
+
+        assert_eq!(options.sampling.max_tokens, None);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use oven_llm::{Message, Response, Usage};
+use oven_llm::{Message, Response, StopReason, Usage};
 
 use super::Agent;
 use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
@@ -27,6 +27,26 @@ use oven_proto::{ApprovalDecision, LoopLimitDecision};
 
 /// Prefix of the tool error returned when a call's arguments are not JSON.
 pub(super) const INVALID_JSON_ARGUMENTS: &str = "invalid JSON arguments";
+/// The reply was cut off by the model's output token limit.
+pub const REPLY_CUT_OFF: &str = "the reply was cut off by the model's output token limit";
+/// The reply carries no answer at all.
+pub const REPLY_EMPTY: &str = "the model returned no answer";
+
+/// Why a reply cannot end the turn: it was cut off, or it says nothing.
+///
+/// A step with no tool call ends the turn, so a reply that carries neither
+/// text nor a tool call would end it with nothing to show. The provider
+/// stopped early — a proxy, a content filter, a reply cut off by the output
+/// token limit — and the turn has to say so instead of reporting success.
+fn reply_problem(response: &Response) -> Option<AgentError> {
+    if response.stop_reason == Some(StopReason::MaxTokens) {
+        return Some(AgentError::from(REPLY_CUT_OFF));
+    }
+    if !response.has_tool_calls() && response.text().trim().is_empty() {
+        return Some(AgentError::from(REPLY_EMPTY));
+    }
+    None
+}
 
 impl Agent {
     /// One provider round trip: ask, commit the reply, run the tools it asked
@@ -44,6 +64,9 @@ impl Agent {
         ctx: &TurnContext,
     ) -> Result<Step, AgentError> {
         let (response, thinking) = self.complete_response(sink).await?;
+        if let Some(error) = reply_problem(&response) {
+            return Err(error);
+        }
         self.acknowledge_request_notes();
 
         self.history

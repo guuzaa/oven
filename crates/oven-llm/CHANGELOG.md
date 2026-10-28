@@ -45,6 +45,12 @@
   the system one is the role's business, and the caller's.
 
 ### Fixed
+- A Chat Completions stream that ends before the provider said why is an error, not a
+  finished reply. The decoder used to close the open blocks, report a `MessageDelta` with
+  no stop reason and hand out a `MessageStop`, so a reply cut off mid-sentence looked
+  like the model's answer. It now reports `CompletionsDecodeError::IncompleteStream`
+  ("stream ended before the model finished"), the same way the Responses protocol reports
+  a stream that ends without `response.completed`.
 - A request's system prompt has one place to live: `Request.system`. The protocols carry
   it apart from the messages — the Responses API's `instructions`, the first `system`
   message of a Chat Completions request — so it is not the same thing as a `Role::System`

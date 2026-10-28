@@ -35,6 +35,11 @@ pub enum CompletionsDecodeError {
     /// （Requirement 5.7）。
     #[error("received data after stream stopped")]
     DataAfterStop,
+    /// 流在 provider 说出这一轮为什么停之前就结束了：`[DONE]` 到了，
+    /// 但没有 `finish_reason`。回复可能停在半句，把它当成答完的话就是把
+    /// 截断的回复当成了模型的答案。
+    #[error("stream ended before the model finished")]
+    IncompleteStream,
 }
 
 /// 将 OpenAI 的 `finish_reason` 字符串映射为 domain 层的 `StopReason`。
@@ -254,9 +259,8 @@ impl StreamDecoder {
     /// - `Stopped` 阶段 → `DecodeError::DataAfterStop`
     /// - `AwaitingDone` 阶段：块已在 `finish_reason` 到达时关闭，
     ///   `MessageDelta` 也已发出，此处只需产出 `MessageStop`
-    /// - `Streaming` 阶段（流结束前从未收到 `finish_reason`）：补齐所有未
-    ///   关闭块的 `ContentBlockStop`、一个 `stop_reason`/`usage` 均为 `None`
-    ///   的 `MessageDelta`，再产出 `MessageStop`
+    /// - `Streaming` 阶段（流结束前从未收到 `finish_reason`）：回复停在半句，
+    ///   报 `DecodeError::IncompleteStream`，不伪造一个 `MessageStop`
     pub(crate) fn finish(&mut self) -> Result<Vec<StreamEvent>, CompletionsDecodeError> {
         match self.phase {
             StreamPhase::Initial => Err(CompletionsDecodeError::MissingChoice),
@@ -265,17 +269,7 @@ impl StreamDecoder {
                 self.phase = StreamPhase::Stopped;
                 Ok(vec![StreamEvent::MessageStop])
             }
-            StreamPhase::Streaming => {
-                let mut events = Vec::new();
-                self.close_open_blocks(&mut events);
-                events.push(StreamEvent::MessageDelta {
-                    stop_reason: None,
-                    usage: None,
-                });
-                events.push(StreamEvent::MessageStop);
-                self.phase = StreamPhase::Stopped;
-                Ok(events)
-            }
+            StreamPhase::Streaming => Err(CompletionsDecodeError::IncompleteStream),
         }
     }
 
@@ -1162,26 +1156,14 @@ mod tests {
     // --- finish() (Requirement 5.6) ---
 
     #[test]
-    fn finish_from_streaming_closes_blocks_and_emits_message_delta_and_stop() {
+    fn finish_from_streaming_reports_the_reply_was_cut_off() {
         let mut decoder = StreamDecoder::new();
         decoder
             .decode_chunk(stream_chunk(vec![text_delta_choice("hi", None)], None))
             .unwrap();
 
-        let events = decoder.finish().unwrap();
-        assert_eq!(events.len(), 3);
-        assert!(matches!(
-            events[0],
-            StreamEvent::ContentBlockStop { index: 0 }
-        ));
-        match &events[1] {
-            StreamEvent::MessageDelta { stop_reason, usage } => {
-                assert_eq!(*stop_reason, None);
-                assert_eq!(*usage, None);
-            }
-            other => panic!("expected MessageDelta, got {other:?}"),
-        }
-        assert!(matches!(events[2], StreamEvent::MessageStop));
+        let err = decoder.finish().unwrap_err();
+        assert!(matches!(err, CompletionsDecodeError::IncompleteStream));
     }
 
     #[test]

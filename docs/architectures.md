@@ -599,16 +599,16 @@ stateDiagram-v2
     Started --> Streaming: TextDelta / ThinkingDelta
     Started --> ThinkingDone: ThinkingDone
     Started --> Tool: ToolStarted
-    Started --> Completed: no tool calls
+    Started --> Completed: an answer, no tool calls
     Started --> Cancelled: cancel
-    Started --> Failed: provider / loop error
+    Started --> Failed: provider / loop error / no answer
 
     Streaming --> Streaming: TextDelta / ThinkingDelta
     Streaming --> ThinkingDone: ThinkingDone
     Streaming --> Tool: ToolStarted
     Streaming --> Completed: end of assistant text
     Streaming --> Cancelled: cancel
-    Streaming --> Failed: error
+    Streaming --> Failed: error / no answer
 
     ThinkingDone --> Streaming: follow-up text
     ThinkingDone --> Tool: ToolStarted
@@ -629,6 +629,8 @@ stateDiagram-v2
 ```
 
 `ThinkingDone` is not a terminal state: it closes the reasoning window the agent timed, before the answer or the tool call that ended it. Approval, loop-limit and question parks are one state, turn-scoped; the reply arrives as `App::respond` and the turn resumes.
+
+A turn ends when a step asks for no tool and the reply carries an answer. A reply that carries none — the provider stopped early, or the reply was cut off by the output token limit — fails the turn instead, so a turn that ended with nothing to show says so rather than reporting a completed answer that never came.
 
 Typical successful sequence:
 
