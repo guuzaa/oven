@@ -373,7 +373,7 @@ Row kinds (`transcript/kinds.rs`) each carry a two-column gutter and a style:
 | `Diff` | `  ` | `+`/`-` lines get add/remove backgrounds |
 | `ToolResult(bool)` | `  ` | header is `Result`; body is collapsed output |
 | `ShellResult(bool)` | `  ` | last 100 lines of output |
-| `Error` | `  ` | |
+| `Error` | `  ` | a failure: the reason, in the words of whoever said it |
 | `System` | `  ` | approvals, cancellations, compaction |
 | `Separator` | `  ` | turn end: `Worked for 1.2s`, or a blank line when the
 duration is unknown |
@@ -417,6 +417,18 @@ there, because nothing is running yet to pin one. A restored turn ends with its
 own `Separator` computed from the user prompt's timestamp to the answer's, so the
 `Worked for 1.2s` line survives a resume; a message that ended in a tool call
 has none, because the answer it led to is still to come.
+
+A turn that stops before the model answered is drawn in the same shape as one
+that finished, so the end of a turn is always in the same place: the reason
+first, then the line that says how it ended and how long it ran. A failure is
+a red row with the reason, in the words of whoever gave it, followed by
+`Failed after 1.2s`; a cancellation is a dim `cancelled` row followed by
+`Cancelled after 1.2s`. The reason is never labelled twice: a provider that
+failed says `provider: api error (500): boom`, and the row says that, not
+`failed: provider: api error (500): boom`. Whatever text the answer had
+already streamed is marked with `…`, because it was cut off — the same marker
+a cancelled answer has always carried, now shared by every ending that
+stopped early.
 
 ### Subagents
 

@@ -1021,10 +1021,7 @@ mod tests {
         let last = events.last().unwrap();
         match last {
             Err(ProviderError::Stream(err)) => {
-                assert_eq!(
-                    err.to_string(),
-                    "stream protocol error: stream ended before [DONE]"
-                );
+                assert_eq!(err.to_string(), "stream ended before [DONE]");
             }
             other => panic!("expected Stream error, got {other:?}"),
         }

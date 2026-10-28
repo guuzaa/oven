@@ -120,6 +120,12 @@ pub(super) fn format_elapsed(ms: u64) -> String {
     format!("{WORKED_FOR} {}", format_duration(ms))
 }
 
+/// Trailing line of a turn that ended without an answer: how it ended, and how
+/// long the turn ran.
+pub(super) fn format_outcome(outcome: &str, ms: u64) -> String {
+    format!("{outcome} after {}", format_duration(ms))
+}
+
 /// Header for a thinking row: the duration the agent reported, or a bare label
 /// when the row carries no timed span.
 pub(super) fn format_thought(ms: Option<u64>) -> String {

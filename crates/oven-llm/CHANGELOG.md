@@ -45,6 +45,11 @@
   the system one is the role's business, and the caller's.
 
 ### Fixed
+- An error says why it happened. `ProviderError::Stream`, `InvalidRequest`,
+  `CompletionsEncode` and `ResponsesEncode` kept their reason in the source
+  chain only, so the text a caller saw was `stream protocol error` or
+  `invalid request` with the reason nowhere in it. The reason is part of the
+  message now: `stream protocol error: stream ended before [DONE]`.
 - A Chat Completions stream that ends before the provider said why is an error, not a
   finished reply. The decoder used to close the open blocks, report a `MessageDelta` with
   no stop reason and hand out a `MessageStop`, so a reply cut off mid-sentence looked

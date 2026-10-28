@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
-    AgentEvent, AppEvent, COMPACTION_CANCELLED, CompactionEvent, LocalShell, NOTICE_MARK,
-    ShellEvent, StepStop, StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent, UserRequestId,
-    present_tool,
+    AgentError, AgentEvent, AppEvent, COMPACTION_CANCELLED, CompactionEvent, LocalShell,
+    NOTICE_MARK, ShellEvent, StepStop, StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent,
+    UserRequestId, present_tool,
 };
 use oven_llm::{ContentBlock, Message, ToolUse};
 use ratatui::Terminal;
@@ -42,6 +42,8 @@ const ELAPSED_1_2S: &str = "Worked for 1.2s";
 const ELAPSED_1_5S: &str = "Worked for 1.5s";
 const ELAPSED_1M: &str = "Worked for 1m 0s";
 const ELAPSED_1M_1S: &str = "Worked for 1m 1s";
+const FAILED_1_5S: &str = "Failed after 1.5s";
+const CANCELLED_1_5S: &str = "Cancelled after 1.5s";
 const THOUGHT_0: &str = "Thought for 0s";
 const THOUGHT_1_5S: &str = "Thought for 1.5s";
 const THOUGHT_1M_1S: &str = "Thought for 1m 1s";
@@ -518,8 +520,19 @@ fn completed_in(duration_ms: u64) -> AppEvent {
     }))
 }
 
+fn failed(message: &str, duration_ms: u64) -> AppEvent {
+    agent(AgentEvent::Turn(TurnEvent::Failed {
+        error: AgentError::new(message),
+        duration_ms,
+    }))
+}
+
 fn cancelled() -> AppEvent {
-    agent(AgentEvent::Turn(TurnEvent::Cancelled { duration_ms: 0 }))
+    cancelled_in(0)
+}
+
+fn cancelled_in(duration_ms: u64) -> AppEvent {
+    agent(AgentEvent::Turn(TurnEvent::Cancelled { duration_ms }))
 }
 
 fn loop_limit_reached(max_iters: usize) -> AppEvent {
@@ -4412,5 +4425,51 @@ fn select_rows(t: &mut Transcript, from: usize, to: usize) {
     t.handle_mouse(
         mouse(MouseEventKind::Drag(MouseButton::Left), end_col, to),
         &State::new(),
+    );
+}
+
+#[test]
+fn a_failed_turn_says_it_failed_and_how_long_it_ran() {
+    const REASON: &str = "the model returned no answer";
+    let mut t = Transcript::new();
+    t.start_user_turn("do the thing");
+    t.on_event(&failed(REASON, 1_547));
+    wide(&mut t);
+
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::User, LineKind::Error, LineKind::Separator]
+    );
+    assert_eq!(t.rows[1].text.as_str(), REASON);
+    assert_eq!(t.rows[2].text.as_str(), FAILED_1_5S);
+}
+
+#[test]
+fn a_cancelled_turn_says_it_was_cancelled_and_how_long_it_ran() {
+    let mut t = Transcript::new();
+    t.start_user_turn("do the thing");
+    t.on_event(&cancelled_in(1_547));
+    wide(&mut t);
+
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::User, LineKind::System, LineKind::Separator]
+    );
+    assert_eq!(t.rows[1].text.as_str(), "cancelled");
+    assert_eq!(t.rows[2].text.as_str(), CANCELLED_1_5S);
+}
+
+#[test]
+fn a_turn_that_stopped_early_marks_the_partial_answer_as_cut_off() {
+    let mut t = Transcript::new();
+    t.start_user_turn("do the thing");
+    t.on_event(&text_delta("half a sen"));
+    t.on_event(&failed("the model returned no answer", 1_547));
+    wide(&mut t);
+
+    assert_eq!(
+        t.rows[1].text.as_str(),
+        "half a sen…",
+        "an answer the turn did not finish is marked as cut off"
     );
 }

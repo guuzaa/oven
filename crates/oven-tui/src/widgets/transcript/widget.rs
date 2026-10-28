@@ -24,9 +24,10 @@ use super::selection::{SelPos, highlight_line};
 use super::wrap::{
     Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, PROMPT_BODY_SLOTS, RESULT_LABEL,
     THINKING_LABEL, THOUGHT_LABEL, apply_hover, apply_shimmer, collect_lines, fits_stream_caret,
-    format_elapsed, format_thought, line_display_width, line_has_glyph, paint_rows, paint_visible,
-    shimmer_phase, sticky_prompt_window, sticky_row_index, stream_caret_line, tail_lines,
-    trim_message, wrap_body_into, wrap_collapsible_into, wrap_markdown_into, wrap_row_into,
+    format_elapsed, format_outcome, format_thought, line_display_width, line_has_glyph, paint_rows,
+    paint_visible, shimmer_phase, sticky_prompt_window, sticky_row_index, stream_caret_line,
+    tail_lines, trim_message, wrap_body_into, wrap_collapsible_into, wrap_markdown_into,
+    wrap_row_into,
 };
 
 const MOUSE_SCROLL_STEP: u16 = 3;
@@ -42,6 +43,12 @@ const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 pub(super) use super::wrap::MAX_STICKY_PROMPT_ROWS;
 const NO_OUTPUT: &str = "(no output)";
 pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
+/// The turn-end line of a turn that failed.
+const FAILED: &str = "Failed";
+/// The turn-end line of a turn that was cancelled.
+const CANCELLED: &str = "Cancelled";
+/// The reason a cancelled turn gives.
+const CANCELLED_REASON: &str = "cancelled";
 
 pub struct Transcript {
     pub(super) rows: Vec<Row>,
@@ -730,6 +737,48 @@ impl Transcript {
         self.push_turn_end(&format_elapsed(duration_ms));
     }
 
+    /// Settles an answer the turn did not finish: the text that arrived is
+    /// marked as cut off, so it does not read as a whole reply.
+    fn flush_partial(&mut self) {
+        let (kind, body) = self.take_stream();
+        if !body.is_empty() {
+            self.append_row(kind, format!("{body}…"), None);
+        }
+    }
+
+    /// Settles what a turn left open: the thinking that was still live, the
+    /// answer it did not finish, and the activity that was open.
+    fn settle_pending(&mut self) {
+        self.stop_live_thinking();
+        self.flush_partial();
+        self.seal_activity();
+    }
+
+    /// Closes a turn that stopped before the model answered: the reason it
+    /// stopped, then the turn-end line that says how it ended and how long
+    /// the turn ran. A failure and a cancellation have the same shape —
+    /// only the reason and its colour differ.
+    fn end_turn_unfinished(
+        &mut self,
+        kind: LineKind,
+        reason: &str,
+        outcome: &str,
+        duration_ms: u64,
+    ) {
+        self.settle_pending();
+        self.push_row(kind, reason);
+        self.push_outcome(outcome, duration_ms);
+    }
+
+    /// The turn-end line of a turn that did not end with an answer.
+    fn push_outcome(&mut self, outcome: &str, duration_ms: u64) {
+        if duration_ms == 0 {
+            self.push_turn_end("");
+            return;
+        }
+        self.push_turn_end(&format_outcome(outcome, duration_ms));
+    }
+
     fn push_turn_end(&mut self, text: &str) {
         if matches!(
             self.rows.last().map(|r| r.kind),
@@ -1415,24 +1464,17 @@ impl Transcript {
                     self.end_turn(*duration_ms);
                 }
                 AgentEvent::Turn(TurnEvent::Cancelled { duration_ms, .. }) => {
-                    self.stop_live_thinking();
-                    if !self.streaming.is_empty() {
-                        let (kind, partial) = self.take_stream();
-                        if !partial.is_empty() {
-                            self.append_row(kind, format!("{partial}…"), None);
-                        }
-                    }
-                    self.push_row(LineKind::System, "cancelled");
-                    self.finish_response();
-                    self.push_elapsed(*duration_ms);
+                    self.end_turn_unfinished(
+                        LineKind::System,
+                        CANCELLED_REASON,
+                        CANCELLED,
+                        *duration_ms,
+                    );
                 }
                 AgentEvent::Turn(TurnEvent::Failed {
                     error, duration_ms, ..
                 }) => {
-                    self.stop_live_thinking();
-                    self.flush_streaming();
-                    self.push_row(LineKind::Error, &error.message);
-                    self.end_turn(*duration_ms);
+                    self.end_turn_unfinished(LineKind::Error, &error.message, FAILED, *duration_ms);
                 }
             },
             AppEventKind::Shell(ev) => match ev {
@@ -1462,9 +1504,7 @@ impl Transcript {
             | AppEventKind::Notification { .. }
             | AppEventKind::RequestResolved { .. } => {}
             AppEventKind::Error { message } => {
-                self.stop_live_thinking();
-                self.flush_streaming();
-                self.seal_activity();
+                self.settle_pending();
                 self.push_row(LineKind::Error, message);
                 self.push_separator();
             }

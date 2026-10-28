@@ -67,7 +67,6 @@ impl From<ProviderError> for AgentError {
                 format!("model '{model}' is not available; run /setup to configure that provider")
             }
             ProviderError::NoProviderRegistered => "no provider registered; run /setup".to_string(),
-            ProviderError::InvalidRequest(reason) => format!("provider: invalid request: {reason}"),
             _ => format!("provider: {err}"),
         };
         Self { message }
@@ -106,5 +105,32 @@ mod tests {
         let json = serde_json::to_string(&error).unwrap();
         assert_eq!(json, r#"{"message":"boom"}"#);
         assert_eq!(serde_json::from_str::<AgentError>(&json).unwrap(), error);
+    }
+
+    #[test]
+    fn a_provider_failure_keeps_the_reason_it_failed_for() {
+        let error = AgentError::from(ProviderError::Stream(
+            oven_llm::StreamCollectorError::Stream("stream ended before the model finished".into()),
+        ));
+
+        assert_eq!(
+            error.message,
+            "provider: stream protocol error: stream ended before the model finished"
+        );
+    }
+
+    #[test]
+    fn a_rejected_request_keeps_the_reason_it_was_rejected() {
+        let error = AgentError::from(ProviderError::InvalidRequest(
+            oven_llm::ValidationError::MaxTokensExceeded {
+                requested: 100,
+                max: 50,
+            },
+        ));
+
+        assert_eq!(
+            error.message,
+            "provider: invalid request: max_tokens 100 exceeds model's max_output_tokens 50"
+        );
     }
 }

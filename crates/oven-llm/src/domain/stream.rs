@@ -101,7 +101,7 @@ impl StreamEvent {
 /// [`StreamCollector::finish`] 可能返回的错误。
 #[derive(Debug, Error)]
 pub enum StreamCollectorError {
-    #[error("stream protocol error: {0}")]
+    #[error("{0}")]
     Stream(String),
 }
 

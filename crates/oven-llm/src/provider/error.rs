@@ -29,22 +29,22 @@ pub enum ProviderError {
     #[error("completions decoding error: {0}")]
     CompletionsDecode(#[source] CompletionsDecodeError),
     /// SSE 解析失败 / 流在 `[DONE]` 前终止。
-    #[error("stream protocol error")]
+    #[error("stream protocol error: {0}")]
     Stream(#[source] StreamCollectorError),
     /// 其他非 2xx 状态码，携带状态码与响应体。
     #[error("api error ({status}): {body}")]
     Api { status: u16, body: String },
     /// 请求发出前的校验失败。
-    #[error("invalid request")]
+    #[error("invalid request: {0}")]
     InvalidRequest(#[source] ValidationError),
     /// Completions API 响应解码失败。
-    #[error("completions encoding error")]
+    #[error("completions encoding error: {0}")]
     CompletionsEncode(#[source] CompletionsEncodeError),
     /// Responses API 响应解码失败。
     #[error("responses decode error: {0}")]
     ResponsesDecode(#[source] ResponsesDecodeError),
     /// Responses API 请求编码失败。
-    #[error("responses encoding error")]
+    #[error("responses encoding error: {0}")]
     ResponsesEncode(#[source] ResponsesEncodeError),
     /// 统一构造入口（`ProviderBuilder`）遇到不支持的 kind/name 组合。
     #[error("unsupported provider combination: {kind:?} + {name:?}")]
@@ -151,7 +151,10 @@ mod tests {
     fn stream_error_display() {
         let inner = StreamCollectorError::Stream("stream ended before [DONE]".to_string());
         let err = ProviderError::Stream(inner);
-        assert_eq!(err.to_string(), "stream protocol error");
+        assert_eq!(
+            err.to_string(),
+            "stream protocol error: stream ended before [DONE]"
+        );
         assert!(err.source().is_some());
     }
 
@@ -159,7 +162,10 @@ mod tests {
     fn invalid_request_display() {
         let inner = ValidationError::ToolsUnsupported;
         let err = ProviderError::InvalidRequest(inner);
-        assert_eq!(err.to_string(), "invalid request");
+        assert_eq!(
+            err.to_string(),
+            "invalid request: model does not support tools"
+        );
         assert!(err.source().is_some());
     }
 
@@ -167,7 +173,10 @@ mod tests {
     fn encode_error_display() {
         let inner = CompletionsEncodeError::InvalidContent("bad".to_string());
         let err = ProviderError::CompletionsEncode(inner);
-        assert_eq!(err.to_string(), "completions encoding error");
+        assert_eq!(
+            err.to_string(),
+            "completions encoding error: invalid content block: bad"
+        );
         assert!(err.source().is_some());
     }
 
@@ -188,7 +197,10 @@ mod tests {
     fn responses_encode_error_display() {
         let inner = ResponsesEncodeError::InvalidContent("bad".to_string());
         let err = ProviderError::ResponsesEncode(inner);
-        assert_eq!(err.to_string(), "responses encoding error");
+        assert_eq!(
+            err.to_string(),
+            "responses encoding error: invalid content block: bad"
+        );
         assert!(err.source().is_some());
     }
 
