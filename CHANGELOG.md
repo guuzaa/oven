@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.1.3] - 2026-10-28
+
+### Added
+- `oven-proto`: `AgentError` joins the vocabulary `oven-app` hands a frontend — it rides in `TurnEvent::Failed`, so a frontend that renders the event can name the type without depending on `oven-proto` itself
+- `oven-app`: `CommandResult` says what the app did with a submission — `Submitted`, `Parked` and `Unparked` each carry the input, so a frontend draws it the way the runtime will treat it
+- `oven-app`: `App::prompt` is a `Headless` client now: one implementation reads the answer off the event stream, and any frontend without a screen reuses it instead of writing the loop again
+- `oven-llm`: `complete_streaming()` drives a streamed call and returns the assembled response — every event goes to the callback first and is collected afterwards, so what the caller saw and what the response holds cannot drift apart
+- `oven-llm`: `Response::tool_calls()`, `has_tool_calls()` and `stopped_for_tools()` answer the questions a loop asks about a reply, and `ToolUse::arguments()` reports a truncated argument object instead of handing the caller an empty one
+- `oven-agent`: a reply that cannot end the turn is logged with the provider's own words — the stop reason it reported, how many content blocks arrived and the output tokens it counted. Every request's debug line carries the stop reason too, so a reply that came back without one is visible in the log and not only in the failure that follows it
+
+### Changed
+- **Breaking:** `oven-app`, `oven-tui`: every frontend request goes through `App::apply(Command)` — a submission, a steer, a rewind, a cancel, a mode switch, an answer, a subagent to stop — so the terminal and a second frontend share one contract. The command carries a classified `Input` and `App::classify` is the only classifier, so no text is read twice
+- `oven-tui`: the terminal's key handler is synchronous, so the requests wait in an outbox until the event loop sends them; the ones the last key made go out before the app is shut down, so a cancel is never lost
+- `oven-app`: the event bus hands every subscriber the same `Arc<AppEvent>`, so a stream of text deltas and a 64 KB tool result cost one reference count rather than a copy each
+- **Breaking:** `oven-llm`: `ToolUse` is a type now — it carries the id, the name, the arguments and the raw wire text, and keeps the cache-hit contract to itself, so the wire text the model generated is no longer a public field every caller had to know about. The JSON of a content block is unchanged, so stored conversations still load
+- **Breaking:** `oven-llm`: the request methods say what they do — `push_*` adds one message or tool, `set_*` replaces the collection
+- **Breaking:** `oven-llm`: `Message::system_prompt()` is gone; `Message::text()` reads the text of any message and the role says whether it is the system one, and `Request.system` is the one home of a system prompt
+- `oven-llm`: the request asks for the model's declared output cap — the provider's own default is lower than the model allows and cut a long answer off mid-sentence
+- `oven-llm` is published as 0.7.0: the typed `ToolUse`, the `push_*`/`set_*` request methods, the provider's own words in a refused request and the `IncompleteStream` decode error above ship in it
+- `oven-tui`: a turn that stops before the model answered has one shape — the reason first, then the line that says how it ended and how long it ran: a failure is a red row with the reason followed by `Failed after 1.5s`, a cancellation a dim `cancelled` row followed by `Cancelled after 1.5s`, and a turn that finished keeps `Worked for 1.5s`
+- The minimum supported Rust version is 1.94, and CI caches with `actions/cache` v5
+
+### Fixed
+- A refused request says why, in the provider's own words: a provider that answers with `{"error":{"message":"..."}}` gets its message read out of it, a body that is not JSON is collapsed onto one line and cut to 200 characters, and a body that says nothing falls back to the status
+- A rate limit says what was exceeded and how long to wait: the `Retry-After` header is read, and `ProviderError::RateLimit` carries the reason beside the wait instead of dropping it
+- A turn that ends with no answer says so: a reply that carries neither text nor a tool call fails the turn instead of reading as the model's final answer, and the reply stays out of the history, so the next turn starts from the last thing that happened
+- `oven-llm`: a Chat Completions stream that ends before the provider said why is `CompletionsDecodeError::IncompleteStream` now, the way the Responses protocol already reports a stream that ends without `response.completed` — a truncated reply no longer reads as an answer
+- The reason a request failed reaches the screen: `ProviderError::Stream`, `InvalidRequest`, `CompletionsEncode` and `ResponsesEncode` keep it in the message now and not only in the source chain, so the row says `provider: api error (500): boom` and not `failed: stream protocol error`
+- An answer that was cut off is marked with `…`, so a failed half-answer is no longer flushed as if it were whole
+- An exclusive tool call runs on its own: the lock is a read-write lock now, so an exclusive call waits for the calls that share its step and they wait for it — a `file_write` no longer runs beside a `file_read` of the same file
+- An edit that lands shows its diff in red and green: the diff a file edit leaves behind wears its sign first, the way the frontend reads a diff, and names the line the way `file_read` reports one
+
 ## [0.1.2] - 2026-10-24
 
 ### Added
