@@ -116,9 +116,14 @@ impl Agent {
     ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
         let started = Instant::now();
         let result = self.complete_or_stream(sink).await;
+        let stop_reason = result
+            .as_ref()
+            .ok()
+            .and_then(|(response, _)| response.stop_reason);
         tracing::debug!(
             model = %self.model(),
             duration_ms = as_ms(started.elapsed()),
+            ?stop_reason,
             "llm request complete"
         );
         result

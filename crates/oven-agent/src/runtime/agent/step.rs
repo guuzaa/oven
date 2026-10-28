@@ -65,6 +65,13 @@ impl Agent {
     ) -> Result<Step, AgentError> {
         let (response, thinking) = self.complete_response(sink).await?;
         if let Some(error) = reply_problem(&response) {
+            tracing::warn!(
+                stop_reason = ?response.stop_reason,
+                blocks = response.content.len(),
+                output_tokens = response.usage.map(|usage| usage.output_tokens),
+                error = %error.message,
+                "the reply cannot end the turn"
+            );
             return Err(error);
         }
         self.acknowledge_request_notes();
