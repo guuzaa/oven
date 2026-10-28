@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0] - 2026-10-28
 
 ### Added
 - `complete_streaming(provider, request, options, on_event)` drives a streamed call and
