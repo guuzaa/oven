@@ -866,6 +866,8 @@ fn continuation_prefix(kind: LineKind, first_prefix: &str) -> String {
     }
 }
 
+/// A diff line wears its sign first: `+` for an added line, `-` for a removed
+/// one. A line that starts with neither is plain text.
 fn diff_line_style(part: &str, fallback: Style, kind: LineKind) -> Style {
     if kind != LineKind::Diff {
         return fallback;

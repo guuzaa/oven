@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{labeled, require_str, resolve_within};
+use super::{labeled, numbered, require_str, resolve_within};
 use oven_agent::{Tool, ToolOutcome, TurnContext};
 use oven_proto::AgentError;
 use oven_proto::ToolView;
@@ -92,7 +92,7 @@ impl Tool for FileReadTool {
 
         output.push('\n');
         for (index, line) in lines[start..end].iter().enumerate() {
-            let _ = write!(output, "L{}→{}", start + index + 1, line);
+            let _ = write!(output, "{}", numbered(start + index + 1, line));
         }
         Ok(output.into())
     }

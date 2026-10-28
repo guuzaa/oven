@@ -173,6 +173,11 @@ fn input_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// A line of a file with its 1-based number, the way `file_read` reports it.
+fn numbered(line: usize, text: &str) -> String {
+    format!("L{line}→{text}")
+}
+
 /// A bare turn for tests that exercise a tool without driving a turn.
 #[cfg(test)]
 fn test_context() -> TurnContext {

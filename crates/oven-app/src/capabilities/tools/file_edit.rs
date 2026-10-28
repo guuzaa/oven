@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{labeled, require_str, resolve_within};
+use super::{labeled, numbered, require_str, resolve_within};
 use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
 use oven_proto::AgentError;
 use oven_proto::{ToolPermission, ToolView};
@@ -124,16 +124,12 @@ fn diff_lines(old_string: &str, new_string: &str) -> String {
 
 /// The diff of an edit that landed, with a gutter naming the line each side
 /// sits on: the removed lines in the file as it was, the added ones in the
-/// file as it now is.
+/// file as it now is. The sign comes first, the way a frontend reads a diff.
 fn landed_diff(applied: &AppliedEdit<'_>) -> String {
-    let removed = applied.edit.old_string.lines().count();
-    let added = applied.edit.new_string.lines().count();
-    let last_line = applied.line + removed.max(added).saturating_sub(1);
-    let width = last_line.to_string().len();
     let lines = |text: &str, sign: char| {
         text.lines()
             .enumerate()
-            .map(|(index, line)| format!("{:>width$} {sign} {line}", applied.line + index))
+            .map(|(index, line)| format!("{sign} {}", numbered(applied.line + index, line)))
             .collect::<Vec<_>>()
     };
     lines(applied.edit.old_string, '-')
@@ -276,7 +272,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(outcome.detail.as_deref(), Some("2 - two\n2 + 2"));
+        assert_eq!(outcome.detail.as_deref(), Some("- L2→two\n+ L2→2"));
     }
 
     #[tokio::test]
@@ -300,7 +296,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             outcome.detail.as_deref(),
-            Some(" 9 - b\n10 - c\n 9 + B\n10 + C\n11 + D")
+            Some("- L9→b\n- L10→c\n+ L9→B\n+ L10→C\n+ L11→D")
         );
     }
 
@@ -324,7 +320,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             outcome.detail.as_deref(),
-            Some("1 - x\n1 + X\n2 - y\n2 + Y")
+            Some("- L1→x\n+ L1→X\n- L2→y\n+ L2→Y")
         );
     }
 

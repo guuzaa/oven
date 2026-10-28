@@ -1882,8 +1882,35 @@ fn wrapped_row_of(t: &Transcript, needle: &str) -> u16 {
 }
 
 const EDIT_SUCCESS: &str = "edited src/main.rs: 1 edit(s), 3 bytes -> 3 bytes";
-const EDIT_LANDED: &str = "2 - old\n2 + new";
+const EDIT_LANDED: &str = "- L2→old\n+ L2→new";
 const EDIT_ERROR: &str = "old_string not found";
+
+#[test]
+fn a_landed_edit_diff_wears_its_sign_first() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&finished(
+        1,
+        ToolResult::Success {
+            output: EDIT_SUCCESS.into(),
+        },
+        Some(EDIT_LANDED),
+    ));
+    wide(&mut t);
+
+    let removal = t
+        .wrapped
+        .iter()
+        .find(|line| line_text(line).contains("old"))
+        .expect("the removed line");
+    let addition = t
+        .wrapped
+        .iter()
+        .find(|line| line_text(line).contains("new"))
+        .expect("the added line");
+    assert_eq!(removal.spans[1].style.bg, Some(Color::LightRed));
+    assert_eq!(addition.spans[1].style.bg, Some(Color::LightGreen));
+}
 
 #[test]
 fn file_edit_aggregates_with_a_nested_diff() {
