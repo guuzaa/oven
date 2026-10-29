@@ -274,9 +274,6 @@ fn take(buffer: &Mutex<Vec<u8>>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
-
-    const BUDGET: Duration = Duration::from_secs(5);
     const HEARTBEAT_FILE: &str = "heartbeat.txt";
 
     /// A background loop that keeps writing to `HEARTBEAT_FILE` while the
@@ -329,6 +326,10 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn detached_descendant_does_not_block_completion() {
+        use std::time::Instant;
+
+        const BUDGET: Duration = Duration::from_secs(5);
+
         let started = Instant::now();
         let output = run_shell_command(
             "echo started; sleep 30 & echo $!",
