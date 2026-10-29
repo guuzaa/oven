@@ -200,7 +200,7 @@ mod tests {
 
     fn base_request() -> Request {
         Request {
-            messages: vec![Message::user(vec![ContentBlock::text("hi")])],
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text("hi")]))],
             ..Default::default()
         }
     }
@@ -312,11 +312,11 @@ mod tests {
         let mut model = full_capability_model();
         model.capabilities.supports_vision = false;
         let req = Request {
-            messages: vec![Message::user(vec![ContentBlock::Image {
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::Image {
                 source: ImageSource::Url {
                     url: "https://example.com/a.png".to_string(),
                 },
-            }])],
+            }]))],
             ..base_request()
         };
         assert_eq!(
@@ -330,7 +330,7 @@ mod tests {
         let mut model = full_capability_model();
         model.capabilities.supports_vision = false;
         let req = Request {
-            messages: vec![Message::user(vec![ContentBlock::ToolResult {
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::ToolResult {
                 tool_use_id: "tool_1".to_string(),
                 content: vec![ContentBlock::Image {
                     source: ImageSource::Url {
@@ -338,7 +338,7 @@ mod tests {
                     },
                 }],
                 is_error: false,
-            }])],
+            }]))],
             ..base_request()
         };
         assert_eq!(
@@ -351,11 +351,11 @@ mod tests {
     fn vision_supported_passes() {
         let model = full_capability_model();
         let req = Request {
-            messages: vec![Message::user(vec![ContentBlock::Image {
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::Image {
                 source: ImageSource::Url {
                     url: "https://example.com/a.png".to_string(),
                 },
-            }])],
+            }]))],
             ..base_request()
         };
         assert_eq!(
@@ -369,11 +369,11 @@ mod tests {
         let mut model = full_capability_model();
         model.capabilities.supports_streaming = false;
         let req = Request {
-            messages: vec![Message::user(vec![ContentBlock::Image {
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::Image {
                 source: ImageSource::Url {
                     url: "https://example.com/a.png".to_string(),
                 },
-            }])],
+            }]))],
             ..base_request()
         };
         assert!(validate_request(&req, &CallOptions::new("test-model"), &model, true).is_err());
@@ -386,9 +386,9 @@ mod tests {
         let mut model = full_capability_model();
         model.context_window = 1;
         let req = Request {
-            messages: vec![Message::user(vec![ContentBlock::text(
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text(
                 "this is a much longer message than one token",
-            )])],
+            )]))],
             ..base_request()
         };
         let estimated = estimate_input_tokens(&req);
@@ -417,9 +417,9 @@ mod tests {
         let mut model = full_capability_model();
         model.context_window = 0;
         let req = Request {
-            messages: vec![Message::user(vec![ContentBlock::text(
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text(
                 "this message would overflow any small context window",
-            )])],
+            )]))],
             ..base_request()
         };
         assert_eq!(
@@ -435,14 +435,14 @@ mod tests {
         let model = full_capability_model();
         let req = Request {
             system: Some("be helpful".to_string()),
-            messages: vec![Message::user(vec![
+            messages: vec![Arc::new(Message::user(vec![
                 ContentBlock::text("hi"),
                 ContentBlock::Image {
                     source: ImageSource::Url {
                         url: "https://example.com/a.png".to_string(),
                     },
                 },
-            ])],
+            ]))],
             tools: vec![Tool {
                 name: "get_weather".to_string(),
                 description: Some("查询天气".to_string()),
@@ -497,7 +497,7 @@ mod tests {
     fn estimate_input_tokens_counts_system_messages_and_tools() {
         let req = Request {
             system: Some("abc".to_string()), // 3 chars
-            messages: vec![Message::user(vec![ContentBlock::text("def")])], // 3 chars
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text("def")]))], // 3 chars
             tools: vec![Tool {
                 name: "ghi".to_string(), // 3 chars
                 description: None,

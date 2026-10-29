@@ -350,7 +350,7 @@ mod tests {
     fn system_field_becomes_instructions() {
         let req = Request {
             system: Some("be helpful".to_string()),
-            messages: vec![Message::user_text("hi")],
+            messages: vec![Arc::new(Message::user_text("hi"))],
             ..Default::default()
         };
         let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn user_text_message_encodes_as_string_content() {
         let req = Request {
-            messages: vec![Message::user_text("hello")],
+            messages: vec![Arc::new(Message::user_text("hello"))],
             ..Default::default()
         };
         let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
@@ -392,9 +392,9 @@ mod tests {
     fn encode_replays_raw_function_call_arguments() {
         let raw = r#"{ "city": "Hangzhou" }"#;
         let req = Request {
-            messages: vec![Message::assistant(vec![ContentBlock::ToolUse(
+            messages: vec![Arc::new(Message::assistant(vec![ContentBlock::ToolUse(
                 ToolUse::from_raw("call_1", "get_weather", raw.to_string()),
-            )])],
+            )]))],
             ..Default::default()
         };
         let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
@@ -409,8 +409,8 @@ mod tests {
     fn multi_turn_encodes_items_in_order() {
         let req = Request {
             messages: vec![
-                Message::user_text("what's the weather?"),
-                Message::assistant(vec![
+                Arc::new(Message::user_text("what's the weather?")),
+                Arc::new(Message::assistant(vec![
                     ContentBlock::thinking("let me check"),
                     ContentBlock::text("I'll check."),
                     ContentBlock::tool_use(
@@ -418,8 +418,8 @@ mod tests {
                         "get_weather".to_string(),
                         serde_json::json!({"city": "Hangzhou"}),
                     ),
-                ]),
-                Message::tool_result("call_1", "sunny", false),
+                ])),
+                Arc::new(Message::tool_result("call_1", "sunny", false)),
             ],
             ..Default::default()
         };
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn system_message_encodes_as_system_input_item() {
         let req = Request {
-            messages: vec![Message::system("be terse")],
+            messages: vec![Arc::new(Message::system("be terse"))],
             ..Default::default()
         };
         let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();

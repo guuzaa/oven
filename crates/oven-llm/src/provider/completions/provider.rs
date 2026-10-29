@@ -333,6 +333,8 @@ impl Provider for CompletionsProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::domain::message::{ContentBlock, Message};
     use crate::domain::reasoning::ReasoningEffort;
@@ -361,7 +363,7 @@ mod tests {
 
     fn sample_request() -> Request {
         Request {
-            messages: vec![Message::user(vec![ContentBlock::text("hi")])],
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text("hi")]))],
             ..Default::default()
         }
     }

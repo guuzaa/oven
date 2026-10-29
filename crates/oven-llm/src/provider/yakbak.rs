@@ -11,6 +11,7 @@
 //! 测试本身不用改。
 
 use std::path::Path;
+use std::sync::Arc;
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -49,7 +50,7 @@ fn api_key(value: &str) -> SecretString {
 
 fn user_request(prompt: &str) -> Request {
     Request {
-        messages: vec![Message::user_text(prompt)],
+        messages: vec![Arc::new(Message::user_text(prompt))],
         ..Default::default()
     }
 }
