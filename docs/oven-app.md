@@ -259,6 +259,23 @@ formats — bare messages and the `{message, usage}` envelope — with timestamp
 and skips lines whose `type` tag it does not know, so a file written by a newer
 version still loads.
 
+The `SessionMeta` record names the format the file was written in
+(`oven_proto::SESSION_FORMAT_VERSION`). A file that records a newer format than
+this build reads is refused rather than half-understood: its records may mean
+something this build does not know.
+
+A file keeps the format it was written in. The records written into it are
+written in that format, so a session resumed from an older file keeps meaning
+what it meant: a format that does not know the working directory does not get
+one, and the file keeps saying the version it said before. A new file is in
+the format this build writes.
+
+The meta also names the directory the session was started in — the root the app
+was pointed at, which is the shell's directory when it was pointed at none. A
+session resumed in another directory says so: the paths its conversation names
+mean something else there. A file written before that was recorded names no
+directory, and there is nothing to compare it against, so it is ignored.
+
 Persistence is incremental: `persist_turn` appends only the records past
 `persisted_messages`, so a turn costs one open/flush cycle no matter how long the
 conversation is. A structural reset (`clear`, restoring a session) bumps the

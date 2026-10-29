@@ -194,7 +194,7 @@ disk.
 | `interaction` | `Question`, `QuestionOption`, `UserResponse`, `ApprovalDecision`, `LoopLimitDecision`, `AnswerResponse` |
 | `subagent` | `NodeInfo`, `NodeStatus` |
 | `todo` | `TodoList`, `TodoItem`, `TodoStatus` |
-| `record` | `Record`, `SessionMeta` |
+| `record` | `Record`, `SessionMeta`, `SESSION_FORMAT_VERSION`, `SESSION_FORMAT_WITHOUT_VERSION` |
 | `id` | `AgentId`, `TurnId`, `ToolCallId`, `UserRequestId` |
 | `mode` | `AgentMode`, `ToolAccess` |
 | `permission` | `ToolPermission` |
@@ -219,7 +219,18 @@ reproducible.
 **The session format is part of the protocol.** `Record` and `SessionMeta`
 describe what a session file holds. A frontend that reloads a session reads
 the same records the runtime wrote, so the format is named here rather than
-buried in the app layer.
+buried in the app layer. `SESSION_FORMAT_VERSION` is the format this build
+writes; a `SessionMeta` records the version its file was written in, so a
+reader can tell a file it understands from one a newer oven wrote.
+`SessionMeta::is_readable_by_this_build` is that rule: a file written by a
+newer oven holds records this build does not know, so it is refused rather
+than half-understood. `SESSION_FORMAT_WITHOUT_VERSION` is the format a file
+written before the version was recorded is in.
+
+**A file keeps the format it was written in.** `Record::into_version` is how a
+record is written in a given format: what that format does not know, it does
+not get. A session resumed from an older file is written in that file's
+format, so the records in it keep meaning what they meant then.
 
 ## Using it
 

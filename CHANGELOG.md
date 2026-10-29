@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `oven-proto`: a session file names the format it was written in — `SessionMeta::format_version` records it, and `SessionMeta::is_readable_by_this_build` is the rule: a file a newer oven wrote is refused rather than half-understood
+- `oven-proto`: `Record::into_version` writes a record in a given format, so a session keeps the format it was written in: a file resumed from an older one is written in that format, and what that format does not know, it does not get
+- `oven-app`, `oven-tui`: a session records the directory it was started in, and resuming it in another one says so — the paths its conversation names mean something else there. A file written before that was recorded names no directory, and there is nothing to compare it against
+
+### Changed
+- **Breaking:** `oven-proto`: `SessionMeta` names the format its file was written in and the directory the session was started in — a struct literal has to name both
+- **Breaking:** `oven-app`: `SessionError` grew `UnsupportedFormat` — a file written in a format this build does not read is refused instead of being read halfway
+
 ## [0.1.3] - 2026-10-28
 
 ### Added

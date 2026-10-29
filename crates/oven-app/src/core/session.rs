@@ -12,6 +12,14 @@
 //! `Message` or the `{"message": ..., "usage": ...}` envelope — are accepted
 //! with timestamp 0, and a non-zero envelope usage becomes a `TokenUsage`
 //! record after its message.
+//!
+//! The session meta record names the format the file was written in. A file
+//! that records a newer format than this build reads is refused rather than
+//! half-understood.
+//!
+//! The meta also names the directory the session was started in, so a session
+//! resumed somewhere else can say so. A file written before that was recorded
+//! names none, and there is nothing to compare it against.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +29,7 @@ use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use oven_llm::{Message, Usage};
-use oven_proto::Record;
+use oven_proto::{Record, SESSION_FORMAT_VERSION, SESSION_FORMAT_WITHOUT_VERSION};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -37,6 +45,8 @@ pub enum SessionError {
     Parse(PathBuf, usize, serde_json::Error),
     #[error("session id '{0}' contains path separators")]
     BadId(String),
+    #[error("session {0} is in format v{1}; this build reads up to v{2}")]
+    UnsupportedFormat(PathBuf, u32, u32),
 }
 
 /// Absolute, symlink-resolved form of a workspace root, falling back to the
@@ -142,6 +152,9 @@ impl Session {
     /// `Record` format, the legacy `{"message": ..., "usage": ...}` envelope
     /// (a non-zero usage becomes a `TokenUsage` record after its message),
     /// and legacy bare-`Message` lines (timestamp 0).
+    ///
+    /// A file that records a format newer than this build reads is refused:
+    /// its records may mean something this build does not know.
     pub async fn load_records(&self) -> Result<Vec<Record>, SessionError> {
         let file = match fs::File::open(&self.path).await {
             Ok(file) => file,
@@ -163,6 +176,9 @@ impl Session {
             let records = parse_line(&line)
                 .map_err(|e| SessionError::Parse(self.path.clone(), line_no, e))?;
             out.extend(records);
+        }
+        if let Some(error) = unsupported_format(&out, &self.path) {
+            return Err(error);
         }
         Ok(out)
     }
@@ -209,6 +225,9 @@ impl Session {
 struct SharedSession {
     session: Session,
     has_content: bool,
+    /// The format the session file is in. A file keeps the format it was
+    /// written in, so the records written into it are written in that format.
+    format_version: u32,
 }
 
 #[derive(Clone)]
@@ -219,7 +238,12 @@ pub(crate) struct SessionStore {
 }
 
 impl SessionStore {
-    pub(crate) fn new(session: Session, root: &Path, has_content: bool) -> Self {
+    pub(crate) fn new(
+        session: Session,
+        root: &Path,
+        has_content: bool,
+        format_version: u32,
+    ) -> Self {
         let dir = session
             .path()
             .parent()
@@ -231,6 +255,7 @@ impl SessionStore {
             shared: Arc::new(Mutex::new(SharedSession {
                 session,
                 has_content,
+                format_version,
             })),
         }
     }
@@ -247,6 +272,36 @@ impl SessionStore {
         let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
         shared.session = session;
         shared.has_content = false;
+        shared.format_version = SESSION_FORMAT_VERSION;
+    }
+
+    /// Appends records to the current session file, written in the format
+    /// that file is in.
+    pub(crate) async fn append_records(&self, records: Vec<Record>) -> Result<(), SessionError> {
+        let records = self.records_for_version(records);
+        self.current().append_records(&records).await
+    }
+
+    /// Rewrites the current session file, written in the format that file is
+    /// in.
+    pub(crate) async fn overwrite(&self, records: Vec<Record>) -> Result<(), SessionError> {
+        let records = self.records_for_version(records);
+        self.current().overwrite(&records).await
+    }
+
+    fn records_for_version(&self, records: Vec<Record>) -> Vec<Record> {
+        let version = self.format_version();
+        records
+            .into_iter()
+            .map(|record| record.into_version(version))
+            .collect()
+    }
+
+    fn format_version(&self) -> u32 {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .format_version
     }
 
     pub(crate) fn mark_content(&self, has_content: bool) {
@@ -357,6 +412,61 @@ fn parse_line(line: &str) -> Result<Vec<Record>, serde_json::Error> {
     }
 }
 
+/// The error a file records a format this build cannot read, if it does.
+fn unsupported_format(records: &[Record], path: &Path) -> Option<SessionError> {
+    records.iter().find_map(|record| match record {
+        Record::SessionMeta(meta) if !meta.is_readable_by_this_build() => {
+            Some(SessionError::UnsupportedFormat(
+                path.to_path_buf(),
+                meta.format_version,
+                SESSION_FORMAT_VERSION,
+            ))
+        }
+        _ => None,
+    })
+}
+
+/// The format a session file is in.
+///
+/// A file records the format it was written in. A file written before the
+/// version was recorded is in the format that introduced it, and a file with
+/// nothing in it is in the format this build writes.
+pub(crate) fn session_format_version(records: &[Record]) -> u32 {
+    if let Some(version) = records.iter().find_map(|record| match record {
+        Record::SessionMeta(meta) => Some(meta.format_version),
+        _ => None,
+    }) {
+        return version;
+    }
+    if records.is_empty() {
+        SESSION_FORMAT_VERSION
+    } else {
+        SESSION_FORMAT_WITHOUT_VERSION
+    }
+}
+
+/// The directory a session was started in, if it recorded one.
+///
+/// A file written before the session recorded its working directory records
+/// none: there is nothing to compare it against, so it is ignored.
+pub(crate) fn session_working_dir(records: &[Record]) -> Option<&str> {
+    records.iter().find_map(|record| match record {
+        Record::SessionMeta(meta) => meta.working_dir.as_deref(),
+        _ => None,
+    })
+}
+
+/// What a session says when it is resumed in another directory.
+///
+/// The paths a conversation names mean something else in another directory,
+/// so the user is told which one the session was started in.
+pub(crate) fn working_dir_notice(records: &[Record], current: &Path) -> Option<String> {
+    let recorded = session_working_dir(records)?;
+    let current = canonical_root(current);
+    (recorded != current)
+        .then(|| format!("session was started in {recorded}, resumed in {current}"))
+}
+
 fn encode_records(records: &[Record]) -> String {
     let mut out = String::new();
     for record in records {
@@ -378,7 +488,7 @@ fn validate_id(id: &str) -> Result<(), SessionError> {
 mod tests {
     use super::*;
     use oven_llm::ContentBlock;
-    use oven_proto::SessionMeta;
+    use oven_proto::{SESSION_FORMAT_WITHOUT_VERSION, SessionMeta};
 
     fn tmp() -> tempdir::TempDir {
         tempdir::TempDir::new("oven-session").unwrap()
@@ -571,6 +681,8 @@ mod tests {
         let meta = SessionMeta {
             root: "/ws".into(),
             created_at: 123,
+            format_version: SESSION_FORMAT_VERSION,
+            working_dir: Some("/ws".into()),
         };
         session
             .append_records(&[
@@ -585,6 +697,174 @@ mod tests {
             matches!(&loaded[0], Record::SessionMeta(m) if m == &meta),
             "meta must parse from the first line"
         );
+    }
+
+    #[tokio::test]
+    async fn a_file_without_a_format_version_reads_as_the_format_that_introduced_it() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"session_meta","root":"/ws","created_at":1}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let loaded = session.load_records().await.unwrap();
+        assert!(
+            matches!(&loaded[0], Record::SessionMeta(meta) if meta.format_version == SESSION_FORMAT_WITHOUT_VERSION),
+            "a file without a version is in the format that introduced it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_from_a_newer_format_is_refused() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"session_meta","root":"/ws","created_at":1,"format_version":99}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let error = session.load_records().await.unwrap_err();
+        assert!(
+            matches!(error, SessionError::UnsupportedFormat(_, 99, _)),
+            "a file this build cannot read must be refused, got {error}"
+        );
+    }
+
+    #[test]
+    fn a_session_resumed_in_another_directory_says_so() {
+        let records = vec![Record::SessionMeta(SessionMeta {
+            root: "/ws".into(),
+            created_at: 1,
+            format_version: SESSION_FORMAT_VERSION,
+            working_dir: Some("/elsewhere".into()),
+        })];
+
+        let notice = working_dir_notice(&records, Path::new("/ws")).unwrap();
+        assert!(
+            notice.contains("/elsewhere") && notice.contains("/ws"),
+            "{notice}"
+        );
+    }
+
+    #[test]
+    fn a_session_resumed_in_the_same_directory_says_nothing() {
+        let records = vec![Record::SessionMeta(SessionMeta {
+            root: "/ws".into(),
+            created_at: 1,
+            format_version: SESSION_FORMAT_VERSION,
+            working_dir: Some("/ws".into()),
+        })];
+
+        assert!(working_dir_notice(&records, Path::new("/ws")).is_none());
+    }
+
+    #[test]
+    fn a_file_without_a_working_dir_is_ignored() {
+        let records = vec![Record::SessionMeta(SessionMeta {
+            root: "/ws".into(),
+            created_at: 1,
+            format_version: SESSION_FORMAT_WITHOUT_VERSION,
+            working_dir: None,
+        })];
+
+        assert!(session_working_dir(&records).is_none());
+        assert!(working_dir_notice(&records, Path::new("/elsewhere")).is_none());
+    }
+
+    #[test]
+    fn the_format_of_a_file_is_the_one_its_meta_records() {
+        let records = vec![Record::SessionMeta(SessionMeta {
+            root: "/ws".into(),
+            created_at: 1,
+            format_version: SESSION_FORMAT_WITHOUT_VERSION,
+            working_dir: None,
+        })];
+        assert_eq!(
+            session_format_version(&records),
+            SESSION_FORMAT_WITHOUT_VERSION
+        );
+    }
+
+    #[test]
+    fn a_file_without_a_meta_is_in_the_format_that_introduced_the_version() {
+        let records = vec![message_record(1, Message::user_text("old"))];
+        assert_eq!(
+            session_format_version(&records),
+            SESSION_FORMAT_WITHOUT_VERSION
+        );
+    }
+
+    #[test]
+    fn an_empty_file_is_in_the_format_this_build_writes() {
+        assert_eq!(session_format_version(&[]), SESSION_FORMAT_VERSION);
+    }
+
+    #[tokio::test]
+    async fn a_session_file_is_written_in_the_format_it_is_in() {
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        let store = SessionStore::new(
+            session,
+            Path::new("/ws"),
+            false,
+            SESSION_FORMAT_WITHOUT_VERSION,
+        );
+        store
+            .append_records(vec![Record::SessionMeta(SessionMeta {
+                root: "/ws".into(),
+                created_at: 1,
+                format_version: SESSION_FORMAT_VERSION,
+                working_dir: Some("/ws".into()),
+            })])
+            .await
+            .unwrap();
+
+        let text = tokio::fs::read_to_string(store.current().path())
+            .await
+            .unwrap();
+        assert!(
+            text.contains(&format!(
+                r#""format_version":{SESSION_FORMAT_WITHOUT_VERSION}"#
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("working_dir"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_new_session_file_is_written_in_the_format_this_build_writes() {
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        let store = SessionStore::new(session, Path::new("/ws"), false, SESSION_FORMAT_VERSION);
+        store
+            .append_records(vec![Record::SessionMeta(SessionMeta {
+                root: "/ws".into(),
+                created_at: 1,
+                format_version: SESSION_FORMAT_VERSION,
+                working_dir: Some("/ws".into()),
+            })])
+            .await
+            .unwrap();
+
+        let text = tokio::fs::read_to_string(store.current().path())
+            .await
+            .unwrap();
+        assert!(
+            text.contains(&format!(r#""format_version":{SESSION_FORMAT_VERSION}"#)),
+            "{text}"
+        );
+        assert!(text.contains(r#""working_dir":"/ws""#), "{text}");
     }
 
     #[tokio::test]

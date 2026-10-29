@@ -343,6 +343,8 @@ fn session_meta_roundtrips_and_survives_clear() {
     let first = h.session_meta().unwrap().clone();
     assert_eq!(first.root, "/ws");
     assert!(first.created_at > 0);
+    assert_eq!(first.format_version, SESSION_FORMAT_VERSION);
+    assert_eq!(first.working_dir.as_deref(), Some("/ws"));
 
     // ensure is a no-op once meta is known.
     h.ensure_session_meta("/other".into());
