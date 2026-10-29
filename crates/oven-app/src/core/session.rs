@@ -154,7 +154,9 @@ impl Session {
     /// and legacy bare-`Message` lines (timestamp 0).
     ///
     /// A file that records a format newer than this build reads is refused:
-    /// its records may mean something this build does not know.
+    /// its records may mean something this build does not know. The refusal
+    /// comes first: the file is refused when its meta is read, before the
+    /// records behind it are read at all.
     pub async fn load_records(&self) -> Result<Vec<Record>, SessionError> {
         let file = match fs::File::open(&self.path).await {
             Ok(file) => file,
@@ -175,10 +177,10 @@ impl Session {
             }
             let records = parse_line(&line)
                 .map_err(|e| SessionError::Parse(self.path.clone(), line_no, e))?;
+            if let Some(error) = unsupported_format(&records, &self.path) {
+                return Err(error);
+            }
             out.extend(records);
-        }
-        if let Some(error) = unsupported_format(&out, &self.path) {
-            return Err(error);
         }
         Ok(out)
     }
@@ -413,6 +415,10 @@ fn parse_line(line: &str) -> Result<Vec<Record>, serde_json::Error> {
 }
 
 /// The error a file records a format this build cannot read, if it does.
+///
+/// The records are the ones just read: the file is refused the moment its
+/// meta says a format this build does not know, before the records behind it
+/// are read at all.
 fn unsupported_format(records: &[Record], path: &Path) -> Option<SessionError> {
     records.iter().find_map(|record| match record {
         Record::SessionMeta(meta) if !meta.is_readable_by_this_build() => {
@@ -738,6 +744,29 @@ mod tests {
         assert!(
             matches!(error, SessionError::UnsupportedFormat(_, 99, _)),
             "a file this build cannot read must be refused, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newer_format_is_refused_before_the_records_behind_it_are_read() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"session_meta","root":"/ws","created_at":1,"format_version":99}}"#
+        )
+        .unwrap();
+        // A record this build knows, in a shape this build does not know.
+        writeln!(file, r#"{{"type":"todo_list","items":[]}}"#).unwrap();
+        file.flush().unwrap();
+
+        let error = session.load_records().await.unwrap_err();
+        assert!(
+            matches!(error, SessionError::UnsupportedFormat(_, 99, _)),
+            "a newer format is refused as such, not as a parse error: {error}"
         );
     }
 
