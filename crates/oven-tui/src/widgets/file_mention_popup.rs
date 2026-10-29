@@ -58,7 +58,17 @@ impl FileMentionPopup {
         &self.matches
     }
 
-    pub(crate) fn refresh(&mut self, text: &str, cursor: usize, mentions: &mut FileMentions) {
+    pub(crate) fn has_token(text: &str, cursor: usize) -> bool {
+        mention_bounds(text, cursor).is_some()
+    }
+
+    pub(crate) fn refresh(
+        &mut self,
+        text: &str,
+        cursor: usize,
+        mentions: &mut FileMentions,
+        rescan: bool,
+    ) {
         let was_open = self.token.is_some();
         self.text = text.to_string();
         self.token = mention_token(text, cursor);
@@ -67,7 +77,7 @@ impl FileMentionPopup {
             self.matches.clear();
             return;
         };
-        if !was_open {
+        if !was_open && rescan {
             mentions.rescan();
             self.selected = 0;
         }
@@ -150,29 +160,31 @@ impl FileMentionPopup {
 }
 
 fn mention_token(text: &str, cursor: usize) -> Option<MentionToken> {
+    let (start, end) = mention_bounds(text, cursor)?;
+    Some(MentionToken {
+        start,
+        end,
+        query: text[start + 1..end].to_string(),
+    })
+}
+
+fn mention_bounds(text: &str, cursor: usize) -> Option<(usize, usize)> {
     let cursor = cursor.min(text.len());
     if !text.is_char_boundary(cursor) {
         return None;
     }
     let before = &text[..cursor];
-    let at = before.rfind('@')?;
-    if at > 0 {
-        let prev = before[..at].chars().next_back()?;
+    let start = before.rfind('@')?;
+    if start > 0 {
+        let prev = before[..start].chars().next_back()?;
         if !prev.is_whitespace() {
             return None;
         }
     }
-    let after_at = &text[at + 1..];
+    let after_at = &text[start + 1..];
     let query_len = after_at.find(char::is_whitespace).unwrap_or(after_at.len());
-    let end = at + 1 + query_len;
-    if cursor > end {
-        return None;
-    }
-    Some(MentionToken {
-        start: at,
-        end,
-        query: text[at + 1..end].to_string(),
-    })
+    let end = start + 1 + query_len;
+    (cursor <= end).then_some((start, end))
 }
 
 #[cfg(test)]

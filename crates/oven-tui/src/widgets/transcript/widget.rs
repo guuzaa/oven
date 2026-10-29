@@ -59,6 +59,8 @@ pub struct Transcript {
     row_offsets: Vec<usize>,
     streaming: String,
     stream_kind: LineKind,
+    /// Whether new streamed text needs to be parsed and wrapped for display.
+    stream_dirty: bool,
     /// The streaming body, parsed once per line instead of once per frame.
     markdown: MarkdownStream,
     pub(super) wrapped_stream: Vec<Line<'static>>,
@@ -91,6 +93,7 @@ impl Transcript {
             row_offsets: Vec::new(),
             streaming: String::new(),
             stream_kind: LineKind::Text,
+            stream_dirty: false,
             markdown: MarkdownStream::new(),
             wrapped_stream: Vec::new(),
             stream_copies: Vec::new(),
@@ -790,6 +793,7 @@ impl Transcript {
     }
 
     fn take_stream(&mut self) -> (LineKind, String) {
+        self.stream_dirty = false;
         self.wrapped_stream.clear();
         self.stream_copies.clear();
         self.markdown.reset();
@@ -818,6 +822,7 @@ impl Transcript {
         }
         self.stream_kind = kind;
         self.streaming.push_str(text);
+        self.stream_dirty = true;
     }
 
     fn wrap_row(&mut self, idx: usize) {
@@ -894,6 +899,7 @@ impl Transcript {
     }
 
     pub(super) fn rewrap_stream(&mut self) {
+        self.stream_dirty = false;
         self.wrapped_stream.clear();
         self.stream_copies.clear();
         let width = self.width();
@@ -1516,7 +1522,7 @@ impl Transcript {
         self.area = area;
         if resized {
             self.rewrap_all();
-        } else if !self.streaming.is_empty() {
+        } else if self.stream_dirty {
             self.rewrap_stream();
         }
 
