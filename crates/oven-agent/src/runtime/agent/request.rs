@@ -1,6 +1,7 @@
 //! How the agent's state becomes one provider request, and how the reply
 //! arrives: streamed when the model streams, as one shot otherwise.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use oven_llm::{
@@ -76,16 +77,16 @@ impl Agent {
 
     pub(crate) fn build_request(&self) -> Request {
         let mode = self.selection.mode();
-        let mut messages: Vec<Message> = self
+        let mut messages: Vec<Arc<Message>> = self
             .history
-            .messages()
+            .shared_messages()
             .filter(|message| message.role != Role::System)
             .cloned()
             .collect();
         let todo_notice = self.todo_notice && !self.todos.is_empty();
         let plan_reminder = self.wants_plan_reminder(mode);
         if todo_notice {
-            messages.push(Message::user_text(self.todos.render_todo_block()));
+            messages.push(Arc::new(Message::user_text(self.todos.render_todo_block())));
             tracing::debug!(
                 mode = mode.label(),
                 todo_items = self.todos.items.len(),
@@ -93,7 +94,7 @@ impl Agent {
             );
         }
         if plan_reminder {
-            messages.push(Message::user_text(prompt_template::PLAN_REMINDER));
+            messages.push(Arc::new(Message::user_text(prompt_template::PLAN_REMINDER)));
             tracing::debug!(
                 mode = mode.label(),
                 todo_misses = self.todo_misses,

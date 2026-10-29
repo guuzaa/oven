@@ -2260,6 +2260,22 @@ fn set_todos_shows_checklist_without_todo_write() {
     assert!(!has_todo_list(&req));
 }
 
+#[test]
+fn the_request_aliases_the_historys_messages() {
+    let mut agent = Agent::new(
+        router_with(Box::new(MockProvider::new(Vec::new()))),
+        Vec::new(),
+    );
+    agent.push_history(Message::user_text("hi"));
+    let req = agent.build_request();
+    let stored = agent.shared_history();
+    assert_eq!(req.messages.len(), stored.len());
+    assert!(
+        Arc::ptr_eq(&req.messages[0], &stored[0]),
+        "the request must alias the history's messages, not copy them"
+    );
+}
+
 #[tokio::test]
 async fn compact_reshows_todo_list_on_the_next_request_only() {
     let (mock, _) = CaptureRequests::new(vec![text_response("the summary"), text_response("ok")]);

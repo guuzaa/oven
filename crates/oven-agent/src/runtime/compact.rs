@@ -53,7 +53,7 @@ impl Agent {
             return Err(AgentError::cancelled());
         }
         let mut req = self.build_request();
-        req.messages.push(Message::user_text(COMPACT_PROMPT));
+        req.push_message(Message::user_text(COMPACT_PROMPT));
         req.tools = Vec::new();
         req.tool_choice = ToolChoice::None;
         // A summary does not need the thinking the turn had.

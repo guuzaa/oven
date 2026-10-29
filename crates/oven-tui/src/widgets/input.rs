@@ -256,10 +256,15 @@ impl InputView {
             return;
         }
         let cursor = cursor_byte(&text, self.textarea.cursor());
+        if !FileMentionPopup::has_token(&text, cursor) {
+            self.file_mention.close();
+            return;
+        }
+        let created = self.mentions.is_none();
         let mentions = self
             .mentions
             .get_or_insert_with(|| FileMentions::open(&self.root));
-        self.file_mention.refresh(&text, cursor, mentions);
+        self.file_mention.refresh(&text, cursor, mentions, !created);
     }
 
     fn border_style(&self, state: &State) -> Style {

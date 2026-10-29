@@ -366,7 +366,7 @@ mod tests {
     fn system_field_generates_first_system_message() {
         let req = Request {
             system: Some("be helpful".to_string()),
-            messages: vec![Message::user(vec![ContentBlock::text("hi")])],
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text("hi")]))],
             ..Default::default()
         };
         let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn no_system_field_produces_no_system_message() {
         let req = Request {
-            messages: vec![Message::user(vec![ContentBlock::text("hi")])],
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text("hi")]))],
             ..Default::default()
         };
         let wire = encode_request(&req, &sample_options(), Channels::default(), false).unwrap();

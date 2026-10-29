@@ -1,5 +1,7 @@
 //! `Request`: one conversation, provider independent.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use super::message::Message;
@@ -20,7 +22,7 @@ use super::tool::{Tool, ToolChoice};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Request {
     pub system: Option<String>,
-    pub messages: Vec<Message>,
+    pub messages: Vec<Arc<Message>>,
     pub tools: Vec<Tool>,
     pub tool_choice: ToolChoice,
 }
@@ -33,14 +35,18 @@ impl Request {
     }
 
     /// 追加一条消息。
-    pub fn push_message(&mut self, msg: Message) -> &mut Self {
-        self.messages.push(msg);
+    pub fn push_message(&mut self, msg: impl Into<Arc<Message>>) -> &mut Self {
+        self.messages.push(msg.into());
         self
     }
 
     /// 替换全部消息。
-    pub fn set_messages(&mut self, msgs: Vec<Message>) -> &mut Self {
-        self.messages = msgs;
+    pub fn set_messages<I, M>(&mut self, msgs: I) -> &mut Self
+    where
+        I: IntoIterator<Item = M>,
+        M: Into<Arc<Message>>,
+    {
+        self.messages = msgs.into_iter().map(Into::into).collect();
         self
     }
 
@@ -83,7 +89,7 @@ impl Request {
 #[derive(Debug, Default)]
 pub struct RequestBuilder {
     system: Option<String>,
-    messages: Vec<Message>,
+    messages: Vec<Arc<Message>>,
     tools: Vec<Tool>,
     tool_choice: ToolChoice,
 }
@@ -96,14 +102,14 @@ impl RequestBuilder {
     }
 
     /// 追加一条消息。
-    pub fn push_message(mut self, msg: Message) -> Self {
-        self.messages.push(msg);
+    pub fn push_message(mut self, msg: impl Into<Arc<Message>>) -> Self {
+        self.messages.push(msg.into());
         self
     }
 
     /// 追加一条用户文本消息。
     pub fn prompt(mut self, msg: impl Into<String>) -> Self {
-        self.messages.push(Message::user_text(msg.into()));
+        self.messages.push(Arc::new(Message::user_text(msg.into())));
         self
     }
 
@@ -126,8 +132,12 @@ impl RequestBuilder {
     }
 
     /// 替换全部消息。
-    pub fn set_messages(mut self, messages: Vec<Message>) -> Self {
-        self.messages = messages;
+    pub fn set_messages<I, M>(mut self, messages: I) -> Self
+    where
+        I: IntoIterator<Item = M>,
+        M: Into<Arc<Message>>,
+    {
+        self.messages = messages.into_iter().map(Into::into).collect();
         self
     }
 
@@ -169,7 +179,7 @@ mod tests {
     fn request_round_trips() {
         let req = Request {
             system: Some("be helpful".to_string()),
-            messages: vec![Message::user(vec![ContentBlock::text("hi")])],
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text("hi")]))],
             tools: vec![],
             tool_choice: ToolChoice::Auto,
         };

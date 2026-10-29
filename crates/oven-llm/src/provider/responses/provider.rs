@@ -305,16 +305,11 @@ impl Provider for ResponsesProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::super::testdata::deepseek_sse;
     use super::*;
 
-    fn deepseek_models() -> Vec<ModelInfo> {
-        catalog::models_for(&ProviderName::DeepSeek, ProviderKind::Responses)
-    }
-
-    fn grok_models() -> Vec<ModelInfo> {
-        catalog::models_for(&ProviderName::Grok, ProviderKind::Responses)
-    }
     use crate::domain::message::{ContentBlock, Message};
     use crate::domain::reasoning::ReasoningEffort;
     use crate::domain::stream::StreamCollector;
@@ -324,13 +319,21 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn deepseek_models() -> Vec<ModelInfo> {
+        catalog::models_for(&ProviderName::DeepSeek, ProviderKind::Responses)
+    }
+
+    fn grok_models() -> Vec<ModelInfo> {
+        catalog::models_for(&ProviderName::Grok, ProviderKind::Responses)
+    }
+
     fn api_key(value: &str) -> SecretString {
         SecretString::new(value.to_string().into())
     }
 
     fn sample_request() -> Request {
         Request {
-            messages: vec![Message::user(vec![ContentBlock::text("hi")])],
+            messages: vec![Arc::new(Message::user(vec![ContentBlock::text("hi")]))],
             ..Default::default()
         }
     }
