@@ -1240,8 +1240,8 @@ impl Transcript {
         self.sync_activity();
     }
 
-    /// Header lines that should shimmer: the live thought's own header while
-    /// one streams, and the activity header otherwise.
+    /// Header lines that should shimmer: the activity's own title, and the
+    /// live thought's header while one streams.
     fn shimmer_lines(&self) -> Vec<usize> {
         let Some(row) = self.activity_row else {
             return Vec::new();
@@ -1254,14 +1254,13 @@ impl Transcript {
     }
 
     fn activity_shimmer(&self, row: usize) -> Vec<usize> {
-        let expanded = self.rows[row]
-            .collapsible
-            .as_ref()
-            .is_some_and(Collapsible::is_expanded);
-        if expanded && let Some(idx) = self.activity.live_thinking_index() {
-            return self.header_line(row, &[idx]).into_iter().collect();
+        let mut lines: Vec<usize> = self.header_line(row, &[]).into_iter().collect();
+        if let Some(idx) = self.activity.live_thinking_index()
+            && let Some(line) = self.header_line(row, &[idx])
+        {
+            lines.push(line);
         }
-        self.header_line(row, &[]).into_iter().collect()
+        lines
     }
 
     fn header_line(&self, row: usize, path: &[usize]) -> Option<usize> {

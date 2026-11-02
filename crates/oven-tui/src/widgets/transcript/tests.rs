@@ -2245,6 +2245,48 @@ fn a_running_tool_burst_shimmers_and_settles_on_its_result() {
 }
 
 #[test]
+fn the_activity_title_waves_beside_a_live_thought() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&thinking("planning"));
+    let area = Rect::new(0, 0, 40, 6);
+    ready(&mut t, area);
+    assert_eq!(t.rows[0].text, BURST_SUMMARY);
+
+    let body = MESSAGE_INDENT.len() + LINE_PREFIX_WIDTH;
+    let title = row_shades(&mut t, area, 0, body..body + BURST_SUMMARY.chars().count());
+    assert!(
+        title.iter().collect::<HashSet<_>>().len() > 1,
+        "the activity title waves while a thought streams: {title:?}"
+    );
+    assert!(
+        title.iter().any(|fg| matches!(fg, Some(Color::Rgb(..)))),
+        "the wave paints a gradient: {title:?}"
+    );
+
+    let thought_row = t
+        .wrapped
+        .iter()
+        .position(|line| line_text(line).contains(THINKING_LABEL))
+        .expect("the thought header is drawn");
+    let indent = MESSAGE_INDENT.len() + LINE_INDENT.len() + LINE_PREFIX_WIDTH;
+    let thought = row_shades(
+        &mut t,
+        area,
+        thought_row as u16,
+        indent..indent + THINKING_LABEL.chars().count(),
+    );
+    assert!(
+        thought.iter().collect::<HashSet<_>>().len() > 1,
+        "the live thought still waves beside it: {thought:?}"
+    );
+}
+
+#[test]
 fn todo_write_splits_tool_bursts() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(
