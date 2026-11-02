@@ -1,6 +1,7 @@
 use super::draw::composer_hint;
 use super::*;
 use crate::core::hint::{self, Keys, Strip};
+use crate::core::theme;
 use crate::widgets::agents::{main_line, running};
 use crate::widgets::input::{InputView, Overlay};
 use crate::widgets::question_prompt::{QuestionPrompt, QuestionPromptAction};
@@ -855,6 +856,28 @@ async fn a_single_esc_only_arms_the_rewind() {
         Some(TEST_ANSWER),
         "the prompt stays in the transcript until the confirm"
     );
+}
+
+#[tokio::test]
+async fn an_armed_esc_turns_the_composer_border_red() {
+    let root = tempdir::TempDir::new("oven-ui-esc-border").unwrap();
+    let mut ui = finished_turn_ui(&root).await;
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    terminal.draw(|f| ui.draw(f)).unwrap();
+    let idle = terminal.backend().buffer().clone();
+    assert_eq!(
+        row_fg(&idle, hint::IDLE),
+        theme::border_idle().fg,
+        "the composer is idle until the Esc arms"
+    );
+
+    ui.handle_key(esc());
+
+    terminal.draw(|f| ui.draw(f)).unwrap();
+    let armed = terminal.backend().buffer().clone();
+    let border = row_fg(&armed, hint::ESC_ARMED).expect("the armed hint is on the border");
+    assert_eq!(border, Color::Red, "the armed composer is red: {border:?}");
 }
 
 #[tokio::test]

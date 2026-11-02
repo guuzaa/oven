@@ -161,9 +161,10 @@ impl InputView {
         area: Rect,
         state: &State,
         hint: Option<&'static str>,
+        armed: bool,
     ) {
         self.area = area;
-        let inner = draw_composer_border(f, area, self.border_style(state), hint);
+        let inner = draw_composer_border(f, area, self.border_style(state, armed), hint);
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(PROMPT_COLS), Constraint::Min(1)])
@@ -267,7 +268,10 @@ impl InputView {
         self.file_mention.refresh(&text, cursor, mentions, !created);
     }
 
-    fn border_style(&self, state: &State) -> Style {
+    fn border_style(&self, state: &State, armed: bool) -> Style {
+        if armed {
+            return theme::border_alert();
+        }
         if shell::is_active(&self.text()) {
             theme::shell()
         } else if state.mode == AgentMode::Plan {
@@ -580,6 +584,7 @@ mod tests {
     use crossterm::event::KeyCode;
     use oven_app::ModelChoice;
     use oven_llm::{EffortSupport, ReasoningEffort};
+    use ratatui::style::Color;
 
     fn commands() -> Vec<(String, String)> {
         vec![
@@ -1363,6 +1368,16 @@ mod tests {
         height: u16,
         state: &State,
     ) -> (String, ratatui::buffer::Buffer) {
+        render_with(view, width, height, state, false)
+    }
+
+    fn render_with(
+        view: &mut InputView,
+        width: u16,
+        height: u16,
+        state: &State,
+        armed: bool,
+    ) -> (String, ratatui::buffer::Buffer) {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1370,7 +1385,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                view.draw_composer(f, f.area(), state, None);
+                view.draw_composer(f, f.area(), state, None, armed);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -1392,7 +1407,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|f| view.draw_composer(f, f.area(), state, None))
+            .draw(|f| view.draw_composer(f, f.area(), state, None, false))
             .unwrap();
         terminal.backend().cursor_position()
     }
@@ -1432,7 +1447,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
         terminal
-            .draw(|f| view.draw_composer(f, f.area(), &state, Some(HINT)))
+            .draw(|f| view.draw_composer(f, f.area(), &state, Some(HINT), false))
             .unwrap();
         let bottom = |y| {
             (0..40)
@@ -1505,6 +1520,18 @@ mod tests {
         };
         let (_, buf) = render(&mut view, 40, 3, &ask);
         assert_eq!(buf[(0, 0)].style().fg, theme::ask_mode().fg);
+    }
+
+    #[test]
+    fn an_armed_esc_turns_the_border_red() {
+        let mut view = view();
+        let (_, buf) = render_with(&mut view, 40, 3, &State::new(), true);
+        let color = buf[(0, 0)].style().fg;
+        assert_eq!(
+            color,
+            Some(Color::Red),
+            "the armed border is red: {color:?}"
+        );
     }
 
     #[test]

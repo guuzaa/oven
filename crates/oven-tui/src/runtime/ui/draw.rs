@@ -47,6 +47,7 @@ impl Ui {
             self.status.draw_bar(f, regions.status, &self.state);
             return;
         }
+        let armed = self.esc_armed();
         self.input.draw_composer(
             f,
             regions.input,
@@ -54,8 +55,9 @@ impl Ui {
             composer_hint(
                 &self.input,
                 self.prompt.as_ref(),
-                hint::Keys::resting(self.state.busy, self.esc_armed(), self.strip_hint()),
+                hint::Keys::resting(self.state.busy, armed, self.strip_hint()),
             ),
+            armed,
         );
         if let Some(overlay) = regions.overlay {
             match self.prompt.as_ref() {

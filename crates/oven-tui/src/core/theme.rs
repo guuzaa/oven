@@ -100,6 +100,11 @@ pub fn border_active() -> Style {
     accent()
 }
 
+/// The composer border while an `Esc` waits for its second press.
+pub fn border_alert() -> Style {
+    Style::default().fg(Color::Red)
+}
+
 pub fn border_type() -> BorderType {
     BorderType::Rounded
 }
