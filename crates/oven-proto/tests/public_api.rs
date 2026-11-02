@@ -7,9 +7,10 @@ use oven_proto::{
     AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse,
     ApprovalDecision, CallOutcome, Command, CommandResult, EventSink, LoopLimitDecision,
     MAX_ITERS_EXCEEDED, NodeInfo, NodeStatus, NullSink, Question, QuestionOption, READ_RESULT_HINT,
-    Record, SessionMeta, StepStop, StreamEvent, TodoItem, TodoList, TodoStatus, ToolAccess,
-    ToolCallId, ToolEvent, ToolOutputStream, ToolPermission, ToolResult, ToolView, TurnEvent,
-    TurnId, UserRequestId, UserResponse, VecEventSink,
+    Record, SESSION_FORMAT_VERSION, SESSION_FORMAT_WITHOUT_VERSION, SessionMeta, StepStop,
+    StreamEvent, TodoItem, TodoList, TodoStatus, ToolAccess, ToolCallId, ToolEvent,
+    ToolOutputStream, ToolPermission, ToolResult, ToolView, TurnEvent, TurnId, UserRequestId,
+    UserResponse, VecEventSink,
 };
 
 #[test]

@@ -186,7 +186,7 @@ impl StatusBar {
         self.flash_until = None;
     }
 
-    fn set_reply(&mut self, text: String) {
+    pub(crate) fn set_reply(&mut self, text: String) {
         let flash = self.has_reply();
         self.reply = Some(text);
         self.reply_until = Some(Instant::now() + REPLY_TTL);

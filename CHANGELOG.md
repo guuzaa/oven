@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `oven-proto`: a session file names the format it was written in — `SessionMeta::format_version` records it, and `SessionMeta::is_readable_by_this_build` is the rule: a file a newer oven wrote is refused rather than half-understood
+- `oven-proto`: `Record::into_version` writes a record in a given format, so a session keeps the format it was written in: a file resumed from an older one is written in that format, and what that format does not know, it does not get
+- `oven-app`: a session file is read knowing the format it is in, named by the meta that is its first record — the same rule a resumed session is written by. Each line, legacy ones included, runs through one upgrade step per version up to the one this build writes before it is deserialized; the only step today, 1 → 2, leaves a line as it is, and a format that changes a record's shape adds its own
+- `oven-app`, `oven-tui`: a session records the directory it was started in, and resuming it in another one says so — the paths its conversation names mean something else there. A file written before that was recorded names no directory, and there is nothing to compare it against
+
+### Changed
+- **Breaking:** `oven-proto`: `SessionMeta` names the format its file was written in and the directory the session was started in — a struct literal has to name both
+- **Breaking:** `oven-app`: `SessionError` grew `UnsupportedFormat(path, version, newest)` — a file written in a format this build does not read is refused instead of being read halfway. `version` is the version as the file writes it, a `String`, since it need not fit one. That covers a format newer than this build and any integer below the first any oven wrote (`0`, `-1`), named by any meta in the file, and the version is taken from the raw meta line, so a newer meta whose shape changed is refused as a format, not as a parse error
+
 ## [0.1.3] - 2026-10-28
 
 ### Added

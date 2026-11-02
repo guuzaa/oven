@@ -28,7 +28,9 @@ use crate::core::config::ProviderConfig;
 use crate::core::error::AppError;
 use crate::core::event::EventBus;
 use crate::core::provider::RouterCatalog;
-use crate::core::session::{Session, SessionStore, canonical_root, session_span};
+use crate::core::session::{
+    Session, SessionStore, canonical_root, session_format_version, session_span, working_dir_notice,
+};
 use crate::platform::dirs;
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
@@ -432,7 +434,16 @@ impl AppBuilder {
         let span = session_span(Some(session.id()));
         async {
             let prior = session.load_records().await?;
-            let sessions = SessionStore::new(session.clone(), &self.root, false);
+            let notice = working_dir_notice(&prior, &self.root);
+            if let Some(notice) = &notice {
+                tracing::warn!(notice = %notice, "session resumed in another directory");
+            }
+            let sessions = SessionStore::new(
+                session.clone(),
+                &self.root,
+                false,
+                session_format_version(&prior),
+            );
             let mut agents = self.build_interactive_agent(Some(sessions)).await?;
             let records: Vec<_> = prior
                 .iter()
@@ -445,14 +456,16 @@ impl AppBuilder {
             hydrate_session(&mut agents.main, &prior);
             agents.main.ensure_session_meta(canonical_root(&self.root));
             self.log_open(&agents.main);
-            Ok(spawn_runtime(
+            let mut app = spawn_runtime(
                 AppId::next(),
                 agents,
                 Some(session),
                 self.root.clone(),
                 self.config.clone(),
                 AppConfig::default_user_config_path(),
-            ))
+            );
+            app.set_startup_notice(notice);
+            Ok(app)
         }
         .instrument(span)
         .await

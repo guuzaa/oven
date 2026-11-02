@@ -84,6 +84,19 @@ impl Ui {
             mode: snapshot.levels.mode,
             ..State::new()
         };
+        let mut status = StatusBar::new(
+            snapshot.levels.model.clone(),
+            &root,
+            snapshot.levels.last_turn_usage,
+        )
+        .with_effort(snapshot.levels.reasoning_effort)
+        .with_context(
+            snapshot.levels.context_tokens,
+            snapshot.levels.context_window,
+        );
+        if let Some(notice) = app.startup_notice() {
+            status.set_reply(notice.to_string());
+        }
         Self {
             app,
             events,
@@ -99,16 +112,7 @@ impl Ui {
             transcript: Transcript::new(),
             views,
             agents_area: None,
-            status: StatusBar::new(
-                snapshot.levels.model.clone(),
-                &root,
-                snapshot.levels.last_turn_usage,
-            )
-            .with_effort(snapshot.levels.reasoning_effort)
-            .with_context(
-                snapshot.levels.context_tokens,
-                snapshot.levels.context_window,
-            ),
+            status,
             input,
             todos: TodosWidget::new(snapshot.levels.todos.clone()),
             prompt: None,

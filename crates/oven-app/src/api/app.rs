@@ -34,6 +34,8 @@ pub struct App {
     root: PathBuf,
     shared: Arc<Shared>,
     state: watch::Receiver<AppState>,
+    /// What the app noticed while opening the session.
+    startup_notice: Option<String>,
 }
 
 impl App {
@@ -66,6 +68,7 @@ impl App {
             root,
             state: shared.state.subscribe(),
             shared,
+            startup_notice: None,
         }
     }
 
@@ -215,6 +218,18 @@ impl App {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// What the app noticed while opening the session, if anything.
+    ///
+    /// A session started in another directory is worth saying out loud: the
+    /// paths its conversation names mean something else there.
+    pub fn startup_notice(&self) -> Option<&str> {
+        self.startup_notice.as_deref()
+    }
+
+    pub(crate) fn set_startup_notice(&mut self, notice: Option<String>) {
+        self.startup_notice = notice;
     }
 
     pub fn history_timed_shared(&self) -> Vec<(Arc<Message>, u64, Option<u64>)> {

@@ -28,8 +28,8 @@ use oven_llm::{
 };
 use oven_proto::{
     AgentError, AgentEvent, AgentEventEnvelope, AgentId, AgentMode, AnswerResponse,
-    ApprovalDecision, LoopLimitDecision, MAX_ITERS_EXCEEDED, Record, ToolEvent, TurnEvent, TurnId,
-    UserResponse,
+    ApprovalDecision, LoopLimitDecision, MAX_ITERS_EXCEEDED, Record, SESSION_FORMAT_VERSION,
+    ToolEvent, TurnEvent, TurnId, UserResponse,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -87,7 +87,12 @@ async fn spawn_app(app: &AppBuilder, provider: Box<dyn Provider>) -> App {
 
 async fn spawn_app_session(app: &AppBuilder, provider: Box<dyn Provider>, session: Session) -> App {
     let prior = session.load_records().await.unwrap();
-    let sessions = crate::core::session::SessionStore::new(session.clone(), app.root(), false);
+    let sessions = crate::core::session::SessionStore::new(
+        session.clone(),
+        app.root(),
+        false,
+        crate::core::session::session_format_version(&prior),
+    );
     let mut agents = app
         .build_agent_with_provider_session(provider, Some(sessions))
         .await
@@ -1130,6 +1135,96 @@ async fn open_session_without_api_key_starts() {
     let app = AppBuilder::new(tmp.path());
     let handle = app.open_session_in(&dir, None).await.unwrap();
     handle.shutdown().await;
+}
+
+/// Write a session file whose meta records `working_dir`.
+fn write_session_with_working_dir(dir: &Path, id: &str, working_dir: Option<&str>) {
+    std::fs::create_dir_all(dir).unwrap();
+    let meta = Record::SessionMeta(oven_proto::SessionMeta {
+        root: canonical_root(dir),
+        created_at: 1,
+        format_version: SESSION_FORMAT_VERSION,
+        working_dir: working_dir.map(str::to_string),
+    });
+    std::fs::write(
+        dir.join(format!("{id}.jsonl")),
+        format!("{}\n", serde_json::to_string(&meta).unwrap()),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_session_resumed_in_another_directory_says_so() {
+    let tmp = tempdir::TempDir::new("app-session-elsewhere").unwrap();
+    let dir = tmp.path().join("sessions");
+    write_session_with_working_dir(&dir, "elsewhere", Some("/elsewhere"));
+
+    let app = AppBuilder::new(tmp.path());
+    let handle = app.open_session_in(&dir, Some("elsewhere")).await.unwrap();
+    let notice = handle
+        .startup_notice()
+        .expect("a session started elsewhere must say so");
+    assert!(notice.contains("/elsewhere"), "{notice}");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_session_resumed_in_the_same_directory_says_nothing() {
+    let tmp = tempdir::TempDir::new("app-session-same").unwrap();
+    let dir = tmp.path().join("sessions");
+    write_session_with_working_dir(&dir, "same", Some(&canonical_root(tmp.path())));
+
+    let app = AppBuilder::new(tmp.path());
+    let handle = app.open_session_in(&dir, Some("same")).await.unwrap();
+    assert!(handle.startup_notice().is_none());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_session_without_a_working_dir_is_ignored() {
+    let tmp = tempdir::TempDir::new("app-session-old").unwrap();
+    let dir = tmp.path().join("sessions");
+    write_session_with_working_dir(&dir, "old", None);
+
+    let app = AppBuilder::new(tmp.path());
+    let handle = app.open_session_in(&dir, Some("old")).await.unwrap();
+    assert!(handle.startup_notice().is_none());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_resumed_session_keeps_the_format_it_was_written_in() {
+    let tmp = tempdir::TempDir::new("app-session-format").unwrap();
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    // A session file written before the meta recorded the format: it says
+    // nothing about the version it is in.
+    let message = Record::Message {
+        timestamp: 1,
+        message: Message::user_text("old"),
+    };
+    std::fs::write(
+        dir.join("s1.jsonl"),
+        format!("{}\n", serde_json::to_string(&message).unwrap()),
+    )
+    .unwrap();
+
+    let app = AppBuilder::new(tmp.path());
+    let handle = app.open_session_in(&dir, Some("s1")).await.unwrap();
+    let mut sub = handle.subscribe();
+    handle.rewind().await.unwrap();
+    wait_rewound(&mut sub).await;
+    handle.shutdown().await;
+
+    let text = std::fs::read_to_string(dir.join("s1.jsonl")).unwrap();
+    assert!(
+        text.contains(r#""format_version":1"#),
+        "a session keeps the format it was written in: {text}"
+    );
+    assert!(
+        !text.contains("working_dir"),
+        "a format that does not know the working directory does not get one: {text}"
+    );
 }
 
 #[tokio::test]
@@ -4841,6 +4936,11 @@ fn assert_session_meta(records: &[Record], root: &Path) {
         Some(Record::SessionMeta(meta)) => {
             assert_eq!(meta.root, canonical_root(root));
             assert!(meta.created_at > 0);
+            assert_eq!(meta.format_version, SESSION_FORMAT_VERSION);
+            assert_eq!(
+                meta.working_dir.as_deref(),
+                Some(canonical_root(root).as_str())
+            );
         }
         other => panic!("expected session meta, got {other:?}"),
     }

@@ -12,7 +12,7 @@ use oven_host::now_ms;
 use oven_llm::{Message, Role, Usage};
 
 use crate::core::subagent::is_notice;
-use oven_proto::{Record, SessionMeta};
+use oven_proto::{Record, SESSION_FORMAT_VERSION, SessionMeta};
 
 type Timestamp = u64;
 
@@ -125,11 +125,17 @@ impl History {
 
     /// Record the session's workspace root if it is not already known (a
     /// resumed session keeps its original root and creation time).
+    ///
+    /// The directory the session works in is recorded with it: the root the
+    /// app was pointed at, which is the shell's directory when the app was
+    /// pointed at none.
     pub fn ensure_session_meta(&mut self, root: String) {
         if self.meta.is_none() {
             self.meta = Some(SessionMeta {
+                working_dir: Some(root.clone()),
                 root,
                 created_at: now_ms(),
+                format_version: SESSION_FORMAT_VERSION,
             });
         }
     }

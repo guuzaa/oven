@@ -194,7 +194,7 @@ disk.
 | `interaction` | `Question`, `QuestionOption`, `UserResponse`, `ApprovalDecision`, `LoopLimitDecision`, `AnswerResponse` |
 | `subagent` | `NodeInfo`, `NodeStatus` |
 | `todo` | `TodoList`, `TodoItem`, `TodoStatus` |
-| `record` | `Record`, `SessionMeta` |
+| `record` | `Record`, `SessionMeta`, `SESSION_FORMAT_VERSION`, `SESSION_FORMAT_WITHOUT_VERSION` |
 | `id` | `AgentId`, `TurnId`, `ToolCallId`, `UserRequestId` |
 | `mode` | `AgentMode`, `ToolAccess` |
 | `permission` | `ToolPermission` |
@@ -219,7 +219,41 @@ reproducible.
 **The session format is part of the protocol.** `Record` and `SessionMeta`
 describe what a session file holds. A frontend that reloads a session reads
 the same records the runtime wrote, so the format is named here rather than
-buried in the app layer.
+buried in the app layer. `SESSION_FORMAT_VERSION` is the format this build
+writes; a `SessionMeta` records the version its file was written in, so a
+reader can tell a file it understands from one a newer oven wrote.
+`SessionMeta::is_readable_by_this_build` is that rule: a file written by a
+newer oven holds records this build does not know, so it is refused rather
+than half-understood. `SESSION_FORMAT_WITHOUT_VERSION` is the format a file
+written before the version was recorded is in.
+
+`SessionMeta::is_readable_by_this_build` accepts the formats from
+`SESSION_FORMAT_WITHOUT_VERSION` to `SESSION_FORMAT_VERSION`; a file that names
+one outside them is refused.
+
+**The meta names the file's format as its first record.** A file whose first
+record is not a meta is in `SESSION_FORMAT_WITHOUT_VERSION`. A meta further
+down does not name the file's format, but one that names a format this build
+does not read still gets the file refused. A reader takes `format_version`
+from the raw line before it reads the meta, so the tag `session_meta` and the
+integer field `format_version` keep their name and type in every format; the
+rest of the meta may change shape like any other record.
+
+**A file keeps the format it was written in.** `Record::into_version` is how a
+record is written in a given format: what that format does not know, it does
+not get. A session resumed from an older file is written in that file's
+format, so the records in it keep meaning what they meant then.
+
+**The version moves on only when an older build would misread a file**: a
+field renamed, removed or made required, a record whose meaning changed. A new
+optional field or a new record type does not move it, because an older build
+skips a field or a record type it does not know. Moving the version locks
+every older build out of the files written in it. A version that moves on
+brings two things: a step in the app's `upgrade_step` that turns a line in the
+version before it into one in it, and what `Record::into_version` does to
+write a record back in the older format. Format 2 is the first that records
+its version; the number 1 is taken by the files written before it was
+recorded.
 
 ## Using it
 

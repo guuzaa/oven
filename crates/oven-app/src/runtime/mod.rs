@@ -9,7 +9,8 @@ use oven_agent::{Agent, CancellationToken, CompactStats, RunPolicy};
 use oven_llm::{ModelId, ModelInfo, Provider, ProviderError, ProviderName, ReasoningEffort};
 use oven_mem::MemoryStore;
 use oven_proto::{
-    AgentError, AppPhase, HistoryChangeReason, Input, ModelChoice, Record, SessionState, TodoList,
+    AgentError, AppPhase, HistoryChangeReason, Input, ModelChoice, Record, SESSION_FORMAT_VERSION,
+    SessionState, TodoList,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
@@ -143,8 +144,7 @@ impl Runtime {
                 if rev == self.persisted_rev {
                     let pending = self.agent.history_records_from(self.persisted_messages);
                     if !pending.is_empty() {
-                        let session = store.current();
-                        if let Err(error) = session.append_records(&pending).await {
+                        if let Err(error) = store.append_records(pending).await {
                             errors.push(error.to_string());
                         } else {
                             store.mark_content(true);
@@ -319,8 +319,7 @@ impl Runtime {
         let mut errors = Vec::new();
         if let Some(store) = &self.session {
             let recs = self.agent.history_records();
-            let session = store.current();
-            match session.overwrite(&recs).await {
+            match store.overwrite(recs).await {
                 Ok(()) => {
                     store.mark_content(true);
                     self.persisted_messages = self.agent.history().len();
@@ -526,8 +525,7 @@ impl Runtime {
                         items: restored.items.clone(),
                     });
                 }
-                let session = store.current();
-                match session.overwrite(&recs).await {
+                match store.overwrite(recs).await {
                     Ok(()) => {
                         store.mark_content(self.agent.history().len() != 0);
                         true
@@ -640,7 +638,12 @@ pub(crate) fn spawn_runtime(
                 let has_content = agents.main.history().len() != 0;
                 let id = has_content.then(|| s.id().to_string());
                 (
-                    Some(SessionStore::new(s, &root, has_content)),
+                    Some(SessionStore::new(
+                        s,
+                        &root,
+                        has_content,
+                        SESSION_FORMAT_VERSION,
+                    )),
                     SessionState { id },
                 )
             }
@@ -673,9 +676,8 @@ pub(crate) async fn persist_todo_snapshot(
     store: &SessionStore,
     todos: &TodoList,
 ) -> Result<(), SessionError> {
-    let session = store.current();
-    session
-        .append_records(&[Record::TodoList {
+    store
+        .append_records(vec![Record::TodoList {
             timestamp: oven_host::now_ms(),
             items: todos.items.clone(),
         }])

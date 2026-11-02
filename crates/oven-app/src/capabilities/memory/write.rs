@@ -118,7 +118,7 @@ mod tests {
     use oven_agent::{CancellationToken, Selection, Tool, ToolOutcome, TurnContext};
     use oven_llm::ModelId;
     use oven_mem::{MemoryId, MemoryRoots, MemoryScope, MemoryStore};
-    use oven_proto::{AgentMode, TurnId};
+    use oven_proto::{AgentMode, SESSION_FORMAT_VERSION, TurnId};
     use serde_json::json;
 
     use crate::core::session::{Session, SessionStore};
@@ -147,7 +147,12 @@ mod tests {
             Some(id) => {
                 let dir = tmp.path().join("sessions");
                 let session = Session::open(&dir, id).await.unwrap();
-                Some(SessionStore::new(session, tmp.path(), true))
+                Some(SessionStore::new(
+                    session,
+                    tmp.path(),
+                    true,
+                    SESSION_FORMAT_VERSION,
+                ))
             }
             None => None,
         };

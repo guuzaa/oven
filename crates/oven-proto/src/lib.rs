@@ -43,7 +43,7 @@ pub use interaction::{
 };
 pub use mode::{AgentMode, ToolAccess};
 pub use permission::ToolPermission;
-pub use record::{Record, SessionMeta};
+pub use record::{Record, SESSION_FORMAT_VERSION, SESSION_FORMAT_WITHOUT_VERSION, SessionMeta};
 pub use sink::{EventSink, NullSink, VecEventSink};
 pub use state::{
     AppLevels, AppPhase, AppState, HistoryChangeReason, ModelChoice, ProviderView, SessionState,
