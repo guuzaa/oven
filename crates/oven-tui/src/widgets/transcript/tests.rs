@@ -50,6 +50,8 @@ const THOUGHT_1M_1S: &str = "Thought for 1m 1s";
 const TODO_SUMMARY: &str = "todo_write · 1 todos (0 in_progress, 0 completed)";
 const BURST_SUMMARY: &str = "Ran 1 command";
 const NOTICE: &str = "explore#1: done · 3 steps, 6 tool calls · 1040 tokens · 32.4s";
+/// Column where a row's body starts: the message indent, then the gutter.
+const BODY_COL: usize = MESSAGE_INDENT.len() + LINE_PREFIX_WIDTH;
 
 fn wide(t: &mut Transcript) {
     t.area.width = 80;
@@ -2282,10 +2284,20 @@ fn the_activity_title_waves_beside_a_live_thought() {
     t.on_event(&thinking("planning"));
     let area = Rect::new(0, 0, 40, 6);
     ready(&mut t, area);
-    assert_eq!(t.rows[0].text, BURST_SUMMARY);
+    let activity = t
+        .rows
+        .iter()
+        .find(|row| row.kind == LineKind::Activity)
+        .expect("the activity row");
+    assert_eq!(activity.text, BURST_SUMMARY);
 
-    let body = MESSAGE_INDENT.len() + LINE_PREFIX_WIDTH;
-    let title = row_shades(&mut t, area, 0, body..body + BURST_SUMMARY.chars().count());
+    let title_row = row_with(&mut t, area, BURST_SUMMARY);
+    let title = row_shades(
+        &mut t,
+        area,
+        title_row,
+        BODY_COL..BODY_COL + BURST_SUMMARY.chars().count(),
+    );
     assert!(
         title.iter().collect::<HashSet<_>>().len() > 1,
         "the activity title waves while a thought streams: {title:?}"
@@ -2295,16 +2307,12 @@ fn the_activity_title_waves_beside_a_live_thought() {
         "the wave paints a gradient: {title:?}"
     );
 
-    let thought_row = t
-        .wrapped
-        .iter()
-        .position(|line| line_text(line).contains(THINKING_LABEL))
-        .expect("the thought header is drawn");
-    let indent = MESSAGE_INDENT.len() + LINE_INDENT.len() + LINE_PREFIX_WIDTH;
+    let thought_row = row_with(&mut t, area, THINKING_LABEL);
+    let indent = BODY_COL + LINE_INDENT.len();
     let thought = row_shades(
         &mut t,
         area,
-        thought_row as u16,
+        thought_row,
         indent..indent + THINKING_LABEL.chars().count(),
     );
     assert!(
@@ -2860,11 +2868,25 @@ fn row_shades(t: &mut Transcript, area: Rect, row: u16, cols: Range<usize>) -> V
     cols.map(|x| buf[(x as u16, row)].style().fg).collect()
 }
 
+/// The screen row that holds `text`, in the transcript as drawn.
+fn row_with(t: &mut Transcript, area: Rect, text: &str) -> u16 {
+    let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+    terminal.draw(|f| t.draw(f, area, &State::new())).unwrap();
+    let buf = terminal.backend().buffer();
+    (0..area.height)
+        .find(|row| {
+            (0..area.width)
+                .map(|col| buf[(col, *row)].symbol())
+                .collect::<String>()
+                .contains(text)
+        })
+        .expect("the row is drawn")
+}
+
 /// A live row's cells wave through a gradient, then flatten once the call's
 /// result lands.
 fn assert_shimmer_then_settles(t: &mut Transcript, area: Rect, title: &str) {
-    let body = MESSAGE_INDENT.len() + LINE_PREFIX_WIDTH;
-    let cols = body..body + title.chars().count();
+    let cols = BODY_COL..BODY_COL + title.chars().count();
     let running = row_shades(t, area, 0, cols.clone());
     assert!(
         running.iter().collect::<HashSet<_>>().len() > 1,
