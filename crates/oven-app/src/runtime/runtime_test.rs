@@ -3899,6 +3899,58 @@ async fn task_runs_a_subagent_and_returns_its_report() {
     handle.shutdown().await;
 }
 
+/// The task a subagent was given is its first user message. The loop is
+/// handed the prompt and never reports it, so the runtime raises it: a
+/// frontend that shows the subagent's transcript has to be told what it was
+/// asked.
+#[tokio::test]
+async fn a_subagent_says_what_it_was_asked() {
+    let tmp = tempdir::TempDir::new("app-runtime-subagent-prompt").unwrap();
+    let mock = MockProvider::new(vec![
+        tool_response(
+            "c1",
+            "task",
+            serde_json::json!({
+                "description": "read note.txt",
+                "prompt": "read note.txt and report what it says",
+                "role": "explore",
+            }),
+        ),
+        text_response("the file says hello"),
+        text_response("done"),
+    ]);
+    let app = AppBuilder::new(tmp.path());
+    let agents = app.build_agent_with_provider(Box::new(mock)).await.unwrap();
+    let handle = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.path().to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+    let mut rx = handle.subscribe();
+
+    assert_eq!(handle.prompt("delegate it").await.unwrap(), "done");
+
+    let subagent = handle.subagents()[0].id;
+    let mut prompts = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEventKind::Agent(env) = &ev.kind
+            && env.agent_id == subagent
+            && let AgentEvent::Turn(TurnEvent::Prompt { text }) = &env.event
+        {
+            prompts.push(text.clone());
+        }
+    }
+    assert_eq!(
+        prompts,
+        vec!["read note.txt and report what it says".to_string()],
+        "the task is the subagent's first user message, raised once"
+    );
+    handle.shutdown().await;
+}
+
 /// With subagents disabled the delegation tools are not mounted at all, so a
 /// call to one fails the way any unknown tool does.
 #[tokio::test]

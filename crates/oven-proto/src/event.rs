@@ -29,6 +29,12 @@ pub enum AgentEvent {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TurnEvent {
     Started,
+    /// The turn's first user message: what it was asked to do. A subagent's
+    /// task is raised by the runtime, which is the only one that knows it —
+    /// the agent loop is handed the prompt, not an event about it.
+    Prompt {
+        text: String,
+    },
     /// A provider round trip begins. `index` counts from 1 within the turn,
     /// so a driver can report loop progress without reading the agent.
     StepStarted {
@@ -216,6 +222,15 @@ mod tests {
         let event = AgentEvent::Turn(TurnEvent::StepFinished {
             index: 2,
             stop: StepStop::ToolUse,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), event);
+    }
+
+    #[test]
+    fn a_raised_prompt_survives_the_wire() {
+        let event = AgentEvent::Turn(TurnEvent::Prompt {
+            text: "read note.txt".into(),
         });
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), event);

@@ -308,6 +308,37 @@ async fn arrows_then_enter_open_the_highlighted_subagent() {
     );
 }
 
+/// A subagent's task is its first user message: the runtime raises it, and
+/// the viewer opens with the question the subagent was asked.
+#[tokio::test]
+async fn a_subagents_task_opens_its_transcript() {
+    let root = tempdir::TempDir::new("oven-ui-agent-task").unwrap();
+    let mut ui = test_ui(&root).await;
+    let alpha = running("alpha");
+    ui.views.mirror(std::slice::from_ref(&alpha));
+
+    ui.apply_event(&AppEvent::agent_with(
+        alpha.id,
+        TurnId(1),
+        AgentEvent::Turn(TurnEvent::Prompt {
+            text: "read note.txt and report what it says".to_string(),
+        }),
+    ));
+    ui.views.focus(alpha.id);
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    terminal.draw(|f| ui.draw(f)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    assert!(
+        row_containing(&buf, "read note.txt and report what it says").is_some(),
+        "the task is what the viewer shows first"
+    );
+    assert!(
+        ui.transcript.rewind_text().is_none(),
+        "the driver's transcript keeps its own turns"
+    );
+}
+
 #[tokio::test]
 async fn the_strip_hint_offers_enter_only_after_a_row_is_highlighted() {
     let root = tempdir::TempDir::new("oven-ui-agent-hint").unwrap();

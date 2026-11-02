@@ -45,6 +45,16 @@ impl Views {
     /// Mirrors the app's registry, and returns how many subagents in it are
     /// still working — the count that keeps the frame ticking.
     pub(super) fn mirror(&mut self, registry: &[NodeInfo]) -> usize {
+        // A view goes away with the subagent it belongs to: the registry
+        // listed it and no longer does. An id the registry has not listed
+        // yet keeps its view, because a subagent's first event reaches the
+        // frontend before the state that lists it does.
+        let gone: Vec<AgentId> = self
+            .registry
+            .iter()
+            .filter(|agent| !registry.iter().any(|new| new.id == agent.id))
+            .map(|agent| agent.id)
+            .collect();
         self.registry.clear();
         self.registry.extend_from_slice(registry);
         let active = self
@@ -52,8 +62,9 @@ impl Views {
             .iter()
             .filter(|agent| agent.status.is_active())
             .count();
-        self.transcripts
-            .retain(|id, _| self.registry.iter().any(|agent| agent.id == *id));
+        for id in gone {
+            self.transcripts.remove(&id);
+        }
         if self
             .focus
             .is_some_and(|id| !self.transcripts.contains_key(&id))
@@ -176,29 +187,16 @@ impl Views {
 
     /// Opens a subagent's transcript, building it on first view.
     ///
-    /// A subagent that has not said anything yet — one waiting for a slot, or
-    /// one just spawned — has no transcript of its own, and opening nothing
-    /// is worse than opening a page that says what it was asked to do. The
-    /// task's label is that page: its events fill in under it as they arrive.
+    /// The task it was given is its first user message, and the runtime
+    /// raises it the moment the subagent is spawned — so a subagent that is
+    /// still queued, or that has not said anything yet, opens with the
+    /// question it was asked, and its events fill in under it.
     pub(super) fn focus(&mut self, id: AgentId) {
         if id == self.main {
             self.close();
             return;
         }
-        if !self.transcripts.contains_key(&id) {
-            let label = self
-                .registry
-                .iter()
-                .find(|agent| agent.id == id)
-                .map(|agent| agent.label.as_str())
-                .filter(|label| !label.is_empty())
-                .map(str::to_owned);
-            let mut view = Transcript::new();
-            if let Some(label) = label {
-                view.start_user_turn(&label);
-            }
-            self.transcripts.insert(id, view);
-        }
+        self.transcripts.entry(id).or_insert_with(Transcript::new);
         self.focus = Some(id);
         self.hold = true;
         if self.registry.iter().any(|agent| agent.id == id) {
@@ -279,8 +277,13 @@ impl Views {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::component::app_event;
     use crate::widgets::agents::running;
-    use oven_app::AgentId;
+    use oven_app::{AgentEvent, AgentId, AppEvent, TurnEvent};
+
+    fn prompt(text: &str) -> AppEvent {
+        app_event(AgentEvent::Turn(TurnEvent::Prompt { text: text.into() }))
+    }
 
     #[test]
     fn leaving_the_viewer_selects_the_main_agent() {
@@ -330,6 +333,40 @@ mod tests {
         views.mirror(std::slice::from_ref(&beta));
         assert_eq!(views.picked_id(), Some(main));
         assert!(!views.confirm());
+    }
+
+    #[test]
+    fn a_view_outlives_a_registry_that_has_not_caught_up() {
+        let main = AgentId::next();
+        let alpha = running("alpha");
+        let mut views = Views::new(main);
+        views
+            .transcript(alpha.id)
+            .on_event(&prompt("read note.txt"));
+        views.focus(alpha.id);
+
+        views.mirror(&[]);
+
+        assert!(
+            views.focused().is_some(),
+            "a subagent's first event arrives before the state that lists it"
+        );
+    }
+
+    #[test]
+    fn a_view_goes_away_with_its_subagent() {
+        let main = AgentId::next();
+        let alpha = running("alpha");
+        let mut views = Views::new(main);
+        views.mirror(std::slice::from_ref(&alpha));
+        views.focus(alpha.id);
+
+        views.mirror(&[]);
+
+        assert!(
+            views.focused().is_none(),
+            "a subagent nobody can reach any more has no view left to open"
+        );
     }
 
     #[test]

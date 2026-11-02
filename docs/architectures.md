@@ -357,6 +357,7 @@ frontend pairs `Started` / `OutputDelta` / `Finished` with.
 
 ```text
 TurnEvent     Started | Completed { usage, duration_ms }
+              Prompt { text }
               StepStarted { index } | StepFinished { index, stop }
               Cancelled { duration_ms } | Failed { error, duration_ms }
               LoopLimitReached { request_id, max_iters }

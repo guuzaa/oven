@@ -1453,6 +1453,9 @@ impl Transcript {
                     self.flush_streaming();
                     self.push_prompt(LineKind::User, text);
                 }
+                AgentEvent::Turn(TurnEvent::Prompt { text }) => {
+                    self.start_user_turn(text);
+                }
                 AgentEvent::Turn(TurnEvent::NoticeAppended { text }) => {
                     self.flush_streaming();
                     self.push_row(LineKind::System, notice_body(text));

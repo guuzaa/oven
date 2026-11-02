@@ -215,13 +215,13 @@ This is a deliberate cost: no agent dimension on `Record`, no cross-process stab
 | Main transcript | A `task` call is an ordinary tool row; its report is the collapsed body | Always |
 | Viewer | That subagent's full transcript, replacing the driver's; the composer line becomes a hint bar | `/agents <n>` / `/agents explore#2`, a click on a bar row, or ↑↓ then Enter while the composer is empty |
 
-The viewer is **created on demand**: a subagent that just spawned, is still queued, or has not said anything yet has no transcript, so opening one builds a fresh transcript seeded with its task label, and later events stream in live. So "open it the moment it's dispatched" works, without waiting for its first event.
+The viewer is **created on demand**, and it opens with the question: the runtime raises the task as the subagent's first user message (`TurnEvent::Prompt`) the moment it is spawned, so a subagent that is still queued, or that has not said anything yet, still opens with what it was asked, and its events stream in under it. So "open it the moment it's dispatched" works, without waiting for its first event.
 
 The viewer takes the keyboard when open: `↑↓` switches to the previous or next agent in the bar, including the driver. An arrow with a modifier (`Shift+↑`) scrolls the transcript one line. `PgUp` / `PgDn` and the mouse scroll the transcript, `x` stops that subagent, `Ctrl-C` exits as usual, and `Esc` jumps straight back to the driver. This `Esc` is the project's **only single-press one** (`EscAction::acts_immediately`): it loses nothing (the transcript is still there and reopens anytime), whereas an interface that ignored the first `Esc` would read as "stuck"; every other `Esc` still needs the second press to confirm. The hint bar states the exits: `↑↓ switch · esc back · pgup/pgdn scroll · x stop`.
 
 TUI-side state keeps the frames ticking while work continues: `state.agents` is the count of still-working subagents, so subagent timers keep animating, while `state.busy` (the driver's own turn, i.e. `phase.is_active()`) stays false and the composer remains usable.
 
-The single place that routes by `agent_id` is `AppEventKind::Agent(env)`: events whose `env.agent_id` is not the driver's feed only the `Transcript` in `Ui::views` — never the driver's transcript, status, or input. Ids the registry no longer lists get pruned.
+The single place that routes by `agent_id` is `AppEventKind::Agent(env)`: events whose `env.agent_id` is not the driver's feed only the `Transcript` in `Ui::views` — never the driver's transcript, status, or input. Ids the registry listed and no longer lists get pruned; an id the registry has not listed yet keeps its view, because a subagent's first event reaches the frontend before the state that lists it does.
 
 `Esc` priority: **pop the queued message → leave the viewer → cancel the driver's turn → rewind**. Hiding a finished bar is what an `Esc` that would otherwise do nothing does, so a rewindable message is not discarded to close the bar.
 

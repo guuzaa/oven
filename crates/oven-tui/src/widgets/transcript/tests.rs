@@ -509,6 +509,10 @@ fn started() -> AppEvent {
     agent(AgentEvent::Turn(TurnEvent::Started))
 }
 
+fn prompt(text: &str) -> AppEvent {
+    agent(AgentEvent::Turn(TurnEvent::Prompt { text: text.into() }))
+}
+
 fn completed() -> AppEvent {
     completed_in(0)
 }
@@ -611,6 +615,29 @@ fn loop_limit_reached_appends_system_line() {
     assert_eq!(kinds_of(&t), vec![LineKind::User, LineKind::System]);
     let expected = format!("{LOOP_LIMIT_REACHED} (100 iterations)");
     assert_eq!(t.rows.last().unwrap().text, expected);
+}
+
+/// A subagent's task is its first user message: the runtime raises it, so
+/// the transcript opens with the question the subagent was asked.
+#[test]
+fn a_raised_prompt_is_the_first_user_row() {
+    let mut t = Transcript::new();
+    t.on_event(&prompt("read note.txt and report what it says"));
+    t.on_event(&text_delta("the file says hello"));
+    t.on_event(&tool_start(
+        1,
+        "read",
+        serde_json::json!({ "path": "note.txt" }),
+    ));
+
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::User, LineKind::Text, LineKind::Activity]
+    );
+    assert_eq!(
+        t.rows[0].text.as_str(),
+        "read note.txt and report what it says"
+    );
 }
 
 #[test]

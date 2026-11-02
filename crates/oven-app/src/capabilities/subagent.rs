@@ -332,6 +332,17 @@ impl SubagentSpawner for Subagents {
             name
         };
         self.notify();
+        // The task is the subagent's first user message, and the only one the
+        // frontend cannot read from the agent: the loop is handed the prompt,
+        // it never reports it. Raising it here puts it ahead of everything
+        // the subagent says, so its transcript opens with the question.
+        self.events.emit_agent(
+            id,
+            turn_id,
+            AgentEvent::Turn(TurnEvent::Prompt {
+                text: request.prompt.clone(),
+            }),
+        );
 
         let mut agent = Agent::with_router(self.router.clone(), role.tools.clone())
             .with_id(id)

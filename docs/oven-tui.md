@@ -450,11 +450,12 @@ Three surfaces, in increasing order of commitment:
 
 While the composer is empty, `↑` and `↓` move a highlight through the driver and the subagents. The driver starts highlighted, which is the transcript on screen. `Enter` opens a highlighted subagent; on the driver it does nothing, and the border only offers select. `Esc` leaves the viewer and highlights the driver again, so arrows can move on. Once nothing is still running, `Esc` hides the strip only when it would otherwise do nothing. A message that can be rewound still takes the two-press confirm and comes back into the composer, and that `Esc` leaves the strip up. Text already in the composer, and an open completion popup, keep `↑↓` and `Enter`.
 
-Opening a view builds it if it does not exist yet, seeded with the label the
-task was spawned under, and fills in from the subagent's events as they arrive —
-so a subagent that is still queued, or that has not spoken yet, still opens
-something. `/agents` applies mid-turn for the same reason: a view command that
-waited for the reply would be useless by the time it ran.
+Opening a view builds it if it does not exist yet, and it opens with the
+question: the runtime raises the task the subagent was spawned under as its
+first user message, and the subagent's events fill in under it — so a
+subagent that is still queued, or that has not spoken yet, still opens with
+what it was asked. `/agents` applies mid-turn for the same reason: a view
+command that waited for the reply would be useless by the time it ran.
 
 While the viewer is open it owns the keyboard: `↑` and `↓` move to the
 previous or next strip row and show that agent, including the driver, so
