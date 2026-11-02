@@ -264,6 +264,23 @@ The `SessionMeta` record names the format the file was written in
 this build reads is refused rather than half-understood: its records may mean
 something this build does not know.
 
+Each line is read knowing the format of its file: the meta that is its first
+record names it, and a file whose first record is not a meta is in
+`SESSION_FORMAT_WITHOUT_VERSION`. Writing takes the file's format by the same
+rule. The version is taken from the raw line before the meta is read, so a
+meta in a format this build does not know is refused as that format even when
+its shape has changed; any integer counts as a format, so `-1` is refused like
+`0` or `99`. A meta further down does not name the file's format, but one that
+names a format this build does not read still refuses the file.
+
+Before a line is deserialized, `upgrade_line` in `core/session.rs` runs
+`upgrade_step` once for each version from the line's up to the one this build
+writes. A legacy line — bare message or envelope — is first put into the typed
+lines format 1 writes for the same records, so it goes through the same steps.
+Format 2 only added an optional field, so the one step that exists today,
+1 → 2, leaves the line as it is; a format that changes a record's shape adds
+its step there.
+
 A file keeps the format it was written in. The records written into it are
 written in that format, so a session resumed from an older file keeps meaning
 what it meant: a format that does not know the working directory does not get

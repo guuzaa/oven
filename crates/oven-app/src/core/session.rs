@@ -28,9 +28,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use oven_llm::{Message, Usage};
-use oven_proto::{Record, SESSION_FORMAT_VERSION, SESSION_FORMAT_WITHOUT_VERSION};
-use serde::Deserialize;
+use oven_llm::Usage;
+use oven_proto::{Record, SESSION_FORMAT_VERSION, SESSION_FORMAT_WITHOUT_VERSION, SessionMeta};
 use thiserror::Error;
 
 const SHORT_SESSION_ID_LEN: usize = 8;
@@ -45,8 +44,13 @@ pub enum SessionError {
     Parse(PathBuf, usize, serde_json::Error),
     #[error("session id '{0}' contains path separators")]
     BadId(String),
-    #[error("session {0} is in format v{1}; this build reads up to v{2}")]
-    UnsupportedFormat(PathBuf, u32, u32),
+    /// The version as the file writes it (possibly not a valid `u32`, e.g.
+    /// `-1`), and the newest format this build reads.
+    #[error(
+        "session {0} is in format v{1}; this build reads v{first} to v{2}",
+        first = SESSION_FORMAT_WITHOUT_VERSION
+    )]
+    UnsupportedFormat(PathBuf, String, u32),
 }
 
 /// Absolute, symlink-resolved form of a workspace root, falling back to the
@@ -104,15 +108,6 @@ pub struct Session {
     path: PathBuf,
 }
 
-/// Legacy JSONL line written by older versions: a message plus the usage its
-/// response consumed. Still read back so existing sessions keep their data.
-#[derive(Debug, Deserialize)]
-struct RecordLine {
-    message: Message,
-    #[serde(default)]
-    usage: Usage,
-}
-
 impl Session {
     /// Open (or create) the session file for `id`. The file is created lazily
     /// on the first append.
@@ -166,6 +161,9 @@ impl Session {
         let mut lines = BufReader::new(file).lines();
         let mut out = Vec::new();
         let mut line_no = 0usize;
+        // Same rule as `session_format_version`: the first record names the
+        // file's format.
+        let mut version = SESSION_FORMAT_WITHOUT_VERSION;
         while let Some(line) = lines
             .next_line()
             .await
@@ -175,12 +173,30 @@ impl Session {
             if line.trim().is_empty() {
                 continue;
             }
-            let records = parse_line(&line)
-                .map_err(|e| SessionError::Parse(self.path.clone(), line_no, e))?;
-            if let Some(error) = unsupported_format(&records, &self.path) {
-                return Err(error);
-            }
-            out.extend(records);
+            let parse_error = |e| SessionError::Parse(self.path.clone(), line_no, e);
+            let value: serde_json::Value = serde_json::from_str(&line).map_err(parse_error)?;
+            // Peek the version before deserializing, so an unknown format is
+            // refused as such rather than as a parse error. Any meta can
+            // refuse the file.
+            let line_version = match meta_format_version(&value) {
+                Some(Err(named)) => {
+                    return Err(SessionError::UnsupportedFormat(
+                        self.path.clone(),
+                        named,
+                        SESSION_FORMAT_VERSION,
+                    ));
+                }
+                Some(Ok(named)) => {
+                    // A later meta is read in its own format but does not
+                    // change the file's.
+                    if out.is_empty() {
+                        version = named;
+                    }
+                    named
+                }
+                None => version,
+            };
+            out.extend(parse_value(value, line_version).map_err(parse_error)?);
         }
         Ok(out)
     }
@@ -378,76 +394,142 @@ const KNOWN_RECORD_TYPES: &[&str] = &[
     "todo_list",
 ];
 
+/// `version` is the format the line was written in.
+///
 /// 1. Invalid JSON → Err.
-/// 2. Object with a known `type` tag → deserialize as `Record` (malformed = Err).
-/// 3. Object with an unknown `type` tag → skip.
-/// 4. No `type`: legacy envelope, then bare `Message`. Both fail → Err.
-fn parse_line(line: &str) -> Result<Vec<Record>, serde_json::Error> {
-    let value: serde_json::Value = serde_json::from_str(line)?;
-    if let Some(tag) = value.get("type").and_then(|t| t.as_str()) {
-        return if KNOWN_RECORD_TYPES.contains(&tag) {
-            serde_json::from_value(value).map(|r| vec![r])
-        } else {
-            Ok(vec![])
-        };
+/// 2. `type` tag → [`upgrade_line`], then known tag → `Record` (malformed =
+///    Err), unknown tag → skip.
+/// 3. No `type`: legacy envelope or bare `Message`, read as format 1.
+#[cfg(test)]
+fn parse_line(line: &str, version: u32) -> Result<Vec<Record>, serde_json::Error> {
+    parse_value(serde_json::from_str(line)?, version)
+}
+
+/// [`parse_line`] for a line already read as JSON.
+fn parse_value(value: serde_json::Value, version: u32) -> Result<Vec<Record>, serde_json::Error> {
+    if value.get("type").is_some_and(serde_json::Value::is_string) {
+        return Ok(read_typed(value, version)?.into_iter().collect());
     }
-    match serde_json::from_value::<RecordLine>(value.clone()) {
-        Ok(envelope) => {
-            let mut out = vec![Record::Message {
-                timestamp: 0,
-                message: envelope.message,
-            }];
-            if envelope.usage != Usage::default() {
-                out.push(Record::TokenUsage {
-                    timestamp: 0,
-                    usage: envelope.usage,
-                });
-            }
-            Ok(out)
-        }
-        Err(_) => serde_json::from_value::<Message>(value).map(|message| {
-            vec![Record::Message {
-                timestamp: 0,
-                message,
-            }]
-        }),
+    // Untyped lines predate records: rewrite them as format 1 lines so they
+    // go through the same upgrade steps.
+    let mut out = Vec::new();
+    for typed in legacy_as_typed(value)? {
+        out.extend(read_typed(typed, SESSION_FORMAT_WITHOUT_VERSION)?);
+    }
+    // The envelope always carried a usage; a zero one is not a record.
+    out.retain(
+        |record| !matches!(record, Record::TokenUsage { usage, .. } if *usage == Usage::default()),
+    );
+    Ok(out)
+}
+
+/// A typed line written in `version` as its record; `None` for an unknown
+/// type.
+fn read_typed(value: serde_json::Value, version: u32) -> Result<Option<Record>, serde_json::Error> {
+    // Upgrade before checking the tag: a step may rename it.
+    let value = upgrade_line(value, version);
+    match value.get("type").and_then(|t| t.as_str()) {
+        Some(tag) if KNOWN_RECORD_TYPES.contains(&tag) => serde_json::from_value(value).map(Some),
+        _ => Ok(None),
     }
 }
 
-/// The error a file records a format this build cannot read, if it does.
+/// An untyped legacy line as format 1 lines with timestamp 0.
 ///
-/// The records are the ones just read: the file is refused the moment its
-/// meta says a format this build does not know, before the records behind it
-/// are read at all.
-fn unsupported_format(records: &[Record], path: &Path) -> Option<SessionError> {
-    records.iter().find_map(|record| match record {
-        Record::SessionMeta(meta) if !meta.is_readable_by_this_build() => {
-            Some(SessionError::UnsupportedFormat(
-                path.to_path_buf(),
-                meta.format_version,
-                SESSION_FORMAT_VERSION,
-            ))
+/// The `{"message": ..., "usage": ...}` envelope becomes a message line and,
+/// if it has a usage, a usage line; anything else is a bare `Message`.
+fn legacy_as_typed(value: serde_json::Value) -> Result<Vec<serde_json::Value>, serde_json::Error> {
+    match value {
+        serde_json::Value::Object(mut fields) if fields.contains_key("message") => {
+            let message = fields.remove("message").unwrap_or_default();
+            let mut out = vec![tagged("message", message)?];
+            if let Some(usage) = fields.remove("usage") {
+                out.push(tagged("token_usage", usage)?);
+            }
+            Ok(out)
         }
+        other => Ok(vec![tagged("message", other)?]),
+    }
+}
+
+/// The body of a legacy line as a typed line: tagged `tag`, timestamp 0.
+fn tagged(tag: &str, body: serde_json::Value) -> Result<serde_json::Value, serde_json::Error> {
+    let serde_json::Value::Object(mut fields) = body else {
+        return Err(serde::de::Error::custom(format!(
+            "a legacy {tag} line must be an object"
+        )));
+    };
+    fields.insert("type".into(), tag.into());
+    fields.insert("timestamp".into(), 0.into());
+    Ok(serde_json::Value::Object(fields))
+}
+
+/// Runs [`upgrade_step`] for each version from `version` up to
+/// [`SESSION_FORMAT_VERSION`]. `version` is always readable: other files are
+/// refused before parsing.
+fn upgrade_line(mut value: serde_json::Value, version: u32) -> serde_json::Value {
+    debug_assert!(SessionMeta::format_is_readable_by_this_build(version));
+    for from in version..SESSION_FORMAT_VERSION {
+        value = upgrade_step(value, from);
+    }
+    value
+}
+
+/// Turns a line in `from` into one in `from + 1`. A format that changes a
+/// record's shape adds its step here.
+fn upgrade_step(value: serde_json::Value, from: u32) -> serde_json::Value {
+    match from {
+        // 2 only added an optional field.
+        1 => value,
+        // Never asked for: `upgrade_line` stops at this build's format.
+        _ => value,
+    }
+}
+
+/// The format a session meta line names, read from the raw JSON: `Ok` if
+/// readable, `Err` with the version as written otherwise.
+///
+/// A missing field means format 1. Any integer, including a negative or
+/// oversized one, counts as a version. A non-integer returns `None` and is
+/// left to deserialization to reject.
+fn meta_format_version(value: &serde_json::Value) -> Option<Result<u32, String>> {
+    if value.get("type").and_then(|t| t.as_str()) != Some("session_meta") {
+        return None;
+    }
+    let Some(named) = value.get("format_version") else {
+        return Some(Ok(SESSION_FORMAT_WITHOUT_VERSION));
+    };
+    let serde_json::Value::Number(number) = named else {
+        return None;
+    };
+    if number.as_u64().is_none() && number.as_i64().is_none() {
+        return None;
+    }
+    let readable = number
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| SessionMeta::format_is_readable_by_this_build(n));
+    Some(readable.ok_or_else(|| number.to_string()))
+}
+
+/// The session's meta: the first record of a file that has one.
+fn session_meta(records: &[Record]) -> Option<&SessionMeta> {
+    match records.first() {
+        Some(Record::SessionMeta(meta)) => Some(meta),
         _ => None,
-    })
+    }
 }
 
 /// The format a session file is in.
 ///
-/// A file records the format it was written in. A file written before the
-/// version was recorded is in the format that introduced it, and a file with
-/// nothing in it is in the format this build writes.
+/// The first record's meta names it (the same rule `Session::load_records`
+/// uses). No leading meta means format 1; an empty file is in this build's
+/// format.
 pub(crate) fn session_format_version(records: &[Record]) -> u32 {
-    if let Some(version) = records.iter().find_map(|record| match record {
-        Record::SessionMeta(meta) => Some(meta.format_version),
-        _ => None,
-    }) {
-        return version;
-    }
-    if records.is_empty() {
-        SESSION_FORMAT_VERSION
-    } else {
-        SESSION_FORMAT_WITHOUT_VERSION
+    match session_meta(records) {
+        Some(meta) => meta.format_version,
+        None if records.is_empty() => SESSION_FORMAT_VERSION,
+        None => SESSION_FORMAT_WITHOUT_VERSION,
     }
 }
 
@@ -456,10 +538,7 @@ pub(crate) fn session_format_version(records: &[Record]) -> u32 {
 /// A file written before the session recorded its working directory records
 /// none: there is nothing to compare it against, so it is ignored.
 pub(crate) fn session_working_dir(records: &[Record]) -> Option<&str> {
-    records.iter().find_map(|record| match record {
-        Record::SessionMeta(meta) => meta.working_dir.as_deref(),
-        _ => None,
-    })
+    session_meta(records)?.working_dir.as_deref()
 }
 
 /// What a session says when it is resumed in another directory.
@@ -493,7 +572,7 @@ fn validate_id(id: &str) -> Result<(), SessionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_llm::ContentBlock;
+    use oven_llm::{ContentBlock, Message};
     use oven_proto::{SESSION_FORMAT_WITHOUT_VERSION, SessionMeta};
 
     fn tmp() -> tempdir::TempDir {
@@ -742,7 +821,7 @@ mod tests {
 
         let error = session.load_records().await.unwrap_err();
         assert!(
-            matches!(error, SessionError::UnsupportedFormat(_, 99, _)),
+            refused_as(&error, "99"),
             "a file this build cannot read must be refused, got {error}"
         );
     }
@@ -765,9 +844,218 @@ mod tests {
 
         let error = session.load_records().await.unwrap_err();
         assert!(
-            matches!(error, SessionError::UnsupportedFormat(_, 99, _)),
+            refused_as(&error, "99"),
             "a newer format is refused as such, not as a parse error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_file_in_a_format_below_the_first_is_refused() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"session_meta","root":"/ws","created_at":1,"format_version":0}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"thinking","timestamp":1,"duration_ms":2}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let error = session.load_records().await.unwrap_err();
+        assert!(
+            refused_as(&error, "0"),
+            "no oven wrote format 0, so a file that names it is refused: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newer_meta_in_a_shape_this_build_does_not_know_is_refused_as_a_format() {
+        use std::io::Write;
+
+        let tmp = tmp();
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        let mut file = std::fs::File::create(session.path()).unwrap();
+        // No `root`: this build could not deserialize it.
+        writeln!(
+            file,
+            r#"{{"type":"session_meta","workspace":"/ws","created_at":1,"format_version":99}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let error = session.load_records().await.unwrap_err();
+        assert!(
+            refused_as(&error, "99"),
+            "the version is read before the meta is: {error}"
+        );
+    }
+
+    #[test]
+    fn a_line_reads_the_same_in_every_format_this_build_reads() {
+        let line = r#"{"type":"thinking","timestamp":1,"duration_ms":2}"#;
+        let expected =
+            serde_json::to_value(parse_line(line, SESSION_FORMAT_VERSION).unwrap()).unwrap();
+        for version in SESSION_FORMAT_WITHOUT_VERSION..SESSION_FORMAT_VERSION {
+            let read = serde_json::to_value(parse_line(line, version).unwrap()).unwrap();
+            assert_eq!(read, expected, "v{version}");
+        }
+    }
+
+    fn refused_as(error: &SessionError, version: &str) -> bool {
+        matches!(error, SessionError::UnsupportedFormat(_, named, _) if named == version)
+    }
+
+    async fn session_with_lines(tmp: &tempdir::TempDir, lines: &[&str]) -> Session {
+        let session = Session::open(tmp.path(), "s").await.unwrap();
+        std::fs::write(session.path(), lines.join("\n") + "\n").unwrap();
+        session
+    }
+
+    #[tokio::test]
+    async fn a_file_in_a_negative_format_is_refused_as_that_format() {
+        let tmp = tmp();
+        let session = session_with_lines(
+            &tmp,
+            &[r#"{"type":"session_meta","root":"/ws","created_at":1,"format_version":-1}"#],
+        )
+        .await;
+
+        let error = session.load_records().await.unwrap_err();
+        assert!(refused_as(&error, "-1"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_meta_further_down_that_names_a_newer_format_refuses_the_file() {
+        let tmp = tmp();
+        let session = session_with_lines(
+            &tmp,
+            &[
+                r#"{"type":"session_meta","root":"/ws","created_at":1,"format_version":2}"#,
+                r#"{"type":"thinking","timestamp":1,"duration_ms":2}"#,
+                r#"{"type":"session_meta","root":"/ws","created_at":1,"format_version":99}"#,
+            ],
+        )
+        .await;
+
+        let error = session.load_records().await.unwrap_err();
+        assert!(refused_as(&error, "99"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_meta_behind_a_skipped_line_names_the_files_format() {
+        let tmp = tmp();
+        let session = session_with_lines(
+            &tmp,
+            &[
+                r#"{"type":"from_a_newer_oven"}"#,
+                r#"{"type":"session_meta","root":"/ws","created_at":1,"format_version":2}"#,
+            ],
+        )
+        .await;
+
+        // The skipped line yields no record, so the meta is first.
+        let loaded = session.load_records().await.unwrap();
+        assert_eq!(session_format_version(&loaded), 2);
+    }
+
+    #[test]
+    fn a_legacy_line_reads_as_the_typed_lines_of_format_1() {
+        let message = r#"{"role":"user","content":[{"type":"text","text":"hi"}]}"#;
+        let usage = r#"{"input_tokens":3,"output_tokens":4}"#;
+
+        let legacy = parse_line(
+            &format!(r#"{{"message":{message},"usage":{usage}}}"#),
+            SESSION_FORMAT_VERSION,
+        )
+        .unwrap();
+        let mut typed = parse_line(
+            &message.replacen('{', r#"{"type":"message","timestamp":0,"#, 1),
+            SESSION_FORMAT_WITHOUT_VERSION,
+        )
+        .unwrap();
+        typed.extend(
+            parse_line(
+                &usage.replacen('{', r#"{"type":"token_usage","timestamp":0,"#, 1),
+                SESSION_FORMAT_WITHOUT_VERSION,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap(),
+            serde_json::to_value(&typed).unwrap()
+        );
+
+        let bare = parse_line(message, SESSION_FORMAT_VERSION).unwrap();
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::to_value(&typed[..1]).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_legacy_line_that_is_not_an_object_is_an_error() {
+        assert!(parse_line("42", SESSION_FORMAT_VERSION).is_err());
+        assert!(parse_line(r#"{"message":42}"#, SESSION_FORMAT_VERSION).is_err());
+    }
+
+    #[test]
+    fn a_meta_names_its_format_from_the_raw_line() {
+        let named = serde_json::json!({"type": "session_meta", "format_version": 2});
+        assert_eq!(meta_format_version(&named), Some(Ok(2)));
+
+        let unnamed = serde_json::json!({"type": "session_meta", "root": "/ws"});
+        assert_eq!(
+            meta_format_version(&unnamed),
+            Some(Ok(SESSION_FORMAT_WITHOUT_VERSION))
+        );
+
+        for (version, written) in [
+            (serde_json::json!(7), "7"),
+            (serde_json::json!(0), "0"),
+            (serde_json::json!(-1), "-1"),
+            (serde_json::json!(u64::MAX), "18446744073709551615"),
+        ] {
+            let meta = serde_json::json!({"type": "session_meta", "format_version": version});
+            assert_eq!(
+                meta_format_version(&meta),
+                Some(Err(written.to_string())),
+                "{written}"
+            );
+        }
+
+        // Not an integer: left to deserialization to reject.
+        for version in [serde_json::json!(1.5), serde_json::json!("2")] {
+            let meta = serde_json::json!({"type": "session_meta", "format_version": version});
+            assert_eq!(meta_format_version(&meta), None, "{version}");
+        }
+
+        let other = serde_json::json!({"type": "thinking", "format_version": 7});
+        assert_eq!(meta_format_version(&other), None);
+    }
+
+    #[test]
+    fn a_meta_further_down_does_not_name_the_files_format() {
+        let records = vec![
+            message_record(1, Message::user_text("old")),
+            Record::SessionMeta(SessionMeta {
+                root: "/ws".into(),
+                created_at: 1,
+                format_version: SESSION_FORMAT_VERSION,
+                working_dir: Some("/elsewhere".into()),
+            }),
+        ];
+        assert_eq!(
+            session_format_version(&records),
+            SESSION_FORMAT_WITHOUT_VERSION
+        );
+        assert!(session_working_dir(&records).is_none());
     }
 
     #[test]
@@ -1059,13 +1347,13 @@ mod tests {
         let lines: Vec<_> = text.lines().collect();
         assert_eq!(lines.len(), 3);
         for line in lines {
-            assert!(parse_line(line).is_ok(), "{line}");
+            assert!(parse_line(line, SESSION_FORMAT_VERSION).is_ok(), "{line}");
         }
     }
 
     #[test]
     fn known_type_malformed_is_error() {
-        let err = parse_line(r#"{"type":"todo_list"}"#).unwrap_err();
+        let err = parse_line(r#"{"type":"todo_list"}"#, SESSION_FORMAT_VERSION).unwrap_err();
         assert!(!err.to_string().is_empty());
     }
 }

@@ -38,13 +38,17 @@ pub enum Record {
 
 /// The session format this build writes.
 ///
-/// A session file records the format it was written in, so a reader can tell
-/// a file it understands from one a newer oven wrote. The version moves on
-/// only when the shape of a record changes, and a file keeps the version it
-/// was written in: the records of a resumed session are written in the
-/// format that file is in, so an old file still means what it meant.
+/// A file records its format and keeps it: a resumed session is written in
+/// the format of its file.
 ///
-/// Format 2 added the working directory to the session meta.
+/// The version moves on only when an older build would misread a file (a
+/// field renamed, removed or made required, a record whose meaning changed).
+/// A new optional field or record type does not move it: older builds skip
+/// what they do not know. A new version needs an upgrade step for reading
+/// and a case in [`Record::into_version`] for writing.
+///
+/// Format 2 is the first to record its version (1 means none was recorded)
+/// and added the working directory to the meta.
 pub const SESSION_FORMAT_VERSION: u32 = 2;
 
 /// The format of a session file written before the version was recorded.
@@ -61,6 +65,14 @@ const WORKING_DIR_FORMAT: u32 = 2;
 
 /// Where and when a session was created. Written as the first JSONL record so
 /// the workspace root survives a resume.
+///
+/// The first record names the file's format; a file that does not start
+/// with a meta is in [`SESSION_FORMAT_WITHOUT_VERSION`]. A later meta that
+/// names an unreadable format still refuses the file.
+///
+/// Readers take `format_version` from the raw JSON before reading the meta,
+/// so the `session_meta` tag and the integer `format_version` field keep
+/// their name and type in every format.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionMeta {
     pub root: String,
@@ -83,7 +95,13 @@ impl SessionMeta {
     /// A file written by a newer oven may hold records this build does not
     /// know, so it is refused rather than half-understood.
     pub fn is_readable_by_this_build(&self) -> bool {
-        self.format_version <= SESSION_FORMAT_VERSION
+        Self::format_is_readable_by_this_build(self.format_version)
+    }
+
+    /// Whether this build reads `version`: from
+    /// [`SESSION_FORMAT_WITHOUT_VERSION`] to [`SESSION_FORMAT_VERSION`].
+    pub fn format_is_readable_by_this_build(version: u32) -> bool {
+        (SESSION_FORMAT_WITHOUT_VERSION..=SESSION_FORMAT_VERSION).contains(&version)
     }
 
     /// This meta as a file in `version` writes it.
@@ -178,6 +196,27 @@ mod tests {
             working_dir: None,
         };
         assert!(!meta.is_readable_by_this_build());
+    }
+
+    #[test]
+    fn a_format_below_the_first_is_not_readable_by_this_build() {
+        let meta = SessionMeta {
+            root: "/ws".into(),
+            created_at: 1,
+            format_version: SESSION_FORMAT_WITHOUT_VERSION - 1,
+            working_dir: None,
+        };
+        assert!(!meta.is_readable_by_this_build());
+    }
+
+    #[test]
+    fn every_format_from_the_first_to_this_one_is_readable_by_this_build() {
+        for version in SESSION_FORMAT_WITHOUT_VERSION..=SESSION_FORMAT_VERSION {
+            assert!(
+                SessionMeta::format_is_readable_by_this_build(version),
+                "v{version}"
+            );
+        }
     }
 
     #[test]
