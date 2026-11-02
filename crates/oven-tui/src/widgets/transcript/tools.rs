@@ -124,8 +124,23 @@ impl ToolBurst {
         }
         if failed {
             call.error = error.filter(|text| !text.is_empty()).map(str::to_string);
+            let kind = action_of(&self.calls[idx].label).into();
+            self.drop_action(kind);
         }
         true
+    }
+
+    /// Takes one call out of the title's action counts: a call that failed is
+    /// a failure, not a tool action, so the title counts the failure and
+    /// leaves out the name of the tool that did not do what it was asked.
+    fn drop_action(&mut self, kind: ToolKind) {
+        let Some(pos) = self.groups.iter().position(|group| group.kind == kind) else {
+            return;
+        };
+        self.groups[pos].count -= 1;
+        if self.groups[pos].count == 0 {
+            self.groups.remove(pos);
+        }
     }
 
     pub(super) fn title(&self) -> String {
@@ -214,7 +229,7 @@ mod tests {
         burst.start("4".into(), "Read src/main.rs", None);
         assert!(burst.finish("2", None, true, None));
 
-        assert_eq!(burst.title(), "Searched 3 patterns, Read 1 file, 1 failed");
+        assert_eq!(burst.title(), "Searched 2 patterns, Read 1 file, 1 failed");
         assert_eq!(
             burst.body(),
             "Searched todo in src\nSearched config in src\nFound **/*.rs in src\nRead src/main.rs"
@@ -288,11 +303,42 @@ mod tests {
         burst.start("1".into(), "write", None);
         assert!(burst.finish("1", None, true, Some("unknown tool: write")));
 
-        assert_eq!(burst.title(), "write, 1 failed");
+        assert_eq!(burst.title(), "1 failed");
         assert_eq!(
             titles(&burst.sections()),
             ["text:write\nunknown tool: write"]
         );
+    }
+
+    #[test]
+    fn a_failed_call_names_no_tool_in_the_title() {
+        let mut burst = ToolBurst::default();
+        burst.start("1".into(), "Ran ls", None);
+        assert!(burst.finish("1", None, true, Some("no such file")));
+
+        assert_eq!(burst.title(), "1 failed");
+    }
+
+    #[test]
+    fn a_failed_call_leaves_the_title_with_the_failure_alone() {
+        let mut burst = ToolBurst::default();
+        burst.start("1".into(), "Edited src/main.rs", Some("- old\n+ new"));
+        burst.start("2".into(), "edit", None);
+        assert!(burst.finish("2", None, true, Some("unknown tool: edit")));
+        burst.start("3".into(), "edit", None);
+        assert!(burst.finish("3", None, true, Some("unknown tool: edit")));
+
+        assert_eq!(burst.title(), "Edited 1 file, 2 failed");
+    }
+
+    #[test]
+    fn a_failed_call_shares_no_count_with_the_call_it_mimics() {
+        let mut burst = ToolBurst::default();
+        burst.start("1".into(), "Edited src/main.rs", Some("- old\n+ new"));
+        burst.start("2".into(), "Edited", None);
+        assert!(burst.finish("2", None, true, Some("unknown tool: Edited")));
+
+        assert_eq!(burst.title(), "Edited 1 file, 1 failed");
     }
 
     #[test]
@@ -301,7 +347,7 @@ mod tests {
         burst.start("1".into(), "Edited src/main.rs", Some("- old\n+ new"));
         assert!(burst.finish("1", None, true, Some("old_string not found")));
 
-        assert_eq!(burst.title(), "Edited 1 file, 1 failed");
+        assert_eq!(burst.title(), "1 failed");
         let [Section::Item { detail, .. }] = &burst.sections()[..] else {
             panic!("expected one diff item");
         };

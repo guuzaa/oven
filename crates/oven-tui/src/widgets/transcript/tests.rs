@@ -300,7 +300,7 @@ fn tool_end_updates_summary_without_result_row() {
     t.on_event(&tool_end(1, false, "boom\n"));
     let row = t.rows.last().unwrap();
     assert_eq!(row.kind, LineKind::Activity);
-    assert_eq!(row.text, "Ran 1 command, 1 failed");
+    assert_eq!(row.text, "1 failed");
     assert_eq!(t.rows.len(), 1);
 }
 
@@ -325,7 +325,7 @@ fn seed_unknown_tool_failure_matches_the_live_burst() {
         Message::tool_result("c1", REASON, true),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "write, 1 failed");
+    assert_eq!(t.rows[0].text, "1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
         format!("write\n{REASON}")
@@ -339,11 +339,29 @@ fn refused_tool_lands_on_its_burst_row() {
     t.on_event(&tool_start(1, "write", serde_json::json!({})));
     t.on_event(&tool_end(1, false, REASON));
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "write, 1 failed");
+    assert_eq!(t.rows[0].text, "1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
         format!("write\n{REASON}")
     );
+}
+
+#[test]
+fn a_failed_tool_leaves_its_name_out_of_the_activity_title() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "file_edit",
+        serde_json::json!({ "path": "src/main.rs" }),
+    ));
+    t.on_event(&tool_start(
+        2,
+        "edit",
+        serde_json::json!({ "path": "src/main.rs" }),
+    ));
+    t.on_event(&tool_end(2, false, "unknown tool: edit"));
+
+    assert_eq!(t.rows[0].text, "Edited 1 file, 1 failed");
 }
 
 #[test]
@@ -363,7 +381,7 @@ fn rejected_tool_lands_on_its_burst_row() {
         None,
     ));
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Ran 1 command, 1 failed");
+    assert_eq!(t.rows[0].text, "1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
         format!("Ran rm -rf /\n{REASON}")
@@ -1481,7 +1499,7 @@ fn live_tools_aggregate_counts_and_failures() {
     ));
     t.on_event(&tool_end(3, true, "hi"));
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Ran 2 commands, Read 1 file, 1 failed");
+    assert_eq!(t.rows[0].text, "Ran 1 command, Read 1 file, 1 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
         "Ran ls\nRan pwd\nboom\nRead a"
@@ -1501,7 +1519,7 @@ fn live_tool_end_rewrites_same_summary_row() {
     t.on_event(&tool_end(1, false, "boom"));
     assert_eq!(t.rows.len(), 1);
     assert_eq!(t.rows[0].kind, LineKind::Activity);
-    assert_eq!(t.rows[0].text, "Ran 1 command, 1 failed");
+    assert_eq!(t.rows[0].text, "1 failed");
 }
 
 #[test]
@@ -1979,7 +1997,7 @@ fn file_edit_with_broken_arguments_still_reads_as_an_edit() {
     t.on_event(&tool_end(1, false, EDIT_ERROR));
     t.on_event(&tool_end(2, false, EDIT_ERROR));
 
-    assert_eq!(t.rows[0].text, "Edited 2 files, 2 failed");
+    assert_eq!(t.rows[0].text, "2 failed");
     assert_eq!(
         t.rows[0].collapsible.as_ref().expect("burst detail").body(),
         format!("Edited src/main.rs\n{EDIT_ERROR}")
@@ -2037,7 +2055,7 @@ fn failed_edit_counts_and_explains_itself() {
     t.on_event(&tool_end(1, false, EDIT_ERROR));
 
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Edited 1 file, 1 failed");
+    assert_eq!(t.rows[0].text, "1 failed");
     assert_eq!(
         diff_items(&t),
         [(
@@ -2438,7 +2456,7 @@ fn seed_failed_tool_counts_without_result() {
         Message::tool_result("c3", "hi", false),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Ran 2 commands, Read 1 file, 1 failed");
+    assert_eq!(t.rows[0].text, "Ran 1 command, Read 1 file, 1 failed");
 }
 
 #[test]
@@ -3689,7 +3707,7 @@ fn expanding_a_block_in_a_pinned_turn_keeps_its_screen_row() {
 }
 
 /// A burst that ended on a failed call.
-const FAILED_BURST: &str = "Ran 1 command, 1 failed";
+const FAILED_BURST: &str = "1 failed";
 
 fn line_texts(lines: &[Line<'_>]) -> Vec<String> {
     lines.iter().map(line_text).collect()
