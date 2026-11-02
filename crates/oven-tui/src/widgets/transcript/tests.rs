@@ -4263,6 +4263,42 @@ fn wrapped_table_stays_inside_its_columns_and_copies_the_source() {
 }
 
 #[test]
+fn an_escaped_pipe_stays_in_its_cell_and_shows_as_a_pipe() {
+    const SRC: &str = "| k | v |\n| --- | --- |\n| 85 | `a\\|b` |\n";
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, SRC);
+    ready(&mut t, Rect::new(0, 0, 40, 10));
+    let shown = line_texts(&t.wrapped);
+    let row = shown
+        .iter()
+        .find(|line| line.contains("a|b"))
+        .expect("row with the escaped pipe");
+    assert!(!row.contains('\\'), "the backslash is dropped: {shown:?}");
+    assert_eq!(shown.len(), 3, "the row keeps its two cells: {shown:?}");
+    let last = t.wrapped.len() - 1;
+    select_rows(&mut t, 0, last);
+    assert_eq!(
+        t.selected_text().as_deref(),
+        Some(SRC.trim_end_matches('\n'))
+    );
+}
+
+#[test]
+fn an_escaped_pipe_in_a_code_span_keeps_its_closure() {
+    const SRC: &str = "| now | then |\n| --- | --- |\n| `.find(\\|(m, _)\\| m)` | `.find(\\|(m, _, _)\\| ...)` |\n";
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Text, SRC);
+    ready(&mut t, Rect::new(0, 0, 60, 10));
+    let shown = line_texts(&t.wrapped);
+    let row = shown
+        .iter()
+        .find(|line| line.contains(".find(|(m, _)| m)"))
+        .expect("row with the escaped pipes");
+    assert!(row.contains(".find(|(m, _, _)| ...)"), "{shown:?}");
+    assert_eq!(shown.len(), 3, "the row keeps its two cells: {shown:?}");
+}
+
+#[test]
 fn a_cell_break_stays_in_the_column_and_copies_the_source() {
     const SRC: &str = "| k | hi |\n| --- | --- |\n| a | ab<br>cd |\n";
     let mut t = Transcript::new();

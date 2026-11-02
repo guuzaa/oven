@@ -5,6 +5,7 @@
 //! from, so a soft wrap does not insert a newline and the clipboard does not
 //! contain the display glyphs.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -1306,10 +1307,20 @@ fn cell_ranges(line: &str) -> Vec<CellRange> {
     }
     let mut cells = Vec::new();
     let mut cell_at = start;
-    for (rel, _) in line[start..stop].match_indices('|') {
-        let abs = start + rel;
-        cells.push(trim_cell(line, cell_at, abs));
-        cell_at = abs + 1;
+    let mut backslashes = 0;
+    for (at, byte) in line.as_bytes()[start..stop].iter().enumerate() {
+        let abs = start + at;
+        match byte {
+            b'\\' => backslashes += 1,
+            b'|' => {
+                if backslashes % 2 == 0 {
+                    cells.push(trim_cell(line, cell_at, abs));
+                    cell_at = abs + 1;
+                }
+                backslashes = 0;
+            }
+            _ => backslashes = 0,
+        }
     }
     cells.push(trim_cell(line, cell_at, stop));
     cells
@@ -1326,26 +1337,57 @@ fn trim_cell(line: &str, start: usize, end: usize) -> CellRange {
     }
 }
 
-fn cell_lines(text: &str, offset: usize, style: Style) -> Vec<Vec<Atom>> {
+fn cell_lines(text: &str, base: usize, style: Style) -> Vec<Vec<Atom>> {
+    let (text, map) = unescape_pipes(text);
+    let text = text.as_ref();
     let mut lines = Vec::new();
     let mut cursor = 0;
     for br in line_breaks(text) {
-        lines.push(cell_segment(
-            &text[cursor..br.start],
-            offset + cursor,
-            style,
-            offset + br.end,
-        ));
+        lines.push(cell_segment(&text[cursor..br.start], cursor, style, br.end));
         cursor = br.end;
     }
-    let tail = cell_segment(&text[cursor..], offset + cursor, style, offset + text.len());
+    let tail = cell_segment(&text[cursor..], cursor, style, text.len());
     if !tail.is_empty() {
         lines.push(tail);
     }
     if lines.is_empty() {
         lines.push(Vec::new());
     }
+    for line in &mut lines {
+        for atom in line {
+            let (start, end) = match &map {
+                Some(map) => (map[atom.start], map[atom.end]),
+                None => (atom.start, atom.end),
+            };
+            atom.start = base + start;
+            atom.end = base + end;
+        }
+    }
     lines
+}
+
+/// The content of a table cell with the backslash of every escaped pipe
+/// dropped, as GitHub does. The map holds the source offset of every byte of
+/// the text, so an atom still points at the bytes it came from.
+fn unescape_pipes(text: &str) -> (Cow<'_, str>, Option<Vec<usize>>) {
+    if !text.contains("\\|") {
+        return (Cow::Borrowed(text), None);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut map = Vec::with_capacity(text.len() + 1);
+    let mut escaped_at = None;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        if ch == '\\' && chars.peek().is_some_and(|(_, next)| *next == '|') {
+            escaped_at = Some(at);
+            continue;
+        }
+        out.push(ch);
+        let src = escaped_at.take().unwrap_or(at);
+        map.resize(map.len() + ch.len_utf8(), src);
+    }
+    map.push(text.len());
+    (Cow::Owned(out), Some(map))
 }
 
 /// Renders one side of a `<br>` and extends its source range over the break.
@@ -1572,6 +1614,8 @@ mod tests {
             "---",
             "```\nlet x = 1;\n```",
             "| a | b |\n| --- | --- |\n| **c** | d |",
+            "| a \\| b |\n| --- | --- |\n| c | d |",
+            "| 你\\|好 | b |\n| --- | --- |\n| c | d |",
             "|  | b |\n| --- | --- |\n| c | d |",
             "| 你 | 好 |\n| --- | --- |\n| 甲 | 乙 |",
             "**open and tail",
@@ -1686,6 +1730,22 @@ mod tests {
     }
 
     #[test]
+    fn an_escaped_pipe_stays_in_its_cell() {
+        let lines = render_markdown("| k | v |\n| --- | --- |\n| 1 | `a\\|b` |");
+        let body = &lines[2];
+        assert_eq!(show(body), "1  a|b");
+        assert_eq!(source_covered(body), body.source.as_ref());
+    }
+
+    #[test]
+    fn an_escaped_pipe_next_to_wide_characters_keeps_its_source() {
+        let lines = render_markdown("| k | v |\n| --- | --- |\n| 你\\|好 | b |");
+        let body = &lines[2];
+        assert_eq!(show(body), "你|好  b");
+        assert_eq!(source_covered(body), body.source.as_ref());
+    }
+
+    #[test]
     fn a_table_separator_needs_only_one_dash() {
         let lines = render_markdown("| k | v |\n| - |\n| 1 | 2 |");
         assert_eq!(show(&lines[0]), "k  v");
@@ -1720,6 +1780,24 @@ mod tests {
         let laid = layout_table(body, 40).expect("cell break");
         let shown: Vec<String> = laid.iter().map(show).collect();
         assert_eq!(shown, ["a  ab", "   cd"]);
+        let mut ranges = Vec::new();
+        for line in &laid {
+            let width = show(line).width();
+            ranges.extend(line.copy_window(0, 0, width, true).ranges_between(0, width));
+        }
+        assert_eq!(emit_ranges(&body.source, &ranges), body.source.as_ref());
+    }
+
+    #[test]
+    fn a_wrapped_escaped_pipe_keeps_its_source() {
+        let lines = render_markdown("| k | value |\n| --- | --- |\n| a | `0123456789\\|abcdef` |");
+        let body = lines
+            .iter()
+            .find(|line| line.source.contains("0123456789"))
+            .expect("body row");
+        let laid = layout_table(body, 13).expect("column wrap");
+        let shown: Vec<String> = laid.iter().map(show).collect();
+        assert_eq!(shown, ["a  0123456789", "   |abcdef"]);
         let mut ranges = Vec::new();
         for line in &laid {
             let width = show(line).width();
