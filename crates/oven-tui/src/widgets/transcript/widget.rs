@@ -1454,6 +1454,7 @@ impl Transcript {
                     self.push_prompt(LineKind::User, text);
                 }
                 AgentEvent::Turn(TurnEvent::Prompt { text }) => {
+                    self.flush_streaming();
                     self.start_user_turn(text);
                 }
                 AgentEvent::Turn(TurnEvent::NoticeAppended { text }) => {

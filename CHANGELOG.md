@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Breaking:** `oven-app`: `Session::append_records` and `Session::overwrite` are crate-private — the format a session file is written in is the store's business, and a caller writing behind its back would write the wrong one. `Session` still opens a file and reads it
+
+### Fixed
+- A prompt lands after the text that was streaming: `TurnEvent::Prompt` appended its row without flushing the stream first, so a pending text would land after the question it belongs to
+
 ## [0.1.4] - 2026-11-03
 
 ### Added

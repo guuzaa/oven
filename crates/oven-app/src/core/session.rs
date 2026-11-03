@@ -203,7 +203,7 @@ impl Session {
 
     /// Append many records (messages and token usage) in one open/flush
     /// cycle.
-    pub async fn append_records(&self, records: &[Record]) -> Result<(), SessionError> {
+    pub(crate) async fn append_records(&self, records: &[Record]) -> Result<(), SessionError> {
         if records.is_empty() {
             return Ok(());
         }
@@ -223,7 +223,7 @@ impl Session {
 
     /// Replace the entire session file with `records`. Used by rewind, which
     /// truncates the persisted conversation together with its usage.
-    pub async fn overwrite(&self, records: &[Record]) -> Result<(), SessionError> {
+    pub(crate) async fn overwrite(&self, records: &[Record]) -> Result<(), SessionError> {
         let mut file = fs::OpenOptions::new()
             .create(true)
             .truncate(true)

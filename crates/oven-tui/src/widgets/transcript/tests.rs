@@ -660,6 +660,19 @@ fn a_raised_prompt_is_the_first_user_row() {
     );
 }
 
+/// A prompt lands after whatever was streaming: the text is flushed first, so
+/// the question is never answered before it is asked.
+#[test]
+fn a_raised_prompt_lands_after_the_streamed_text() {
+    let mut t = Transcript::new();
+    t.on_event(&text_delta("the file says hello"));
+    t.on_event(&prompt("read note.txt"));
+
+    assert_eq!(kinds_of(&t), vec![LineKind::Text, LineKind::User]);
+    assert_eq!(t.rows[0].text.as_str(), "the file says hello");
+    assert_eq!(t.rows[1].text.as_str(), "read note.txt");
+}
+
 #[test]
 fn a_subagent_notice_appends_system_line() {
     let mut t = Transcript::new();
