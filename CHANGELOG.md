@@ -1,16 +1,30 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.4] - 2026-11-03
 
 ### Added
+- `oven-proto`: a turn's first user message is an event — `TurnEvent::Prompt { text }` — so a frontend can show what a turn was asked to do
+- `oven-app`, `oven-tui`: a subagent's task is its first user message — the runtime raises the task the moment the subagent is spawned, because it is the only one that knows it: the agent loop is handed the prompt and never reports it. The transcript takes it as its first user row, the same shape as a prompt the driver typed, so a viewer opens with the question the subagent was asked and the subagent's events fill in under it
 - `oven-proto`: a session file names the format it was written in — `SessionMeta::format_version` records it, and `SessionMeta::is_readable_by_this_build` is the rule: a file a newer oven wrote is refused rather than half-understood
 - `oven-proto`: `Record::into_version` writes a record in a given format, so a session keeps the format it was written in: a file resumed from an older one is written in that format, and what that format does not know, it does not get
 - `oven-app`: a session file is read knowing the format it is in, named by the meta that is its first record — the same rule a resumed session is written by. Each line, legacy ones included, runs through one upgrade step per version up to the one this build writes before it is deserialized; the only step today, 1 → 2, leaves a line as it is, and a format that changes a record's shape adds its own
 - `oven-app`, `oven-tui`: a session records the directory it was started in, and resuming it in another one says so — the paths its conversation names mean something else there. A file written before that was recorded names no directory, and there is nothing to compare it against
 
 ### Changed
+- **Breaking:** `oven-llm`: a request shares the conversation instead of copying it — `Request::messages` is a `Vec<Arc<Message>>`, and `push_message` / `set_messages` take anything that converts into a shared handle. The agent hands the history's own handles over, so building a request costs one refcount per message instead of a copy of its content. The JSON of a request is unchanged, so a stored request still loads
+- **Breaking:** `oven-proto`: `TurnEvent` grew `Prompt { text }` — a frontend that matches the event exhaustively has to handle the new one
 - **Breaking:** `oven-proto`: `SessionMeta` names the format its file was written in and the directory the session was started in — a struct literal has to name both
 - **Breaking:** `oven-app`: `SessionError` grew `UnsupportedFormat(path, version, newest)` — a file written in a format this build does not read is refused instead of being read halfway. `version` is the version as the file writes it, a `String`, since it need not fit one. That covers a format newer than this build and any integer below the first any oven wrote (`0`, `-1`), named by any meta in the file, and the version is taken from the raw meta line, so a newer meta whose shape changed is refused as a format, not as a parse error
+- `oven-llm` is published as 0.8.0: the shared request messages above ship in it
+- `oven-tui`: the file index is built when a mention opens — the composer no longer scans every file under the workspace root the first time it has any text to show. A mention that opens again rescans the tree in the background, so a file created since the last one is still found
+- `oven-tui`: a streaming reply is rewrapped when the text grew or the width changed, not on every frame — a frame that drew nothing new no longer pays for a rewrap of the whole body
+- `oven-tui`: an armed `Esc` turns the composer's border red — the first press only arms the action the screen is offering, so the word that asks for the confirm had nothing to draw the eye to it. The hint keeps its grey: the red is the box, and the red lasts exactly as long as the confirm window
+- `oven-tui`: a view goes away with the subagent it belongs to — the registry listed it and no longer does. An id the registry has not listed yet keeps its view, because a subagent's first event reaches the frontend before the state that lists it does
+
+### Fixed
+- A failed tool call leaves the activity title's action counts — a failed call is a failure, not a tool action: a burst of one failed call says `1 failed`, and a burst that also edited a file says `Edited 1 file, 1 failed`. The name the model made up never reaches the title, and neither does the name of a tool that ran and failed; the body still says what happened
+- An escaped pipe stays in its table cell — GitHub's rule is the one now: the backslash of an escaped pipe is dropped before the cell is parsed, inside a code span as well, so the cell shows `|` and the pipe does not split it. The bytes on the screen and the bytes in the file stay apart — every atom keeps a range into the source, so copying a table still copies the markdown that was written, backslash and all
+- The activity title shimmers beside a live thought — an expanded activity shimmered only the thought's own header, so the title sat still while the thought waved
 
 ## [0.1.3] - 2026-10-28
 
