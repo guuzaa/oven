@@ -2,7 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- A foreground subagent no longer holds the conversation: when the user writes to a turn that is waiting on `task`, the subagent moves to the background and `task` returns, so the turn answers the user while the subagent works on. `SubagentSpawner::detach` moves it, and `PendingInbox::user_waiting` / `TurnContext::user_waiting` say when the user has written
+- `oven-agent`: `Agent::resume` runs a turn opened by what waits in the inbox instead of by a prompt
+- `oven-app`: a background subagent that finishes while the driver is idle starts a turn of its own, after any input the user already sent. `subagents.wake_on_finish` (default `true`) turns it off. A subagent that was stopped wakes nobody, and a turn that was cancelled or failed leaves its notices for the next turn without starting one
+
 ### Changed
+- A subagent notice carries the report, clamped like a `task` result, so the driver no longer has to ask `task_output` for it. The transcript draws only the notice's first line, so a failed subagent names its error on that line, cut to one line of its own
+- **Breaking:** `oven-agent`: `SubagentSpawner` grew `detach`; `PendingInbox` is an `async_trait` with a defaulted `user_waiting`
+- **Breaking:** `oven-proto`: `NodeInfo::notice` and `READ_RESULT_HINT` are gone; `oven-app` renders the notice with its report
 - **Breaking:** `oven-app`: `Session::append_records` and `Session::overwrite` are crate-private — the format a session file is written in is the store's business, and a caller writing behind its back would write the wrong one. `Session` still opens a file and reads it
 
 ### Fixed

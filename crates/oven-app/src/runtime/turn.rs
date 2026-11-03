@@ -16,12 +16,15 @@ use super::Runtime;
 const EMPTY_SHELL: &str = "empty shell command";
 
 impl Runtime {
-    pub(crate) async fn start_turn(&mut self, input: String) {
+    /// Runs one turn: for `prompt`, or, when there is none, for the notices
+    /// waiting in the inbox.
+    pub(crate) async fn start_turn(&mut self, prompt: Option<String>) {
         let turn_id = TurnId::next();
         tracing::info!(
             turn_id = turn_id.0,
             mode = self.agent.mode().label(),
             model = %self.agent.model(),
+            woken = prompt.is_none(),
             "turn started"
         );
         let cancel = CancellationToken::new();
@@ -33,7 +36,13 @@ impl Runtime {
             .with_inbox(self.shared.inbox() as Arc<dyn PendingInbox>);
 
         let result = {
-            let turn = self.agent.run(input, &ctx, &mut sink);
+            let agent = &mut self.agent;
+            let turn = async {
+                match prompt {
+                    Some(input) => agent.run(input, &ctx, &mut sink).await,
+                    None => agent.resume(&ctx, &mut sink).await,
+                }
+            };
             tokio::pin!(turn);
 
             loop {
@@ -50,6 +59,12 @@ impl Runtime {
                 }
             }
         };
+        // Only what waited through the failed turn is quieted: this runs as
+        // the turn resolves, so a subagent that finishes afterwards finds an
+        // idle agent and wakes it.
+        if result.is_err() {
+            self.shared.inbox().quiet();
+        }
         self.shared.end_turn();
 
         if let Some(store) = &self.session {

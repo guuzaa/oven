@@ -1,7 +1,8 @@
 //! One provider round trip and the tools it asked for.
 //!
-//! [`Agent::step`] is one round trip; [`Agent::run`] is the loop policy that
-//! keeps stepping until the provider stops asking for tools.
+//! [`Agent::step`] is one round trip; [`Agent::run`] and [`Agent::resume`]
+//! are the loop policy that keeps stepping until the provider stops asking
+//! for tools.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,6 +32,8 @@ pub(super) const INVALID_JSON_ARGUMENTS: &str = "invalid JSON arguments";
 pub const REPLY_CUT_OFF: &str = "the reply was cut off by the model's output token limit";
 /// The reply carries no answer at all.
 pub const REPLY_EMPTY: &str = "the model returned no answer";
+/// A turn was resumed with nothing waiting in its inbox to answer.
+pub(super) const NOTHING_TO_RESUME: &str = "nothing is waiting for the agent to answer";
 
 /// Why a reply cannot end the turn: it was cut off, or it says nothing.
 ///
@@ -120,9 +123,11 @@ impl Agent {
     /// What reached the turn while its tools ran rides along with the
     /// results the next provider request uploads. A notice that outlived
     /// the turn it belongs to is told to this one: it still describes
-    /// something the model asked for.
-    fn append_pending(&mut self, ctx: &TurnContext, sink: &mut impl EventSink) {
-        for input in ctx.take_pending() {
+    /// something the model asked for. `false` when nothing was waiting.
+    fn append_pending(&mut self, ctx: &TurnContext, sink: &mut impl EventSink) -> bool {
+        let pending = ctx.take_pending();
+        let appended = !pending.is_empty();
+        for input in pending {
             match input {
                 PendingInput::User(text) => {
                     self.history.push(Message::user_text(text.clone()));
@@ -134,6 +139,7 @@ impl Agent {
                 }
             }
         }
+        appended
     }
 
     /// Resolves the response's calls against the mounted tools before any of
@@ -214,14 +220,34 @@ impl Agent {
         true
     }
 
-    #[tracing::instrument(name = "agent.turn", skip_all, fields(turn_id = ctx.turn_id.0, model = %self.model()))]
     pub async fn run(
         &mut self,
         input: impl Into<String>,
         ctx: &TurnContext,
         sink: &mut impl EventSink,
     ) -> Result<TurnOutput, AgentError> {
-        let input: String = input.into();
+        self.drive(Some(input.into()), ctx, sink).await
+    }
+
+    /// A turn opened by what is waiting in the inbox rather than by a
+    /// prompt: a subagent that finished while nobody was talking to the
+    /// agent. Fails without asking the provider anything when the inbox is
+    /// empty.
+    pub async fn resume(
+        &mut self,
+        ctx: &TurnContext,
+        sink: &mut impl EventSink,
+    ) -> Result<TurnOutput, AgentError> {
+        self.drive(None, ctx, sink).await
+    }
+
+    #[tracing::instrument(name = "agent.turn", skip_all, fields(turn_id = ctx.turn_id.0, model = %self.model()))]
+    async fn drive(
+        &mut self,
+        prompt: Option<String>,
+        ctx: &TurnContext,
+        sink: &mut impl EventSink,
+    ) -> Result<TurnOutput, AgentError> {
         sink.emit(AgentEvent::Turn(TurnEvent::Started));
 
         self.todo_written_this_turn = false;
@@ -231,7 +257,11 @@ impl Agent {
         // before its future is polled.
         self.history.note_committed();
         let turn = async {
-            self.history.push(Message::user_text(input));
+            match prompt {
+                Some(input) => self.history.push(Message::user_text(input)),
+                None if self.append_pending(ctx, sink) => {}
+                None => return Err(AgentError::from(NOTHING_TO_RESUME)),
+            }
             self.history.note_committed();
 
             let mut index = 0;

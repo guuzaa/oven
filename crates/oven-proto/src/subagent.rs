@@ -90,22 +90,7 @@ impl NodeInfo {
             self.elapsed_ms(now_ms),
         )
     }
-
-    /// The one line a caller that is not waiting on this subagent reads:
-    /// what finished, what it spent, and how to read the rest.
-    pub fn notice(&self, now_ms: u64) -> String {
-        format!(
-            "{}: {}; {READ_RESULT_HINT}.",
-            self.name,
-            self.progress(now_ms)
-        )
-    }
 }
-
-/// How a caller that is not waiting on this subagent reads the rest of what
-/// it did. `task` points at it before a background subagent has finished, a
-/// notice quotes it after.
-pub const READ_RESULT_HINT: &str = "read its result with task_output";
 
 pub fn progress(
     status: &str,

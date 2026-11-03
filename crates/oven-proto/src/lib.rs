@@ -48,6 +48,6 @@ pub use sink::{EventSink, NullSink, VecEventSink};
 pub use state::{
     AppLevels, AppPhase, AppState, HistoryChangeReason, ModelChoice, ProviderView, SessionState,
 };
-pub use subagent::{NodeInfo, NodeStatus, READ_RESULT_HINT, progress};
+pub use subagent::{NodeInfo, NodeStatus, progress};
 pub use todo::{TodoItem, TodoList, TodoStatus};
 pub use view::ToolView;

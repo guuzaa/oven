@@ -95,6 +95,8 @@ enabled = true
 max_concurrent = 4
 # Provider round trips one subagent may take.
 max_iters = 60
+# Start a turn when a background subagent finishes while the agent is idle.
+wake_on_finish = true
 
 # MCP servers to connect to at startup: stdio via command/args/env, or a
 # remote streamable HTTP endpoint via url (headers optional). Each server's

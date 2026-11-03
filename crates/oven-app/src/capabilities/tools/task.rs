@@ -12,22 +12,24 @@ use oven_llm::ModelId;
 use serde_json::{Value, json};
 
 use super::require_str;
+use crate::capabilities::report::{MAX_REPORT_BYTES, clamp, with_report};
 use oven_agent::{
     NodeOutcome, NodeReport, RoleSpec, SpawnRequest, SubagentSpawner, Tool, ToolCaps, ToolOutcome,
     TurnContext,
 };
-use oven_proto::{AgentError, AgentMode, NodeStatus};
-use oven_proto::{READ_RESULT_HINT, ToolPermission, ToolView};
+use oven_proto::{AgentError, AgentMode};
+use oven_proto::{ToolPermission, ToolView};
 
 const NO_SUBAGENTS: &str = "no subagents have run in this session";
 const PLAN_MODE_NOTE: &str = " In plan mode only the read-only roles may run.";
 const MODEL_NOTE: &str = " By default a subagent runs on your model; pass `model` to run it on \
                           another, and ask `list_models` which models exist.";
-
-/// A subagent's report is a tool result like any other, so it is capped
-/// before it reaches the caller's context.
-const MAX_REPORT_BYTES: usize = 16 * 1024;
-const TRUNCATION_MARK: &str = "\n...[truncated]";
+const DETACH_NOTE: &str = " If the user writes to you while you wait on one, it moves to the \
+                           background so you can answer, and its report reaches you when it \
+                           finishes.";
+const REPORT_FOLLOWS: &str = "You will be told when it finishes, with its report.";
+pub(crate) const MOVED_TO_BACKGROUND: &str =
+    "is still running: the user wrote to you, so it moved to the background.";
 
 pub struct TaskTool {
     spawner: Arc<dyn SubagentSpawner>,
@@ -192,18 +194,25 @@ impl Tool for TaskTool {
         let request = self.parse(args, cx)?;
         let background = request.background;
         let handle = self.spawner.spawn(request).await?;
-        match background {
-            true => Ok(format!(
-                "[{} started in the background. You will be told when it finishes; \
-                 {READ_RESULT_HINT}.]",
-                handle.name
-            )
-            .into()),
-            false => {
-                let name = handle.name.clone();
-                Ok(render_outcome(&name, handle.join().await?).into())
-            }
+        let (id, name) = (handle.id, handle.name.clone());
+        if background {
+            return Ok(format!("[{name} started in the background. {REPORT_FOLLOWS}]").into());
         }
+        // The user writing to the turn ends the wait, not the subagent: the
+        // turn answers them while the subagent works on.
+        let join = handle.join();
+        tokio::pin!(join);
+        let outcome = tokio::select! {
+            biased;
+            outcome = &mut join => outcome?,
+            () = cx.user_waiting() => {
+                if self.spawner.detach(id) {
+                    return Ok(format!("[{name} {MOVED_TO_BACKGROUND} {REPORT_FOLLOWS}]").into());
+                }
+                join.await?
+            }
+        };
+        Ok(render_outcome(&name, outcome).into())
     }
 }
 
@@ -288,24 +297,17 @@ fn describe(roles: &[RoleSpec]) -> String {
         let _ = write!(text, " `{}` — {};", role.name, role.description);
     }
     text.push_str(MODEL_NOTE);
+    text.push_str(DETACH_NOTE);
     text.push_str(PLAN_MODE_NOTE);
     text
 }
 
 fn render_outcome(name: &str, outcome: NodeOutcome) -> String {
-    let mut text = format!("[{name} {}]", outcome.progress());
-    match &outcome.status {
-        NodeStatus::Failed { error } => {
-            let _ = write!(text, "\n{error}");
-        }
-        _ => {
-            let report = outcome.report.trim();
-            if !report.is_empty() {
-                let _ = write!(text, "\n\n{}", clamp(report, MAX_REPORT_BYTES));
-            }
-        }
-    }
-    text
+    with_report(
+        format!("[{name} {}]", outcome.progress()),
+        &outcome.status,
+        &outcome.report,
+    )
 }
 
 fn render_reports(reports: &[NodeReport]) -> String {
@@ -330,24 +332,15 @@ fn render_reports(reports: &[NodeReport]) -> String {
     out
 }
 
-fn clamp(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-    format!(
-        "{}{TRUNCATION_MARK}",
-        &text[..text.floor_char_boundary(max)]
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capabilities::report::TRUNCATION_MARK;
     use crate::capabilities::tools::{test_context, test_context_in};
+    use crate::runtime::pending::TurnInbox;
     use oven_agent::NodeHandle;
     use oven_llm::Usage;
-    use oven_proto::NodeInfo;
-    use oven_proto::{AgentId, TurnId};
+    use oven_proto::{AgentId, NodeInfo, NodeStatus, TurnId};
     use serde_json::json;
     use std::sync::Mutex;
     use tokio::sync::oneshot;
@@ -395,34 +388,62 @@ mod tests {
         /// Returned instead of `reports` when set, to exercise the tool's own
         /// error wording.
         reports_error: Option<String>,
+        /// Set to keep the subagent running after `spawn`: its outcome is
+        /// only sent when `detach` finds it already finished.
+        running: Option<Running>,
+    }
+
+    struct Running {
+        /// Whether `detach` finds it still running.
+        detachable: bool,
+        outcome: Mutex<Option<oneshot::Sender<NodeOutcome>>>,
+        detached: Mutex<Vec<AgentId>>,
     }
 
     impl MockSpawner {
         fn new(outcome: NodeOutcome) -> Arc<Self> {
-            Arc::new(Self {
+            Arc::new(Self::base(outcome))
+        }
+
+        fn base(outcome: NodeOutcome) -> Self {
+            Self {
                 seen: Mutex::new(Vec::new()),
                 outcome,
                 reports: Vec::new(),
                 reports_error: None,
-            })
+                running: None,
+            }
         }
 
         fn with_reports(outcome: NodeOutcome, reports: Vec<NodeReport>) -> Arc<Self> {
             Arc::new(Self {
-                seen: Mutex::new(Vec::new()),
-                outcome,
                 reports,
-                reports_error: None,
+                ..Self::base(outcome)
             })
         }
 
         fn with_reports_error(message: &str) -> Arc<Self> {
             Arc::new(Self {
-                seen: Mutex::new(Vec::new()),
-                outcome: completed(),
-                reports: Vec::new(),
                 reports_error: Some(message.to_string()),
+                ..Self::base(completed())
             })
+        }
+
+        fn running(detachable: bool) -> Arc<Self> {
+            Arc::new(Self {
+                running: Some(Running {
+                    detachable,
+                    outcome: Mutex::new(None),
+                    detached: Mutex::new(Vec::new()),
+                }),
+                ..Self::base(completed())
+            })
+        }
+
+        fn detached(&self) -> usize {
+            self.running
+                .as_ref()
+                .map_or(0, |running| running.detached.lock().unwrap().len())
         }
     }
 
@@ -431,8 +452,25 @@ mod tests {
         async fn spawn(&self, request: SpawnRequest) -> Result<NodeHandle, AgentError> {
             self.seen.lock().unwrap().push(request);
             let (tx, rx) = oneshot::channel();
-            tx.send(self.outcome.clone()).unwrap();
+            match &self.running {
+                Some(running) => *running.outcome.lock().unwrap() = Some(tx),
+                None => tx.send(self.outcome.clone()).unwrap(),
+            }
             Ok(NodeHandle::new(AgentId::next(), "explore#1".into(), rx))
+        }
+
+        fn detach(&self, id: AgentId) -> bool {
+            let Some(running) = &self.running else {
+                return false;
+            };
+            if running.detachable {
+                running.detached.lock().unwrap().push(id);
+                return true;
+            }
+            if let Some(tx) = running.outcome.lock().unwrap().take() {
+                let _ = tx.send(self.outcome.clone());
+            }
+            false
         }
 
         fn reports(&self, _name: Option<&str>) -> Result<Vec<NodeReport>, AgentError> {
@@ -492,8 +530,46 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("explore#1 started in the background"), "{out}");
-        assert!(out.contains("task_output"), "{out}");
+        assert!(out.contains(REPORT_FOLLOWS), "{out}");
         assert!(spawner.seen.lock().unwrap()[0].background);
+    }
+
+    /// A turn the user has already written to.
+    fn written_to() -> TurnContext {
+        let inbox = Arc::new(TurnInbox::default());
+        inbox.push_chat("use the other file".into());
+        test_context().with_inbox(inbox)
+    }
+
+    #[tokio::test]
+    async fn the_user_writing_moves_a_waited_on_subagent_to_the_background() {
+        let spawner = MockSpawner::running(true);
+        let ToolOutcome { output: out, .. } = tool(spawner.clone())
+            .run(
+                &json!({"description": "find it", "prompt": "go"}),
+                &written_to(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            format!("[explore#1 {MOVED_TO_BACKGROUND} {REPORT_FOLLOWS}]")
+        );
+        assert_eq!(spawner.detached(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_subagent_that_finished_as_the_user_wrote_returns_its_report() {
+        let spawner = MockSpawner::running(false);
+        let ToolOutcome { output: out, .. } = tool(spawner.clone())
+            .run(
+                &json!({"description": "find it", "prompt": "go"}),
+                &written_to(),
+            )
+            .await
+            .unwrap();
+        assert!(out.ends_with(REPORT), "{out}");
+        assert_eq!(spawner.detached(), 0);
     }
 
     #[tokio::test]
@@ -657,6 +733,7 @@ mod tests {
         assert!(text.contains("`explore` — explore things"), "{text}");
         assert!(text.contains("`general` — general things"), "{text}");
         assert!(text.contains(MODEL_NOTE), "{text}");
+        assert!(text.contains(DETACH_NOTE), "{text}");
         assert!(text.contains(PLAN_MODE_NOTE), "{text}");
     }
 

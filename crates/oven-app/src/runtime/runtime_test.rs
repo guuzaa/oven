@@ -1,5 +1,5 @@
 use crate::capabilities::subagent::{SubagentParts, Subagents};
-use crate::capabilities::tools::{TaskTool, TodoWriteTool};
+use crate::capabilities::tools::{MOVED_TO_BACKGROUND, TaskTool, TodoWriteTool};
 use crate::core::config::{AppConfig, ProfileBinding, ProviderConfig, ProviderSelection};
 use crate::core::event::EventBus;
 use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL};
@@ -21,7 +21,7 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use futures::Stream;
 use futures::stream::BoxStream;
-use oven_agent::{Agent, PendingInput, Tool, ToolOutcome, TurnContext};
+use oven_agent::{Agent, PendingInbox, PendingInput, Tool, ToolOutcome, TurnContext};
 use oven_llm::{
     CallOptions, ContentBlock, Delta, Message, ModelId, ModelInfo, Provider, ProviderError,
     ProviderName, Request, Response, Role, Router, StopReason, StreamEvent, ToolUse, Usage,
@@ -4204,9 +4204,7 @@ async fn a_finished_subagent_notifies_the_driver() {
     while !matches!(phase.borrow().levels.phase, AppPhase::Running { .. }) {
         phase.changed().await.unwrap();
     }
-    inbox.push(PendingInput::Notice {
-        text: NOTICE.into(),
-    });
+    inbox.push_notice(NOTICE.into(), true);
     gate.notify_one();
 
     assert_eq!(replying.await.unwrap().unwrap(), "done");
@@ -4217,95 +4215,277 @@ async fn a_finished_subagent_notifies_the_driver() {
         })
     });
     assert!(uploaded, "the notice rides the tool-result upload");
+    wait_state(&app, |state| state.levels.phase.is_idle()).await;
+    assert!(
+        !inbox.wants_wake(),
+        "a notice the turn already read wakes no second turn"
+    );
     Arc::into_inner(app)
         .expect("the reply task is done")
         .shutdown()
         .await;
 }
 
-/// A real background subagent, driven through the `task` tool, that outlives
-/// the turn which spawned it: the notice it leaves waits in the inbox until
-/// a later turn uploads it.
+const GATED_NOTICE: &str = "explore#1: done · 1 steps, 2 tool calls · 40 tokens · 1.0s";
+
+/// A driver whose first request waits at the gate, with a waking notice
+/// parked before that request is answered.
+async fn gated_with_notice(
+    tmp: &Path,
+    responses: Vec<Response>,
+) -> (App, Arc<TurnInbox>, Arc<Notify>) {
+    let gate = Arc::new(Notify::new());
+    let mock = GatedProvider::new(Arc::clone(&gate), responses);
+    let agents = AppBuilder::new(tmp)
+        .build_agent_with_provider(Box::new(mock))
+        .await
+        .unwrap();
+    let inbox = Arc::clone(&agents.inbox);
+    let app = spawn_runtime(
+        AppId::next(),
+        agents,
+        None,
+        tmp.to_path_buf(),
+        AppConfig::default(),
+        None,
+    );
+    (app, inbox, gate)
+}
+
+async fn park_notice_while_running(app: &App, inbox: &TurnInbox, gate: &Notify) {
+    wait_state(app, |state| {
+        matches!(state.levels.phase, AppPhase::Running { .. })
+    })
+    .await;
+    inbox.push_notice(GATED_NOTICE.into(), true);
+    gate.notify_one();
+}
+
+/// A notice that arrives during the step that answers without tools is not
+/// read by that turn; a woken turn answers it.
 #[tokio::test]
-async fn a_background_subagent_notice_reaches_a_later_turn() {
-    /// Answers the driver and the subagent from their own queues: only the
-    /// driver mounts `task`, so the request says which one is asking.
-    struct ByCallerProvider {
-        driver: Mutex<std::collections::VecDeque<Response>>,
-        child: Mutex<std::collections::VecDeque<Response>>,
-    }
-
-    #[async_trait]
-    impl Provider for ByCallerProvider {
-        async fn complete(
-            &self,
-            req: &Request,
-            _options: &CallOptions,
-        ) -> Result<Response, ProviderError> {
-            let queue = if req.tools.iter().any(|tool| tool.name == TaskTool::NAME) {
-                &self.driver
-            } else {
-                &self.child
-            };
-            queue
-                .lock()
-                .unwrap()
-                .pop_front()
-                .ok_or_else(|| ProviderError::Api {
-                    status: 500,
-                    body: "no more mock responses".into(),
-                })
-        }
-
-        async fn stream(
-            &self,
-            _req: &Request,
-            _options: &CallOptions,
-        ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-            Err(ProviderError::Api {
-                status: 500,
-                body: "stream disabled in mock".into(),
-            })
-        }
-
-        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-            ModelInfo::non_streaming(&self.provider_name(), id)
-        }
-
-        fn provider_name(&self) -> ProviderName {
-            ProviderName::Custom("by-caller".into())
-        }
-    }
-
-    let tmp = tempdir::TempDir::new("app-runtime-background-notice").unwrap();
-    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
-    let provider = ByCallerProvider {
-        driver: Mutex::new(
-            vec![
-                tool_response(
-                    "t1",
-                    "task",
-                    serde_json::json!({
-                        "description": "read the note",
-                        "prompt": "read note.txt",
-                        "role": "explore",
-                        "background": true,
-                    }),
-                ),
-                text_response("delegated"),
-                tool_response("f1", "file_read", serde_json::json!({"path": "note.txt"})),
-                text_response("noted"),
-            ]
-            .into(),
-        ),
-        child: Mutex::new(vec![text_response("the file says hello")].into()),
+async fn a_notice_missed_by_a_final_answer_wakes_a_turn() {
+    let tmp = tempdir::TempDir::new("app-runtime-notice-final").unwrap();
+    let (app, inbox, gate) = gated_with_notice(
+        tmp.path(),
+        vec![text_response("first"), text_response("woken")],
+    )
+    .await;
+    let mut sub = app.subscribe();
+    let replying = {
+        let app = app.clone();
+        tokio::spawn(async move { app.prompt("hi").await })
     };
-    let app = AppBuilder::new(tmp.path());
-    let handle = spawn_app(&app, Box::new(provider)).await;
+
+    park_notice_while_running(&app, &inbox, &gate).await;
+    assert_eq!(replying.await.unwrap().unwrap(), "first");
+    wait_woken_turn(&mut sub, app.agent_id()).await;
+
+    assert!(has_text(&app, |text| text.contains(GATED_NOTICE)));
+    assert!(has_text(&app, |text| text == "woken"));
+    app.shutdown().await;
+}
+
+/// A turn that fails leaves the notices that waited through it for the next
+/// turn the user starts, instead of starting one nobody asked for.
+#[tokio::test]
+async fn a_failed_turn_wakes_no_turn_for_its_notices() {
+    let tmp = tempdir::TempDir::new("app-runtime-notice-failed").unwrap();
+    let (app, inbox, gate) = gated_with_notice(tmp.path(), Vec::new()).await;
+    let replying = {
+        let app = app.clone();
+        tokio::spawn(async move { app.prompt("hi").await })
+    };
+
+    park_notice_while_running(&app, &inbox, &gate).await;
+    assert!(
+        replying.await.unwrap().is_err(),
+        "the provider has no reply"
+    );
+    wait_state(&app, |state| state.levels.phase.is_idle()).await;
+
+    assert!(!inbox.wants_wake());
+    assert!(
+        matches!(inbox.take().as_slice(), [PendingInput::Notice { text }] if text == GATED_NOTICE),
+        "the notice waits for the next turn"
+    );
+    app.shutdown().await;
+}
+
+/// Answers the driver and the subagent from their own queues. A gated
+/// subagent answers only once the test lets it, so the test decides when it
+/// finishes relative to the driver.
+struct SplitProvider {
+    driver: Mutex<std::collections::VecDeque<Response>>,
+    child: Mutex<std::collections::VecDeque<Response>>,
+    child_gate: Option<Arc<Notify>>,
+}
+
+impl SplitProvider {
+    fn new(driver: Vec<Response>, child: Vec<Response>, child_gate: Option<Arc<Notify>>) -> Self {
+        Self {
+            driver: Mutex::new(driver.into()),
+            child: Mutex::new(child.into()),
+            child_gate,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for SplitProvider {
+    async fn complete(
+        &self,
+        req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
+        let queue = if is_subagent(req) {
+            if let Some(gate) = &self.child_gate {
+                gate.notified().await;
+            }
+            &self.child
+        } else {
+            &self.driver
+        };
+        queue
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| ProviderError::Api {
+                status: 500,
+                body: "no more mock responses".into(),
+            })
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("split".into())
+    }
+}
+
+const CHILD_REPORT: &str = "the file says hello";
+
+fn delegate(background: bool) -> Response {
+    tool_response(
+        "t1",
+        TaskTool::NAME,
+        serde_json::json!({
+            "description": "read the note",
+            "prompt": "read note.txt",
+            "role": "explore",
+            "background": background,
+        }),
+    )
+}
+
+async fn spawn_split(tmp: &Path, provider: SplitProvider, config: AppConfig) -> App {
+    let agents = AppBuilder::new(tmp)
+        .build_agent_with_provider(Box::new(provider))
+        .await
+        .unwrap();
+    spawn_runtime(AppId::next(), agents, None, tmp.to_path_buf(), config, None)
+}
+
+fn has_text(handle: &App, wanted: impl Fn(&str) -> bool) -> bool {
+    history(handle).iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::Text { text } => wanted(text),
+            ContentBlock::ToolResult { content, .. } => content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Text { text } if wanted(text))),
+            _ => false,
+        })
+    })
+}
+
+/// Waits for the driver to finish a turn that opened with a notice.
+async fn wait_woken_turn(sub: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>, main: AgentId) {
+    tokio::time::timeout(settle_timeout(), async {
+        let mut woken = false;
+        loop {
+            let ev = sub.recv().await.expect("the runtime went away");
+            let AppEventKind::Agent(env) = &ev.kind else {
+                continue;
+            };
+            if env.agent_id != main {
+                continue;
+            }
+            match env.event {
+                AgentEvent::Turn(TurnEvent::NoticeAppended { .. }) => woken = true,
+                AgentEvent::Turn(TurnEvent::Completed { .. }) if woken => return,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the driver to be woken");
+}
+
+/// A background subagent that finishes while nobody is talking to the
+/// driver starts a turn of its own, which answers its report.
+#[tokio::test]
+async fn a_background_subagent_wakes_the_idle_driver() {
+    let tmp = tempdir::TempDir::new("app-runtime-background-wake").unwrap();
+    let gate = Arc::new(Notify::new());
+    let provider = SplitProvider::new(
+        vec![
+            delegate(true),
+            text_response("delegated"),
+            text_response("it says hello"),
+        ],
+        vec![text_response(CHILD_REPORT)],
+        Some(Arc::clone(&gate)),
+    );
+    let handle = spawn_split(tmp.path(), provider, AppConfig::default()).await;
+    let mut sub = handle.subscribe();
 
     assert_eq!(handle.prompt("delegate it").await.unwrap(), "delegated");
-    // The subagent outlived the turn that asked for it, so its notice is
-    // parked with nothing running to read it.
+    gate.notify_one();
+    wait_woken_turn(&mut sub, handle.agent_id()).await;
+
+    assert!(
+        has_text(&handle, |text| text.contains(NOTICE_MARK)
+            && text.contains(CHILD_REPORT)),
+        "the notice carries the report"
+    );
+    assert!(has_text(&handle, |text| text == "it says hello"));
+    handle.shutdown().await;
+}
+
+/// With waking off, the notice a background subagent leaves waits in the
+/// inbox until a later turn uploads it.
+#[tokio::test]
+async fn a_background_subagent_notice_waits_for_a_later_turn_when_waking_is_off() {
+    let tmp = tempdir::TempDir::new("app-runtime-background-notice").unwrap();
+    std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+    let provider = SplitProvider::new(
+        vec![
+            delegate(true),
+            text_response("delegated"),
+            tool_response("f1", "file_read", serde_json::json!({"path": "note.txt"})),
+            text_response("noted"),
+        ],
+        vec![text_response(CHILD_REPORT)],
+        None,
+    );
+    let mut config = AppConfig::default();
+    config.subagents.wake_on_finish = false;
+    let handle = spawn_split(tmp.path(), provider, config).await;
+
+    assert_eq!(handle.prompt("delegate it").await.unwrap(), "delegated");
     wait_state(&handle, |state| {
         !state.levels.subagents.is_empty()
             && state
@@ -4317,18 +4497,57 @@ async fn a_background_subagent_notice_reaches_a_later_turn() {
     .await;
 
     assert_eq!(handle.prompt("what did it find?").await.unwrap(), "noted");
-    let noticed = history(&handle).iter().any(|message| {
-        message.content.iter().any(|block| match block {
-            ContentBlock::Text { text } => {
-                text.contains(NOTICE_MARK) && text.contains("explore#1") && text.contains("done")
-            }
-            _ => false,
-        })
-    });
     assert!(
-        noticed,
+        has_text(&handle, |text| text.contains(NOTICE_MARK)
+            && text.contains("explore#1")
+            && text.contains("done")),
         "a notice that outlived its turn still reaches the driver"
     );
+    handle.shutdown().await;
+}
+
+/// The user writing to a driver that waits on a subagent frees the driver:
+/// it answers them while the subagent works on in the background, and is
+/// woken with the report once the subagent finishes.
+#[tokio::test]
+async fn the_user_writing_frees_a_driver_waiting_on_a_subagent() {
+    const FOLLOW_UP: &str = "also check the docs";
+    let tmp = tempdir::TempDir::new("app-runtime-detach").unwrap();
+    let gate = Arc::new(Notify::new());
+    let provider = SplitProvider::new(
+        vec![
+            delegate(false),
+            text_response("on it"),
+            text_response("it says hello"),
+        ],
+        vec![text_response(CHILD_REPORT)],
+        Some(Arc::clone(&gate)),
+    );
+    let handle = spawn_split(tmp.path(), provider, AppConfig::default()).await;
+    let mut sub = handle.subscribe();
+    let replying = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.prompt("delegate it").await })
+    };
+
+    wait_for_active_subagent(&handle).await;
+    assert!(handle.steer(&handle.classify(FOLLOW_UP)));
+    assert_eq!(replying.await.unwrap().unwrap(), "on it");
+    assert!(
+        handle
+            .subagents()
+            .iter()
+            .all(|node| node.status.is_active() && node.background),
+        "the subagent works on in the background"
+    );
+    assert!(has_text(&handle, |text| text.contains(MOVED_TO_BACKGROUND)));
+    assert!(has_text(&handle, |text| text == FOLLOW_UP));
+
+    gate.notify_one();
+    wait_woken_turn(&mut sub, handle.agent_id()).await;
+    assert!(has_text(&handle, |text| text.contains(NOTICE_MARK)
+        && text.contains(CHILD_REPORT)));
+    assert!(has_text(&handle, |text| text == "it says hello"));
     handle.shutdown().await;
 }
 

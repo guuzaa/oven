@@ -700,6 +700,9 @@ pub struct SubagentConfig {
     pub max_concurrent: usize,
     /// Provider round trips one subagent may take.
     pub max_iters: usize,
+    /// Start a turn when a background subagent finishes while the agent is
+    /// idle, so its report is answered without waiting for the user.
+    pub wake_on_finish: bool,
 }
 
 impl SubagentConfig {
@@ -716,6 +719,9 @@ impl SubagentConfig {
         if incoming.max_iters != default.max_iters {
             self.max_iters = incoming.max_iters;
         }
+        if incoming.wake_on_finish != default.wake_on_finish {
+            self.wake_on_finish = incoming.wake_on_finish;
+        }
     }
 }
 
@@ -725,6 +731,7 @@ impl Default for SubagentConfig {
             enabled: true,
             max_concurrent: DEFAULT_SUBAGENT_CONCURRENT,
             max_iters: DEFAULT_SUBAGENT_ITERS,
+            wake_on_finish: true,
         }
     }
 }

@@ -13,7 +13,7 @@ Terminology follows common usage: *loop engineering* treats the loop as a first-
 | Tradeoff | Choice | Why |
 |----------|--------|-----|
 | Persistence | **None** | The session keeps only the `task` call and its result. A subagent's internal conversation dies with the app, as in Claude Code. This skips the whole "tag `Record` with an agent + stable id + rebuild on resume" apparatus. |
-| Result delivery | **Foreground blocks + background is pushed** | `task` blocks by default and returns the subagent's final answer as the tool result; `background=true` returns the name immediately, and when the subagent ends the driver is *told* — the notice rides along with the tool results of whatever step is running, or waits in the queue until a later step runs tools, so the driver reads it without polling and a subagent that outlives its turn is not lost. `task_output` remains the way to fetch a report on demand. Tool calls inside a `step` are serial, so only background mode gives real parallelism. |
+| Result delivery | **Foreground waits until the user speaks + background is pushed** | `task` waits by default and returns the subagent's final answer as the tool result. If the user writes to the turn while it waits, the subagent moves to the background and `task` returns at once, so the turn can answer them. `background=true` returns the name immediately. When a background subagent ends, the driver is *told*, report included: the notice rides along with the tool results of whatever step is running, and if the driver is idle it starts a turn of its own for it (`subagents.wake_on_finish`). `task_output` remains the way to fetch a report on demand. |
 | TUI | **Bar + separate viewer** | Reuse the existing `Transcript` component (scrolling, selection, collapsing, streaming all come free) instead of indenting subagent blocks into the main transcript, which would disturb the row/burst model. |
 | Approval | **Restrict tools by role, no prompts** | A subagent's `TurnContext` carries none of the approval, loop-limit, or question channels, so it **cannot structurally** stop and wait for a human. What it may do is decided by its role. |
 
@@ -96,13 +96,21 @@ sequenceDiagram
     T->>S: spawn(SpawnRequest)
     S->>S: register Pending + take a cancel token
     S-->>T: NodeHandle
-    T->>C: (foreground) handle.join() blocks
+    T->>C: (foreground) select { handle.join(), cx.user_waiting() }
     C->>U: AgentEventEnvelope{agent_id=child} straight to the bus
     S->>S: status → Running, tool-call count +1
-    C-->>T: NodeOutcome{status, report, usage}
-    T-->>M: tool result "[explore#1 done · 3 steps, 6 tool calls · 8400 tokens · 12.3s]"
+    alt the subagent finishes first
+        C-->>T: NodeOutcome{status, report, usage}
+        T-->>M: tool result "[explore#1 done · 3 steps, 6 tool calls · 8400 tokens · 12.3s]" + report
+    else the user steers a chat into the turn first
+        T->>S: detach(id) → background = true
+        T-->>M: tool result "[explore#1 is still running: … moved to the background. …]"
+        C-->>S: finish → TurnInbox notice (tally + report)
+    end
     S->>RT: wake (registry changed)
 ```
+
+`detach` and `finish` both decide under the registry lock, so a subagent reports either to its `task` call or through the inbox, never both and never neither. When `detach` finds it already finished, `task` reads the outcome that is on its way.
 
 ### 4.3 Lifecycle
 
@@ -146,7 +154,7 @@ AppBuilder ─► tools ─► Subagents::new(…)
              └─ AppAgents { main, subagents, events, wake_rx }
 
 BusSink         wraps each agent's events with its own agent_id/turn_id ─► EventBus ─► frontend
-Runtime::run    idle:    select { shutdown, inbox, wake_rx }
+Runtime::run    idle:    select { shutdown, inbox, waking notice → resume turn, wake_rx }
 start_turn      running: select { shutdown, wake_rx, turn }
 ```
 
@@ -178,7 +186,8 @@ So the only difference between a "foreground" and a "background" subagent is **w
 | Name | `explore#1`, per-role counter, unique within this app run |
 | Index | 1-based position in the listing (`/agents 2`) |
 | Foreground result | The `task` tool result: `[name done · N steps, M tool calls · K tokens · T s]` + the report, clamped to 16 KB |
-| Background result | The driver is told when it ends — `[subagent notice] explore#1: done · N steps, M tool calls · K tokens · T s` is appended to its history behind the tool results of the step that was running, and reaches the next provider request. A subagent still running when its turn ends leaves the notice queued: the next turn that runs tools picks it up. `task_output {name}` then fetches the report; omit `name` to list all |
+| Background result | The driver is told when it ends — `[subagent notice] explore#1: done · N steps, M tool calls · K tokens · T s`, followed by the report clamped to 16 KB (a failure puts its error on the first line instead, cut to one line: `… · T s — <error>`), is appended to its history behind the tool results of the step that was running, and reaches the next provider request. The frontend draws only the first line. A subagent still running when its turn ends leaves the notice queued; once the driver is idle, `Runtime::run` starts a turn for it (`Agent::resume`, opened by the notice instead of a prompt), after any input the user already sent. A cancelled subagent's notice wakes nobody, and a turn that was cancelled or failed quiets the notices left behind, so the next turn the user starts hears of them instead. With `wake_on_finish = false` the notice waits for the next turn that runs tools. `task_output {name}` fetches a report on demand; omit `name` to list all |
+| Detached result | A foreground subagent the user interrupted by writing to the turn: `task` returns `[explore#1 is still running: the user wrote to you, so it moved to the background. …]`, and the subagent reports like a background one. A turn without an inbox (a subagent's own) never detaches |
 
 ### 4.8 Running several calls from one step in parallel
 
@@ -276,6 +285,7 @@ max_iters = 200        # top level: one driver turn's budget
 enabled = true         # off unmounts task / task_output
 max_concurrent = 4     # spawns past this queue, shown as queued
 max_iters = 60         # one subagent's provider round-trip budget
+wake_on_finish = true  # a background subagent finishing starts a turn on an idle driver
 ```
 
 ---

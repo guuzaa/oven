@@ -2186,6 +2186,47 @@ async fn a_notice_that_outlived_its_turn_is_still_told() {
 }
 
 #[tokio::test]
+async fn a_resumed_turn_opens_with_what_was_waiting() {
+    const NOTICE: &str = "explore#1: done · 1 steps, 2 tool calls · 40 tokens · 1.0s";
+    let (mock, seen) = CaptureRequests::new(vec![text_response("it found the bug")]);
+    let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+    let ctx = turn_ctx(&agent).with_inbox(parked(vec![PendingInput::Notice {
+        text: NOTICE.into(),
+    }]));
+    let mut sink = VecEventSink::default();
+    let output = agent.resume(&ctx, &mut sink).await.unwrap();
+
+    assert_eq!(output.response.text(), "it found the bug");
+    let reqs = seen.lock().unwrap().clone();
+    let last = reqs.last().unwrap().messages.last().unwrap();
+    assert_eq!(last.role, Role::User);
+    assert!(content_has(last, NOTICE_MARK) && content_has(last, NOTICE));
+    assert!(matches!(
+        sink.events.as_slice(),
+        [
+            AgentEvent::Turn(TurnEvent::Started),
+            AgentEvent::Turn(TurnEvent::NoticeAppended { .. }),
+            ..
+        ]
+    ));
+}
+
+#[tokio::test]
+async fn resuming_with_nothing_waiting_asks_the_provider_nothing() {
+    let (mock, seen) = CaptureRequests::new(vec![text_response("unused")]);
+    let mut agent = Agent::new(router_with(Box::new(mock)), Vec::new());
+    let ctx = turn_ctx(&agent).with_inbox(parked(Vec::new()));
+    let error = agent
+        .resume(&ctx, &mut VecEventSink::default())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.message, super::step::NOTHING_TO_RESUME);
+    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(agent.history().len(), 0);
+}
+
+#[tokio::test]
 async fn rewind_past_a_notice_returns_the_prompt_it_followed() {
     const NOTICE: &str = "explore#1: done · 1 steps, 2 tool calls · 40 tokens · 1.0s";
     let mock = MockProvider::new(vec![

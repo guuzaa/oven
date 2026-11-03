@@ -1646,9 +1646,11 @@ fn result_body(body: &str) -> &str {
 
 /// What a notice says, without the mark a persisted one carries. A live
 /// notice arrives without it, so a notice reads the same whichever way it
-/// reached the transcript.
+/// reached the transcript. Only its tally line is drawn: the report it
+/// carries is for the model, and the subagent's own view shows it.
 fn notice_body(text: &str) -> &str {
-    text.strip_prefix(NOTICE_MARK).unwrap_or(text).trim()
+    let body = text.strip_prefix(NOTICE_MARK).unwrap_or(text).trim();
+    body.lines().next().unwrap_or(body)
 }
 
 /// What a standalone call should append. A success with no output adds nothing.

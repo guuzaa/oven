@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use oven_agent::{
-    Agent, CancellationToken, NodeHandle, NodeOutcome, NodeReport, PendingInput, RoleSpec,
-    RouterHandle, RunPolicy, SpawnRequest, SubagentSpawner, Tool, TurnContext,
+    Agent, CancellationToken, NodeHandle, NodeOutcome, NodeReport, RoleSpec, RouterHandle,
+    RunPolicy, SpawnRequest, SubagentSpawner, Tool, TurnContext,
 };
 use oven_host::{as_ms, now_ms};
 use oven_llm::{ModelId, Usage};
@@ -22,6 +22,7 @@ use oven_proto::{
 };
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
+use crate::capabilities::report::render_notice;
 use crate::core::event::{BusSink, EventBus};
 use crate::runtime::pending::TurnInbox;
 use tokio::task::JoinHandle;
@@ -223,6 +224,7 @@ impl Subagents {
 
     /// Records the terminal state and prunes the oldest finished subagents.
     fn finish(&self, id: AgentId, status: NodeStatus, report: String, usage: Usage) {
+        let cancelled = status == NodeStatus::Cancelled;
         let notice = {
             let mut registry = self.lock();
             let Some(entry) = registry.entries.iter_mut().find(|e| e.info.id == id) else {
@@ -231,19 +233,24 @@ impl Subagents {
             entry.info.status = status;
             entry.info.usage = usage;
             entry.info.finished_at = Some(now_ms());
-            entry.report = Some(report);
             // A foreground subagent is being awaited by the `task` call that
-            // spawned it, whose result says all of this already.
+            // spawned it, whose result says all of this already. The notice is
+            // rendered once the lock is released: the state mirror reads the
+            // registry too.
             let notice = entry
                 .info
                 .background
-                .then(|| entry.info.notice(oven_host::now_ms()));
+                .then(|| (entry.info.clone(), report.clone()));
+            entry.report = Some(report);
             registry.revision += 1;
             registry.prune();
             notice
         };
-        if let Some(text) = notice {
-            self.inbox.push(PendingInput::Notice { text });
+        if let Some((info, report)) = notice {
+            // A subagent that was stopped, by the user or with the turn
+            // that spawned it, has nothing the agent should get up for.
+            self.inbox
+                .push_notice(render_notice(&info, &report, now_ms()), !cancelled);
         }
         self.notify();
     }
@@ -366,6 +373,30 @@ impl SubagentSpawner for Subagents {
             done,
         ));
         Ok(NodeHandle::new(id, name, outcome))
+    }
+
+    fn detach(&self, id: AgentId) -> bool {
+        // `finish` reads `background` under the same lock, so a subagent
+        // either reports to its caller or through the inbox, never both.
+        let detached = {
+            let mut registry = self.lock();
+            let entry = registry
+                .entries
+                .iter_mut()
+                .find(|entry| entry.info.id == id && entry.info.status.is_active());
+            let name = entry.map(|entry| {
+                entry.info.background = true;
+                entry.info.name.clone()
+            });
+            registry.revision += u64::from(name.is_some());
+            name
+        };
+        let Some(name) = detached else {
+            return false;
+        };
+        tracing::info!(subagent = %name, "subagent moved to the background");
+        self.notify();
+        true
     }
 
     fn reports(&self, name: Option<&str>) -> Result<Vec<NodeReport>, AgentError> {
@@ -568,7 +599,7 @@ impl EventSink for CountingSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oven_agent::{Agent, PendingInbox};
+    use oven_agent::{Agent, PendingInbox, PendingInput};
     use oven_llm::Router;
     use oven_proto::{ToolCallId, ToolResult, ToolView};
 
@@ -667,6 +698,52 @@ mod tests {
                 if text.contains("explore#1") && text.contains("done")),
             "{taken:?}"
         );
+    }
+
+    #[test]
+    fn a_detached_subagent_reports_through_the_inbox_with_its_report() {
+        const REPORT: &str = "the file says hello";
+        let (subagents, inbox) = noticed();
+        let id = registered(&subagents, false);
+
+        assert!(subagents.detach(id));
+        subagents.finish(id, NodeStatus::Completed, REPORT.into(), Usage::default());
+
+        assert!(inbox.wants_wake(), "an idle driver is woken for it");
+        let taken = inbox.take();
+        assert!(
+            matches!(taken.as_slice(), [PendingInput::Notice { text }]
+                if text.starts_with("explore#1: done") && text.ends_with(REPORT)),
+            "{taken:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_subagent_cannot_be_detached() {
+        let (subagents, inbox) = noticed();
+        let id = registered(&subagents, false);
+        subagents.finish(
+            id,
+            NodeStatus::Completed,
+            "the file says hello".into(),
+            Usage::default(),
+        );
+
+        assert!(
+            !subagents.detach(id),
+            "its outcome is already on the way to the caller"
+        );
+        assert!(inbox.take().is_empty(), "so it is not told twice");
+    }
+
+    #[test]
+    fn a_stopped_background_subagent_wakes_nobody() {
+        let (subagents, inbox) = noticed();
+        let id = registered(&subagents, true);
+        subagents.finish(id, NodeStatus::Cancelled, String::new(), Usage::default());
+
+        assert!(!inbox.wants_wake());
+        assert_eq!(inbox.take().len(), 1, "the next turn still hears of it");
     }
 
     #[test]

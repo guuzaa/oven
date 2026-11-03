@@ -107,19 +107,28 @@ impl Runtime {
         loop {
             // Subagent events go straight to the bus. A wake still has to be
             // mirrored into state while no turn of ours is running.
+            //
+            // What the user sent goes first; a subagent that finished while
+            // nobody was talking to the agent gets a turn of its own after.
+            // That is checked on every pass rather than on a wake signal, since
+            // a turn that just ended may have drained the signal it left.
             let input = tokio::select! {
                 biased;
                 () = self.shared.shutdown.cancelled() => break,
                 input = inbox.recv() => match input {
-                    Some(input) => input,
+                    Some(input) => Some(input),
                     None => break,
                 },
+                () = std::future::ready(()), if self.should_wake() => None,
                 Some(()) = self.wake_rx.recv() => {
                     self.shared.sync_subagents();
                     continue;
                 }
             };
-            self.handle(input).await;
+            match input {
+                Some(input) => self.handle(input).await,
+                None => self.start_turn(None).await,
+            }
         }
         self.shutdown(&inbox);
     }
@@ -131,8 +140,13 @@ impl Runtime {
             Input::Shell(command) if command.is_empty() => self.reject_empty_shell(),
             Input::Shell(command) => self.run_shell(command).await,
             Input::Slash { name, args } => self.run_slash(&name, &args).await,
-            Input::Chat(text) => self.start_turn(text).await,
+            Input::Chat(text) => self.start_turn(Some(text)).await,
         }
+    }
+
+    /// Whether a finished subagent is waiting for the idle agent to answer it.
+    fn should_wake(&self) -> bool {
+        self.shared.config().subagents.wake_on_finish && self.shared.inbox().wants_wake()
     }
 
     pub(crate) async fn persist_turn(&mut self) {

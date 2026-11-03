@@ -52,6 +52,8 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list_models::ListModelsTool;
 pub use skill_read::SkillReadTool;
+#[cfg(test)]
+pub(crate) use task::MOVED_TO_BACKGROUND;
 pub use task::{TaskOutputTool, TaskTool};
 pub use todo_write::TodoWriteTool;
 pub use web_fetch::WebFetchTool;

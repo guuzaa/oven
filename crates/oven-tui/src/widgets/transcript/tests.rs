@@ -685,6 +685,16 @@ fn a_subagent_notice_appends_system_line() {
 }
 
 #[test]
+fn a_notice_draws_its_tally_not_its_report() {
+    let mut t = Transcript::new();
+    t.push_prompt(LineKind::User, "q");
+    t.on_event(&agent(AgentEvent::Turn(TurnEvent::NoticeAppended {
+        text: format!("{NOTICE}\n\nthe file says hello"),
+    })));
+    assert_eq!(t.rows.last().unwrap().text, NOTICE);
+}
+
+#[test]
 fn a_seeded_notice_is_a_system_line_not_a_prompt() {
     let mut t = Transcript::new();
     t.seed(&[

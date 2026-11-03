@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use oven_agent::{
-    Agent, CancellationToken, PendingInput, PendingRequest, RequestSink, RouterHandle, Selection,
-    UserRequest,
+    Agent, CancellationToken, PendingRequest, RequestSink, RouterHandle, Selection, UserRequest,
 };
 use oven_llm::{EffortSupport, ModelId, ReasoningEffort, Router, clamp_level};
 use oven_proto::{
@@ -90,7 +89,7 @@ impl Shared {
     }
 
     pub(crate) fn push_prompt(&self, text: String) {
-        self.inbox.push(PendingInput::User(text));
+        self.inbox.push_chat(text);
     }
 
     /// Drops one parked chat equal to `text`, preferring the latest.

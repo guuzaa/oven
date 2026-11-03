@@ -93,7 +93,8 @@ impl NodeOutcome {
 }
 
 /// A spawned subagent. A caller that wants the result waits on it; a caller
-/// that does not drops it and polls [`SubagentSpawner::reports`] later.
+/// that stops waiting detaches it with [`SubagentSpawner::detach`] and hears
+/// from it through the inbox.
 pub struct NodeHandle {
     pub id: AgentId,
     pub name: String,
@@ -117,6 +118,12 @@ impl NodeHandle {
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
     async fn spawn(&self, request: SpawnRequest) -> Result<NodeHandle, AgentError>;
+
+    /// Moves a subagent someone is waiting on to the background: when it
+    /// finishes, it reports through the inbox instead of to its caller.
+    /// `false` when it has already finished, so its outcome is on the way to
+    /// the caller.
+    fn detach(&self, id: AgentId) -> bool;
 
     /// Report on `name`, or on every subagent when it is `None`. Unknown
     /// names are an error so the model learns it guessed wrong.

@@ -2,6 +2,7 @@
 
 pub mod mcp;
 pub mod memory;
+pub(crate) mod report;
 pub mod skills;
 pub mod subagent;
 pub mod tools;

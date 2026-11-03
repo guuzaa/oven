@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use oven_llm::{Message, Usage};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -31,8 +32,16 @@ pub enum PendingInput {
 
 /// What reached the turn while it ran. The driver takes it once, after tool
 /// results are written, and appends each item behind those results.
+#[async_trait]
 pub trait PendingInbox: Debug + Send + Sync {
     fn take(&self) -> Vec<PendingInput>;
+
+    /// Resolves once a chat the user typed is waiting here, so a tool that
+    /// can step aside lets the turn answer it. An inbox nobody types into
+    /// never resolves.
+    async fn user_waiting(&self) {
+        std::future::pending().await
+    }
 }
 
 /// How much one run may spend before it stops on its own.
@@ -113,6 +122,15 @@ impl TurnContext {
             .as_ref()
             .map(|inbox| inbox.take())
             .unwrap_or_default()
+    }
+
+    /// Resolves once the user has written to this turn. A turn without an
+    /// inbox, such as a subagent's, never hears from the user.
+    pub async fn user_waiting(&self) {
+        match &self.inbox {
+            Some(inbox) => inbox.user_waiting().await,
+            None => std::future::pending().await,
+        }
     }
 
     /// Whether anyone can answer what this turn asks of the user.
