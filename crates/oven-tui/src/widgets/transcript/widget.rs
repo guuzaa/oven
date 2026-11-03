@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1544,10 +1545,10 @@ impl Transcript {
                 for (offset, line) in &mut window {
                     paint_selection(line, prompt_start + *offset, sel);
                 }
-                let lines = window.into_iter().map(|(_, line)| line).collect();
+                let lines: Vec<_> = window.into_iter().map(|(_, line)| line).collect();
                 let height = u16::try_from(height).unwrap_or(area.height);
                 let prompt_area = Rect::new(area.x, area.y, area.width, height);
-                paint_visible(f, prompt_area, lines);
+                paint_visible(f, prompt_area, &lines);
                 content_area.y = content_area.y.saturating_add(height);
                 content_area.height = content_area.height.saturating_sub(height);
                 self.sticky_prompt = Some((prompt_start, height));
@@ -1565,14 +1566,14 @@ impl Transcript {
             if header >= start
                 && let Some(line) = visible.get_mut(header - start)
             {
-                *line = apply_shimmer(line, phase);
+                *line = Cow::Owned(apply_shimmer(line, phase));
             }
         }
         if let Some(header) = &self.hovered_collapsible
             && header.line >= start
             && let Some(line) = visible.get_mut(header.line - start)
         {
-            *line = apply_hover(line, self.width());
+            *line = Cow::Owned(apply_hover(line, self.width()));
         }
         if self.is_live_text()
             && end == total
@@ -1590,7 +1591,7 @@ impl Transcript {
         }
         // Leave the last column unwritten. A glyph there arms pending wrap,
         // which opens a blank row and the caret lands under it.
-        paint_rows(f, content_area, visible, !self.is_live_text());
+        paint_rows(f, content_area, &visible, !self.is_live_text());
     }
 }
 
@@ -1608,7 +1609,7 @@ fn timed_messages(messages: &[Message]) -> Vec<(Arc<Message>, u64, Option<u64>)>
 /// The extra row replaces the top of a full viewport so the caret is not
 /// clipped, and nothing is inserted between the text and the caret.
 fn place_stream_caret(
-    visible: &mut Vec<Line<'static>>,
+    visible: &mut Vec<Cow<'_, Line<'static>>>,
     width: usize,
     height: usize,
     on_tail: bool,
@@ -1621,6 +1622,7 @@ fn place_stream_caret(
         visible
             .last_mut()
             .expect("stream row")
+            .to_mut()
             .spans
             .push(Span::styled(STREAM_CARET, theme::assistant()));
         return;
@@ -1628,7 +1630,7 @@ fn place_stream_caret(
     if visible.len() >= height && height > 0 {
         visible.remove(0);
     }
-    visible.push(stream_caret_line(STREAM_CARET));
+    visible.push(Cow::Owned(stream_caret_line(STREAM_CARET)));
 }
 
 /// Whether `text` survives as a transcript row. Newlines and other
@@ -1679,7 +1681,7 @@ fn shift_pos(pos: SelPos, edge: usize, delta: isize) -> SelPos {
     }
 }
 
-fn paint_selection(line: &mut Line<'static>, idx: usize, sel: Option<(SelPos, SelPos)>) {
+fn paint_selection(line: &mut Cow<'_, Line<'static>>, idx: usize, sel: Option<(SelPos, SelPos)>) {
     let Some((start, end)) = sel else {
         return;
     };
@@ -1689,7 +1691,7 @@ fn paint_selection(line: &mut Line<'static>, idx: usize, sel: Option<(SelPos, Se
     let width = line_display_width(line);
     let from = if idx == start.line { start.col } else { 0 };
     let to = if idx == end.line { end.col } else { width };
-    *line = highlight_line(line, from, to);
+    *line = Cow::Owned(highlight_line(line, from, to));
 }
 
 fn result_text(content: &[ContentBlock]) -> String {

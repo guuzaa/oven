@@ -37,6 +37,13 @@ impl Collapsible {
         }
     }
 
+    pub(super) fn single_text(&self) -> Option<&str> {
+        match self.sections.as_slice() {
+            [Section::Text(text)] => Some(text),
+            _ => None,
+        }
+    }
+
     pub(super) fn open_state(&self) -> OpenState {
         OpenState {
             expanded: self.expanded,

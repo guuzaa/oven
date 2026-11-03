@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::f32::consts::TAU;
 use std::mem;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -7,7 +8,6 @@ use ratatui::buffer::CellDiffOption;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::collapsible::{Collapsible, Section};
@@ -135,7 +135,7 @@ pub(super) fn format_thought(ms: Option<u64>) -> String {
     }
 }
 
-pub(crate) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
+pub(crate) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: &[Cow<'_, Line<'static>>]) {
     paint_rows(f, area, lines, true);
 }
 
@@ -145,14 +145,16 @@ pub(crate) fn paint_visible(f: &mut Frame<'_>, area: Rect, lines: Vec<Line<'stat
 pub(crate) fn paint_rows(
     f: &mut Frame<'_>,
     area: Rect,
-    lines: Vec<Line<'static>>,
+    lines: &[Cow<'_, Line<'static>>],
     write_last_column: bool,
 ) {
-    f.render_widget(Paragraph::new(lines), area);
     let buf = f.buffer_mut();
     let area = area.intersection(*buf.area());
     if area.width == 0 {
         return;
+    }
+    for (y, line) in (area.top()..area.bottom()).zip(lines) {
+        buf.set_line(area.left(), y, line, area.width);
     }
     let last = area.right() - 1;
     for y in area.top()..area.bottom() {
@@ -173,17 +175,17 @@ pub(crate) fn paint_rows(
     }
 }
 
-pub(super) fn collect_lines(
-    history: &[Line<'static>],
-    stream: &[Line<'static>],
+pub(super) fn collect_lines<'a>(
+    history: &'a [Line<'static>],
+    stream: &'a [Line<'static>],
     start: usize,
     end: usize,
-) -> Vec<Line<'static>> {
+) -> Vec<Cow<'a, Line<'static>>> {
     let n = history.len();
     let cut = start.min(n).min(end);
     let h = &history[cut..end.min(n)];
     let s = &stream[start.saturating_sub(n)..end.saturating_sub(n)];
-    h.iter().chain(s).cloned().collect()
+    h.iter().chain(s).map(Cow::Borrowed).collect()
 }
 
 pub(super) fn trim_message(text: &str) -> String {
@@ -411,16 +413,16 @@ fn wrap_prompt_frame_into(
 /// The pinned prompt inside `height` rows, still closed. Each entry is the
 /// source offset in `lines` and the line itself: a short viewport keeps the
 /// bottom rule, so the last screen row is not the next source line.
-pub(super) fn sticky_prompt_window(
-    lines: &[Line<'static>],
+pub(super) fn sticky_prompt_window<'a>(
+    lines: &'a [Line<'static>],
     height: usize,
-) -> Vec<(usize, Line<'static>)> {
+) -> Vec<(usize, Cow<'a, Line<'static>>)> {
     let frame_len = lines.len();
     let rows = height.min(frame_len);
     (0..rows)
         .map(|rel| {
             let idx = sticky_row_index(frame_len, rows, rel);
-            (idx, lines[idx].clone())
+            (idx, Cow::Borrowed(&lines[idx]))
         })
         .collect()
 }
@@ -475,14 +477,94 @@ pub(super) fn wrap_collapsible_into(
     }];
     wrap_line_into(buf, &header, width, kind);
     if collapsible.is_expanded() {
-        let body = buf.len();
-        let mut nested = wrap_sections_into(buf, collapsible, kind, width, 0, &[]);
-        if let Some(rows) = live_rows {
-            window_live_body(buf, &mut nested, body, rows);
+        match (live_rows, collapsible.single_text()) {
+            (Some(rows), Some(text)) => wrap_live_tail(buf, text, kind, width, rows),
+            _ => {
+                let body = buf.len();
+                let mut nested = wrap_sections_into(buf, collapsible, kind, width, 0, &[]);
+                if let Some(rows) = live_rows {
+                    window_live_body(buf, &mut nested, body, rows);
+                }
+                headers.extend(nested);
+            }
         }
-        headers.extend(nested);
     }
     headers
+}
+
+/// Wraps only the tail of a text-only live body. The head is counted rather
+/// than built: a delta walks the body once and builds only the rows it shows.
+fn wrap_live_tail(buf: &mut Buf<'_>, text: &str, kind: LineKind, width: usize, rows: usize) {
+    let columns = body_columns(width);
+    let total: usize = text
+        .lines()
+        .map(|part| wrapped_row_count(part, columns))
+        .sum();
+    if total <= rows {
+        wrap_text_into(buf, text.lines(), kind, 0, width);
+        return;
+    }
+    let kept = kept_rows(rows);
+    let mut tail = Vec::new();
+    let mut tail_rows = 0;
+    for part in text.lines().rev() {
+        if tail_rows >= kept {
+            break;
+        }
+        tail_rows += wrapped_row_count(part, columns);
+        tail.push(part);
+    }
+    let body = buf.len();
+    wrap_text_into(buf, tail.into_iter().rev(), kind, 0, width);
+    buf.drain(body..body + (tail_rows - kept));
+    buf.insert_visual(body, earlier_lines_marker(total - kept));
+}
+
+/// Columns a body part may use. A zero width keeps a whole line on one row,
+/// the way `wrap_line_into` does.
+fn body_columns(width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    width.saturating_sub(body_prefix(0).width()).max(1)
+}
+
+/// Rows a part takes once it is wrapped.
+fn wrapped_row_count(part: &str, columns: usize) -> usize {
+    if columns == 0 {
+        return 1;
+    }
+    let mut rest = part;
+    let mut rows = 1;
+    while !rest.is_empty() {
+        rest = split_at_width(rest, columns).1;
+        if !rest.is_empty() {
+            rows += 1;
+        }
+    }
+    rows
+}
+
+/// Rows a live body keeps once the marker row is set aside.
+fn kept_rows(rows: usize) -> usize {
+    rows.saturating_sub(MARKER_ROWS)
+}
+
+fn wrap_text_into<'a>(
+    buf: &mut Buf<'_>,
+    parts: impl Iterator<Item = &'a str>,
+    kind: LineKind,
+    depth: usize,
+    width: usize,
+) {
+    for part in parts {
+        let style = kind.style();
+        let line = Line::from(vec![
+            Span::styled(body_prefix(depth), style),
+            Span::styled(part.to_string(), diff_line_style(part, style, kind)),
+        ]);
+        wrap_line_into(buf, &line, width, kind);
+    }
 }
 
 /// Keeps a live body within `rows` screen rows, so deltas cannot push older
@@ -493,7 +575,7 @@ fn window_live_body(buf: &mut Buf<'_>, nested: &mut Vec<Header>, body: usize, ro
     if total <= rows {
         return;
     }
-    let skipped = total - rows + MARKER_ROWS;
+    let skipped = total - kept_rows(rows);
     let cut = body + skipped;
     buf.drain(body..cut);
     buf.insert_visual(body, earlier_lines_marker(skipped));
@@ -516,16 +598,7 @@ fn wrap_sections_into(
         let mut path = path.to_vec();
         path.push(idx);
         match section {
-            Section::Text(text) => {
-                for part in text.lines() {
-                    let style = kind.style();
-                    let line = Line::from(vec![
-                        Span::styled(body_prefix(depth), style),
-                        Span::styled(part.to_string(), diff_line_style(part, style, kind)),
-                    ]);
-                    wrap_line_into(buf, &line, width, kind);
-                }
-            }
+            Section::Text(text) => wrap_text_into(buf, text.lines(), kind, depth, width),
             Section::Item {
                 kind: item_kind,
                 title,
@@ -939,4 +1012,72 @@ pub(super) fn stream_caret_line(caret: &str) -> Line<'static> {
         Span::styled(gutter, LineKind::Text.style()),
         Span::styled(caret.to_string(), theme::assistant()),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WIDTHS: [usize; 4] = [1, 7, 20, 80];
+    const LIVE_ROWS: [usize; 3] = [0, 1, MAX_LIVE_BODY_ROWS];
+    const BODIES: [&str; 7] = [
+        "",
+        "short",
+        "one\ntwo\nthree",
+        "a\n\nb\n\n\nc\n\n\n\nd\ne\nf\ng\nh\ni\nj",
+        "你好世界你好世界你好世界你好世界你好世界你好世界你好世界",
+        "mixed 你好 line that wraps several times over a narrow column width",
+        "first\nsome long line that wraps many many times over a narrow column\nlast",
+    ];
+
+    fn render(body: &str, width: usize, rows: usize, tail_only: bool) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut copies = Vec::new();
+        let mut buf = Buf {
+            lines: &mut lines,
+            copies: &mut copies,
+        };
+        if tail_only {
+            wrap_live_tail(&mut buf, body, LineKind::Thinking, width, rows);
+        } else {
+            let collapsible = Collapsible::new(body);
+            let start = buf.len();
+            let mut nested =
+                wrap_sections_into(&mut buf, &collapsible, LineKind::Thinking, width, 0, &[]);
+            window_live_body(&mut buf, &mut nested, start, rows);
+        }
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn live_tail_matches_wrapping_the_whole_body() {
+        for body in BODIES {
+            for width in WIDTHS {
+                for rows in LIVE_ROWS {
+                    assert_eq!(
+                        render(body, width, rows, true),
+                        render(body, width, rows, false),
+                        "body {body:?} at width {width} in {rows} rows"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn live_tail_matches_for_a_long_body() {
+        let body = (0..500)
+            .map(|i| format!("line {i} {}", "x".repeat(i % 37)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for width in WIDTHS {
+            for rows in LIVE_ROWS {
+                assert_eq!(
+                    render(&body, width, rows, true),
+                    render(&body, width, rows, false),
+                    "width {width} in {rows} rows"
+                );
+            }
+        }
+    }
 }
