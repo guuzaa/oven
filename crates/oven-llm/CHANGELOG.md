@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.0] - 2026-11-03
+
+### Changed
+- **Breaking:** a request shares the conversation instead of copying it — `Request::messages` is a
+  `Vec<Arc<Message>>`, and `Request::push_message` / `set_messages` and their `RequestBuilder`
+  twins take anything that converts into a shared handle. The agent hands the history's own
+  handles over, so building a request costs one reference count per message instead of a copy of
+  its content. The JSON of a request is unchanged, so a stored request still loads.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added
