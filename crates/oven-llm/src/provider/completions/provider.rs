@@ -3,7 +3,8 @@
 //!
 //! 本模块负责把 domain 层的 `Request`/`Response`/`StreamEvent` 与
 //! `encoder`/`decoder` 串联起来，完成实际的 HTTP 调用：
-//! - `build_body`：`encoder::encode_request` + `provider_options` 合并
+//! - `build_body_bytes`：`encoder::encode_request` 的结果直序列化成字节；需要
+//!   合并 `provider_options` 或厂商字段时走 `build_body`
 //! - `post_chat_completions`：POST `chat/completions`，把非 2xx 状态码映射为
 //!   具体的 `ProviderError` 变体
 //! - `Provider::complete` / `Provider::stream`：分别对接非流式响应解码与
@@ -191,17 +192,35 @@ impl CompletionsProvider {
         ))
     }
 
+    /// The request body as the bytes that go out. With nothing to merge into
+    /// it, the wire request serializes straight to bytes instead of passing
+    /// through a `serde_json::Value` tree first.
+    fn build_body_bytes(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+        model: Option<&ModelInfo>,
+        stream: bool,
+    ) -> Result<Vec<u8>, ProviderError> {
+        let encode_error = |err: serde_json::Error| {
+            ProviderError::CompletionsEncode(
+                super::encoder::CompletionsEncodeError::InvalidContent(err.to_string()),
+            )
+        };
+        if self.endpoint.sends_wire_as_is(options) {
+            let reasoning = self.endpoint.reasoning_channels(options, model);
+            let wire = encoder::encode_request(req, options, reasoning, stream)?;
+            return serde_json::to_vec(&wire).map_err(encode_error);
+        }
+        let body = self.build_body(req, options, model, stream)?;
+        serde_json::to_vec(&body).map_err(encode_error)
+    }
+
     async fn post_chat_completions(
         &self,
-        body: &serde_json::Value,
+        body_bytes: Vec<u8>,
     ) -> Result<reqwest::Response, ProviderError> {
-        self.endpoint
-            .post("chat/completions", body, |reason| {
-                ProviderError::CompletionsEncode(
-                    super::encoder::CompletionsEncodeError::InvalidContent(reason),
-                )
-            })
-            .await
+        self.endpoint.post("chat/completions", body_bytes).await
     }
 }
 
@@ -216,8 +235,8 @@ impl Provider for CompletionsProvider {
         let model = self.resolve_model(&options.model);
         self.endpoint
             .validate_known_model(req, options, model, false)?;
-        let body = self.build_body(req, options, model, false)?;
-        let response = self.post_chat_completions(&body).await?;
+        let body = self.build_body_bytes(req, options, model, false)?;
+        let response = self.post_chat_completions(body).await?;
 
         let body_bytes = response.bytes().await?;
         let wire: ChatCompletionResponse = serde_json::from_slice(&body_bytes).map_err(|e| {
@@ -239,8 +258,8 @@ impl Provider for CompletionsProvider {
         let model = self.resolve_model(&options.model);
         self.endpoint
             .validate_known_model(req, options, model, true)?;
-        let body = self.build_body(req, options, model, true)?;
-        let response = self.post_chat_completions(&body).await?;
+        let body = self.build_body_bytes(req, options, model, true)?;
+        let response = self.post_chat_completions(body).await?;
 
         let byte_stream = Box::pin(response.bytes_stream());
         let mut sse_stream = byte_stream.eventsource();
@@ -643,6 +662,61 @@ mod tests {
         let body = wire_body(&provider, &req, &options);
         assert!(body.get("thinking").is_none());
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    fn sent_body(
+        provider: &CompletionsProvider,
+        req: &Request,
+        options: &CallOptions,
+    ) -> serde_json::Value {
+        let model = provider.resolve_model(&options.model);
+        let bytes = provider
+            .build_body_bytes(req, options, model, false)
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn sent_bytes_equal_the_merged_body_when_nothing_is_merged() {
+        let provider = CompletionsProvider::with_base_url(
+            "https://example.com",
+            ProviderName::Custom("example".into()),
+            api_key("k"),
+        );
+        let req = sample_request();
+        let options = sample_options();
+        assert_eq!(
+            sent_body(&provider, &req, &options),
+            wire_body(&provider, &req, &options)
+        );
+    }
+
+    #[test]
+    fn sent_bytes_carry_provider_options() {
+        let provider = CompletionsProvider::with_base_url(
+            "https://example.com",
+            ProviderName::Custom("example".into()),
+            api_key("k"),
+        );
+        let req = sample_request();
+        let options = sample_options()
+            .temperature(0.5)
+            .provider_option("temperature", json!(0.9))
+            .provider_option("top_k", json!(40));
+        let body = sent_body(&provider, &req, &options);
+        assert_eq!(body["temperature"], 0.9);
+        assert_eq!(body["top_k"], 40);
+        assert_eq!(body, wire_body(&provider, &req, &options));
+    }
+
+    #[test]
+    fn sent_bytes_carry_the_vendor_fields() {
+        let provider = CompletionsProvider::minimax(api_key("k"));
+        let req = sample_request();
+        let options = sample_options();
+        let body = sent_body(&provider, &req, &options);
+        assert_eq!(body["reasoning_split"], true);
+        assert_eq!(body, wire_body(&provider, &req, &options));
     }
 
     #[test]

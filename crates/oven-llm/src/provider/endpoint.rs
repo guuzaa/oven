@@ -126,13 +126,17 @@ impl Endpoint {
         body
     }
 
+    /// Whether the wire request goes out as encoded: no vendor field and no
+    /// `provider_options` key to merge into it.
+    pub(crate) fn sends_wire_as_is(&self, options: &CallOptions) -> bool {
+        options.provider_options.is_empty() && self.extra_fields().is_empty()
+    }
+
     pub(crate) async fn post(
         &self,
         path: &str,
-        body: &serde_json::Value,
-        encode_error: impl FnOnce(String) -> ProviderError,
+        body_bytes: Vec<u8>,
     ) -> Result<reqwest::Response, ProviderError> {
-        let body_bytes = serde_json::to_vec(body).map_err(|err| encode_error(err.to_string()))?;
         let headers = http::build_headers(&self.api_key, &self.extra_headers);
         let url = http::endpoint(&self.base_url, path);
         http::post_json(&self.client, headers, url, body_bytes).await
