@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::activity::Activity;
-use super::collapsible::Collapsible;
+use super::collapsible::{Collapsible, Section};
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
@@ -23,10 +23,10 @@ use super::kinds::{Header, LineKind, Row};
 use super::markdown::{CopyBuf, LineCopy, MarkdownStream};
 use super::selection::{SelPos, highlight_line};
 use super::wrap::{
-    Buf, MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, PROMPT_BODY_SLOTS, RESULT_LABEL,
-    THINKING_LABEL, THOUGHT_LABEL, apply_hover, apply_shimmer, collect_lines, fits_stream_caret,
-    format_elapsed, format_outcome, format_thought, line_display_width, line_has_glyph, paint_rows,
-    paint_visible, shimmer_phase, sticky_prompt_window, sticky_row_index, stream_caret_line,
+    Buf, Live, MAX_SHELL_DISPLAY_LINES, PROMPT_BODY_SLOTS, RESULT_LABEL, THINKING_LABEL,
+    THOUGHT_LABEL, apply_hover, apply_shimmer, collect_lines, fits_stream_caret, format_elapsed,
+    format_outcome, format_thought, line_display_width, line_has_glyph, paint_rows, paint_visible,
+    shimmer_phase, shows_whole, sticky_prompt_window, sticky_row_index, stream_caret_line,
     tail_lines, trim_message, wrap_body_into, wrap_collapsible_into, wrap_markdown_into,
     wrap_row_into,
 };
@@ -692,7 +692,7 @@ impl Transcript {
         buf: &mut Buf<'_>,
         row: &Row,
         width: usize,
-        live_rows: Option<usize>,
+        live: Live,
         separator: bool,
     ) -> (Vec<Header>, usize) {
         if let Some(collapsible) = &row.collapsible {
@@ -703,7 +703,7 @@ impl Transcript {
                     &row.text,
                     collapsible,
                     width,
-                    live_rows,
+                    live,
                     separator,
                 ),
                 0,
@@ -832,12 +832,12 @@ impl Transcript {
             (Vec::new(), 0)
         } else {
             let separator = !self.wrapped.is_empty();
-            let live_rows = self.live_body_rows(idx);
+            let live = self.live_body(idx);
             let mut buf = Buf {
                 lines: &mut self.wrapped,
                 copies: &mut self.copies,
             };
-            Self::wrap_row_into(&mut buf, &self.rows[idx], width, live_rows, separator)
+            Self::wrap_row_into(&mut buf, &self.rows[idx], width, live, separator)
         };
         self.rows[idx].headers = headers;
         self.finish_prompt_window(idx, body);
@@ -858,12 +858,12 @@ impl Transcript {
             0 => (Vec::new(), 0),
             width => {
                 let separator = start > 0;
-                let live_rows = self.live_body_rows(idx);
+                let live = self.live_body(idx);
                 let mut buf = Buf {
                     lines: &mut lines,
                     copies: &mut copies,
                 };
-                Self::wrap_row_into(&mut buf, &self.rows[idx], width, live_rows, separator)
+                Self::wrap_row_into(&mut buf, &self.rows[idx], width, live, separator)
             }
         };
         // Wrapped into a buffer of its own, so a marker's line comes back
@@ -891,12 +891,18 @@ impl Transcript {
         self.rows[idx].prompt_scroll = self.rows[idx].prompt_scroll.min(max);
     }
 
-    /// The activity row stays open while its turn runs, so its body renders
-    /// only the newest screen rows: a growing body cannot scroll the view up.
-    /// The budget lifts once the row is sealed, and the whole body draws when
-    /// the user opens it.
-    fn live_body_rows(&self, idx: usize) -> Option<usize> {
-        (self.activity_row == Some(idx)).then_some(MAX_LIVE_BODY_ROWS)
+    /// The activity row shows only its newest section while its turn runs, so
+    /// a growing body cannot scroll the view up. Once the row is sealed the
+    /// whole body draws, and the user can open it to read the rest.
+    fn live_body(&self, idx: usize) -> Live {
+        if self.activity_row != Some(idx) {
+            return Live::default();
+        }
+        Live {
+            growing: true,
+            streaming: self.activity.live_thinking_index(),
+            thought: self.activity.is_flat_thinking(),
+        }
     }
 
     pub(super) fn rewrap_stream(&mut self) {
@@ -1201,6 +1207,9 @@ impl Transcript {
     }
 
     fn toggle_collapsible(&mut self, row: usize, header: &Header) {
+        let live = self.live_section(row, header);
+        let kind = self.section_kind(row, &header.path);
+        let context = self.live_body(row);
         let Some(mut target) = self.rows.get_mut(row).and_then(|r| r.collapsible.as_mut()) else {
             return;
         };
@@ -1210,12 +1219,48 @@ impl Transcript {
             };
             target = nested;
         }
-        target.toggle();
+        // A live row shows only its newest section: there the marker opens
+        // that section for good, or folds it away when it is already open.
+        let whole = match (live, kind) {
+            (true, Some(kind)) => shows_whole(context, &header.path, kind, target),
+            _ => true,
+        };
+        if live && !whole {
+            target.toggle_pinned();
+        } else {
+            target.toggle();
+        }
         // The first body line the last layout would draw, so the toggled
-        // block keeps the screen row it was clicked on.
+        // block keeps the screen row it was clicked on. A live row keeps
+        // following the tail instead: it grows as the turn runs.
         let (_, start) = self.layout_viewport(self.area.height);
+        let following = self.top.is_none();
         self.rewrap_row(row);
-        self.top = Some(start);
+        self.top = if following && self.activity_row == Some(row) {
+            None
+        } else {
+            Some(start)
+        };
+    }
+
+    /// Whether the header points into a section of the row that is still
+    /// growing: such a row shows its newest section alone.
+    fn live_section(&self, row: usize, header: &Header) -> bool {
+        !header.path.is_empty()
+            && self.activity_row == Some(row)
+            && !self.rows[row]
+                .collapsible
+                .as_ref()
+                .is_some_and(|body| body.open_state().pinned)
+    }
+
+    /// The kind of the section a header points at.
+    fn section_kind(&self, row: usize, path: &[usize]) -> Option<LineKind> {
+        let section = self.rows.get(row)?.collapsible.as_ref()?.section_at(path)?;
+        match section {
+            Section::Item { kind, .. } => Some(*kind),
+            Section::Text(_) => None,
+        }
     }
 
     /// Settles the live thinking row on the label, for reasoning the agent

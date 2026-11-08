@@ -9,6 +9,9 @@
 
 ### Changed
 - A subagent notice carries the report, clamped like a `task` result, so the driver no longer has to ask `task_output` for it. The transcript draws only the notice's first line, so a failed subagent names its error on that line, cut to one line of its own
+- `oven-tui`: the activity row shows its newest section while the turn runs, not the newest screen rows — a thought shows the line it is on, cut at the front with an ellipsis, a call shows its label and the failure under it, and a diff waits folded until the reader opens it. A thought is never released in full before the turn ends, so a growing row stays one row tall and the rows below it keep their place
+- `oven-tui`: a section the user opened is theirs — it keeps its place as more arrives and survives the folds that follow, so the body they are reading does not vanish under them. The marker of the newest section opens it for good and folds it away again, and the view keeps following the tail while the row grows, so opening a section does not freeze the screen
+- `oven-tui`: a call that changed a file names it in the row's title — `Edited src/main.rs, src/lib.rs` instead of `Edited 2 files`. One file is listed once, however often it was edited, and a call that failed names no file at all
 - **Breaking:** `oven-agent`: `SubagentSpawner` grew `detach`; `PendingInbox` is an `async_trait` with a defaulted `user_waiting`
 - **Breaking:** `oven-proto`: `NodeInfo::notice` and `READ_RESULT_HINT` are gone; `oven-app` renders the notice with its report
 - **Breaking:** `oven-app`: `Session::append_records` and `Session::overwrite` are crate-private — the format a session file is written in is the store's business, and a caller writing behind its back would write the wrong one. `Session` still opens a file and reads it

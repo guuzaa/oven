@@ -22,6 +22,11 @@ impl Collapsible {
         Self::from_sections(vec![Section::Text(body.into())])
     }
 
+    /// A body that waits folded: the reader opens it when they want it.
+    pub(super) fn collapsed(body: impl Into<String>) -> Self {
+        Self::new(body).with_open_state(OpenState::collapsed())
+    }
+
     pub(super) fn from_sections(sections: Vec<Section>) -> Self {
         Self {
             sections,
@@ -104,6 +109,16 @@ impl Collapsible {
         }
     }
 
+    /// The section a header points at.
+    pub(super) fn section_at(&self, path: &[usize]) -> Option<&Section> {
+        let (first, rest) = path.split_first()?;
+        let section = self.sections.get(*first)?;
+        match section {
+            Section::Item { detail, .. } if !rest.is_empty() => detail.section_at(rest),
+            _ => Some(section),
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn body(&self) -> String {
         self.sections
@@ -125,18 +140,38 @@ impl Collapsible {
         self.pinned = self.expanded;
     }
 
+    /// Opens a block the user asked to keep open, or closes it again. A pinned
+    /// block survives the folds that follow.
+    pub(super) fn toggle_pinned(&mut self) {
+        self.pinned = !self.pinned;
+        self.expanded = self.pinned;
+    }
+
     /// Every nested item and text block, in order; a nested path indexes this.
     pub(super) fn sections(&self) -> &[Section] {
         &self.sections
     }
 
-    /// Returns whether it was expanded before collapsing.
+    /// Whether the user opened something inside this block.
+    fn has_opened_child(&self) -> bool {
+        self.sections.iter().any(|section| match section {
+            Section::Item { detail, .. } => detail.open_state().pinned || detail.has_opened_child(),
+            Section::Text(_) => false,
+        })
+    }
+
+    /// Closes every child, then folds this block unless the user opened
+    /// something inside it: that keeps the block open. Returns whether
+    /// anything changed.
     pub(super) fn collapse(&mut self) -> bool {
         if self.pinned || !self.expanded {
             return false;
         }
-        self.expanded = false;
         self.collapse_children();
+        if self.has_opened_child() {
+            return true;
+        }
+        self.expanded = false;
         true
     }
 
@@ -155,8 +190,10 @@ impl Collapsible {
         if self.pinned {
             return;
         }
-        self.expanded = false;
         self.collapse_children();
+        if !self.has_opened_child() {
+            self.expanded = false;
+        }
     }
 
     #[cfg(test)]

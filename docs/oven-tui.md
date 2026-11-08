@@ -389,17 +389,36 @@ a header toggles expansion; hover paints a background so headers read as
 clickable.
 
 A collapsible body that is still receiving content — live thinking deltas and
-an open tool burst — renders only its newest `MAX_LIVE_BODY_ROWS` (8) screen
-rows, counted after wrapping so one long line can spend the whole budget on its
-own, behind a dim `… N earlier lines` marker that spends one of those rows. So a
-growing row cannot scroll older rows out of the view. When the row stops
-streaming it collapses at once (the thinking row as soon as its duration is
-reported, the burst as soon as it closes) so no expanded body is left waiting
-for the next row; once it stops streaming the full body renders again on expand.
+an open tool burst — renders its newest section, so a growing row cannot scroll
+older rows out of the view. A thought shows the line it is on, one row wide: a
+line too wide for the terminal is cut at the front and marked with an ellipsis,
+and the next line the model writes replaces it. A call shows its label and the
+failure under it, so a failed call still names the command it ran. A thought is
+never released in full while the turn runs — not in the newest section, not in
+a section the user opened, not in a row the user opened; it shows the line it
+is on and waits for the turn to end for the rest. A diff waits folded: the
+title says what changed, and the reader opens the diff when they want to read
+it. Everything else waits for the turn to end. The marker of that newest
+section opens it for good, and folds it away again when it is already open. On
+a thought the marker says whether the section stays when the next one arrives,
+since a thought that is still streaming keeps its line either way. A section
+the user opened is theirs: it keeps its place as more arrives, so a call that
+lands after it does not push it out of the row. A row the user opened shows
+every section again — the live view yields to a pinned row — but every body
+still follows its own rule: a diff the reader opened whole, a thought one
+line, a call its label. The view keeps following the tail while the row grows,
+so opening a section does not freeze the screen. When the row stops streaming
+it collapses at once (the thinking row as soon as its duration is reported, the
+burst as soon as it closes) so no expanded body is left waiting for the next
+row — unless the user opened something inside it, which keeps the row open;
+once it stops streaming the full body renders again on expand, and an opened
+thought shows its whole text.
 
 Tool calls that declare `view.collapse` are grouped into one `ToolBurst` row
 (`transcript/tools.rs`) whose title counts by kind — `Searched 3 patterns, Read
 1 file, 1 failed` — with the individual call summaries as the collapsed body.
+A call that changed a file names it instead of counting it: the title reads
+`Edited src/main.rs, src/lib.rs`, one file once however often it was edited.
 The row is upserted in place as calls finish, so a burst does not spam the log.
 Non-collapsing tools get their own row, plus a `Result` row on failure.
 While a call is in flight its row shimmers the same way: `live_tool_lines`
@@ -407,10 +426,11 @@ reports the wrapped line of the burst row while any of its calls has yet to
 answer, and of each own-row call until its result lands, so `draw` waves those
 lines through the same grey gradient the thinking row uses.
 
-Thinking content is never streamed to the screen. A live thinking row shows
-`Thinking...` with a per-character shimmer, and is retitled to `Thought for 1.2s`
-when the agent reports its duration, or to the bare `Thought` label if the turn
-ends without one. Resuming a session replays the same rows from
+Thinking content is streamed into the activity row, one line at a time: the
+row shows `Thinking...` with a per-character shimmer, and the line the thought
+is on replaces the one before it. It is retitled to `Thought for 1.2s` when the
+agent reports its duration, or to the bare `Thought` label if the turn ends
+without one. Resuming a session replays the same rows from
 `App::history_timed_shared()`, including reordering reasoning ahead of the answer
 for providers that persist it after the text. Every question is a `User` row
 there, because nothing is running yet to pin one. A restored turn ends with its

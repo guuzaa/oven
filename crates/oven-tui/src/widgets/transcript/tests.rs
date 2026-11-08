@@ -28,9 +28,9 @@ use super::selection::{extract_line_range, highlight_line, slice_cols};
 
 use super::widget::{LOOP_LIMIT_REACHED, MAX_STICKY_PROMPT_ROWS, STREAM_CARET, Transcript};
 use super::wrap::{
-    MAX_LIVE_BODY_ROWS, MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL,
-    apply_shimmer, format_elapsed, format_lines, format_thought, line_display_width,
-    line_terminal_width, tail_lines,
+    MAX_SHELL_DISPLAY_LINES, RESULT_LABEL, THINKING_LABEL, THOUGHT_LABEL, apply_shimmer,
+    format_elapsed, format_lines, format_thought, line_display_width, line_terminal_width,
+    tail_lines,
 };
 
 const ELAPSED_0: &str = "Worked for 0s";
@@ -361,7 +361,7 @@ fn a_failed_tool_leaves_its_name_out_of_the_activity_title() {
     ));
     t.on_event(&tool_end(2, false, "unknown tool: edit"));
 
-    assert_eq!(t.rows[0].text, "Edited 1 file, 1 failed");
+    assert_eq!(t.rows[0].text, "Edited src/main.rs, 1 failed");
 }
 
 #[test]
@@ -801,7 +801,7 @@ fn an_error_seals_the_activity_before_the_next_tool() {
 }
 
 #[test]
-fn a_collapsed_diff_stays_collapsed_when_thinking_continues() {
+fn a_folded_diff_stays_folded_when_thinking_continues() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
@@ -812,14 +812,25 @@ fn a_collapsed_diff_stays_collapsed_when_thinking_continues() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(has(&t, "- old"), "the open row shows the diff it ran");
-    let diff_row = wrapped_row_of(&t, "Edited src/main.rs");
+    assert!(has(&t, "Edited src/main.rs"), "the row says what it edited");
+    assert!(!has(&t, "- old"), "the diff waits folded");
+    let diff_row = item_row_of(&t, 0, "Edited src/main.rs");
     double_click(&mut t, 2, diff_row);
-    assert!(!has(&t, "- old"));
+    assert!(has(&t, "- old"), "the user opens the diff");
+
+    double_click(&mut t, 2, diff_row);
+    assert!(!has(&t, "- old"), "the user folds the diff");
 
     t.on_event(&thinking("more"));
     assert!(!has(&t, "- old"), "a folded diff stays folded");
-    assert!(has(&t, "Edited src/main.rs"));
+
+    t.on_event(&completed());
+    toggle_row(&mut t, 0);
+    assert!(
+        has(&t, "Edited src/main.rs"),
+        "the folded diff is still there"
+    );
+    assert!(!has(&t, "- old"), "and it is still folded");
 }
 
 #[test]
@@ -839,7 +850,7 @@ fn edits_across_steps_sum_in_the_activity_title() {
     t.on_event(&tool_end(2, true, EDIT_SUCCESS));
 
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Edited 2 files");
+    assert_eq!(t.rows[0].text, "Edited src/main.rs, src/lib.rs");
     assert_eq!(
         item_titles(&t, 0),
         vec![
@@ -895,7 +906,7 @@ fn tool_steps_without_thinking_stay_one_activity() {
             LineKind::Separator
         ]
     );
-    assert_eq!(t.rows[1].text, "Edited 2 files");
+    assert_eq!(t.rows[1].text, "Edited src/main.rs, src\\lib.rs");
     assert_eq!(
         item_titles(&t, 1),
         vec![
@@ -920,7 +931,10 @@ fn blank_text_between_tool_steps_does_not_split_the_activity() {
             ],
             "gap {gap:?}"
         );
-        assert_eq!(t.rows[1].text, "Edited 2 files", "gap {gap:?}");
+        assert_eq!(
+            t.rows[1].text, "Edited src/main.rs, src\\lib.rs",
+            "gap {gap:?}"
+        );
         assert_eq!(t.rows[2].text, "done", "gap {gap:?}");
     }
 }
@@ -944,9 +958,9 @@ fn visible_text_between_tool_steps_still_splits_the_activity() {
         row_texts(&t),
         vec![
             "fix it",
-            "Edited 1 file",
+            "Edited src/main.rs",
             ASIDE,
-            "Edited 1 file",
+            "Edited src\\lib.rs",
             "done",
             ""
         ]
@@ -986,7 +1000,7 @@ fn seeded_blank_text_between_edits_stays_one_activity() {
             LineKind::Separator
         ]
     );
-    assert_eq!(t.rows[1].text, "Edited 2 files");
+    assert_eq!(t.rows[1].text, "Edited src/main.rs, src\\lib.rs");
 }
 
 #[test]
@@ -1181,36 +1195,26 @@ fn tool_result_double_click_toggles_detail() {
 
     let detail = result_detail(&t, 0);
     assert_eq!(detail.body(), OUTPUT);
-    assert!(detail.is_expanded());
     let has = |t: &Transcript| {
         t.wrapped
             .iter()
             .any(|line| line_text(line).contains("more lines of output"))
     };
-    assert!(has(&t), "the open row shows the result while the turn runs");
+    assert!(
+        !has(&t),
+        "a finished result shows its title alone while the turn runs"
+    );
 
     let header_y = t
         .wrapped
         .iter()
         .position(|line| line_text(line).contains(RESULT_LABEL))
         .expect("result header") as u16;
-    double_click(&mut t, 2, 0);
-    assert!(!has(&t), "the row header folds the whole body");
-
-    double_click(&mut t, 2, 0);
-    assert!(has(&t));
+    double_click(&mut t, 2, header_y);
+    assert!(has(&t), "the user opens the result: its output shows");
 
     double_click(&mut t, 2, header_y);
-
-    assert!(!result_detail(&t, 0).is_expanded());
-    assert!(!has(&t));
-
-    t.handle_mouse(
-        mouse(MouseEventKind::Up(MouseButton::Left), 2, header_y),
-        &State::new(),
-    );
-    double_click(&mut t, 2, header_y);
-    assert!(result_detail(&t, 0).is_expanded());
+    assert!(!has(&t), "and closes it again");
 }
 
 #[test]
@@ -1319,7 +1323,7 @@ fn next_message_collapses_previous_details() {
     t.on_event(&tool_end(1, true, "edited"));
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert!(t.rows[0].collapsible.as_ref().unwrap().is_expanded());
-    assert_eq!(t.rows[0].text, "Edited 1 file");
+    assert_eq!(t.rows[0].text, "Edited src/main.rs");
 
     t.on_event(&text_delta("done"));
     t.on_event(&completed());
@@ -1635,15 +1639,10 @@ fn burst_double_click_toggles_call_list() {
     );
 }
 
-const EARLIER_5_LINES: &str = "… 5 earlier lines";
-const EARLIER_3_LINES: &str = "… 3 earlier lines";
-const EARLIER_23_LINES: &str = "… 23 earlier lines";
-const EARLIER_2_LINES: &str = "… 2 earlier lines";
-
 #[test]
-fn live_thinking_body_windows_to_the_newest_lines() {
+fn live_thinking_body_shows_only_the_line_it_is_on() {
     let mut t = Transcript::new();
-    stream_thinking(&mut t, MAX_LIVE_BODY_ROWS + 4);
+    stream_thinking(&mut t, 12);
     ready(&mut t, Rect::new(0, 0, 80, 24));
     let has = |t: &Transcript, needle: &str| {
         t.wrapped
@@ -1651,12 +1650,12 @@ fn live_thinking_body_windows_to_the_newest_lines() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(&t, EARLIER_5_LINES), "{:?}", t.wrapped);
+    assert_eq!(t.wrapped.len(), 2, "the row and its line: {:?}", t.wrapped);
     assert!(
         has(&t, "t12"),
-        "the open row shows the newest lines of the chain"
+        "the open row shows the line the thought is on"
     );
-    assert!(!has(&t, "t04"));
+    assert!(!has(&t, "t11"), "the lines before it are not drawn");
 
     toggle_row(&mut t, 0);
     assert!(!has(&t, "t12"), "the user closes the row");
@@ -1673,20 +1672,42 @@ fn live_thinking_body_windows_to_the_newest_lines() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(
-        !has(EARLIER_5_LINES),
-        "the window lifts once the turn is over"
-    );
-    assert!(has("t01"));
+    assert!(has("t01"), "the whole thought shows once the turn is over");
     assert!(has("t12"));
 }
 
+/// A row the user opened shows its whole body, even while the turn runs.
 #[test]
-fn open_tool_burst_body_windows_to_the_newest_calls() {
+fn an_opened_activity_row_shows_the_line_the_thought_is_on() {
     let mut t = Transcript::new();
-    for i in 1..=(MAX_LIVE_BODY_ROWS + 2) as u64 {
+    stream_thinking(&mut t, 6);
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    let has = |t: &Transcript, needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(!has(&t, "t01"), "the live row shows one line");
+
+    toggle_row(&mut t, 0);
+    toggle_row(&mut t, 0);
+
+    assert!(
+        has(&t, "t06"),
+        "the user opened the row: the thought shows the line it is on"
+    );
+    assert!(
+        !has(&t, "t01"),
+        "a thought is never released in full while the turn runs"
+    );
+}
+
+#[test]
+fn open_tool_burst_body_shows_only_the_newest_call() {
+    let mut t = Transcript::new();
+    for i in 1..=10 {
         t.on_event(&tool_start(
-            i,
+            i as u64,
             "bash",
             serde_json::json!({ "command": format!("c{i:02}") }),
         ));
@@ -1698,9 +1719,8 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(&t, EARLIER_3_LINES), "{:?}", t.wrapped);
-    assert!(has(&t, "c10"), "the open row shows the newest calls");
-    assert!(!has(&t, "c01"));
+    assert!(has(&t, "c10"), "the open row shows the newest call");
+    assert!(!has(&t, "c01"), "the calls before it are not drawn");
 
     t.on_event(&completed());
     let has = |needle: &str| {
@@ -1708,7 +1728,6 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_3_LINES));
     assert!(!has("c10"), "the burst closes once the turn moves on");
 
     let header = t
@@ -1722,7 +1741,6 @@ fn open_tool_burst_body_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_3_LINES));
     assert!(has("c01"));
     assert!(has("c10"));
 }
@@ -1738,34 +1756,41 @@ fn the_activity_row_opens_while_the_turn_runs_and_folds_when_it_ends() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(has(&t, "- old"), "the running turn shows what it edited");
+    assert!(
+        has(&t, "Edited src/main.rs"),
+        "the running turn says what it edited"
+    );
+    assert!(!has(&t, "- old"), "the diff waits folded");
 
     t.on_event(&completed());
-    assert!(!has(&t, "- old"), "the turn ending folds the row away");
+    assert_eq!(
+        t.rows[0].headers.len(),
+        1,
+        "the turn ending folds the row away"
+    );
 
     toggle_row(&mut t, 0);
-    let item = wrapped_row_of(&t, "Edited src/main.rs");
+    let item = item_row_of(&t, 0, "Edited src/main.rs");
     double_click(&mut t, 2, item);
     assert!(has(&t, "- old"), "the user opens it again");
 }
 
-/// Calls that already reported a result keep the row inside its budget: the
-/// body is capped for the whole turn, not only while a call is in flight.
+/// A call that already reported a result keeps the row on its newest call: the
+/// body shows one thing for the whole turn, not only while a call is in flight.
 #[test]
-fn a_settled_burst_stays_inside_the_live_row_budget() {
+fn a_settled_burst_shows_only_its_newest_call() {
     let mut t = Transcript::new();
-    for i in 1..=(MAX_LIVE_BODY_ROWS + 2) as u64 {
+    for i in 1..=10 {
         t.on_event(&tool_start(
-            i,
+            i as u64,
             "bash",
             serde_json::json!({ "command": format!("c{i:02}") }),
         ));
-        t.on_event(&tool_end(i, true, "ok"));
+        t.on_event(&tool_end(i as u64, true, "ok"));
     }
     ready(&mut t, Rect::new(0, 0, 80, 24));
 
-    assert_eq!(t.wrapped.len(), 1 + MAX_LIVE_BODY_ROWS, "{:?}", t.wrapped);
-    assert!(line_text(&t.wrapped[1]).contains(EARLIER_3_LINES));
+    assert_eq!(t.wrapped.len(), 2, "{:?}", t.wrapped);
     assert!(
         line_text(t.wrapped.last().unwrap()).contains("c10"),
         "the newest call is the one still on screen"
@@ -1779,10 +1804,198 @@ fn a_settled_burst_stays_inside_the_live_row_budget() {
     );
 }
 
+/// A failed call names the command that failed: the label leads, the reason
+/// follows it.
 #[test]
-fn live_diff_burst_windows_to_the_newest_calls() {
+fn a_live_failed_call_shows_the_command_it_ran() {
     let mut t = Transcript::new();
-    for i in 1..=(MAX_LIVE_BODY_ROWS + 2) {
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&tool_end(1, false, "no such file"));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+
+    let has = |t: &Transcript, needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(has(&t, "ls"), "the call names itself: {:?}", t.wrapped);
+    assert!(has(&t, "no such file"), "and says why it failed");
+}
+
+/// The marker of a live section opens it for good: the thought keeps the line
+/// it is on while the turn runs, and shows its whole text once it ends.
+#[test]
+fn a_live_section_opens_for_good() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&thinking("first\n"));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    let has = |t: &Transcript, needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(
+        has(&t, "first"),
+        "the live row shows the line the thought is on"
+    );
+
+    let thought_row = wrapped_row_of(&t, THINKING_LABEL);
+    double_click(&mut t, 2, thought_row);
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert!(has(&t, "first"), "the opened thought keeps its line");
+
+    t.on_event(&thinking("second\n"));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert!(
+        has(&t, "second"),
+        "the opened thought keeps what arrives after it"
+    );
+
+    t.on_event(&completed());
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert!(
+        has(&t, "first"),
+        "the turn is over: the thought shows its whole text"
+    );
+}
+
+/// An opened section keeps its place while the turn runs: a call that lands
+/// after it does not push it out of the row.
+#[test]
+fn an_opened_live_section_keeps_its_place_as_more_arrives() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&thinking("first\nsecond\n"));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    let has = |t: &Transcript, needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+
+    let thought_row = wrapped_row_of(&t, THINKING_LABEL);
+    double_click(&mut t, 2, thought_row);
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert!(has(&t, "second"), "the thought shows the line it is on");
+    assert!(
+        !has(&t, "first"),
+        "an opened thought is never released in full"
+    );
+
+    t.on_event(&tool_start(
+        2,
+        "bash",
+        serde_json::json!({ "command": "pwd" }),
+    ));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert!(
+        has(&t, "second"),
+        "the opened thought stays while the next call lands"
+    );
+    assert!(has(&t, "pwd"), "and the new call shows its own title");
+}
+
+/// The live row grows as the thought runs: the view keeps following the tail,
+/// so the newest line stays on screen.
+#[test]
+fn a_live_row_keeps_following_the_tail_when_a_section_opens() {
+    let mut t = Transcript::new();
+    for i in 0..30 {
+        t.push_row(LineKind::Text, &format!("line {i}"));
+    }
+    t.on_event(&thinking("first\n"));
+    let area = Rect::new(0, 0, 80, 10);
+    ready(&mut t, area);
+
+    let open_row = |t: &mut Transcript| {
+        let row = row_with(t, area, THINKING_LABEL);
+        double_click(t, 2, row);
+    };
+    open_row(&mut t);
+    open_row(&mut t);
+    ready(&mut t, area);
+    assert!(t.top.is_none(), "the view keeps following the tail");
+
+    t.on_event(&thinking("second\n"));
+    ready(&mut t, area);
+    assert!(t.top.is_none(), "the view keeps following the tail");
+    let newest = row_with(&mut t, area, "second");
+    assert!(newest < area.height, "the newest line is on screen");
+}
+
+/// A section the user opened is theirs: the row stays open when the turn ends,
+/// so the body they are reading does not vanish under them.
+#[test]
+fn an_opened_section_survives_the_end_of_the_turn() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&thinking("first\n"));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    let has = |t: &Transcript, needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+
+    let thought_row = wrapped_row_of(&t, THINKING_LABEL);
+    double_click(&mut t, 2, thought_row);
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+
+    t.on_event(&completed());
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert!(
+        has(&t, "first"),
+        "the thought the user opened stays when the turn ends"
+    );
+}
+
+/// A diff waits folded: the live row names the file, and the user opens the
+/// diff when they want to read it.
+#[test]
+fn a_live_diff_folds_and_opens_again() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(1, "file_edit", file_edit_input()));
+    t.on_event(&tool_end(1, true, EDIT_SUCCESS));
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    let has = |t: &Transcript, needle: &str| {
+        t.wrapped
+            .iter()
+            .any(|line| line_text(line).contains(needle))
+    };
+    assert!(has(&t, "Edited src/main.rs"), "the live row names the file");
+    assert!(!has(&t, "- old"), "the diff waits folded");
+
+    let diff_row = item_row_of(&t, 0, "Edited src/main.rs");
+    double_click(&mut t, 2, diff_row);
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert!(has(&t, "- old"), "the user opens the diff");
+
+    double_click(&mut t, 2, diff_row);
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    assert!(!has(&t, "- old"), "the user folds it again");
+}
+
+#[test]
+fn live_diff_burst_shows_only_the_newest_edit() {
+    let mut t = Transcript::new();
+    for i in 1..=10 {
         t.on_event(&tool_start(
             i as u64,
             "file_edit",
@@ -1799,13 +2012,16 @@ fn live_diff_burst_windows_to_the_newest_calls() {
             .any(|line| line_text(line).contains(needle))
     };
 
-    assert!(has(&t, EARLIER_23_LINES), "{:?}", t.wrapped);
     assert!(
         has(&t, "Edited src/f10.rs"),
-        "the open row shows the newest edits"
+        "the open row shows the newest edit"
     );
-    assert!(!has(&t, "Edited src/f01.rs"));
-    assert!(has(&t, "- old"), "a visible item still shows its diff");
+    assert_eq!(
+        t.rows[0].headers.len(),
+        2,
+        "the edits before it are not drawn"
+    );
+    assert!(!has(&t, "- old"), "the diff waits folded");
 
     t.on_event(&completed());
     let has = |needle: &str| {
@@ -1813,13 +2029,12 @@ fn live_diff_burst_windows_to_the_newest_calls() {
             .iter()
             .any(|line| line_text(line).contains(needle))
     };
-    assert!(!has(EARLIER_23_LINES));
     assert!(
         !has("Edited src/f10.rs"),
         "the burst closes once the turn moves on"
     );
 
-    let row = wrapped_row_of(&t, "Edited 10 files");
+    let row = wrapped_row_of(&t, "Edited src/f01.rs");
     double_click(&mut t, 2, row);
     let has = |needle: &str| {
         t.wrapped
@@ -1831,28 +2046,24 @@ fn live_diff_burst_windows_to_the_newest_calls() {
 
 /// Columns an 80-wide body has under its 3-column prefix.
 const WRAP_COLUMNS: usize = 77;
-const TAIL_COLUMNS: usize = 40;
-/// Rows a body of that width and length wraps to.
-const LONG_BODY_ROWS: usize = MAX_LIVE_BODY_ROWS + 1;
 
 #[test]
-fn live_body_window_counts_wrapped_rows() {
+fn a_live_body_is_one_row() {
     let mut t = Transcript::new();
-    let long = "z".repeat(WRAP_COLUMNS * MAX_LIVE_BODY_ROWS + TAIL_COLUMNS);
+    let long = "z".repeat(WRAP_COLUMNS * 2);
     t.on_event(&thinking(&format!("{long}\n")));
     ready(&mut t, Rect::new(0, 0, 80, 24));
     assert_eq!(
         t.wrapped.len(),
-        1 + MAX_LIVE_BODY_ROWS,
-        "one physical line costs every row it occupies, not just one"
-    );
-    assert!(
-        line_text(&t.wrapped[1]).contains(EARLIER_2_LINES),
-        "{:?}",
+        2,
+        "the row and the line it is on: {:?}",
         t.wrapped
     );
-    let zs = |line: &Line<'_>| line_text(line).matches('z').count();
-    assert_eq!(zs(t.wrapped.last().unwrap()), TAIL_COLUMNS);
+    assert!(
+        line_text(&t.wrapped[1]).contains('…'),
+        "a long line is clipped to one row: {:?}",
+        t.wrapped
+    );
 
     toggle_row(&mut t, 0);
     assert_eq!(t.wrapped.len(), 1, "the user closes the row");
@@ -1862,9 +2073,8 @@ fn live_body_window_counts_wrapped_rows() {
 
     t.finish_response();
     toggle_row(&mut t, 0);
-    assert_eq!(
-        t.wrapped.len(),
-        1 + LONG_BODY_ROWS,
+    assert!(
+        t.wrapped.len() > 2,
         "the whole body renders once the turn stops streaming"
     );
 }
@@ -1951,6 +2161,18 @@ fn wrapped_row_of(t: &Transcript, needle: &str) -> u16 {
         .expect("wrapped line")
 }
 
+/// The screen row of a nested item, past the row's own header: an item title
+/// repeats the file the row title names, so the first match is the header.
+fn item_row_of(t: &Transcript, row: usize, needle: &str) -> u16 {
+    let header = t.rows[row].headers[0].line;
+    t.wrapped
+        .iter()
+        .skip(header + 1)
+        .position(|line| line_text(line).contains(needle))
+        .map(|idx| u16::try_from(header + 1 + idx).expect("screen row"))
+        .expect("wrapped line")
+}
+
 const EDIT_SUCCESS: &str = "edited src/main.rs: 1 edit(s), 3 bytes -> 3 bytes";
 const EDIT_LANDED: &str = "- L2→old\n+ L2→new";
 const EDIT_ERROR: &str = "old_string not found";
@@ -1966,7 +2188,9 @@ fn a_landed_edit_diff_wears_its_sign_first() {
         },
         Some(EDIT_LANDED),
     ));
-    wide(&mut t);
+    ready(&mut t, Rect::new(0, 0, 80, 10));
+    let item = item_row_of(&t, 0, "Edited src/main.rs");
+    double_click(&mut t, 2, item);
 
     let removal = t
         .wrapped
@@ -1989,7 +2213,7 @@ fn file_edit_aggregates_with_a_nested_diff() {
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
 
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Edited 1 file");
+    assert_eq!(t.rows[0].text, "Edited src/main.rs");
     let burst = t.rows[0].collapsible.as_ref().expect("burst detail");
     assert!(burst.is_expanded(), "the edit shows while its turn runs");
     assert_eq!(burst.body(), "");
@@ -2038,7 +2262,7 @@ fn file_write_aggregates_with_a_nested_diff() {
     t.on_event(&tool_end(2, true, "wrote 17 bytes to out.txt"));
 
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Wrote 1 file");
+    assert_eq!(t.rows[0].text, "Wrote out.txt");
     assert_eq!(
         diff_items(&t),
         [(
@@ -2060,7 +2284,7 @@ fn mixed_burst_keeps_calls_in_invocation_order() {
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
     t.on_event(&tool_end(2, true, "ok"));
 
-    assert_eq!(t.rows[0].text, "Edited 1 file, Ran 1 command");
+    assert_eq!(t.rows[0].text, "Edited src/main.rs, Ran 1 command");
     assert_eq!(
         diff_items(&t),
         [("Edited src/main.rs".to_string(), "- old\n+ new".to_string())]
@@ -2100,7 +2324,7 @@ fn seed_file_edit_aggregates_with_a_nested_diff() {
         Message::tool_result("e1", EDIT_SUCCESS, false),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Edited 1 file");
+    assert_eq!(t.rows[0].text, "Edited src/main.rs");
     assert_eq!(
         diff_items(&t),
         [("Edited src/main.rs".to_string(), "- old\n+ new".to_string())]
@@ -2122,7 +2346,7 @@ fn diff_double_click_toggles_burst_detail() {
     };
     assert!(!has(&t), "the burst collapses once the turn moves on");
 
-    let row = wrapped_row_of(&t, "Edited 1 file");
+    let row = wrapped_row_of(&t, "Edited src/main.rs");
     double_click(&mut t, 2, row);
     assert!(
         t.rows[0]
@@ -2141,11 +2365,11 @@ fn diff_double_click_toggles_burst_detail() {
             .any(|line| line_text(line).contains("Edited src/main.rs"))
     );
 
-    let row = wrapped_row_of(&t, "Edited src/main.rs");
+    let row = item_row_of(&t, 0, "Edited src/main.rs");
     double_click(&mut t, 2, row);
     assert!(has(&t));
 
-    let row = wrapped_row_of(&t, "Edited src/main.rs");
+    let row = item_row_of(&t, 0, "Edited src/main.rs");
     double_click(&mut t, 2, row);
     assert!(!has(&t));
     assert!(
@@ -2178,7 +2402,7 @@ fn nested_item_double_click_toggles_only_its_own_diff() {
     };
     assert!(!has("- old", &t) && !has("- libold", &t));
 
-    let row = wrapped_row_of(&t, "Edited 2 files");
+    let row = wrapped_row_of(&t, "Edited src/main.rs, src/lib.rs");
     double_click(&mut t, 2, row);
     assert!(
         !has("- old", &t) && !has("- libold", &t),
@@ -2186,7 +2410,7 @@ fn nested_item_double_click_toggles_only_its_own_diff() {
     );
     assert!(has("Edited src/main.rs", &t) && has("Edited src/lib.rs", &t));
 
-    let row = wrapped_row_of(&t, "Edited src/main.rs");
+    let row = item_row_of(&t, 0, "Edited src/main.rs");
     double_click(&mut t, 2, row);
     assert!(has("- old", &t), "the clicked item expands");
     assert!(!has("- libold", &t), "its sibling keeps its own state");
@@ -2199,13 +2423,14 @@ fn nested_item_double_click_toggles_only_its_own_diff() {
         "the burst itself stays expanded"
     );
 
-    let row = wrapped_row_of(&t, "Edited src/lib.rs");
+    let row = item_row_of(&t, 0, "Edited src/lib.rs");
     double_click(&mut t, 2, row);
     assert!(has("- old", &t) && has("- libold", &t));
 
-    let row = wrapped_row_of(&t, "Edited 2 files");
+    let row = wrapped_row_of(&t, "Edited src/main.rs, src/lib.rs");
     double_click(&mut t, 2, row);
-    assert!(!has("- old", &t) && !has("- libold", &t) && !has("Edited src/main.rs", &t));
+    assert!(!has("- old", &t) && !has("- libold", &t), "the burst folds");
+    assert_eq!(t.rows[0].headers.len(), 1, "the items are gone");
 }
 
 #[test]
@@ -2214,6 +2439,8 @@ fn nested_diff_lines_are_indented_past_their_item_title() {
     t.on_event(&tool_start(1, "file_edit", file_edit_input()));
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
     ready(&mut t, Rect::new(0, 0, 80, 10));
+    let item = item_row_of(&t, 0, "Edited src/main.rs");
+    double_click(&mut t, 2, item);
 
     let removed = t
         .wrapped
@@ -3807,25 +4034,25 @@ fn a_row_rewrapped_in_place_wraps_like_the_whole_transcript() {
 }
 
 #[test]
-fn a_streaming_body_keeps_its_window_without_a_full_rewrap() {
+fn a_streaming_body_keeps_one_row_without_a_full_rewrap() {
     let mut t = Transcript::new();
-    let long = "z".repeat(WRAP_COLUMNS * MAX_LIVE_BODY_ROWS + TAIL_COLUMNS);
+    let long = "z".repeat(WRAP_COLUMNS * 2);
     t.on_event(&thinking(&format!("{long}\n")));
     ready(&mut t, Rect::new(0, 0, 80, 24));
-    assert_eq!(t.wrapped.len(), 1 + MAX_LIVE_BODY_ROWS);
+    assert_eq!(t.wrapped.len(), 2);
 
     t.on_event(&thinking("a delta arrives\n"));
 
-    assert_eq!(t.wrapped.len(), 1 + MAX_LIVE_BODY_ROWS, "{:?}", t.wrapped);
+    assert_eq!(t.wrapped.len(), 2, "{:?}", t.wrapped);
 }
 
-/// A burst retitled by a call that failed still shows only its newest calls.
+/// A burst retitled by a call that failed still shows only its newest call.
 #[test]
-fn a_retitled_burst_keeps_its_windowed_body() {
+fn a_retitled_burst_keeps_its_newest_call() {
     let mut t = Transcript::new();
-    for i in 1..=(MAX_LIVE_BODY_ROWS + 2) as u64 {
+    for i in 1..=10 {
         t.on_event(&tool_start(
-            i,
+            i as u64,
             "bash",
             serde_json::json!({ "command": format!("c{i:02}") }),
         ));
@@ -3840,13 +4067,12 @@ fn a_retitled_burst_keeps_its_windowed_body() {
             .any(|line| line_text(line).contains(needle))
     };
     assert!(
-        has("… 4 earlier lines"),
-        "the failure reason is one more line above the window: {:?}",
+        has("c10"),
+        "the newest call is the one on screen: {:?}",
         t.wrapped
     );
-    assert!(has("c10"));
     assert!(!has("c01"));
-    assert!(!has("boom"));
+    assert!(!has("boom"), "the failed call is not the newest one");
 }
 
 #[test]

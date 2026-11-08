@@ -119,7 +119,13 @@ impl Activity {
         let idx = self.burst.start(call_id, summary, detail);
         self.segments.push(Segment::Call {
             idx,
-            open: OpenState::expanded(),
+            // A diff waits folded: the title says what changed, and the
+            // reader opens the diff when they want to read it.
+            open: if detail.is_some_and(|text| !text.is_empty()) {
+                OpenState::collapsed()
+            } else {
+                OpenState::expanded()
+            },
         });
     }
 
@@ -143,16 +149,13 @@ impl Activity {
         self.fold_thoughts = true;
         let idx = self.segments.len();
         self.pending.insert(call_id, idx);
-        let open = if body.is_empty() {
-            OpenState::collapsed()
-        } else {
-            OpenState::expanded()
-        };
+        // The body waits folded: the title says what changed, and the reader
+        // opens the body when they want to read it.
         self.segments.push(Segment::Standalone {
             kind,
             title,
             body,
-            open,
+            open: OpenState::collapsed(),
         });
     }
 
@@ -320,7 +323,7 @@ mod tests {
         activity.push_thinking("Thought for 1s", "again", false);
         activity.start_call("2".into(), "Edited src/b.rs", Some("- x\n+ y"));
 
-        assert_eq!(activity.project().0, "Edited 2 files");
+        assert_eq!(activity.project().0, "Edited src/a.rs, src/b.rs");
     }
 
     #[test]

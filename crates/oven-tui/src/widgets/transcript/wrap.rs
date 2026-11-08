@@ -49,16 +49,6 @@ impl Buf<'_> {
     fn len(&self) -> usize {
         self.lines.len()
     }
-
-    fn drain(&mut self, range: std::ops::Range<usize>) {
-        self.lines.drain(range.clone());
-        self.copies.drain(range);
-    }
-
-    fn insert_visual(&mut self, at: usize, line: Line<'static>) {
-        self.lines.insert(at, line);
-        self.copies.insert(at, LineCopy::Visual);
-    }
 }
 
 pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
@@ -68,14 +58,11 @@ pub(super) const MAX_SHELL_DISPLAY_LINES: usize = 100;
 pub(super) const MAX_STICKY_PROMPT_ROWS: usize = 8;
 /// Body rows visible inside that window, once the top and bottom rules are set aside.
 pub(super) const PROMPT_BODY_SLOTS: usize = MAX_STICKY_PROMPT_ROWS - 2;
-/// Screen rows — counted after wrapping — a body still receiving content may
-/// occupy, so a line that wraps into many rows is capped by the rows it takes,
-/// not by the newline it came from.
-pub(super) const MAX_LIVE_BODY_ROWS: usize = 8;
 pub(super) const THINKING_LABEL: &str = "Thinking...";
 pub(super) const THOUGHT_LABEL: &str = "Thought";
 pub(super) const RESULT_LABEL: &str = "Result";
 const EARLIER_LINES: &str = "earlier lines";
+const ELLIPSIS: &str = "…";
 const MS_PER_SECOND: u64 = 1000;
 const MS_PER_TENTH: u64 = 100;
 const TENTHS_PER_SECOND: u64 = 10;
@@ -86,8 +73,6 @@ const SHADE_MIN: f32 = 88.0;
 const SHADE_MAX: f32 = 220.0;
 const WORKED_FOR: &str = "Worked for";
 const THOUGHT_FOR: &str = "Thought for";
-/// Rows the … N earlier lines marker occupies inside a live body budget.
-const MARKER_ROWS: usize = 1;
 /// Border plus one padding column on each side of a framed prompt.
 const PROMPT_FRAME_COLS: usize = 4;
 const PROMPT_CORNER_COLS: usize = 2;
@@ -252,15 +237,7 @@ fn thinking_shade(t: f32) -> Color {
 }
 
 fn earlier_lines(skipped: usize) -> String {
-    format!("… {skipped} {EARLIER_LINES}")
-}
-
-fn earlier_lines_marker(skipped: usize) -> Line<'static> {
-    let style = theme::dim();
-    Line::from(vec![
-        Span::styled(body_prefix(0), style),
-        Span::styled(earlier_lines(skipped), style),
-    ])
+    format!("{ELLIPSIS} {skipped} {EARLIER_LINES}")
 }
 
 /// Left margin every row at nesting `depth` shares, so bodies line up.
@@ -273,7 +250,12 @@ fn body_prefix(depth: usize) -> String {
 }
 
 fn marker_prefix(collapsible: &Collapsible, depth: usize) -> String {
-    let marker = if collapsible.is_expanded() {
+    marker_with(collapsible.is_expanded(), depth)
+}
+
+/// The marker of a block, whether or not it shows its whole body.
+fn marker_with(expanded: bool, depth: usize) -> String {
+    let marker = if expanded {
         EXPANDED_MARKER
     } else {
         COLLAPSED_MARKER
@@ -452,6 +434,101 @@ pub(super) fn apply_hover(line: &Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// What a row that is still growing shows.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Live {
+    /// The row is still being written to.
+    pub growing: bool,
+    /// The section that is still being written, if any.
+    pub streaming: Option<usize>,
+    /// The row's own text is a thought: it is written line by line, so only
+    /// the line it is on shows.
+    pub thought: bool,
+}
+
+impl Live {
+    /// The same context one level down: nothing below the row's own sections
+    /// can be the one being written.
+    fn nested(self) -> Self {
+        Self {
+            streaming: None,
+            ..self
+        }
+    }
+}
+
+/// What a section of a growing row shows: a thought is a stream that shows
+/// the line it is on, a diff the reader opened shows whole, a section the user
+/// opened is theirs, and a finished one shows its title alone.
+#[derive(Clone, Copy, PartialEq)]
+enum Body {
+    Whole,
+    Line,
+    None,
+}
+
+fn section_body(live: Live, index: usize, kind: LineKind, detail: &Collapsible) -> Body {
+    if !live.growing {
+        return if detail.is_expanded() {
+            Body::Whole
+        } else {
+            Body::None
+        };
+    }
+    // A thought is a stream: it shows the line it is on and never all of it,
+    // not even once the user opens it and not even in a row the user opened.
+    // The whole thought waits for the turn to end.
+    if kind == LineKind::Thinking {
+        return if live.streaming == Some(index) || detail.open_state().pinned {
+            Body::Line
+        } else {
+            Body::None
+        };
+    }
+    // A diff the reader opened shows whole: it is the work itself. It waits
+    // folded until then.
+    if kind == LineKind::Diff && detail.is_expanded() {
+        return Body::Whole;
+    }
+    // A section the user opened is theirs.
+    if detail.open_state().pinned {
+        return Body::Whole;
+    }
+    Body::None
+}
+
+/// Whether the marker of a section reads as open: it does when the section
+/// shows its whole body, and when the user opened it — a thought stays one row
+/// either way.
+fn marker_open(live: Live, body: Body, detail: &Collapsible) -> bool {
+    if !live.growing {
+        return detail.is_expanded();
+    }
+    body == Body::Whole || detail.open_state().pinned
+}
+
+/// Whether the user opened this section: its body is theirs to keep.
+fn opened(section: &Section) -> bool {
+    match section {
+        Section::Item { detail, .. } => detail.open_state().pinned,
+        Section::Text(_) => false,
+    }
+}
+
+/// Whether the section a header points at shows its whole body right now.
+pub(super) fn shows_whole(
+    live: Live,
+    path: &[usize],
+    kind: LineKind,
+    detail: &Collapsible,
+) -> bool {
+    // Only a section of the row itself can be the one being written.
+    match path.first().copied().filter(|_| path.len() == 1) {
+        Some(index) => section_body(live, index, kind, detail) == Body::Whole,
+        None => detail.is_expanded(),
+    }
+}
+
 /// Wraps a collapsible row and returns its markers: the row's own header
 /// first, then one per nested item that is currently rendered.
 pub(super) fn wrap_collapsible_into(
@@ -460,7 +537,7 @@ pub(super) fn wrap_collapsible_into(
     title: &str,
     collapsible: &Collapsible,
     width: usize,
-    live_rows: Option<usize>,
+    live: Live,
     separator: bool,
 ) -> Vec<Header> {
     if separator {
@@ -477,77 +554,164 @@ pub(super) fn wrap_collapsible_into(
     }];
     wrap_line_into(buf, &header, width, kind);
     if collapsible.is_expanded() {
-        match (live_rows, collapsible.single_text()) {
-            (Some(rows), Some(text)) => wrap_live_tail(buf, text, kind, width, rows),
-            _ => {
-                let body = buf.len();
-                let mut nested = wrap_sections_into(buf, collapsible, kind, width, 0, &[]);
-                if let Some(rows) = live_rows {
-                    window_live_body(buf, &mut nested, body, rows);
+        if live.growing && !collapsible.open_state().pinned {
+            headers.extend(wrap_live_body(buf, collapsible, kind, width, live));
+        } else {
+            headers.extend(wrap_sections_into(
+                buf,
+                collapsible,
+                kind,
+                width,
+                0,
+                &[],
+                live,
+            ));
+        }
+    }
+    headers
+}
+
+/// The body of a row that is still growing: the sections the user opened and
+/// the newest one, so a growing row cannot scroll older rows out of the view
+/// and an opened section keeps its place as more arrives.
+fn wrap_live_body(
+    buf: &mut Buf<'_>,
+    collapsible: &Collapsible,
+    kind: LineKind,
+    width: usize,
+    live: Live,
+) -> Vec<Header> {
+    let sections = collapsible.sections();
+    let newest = sections.len().saturating_sub(1);
+    let mut headers = Vec::new();
+    for (index, section) in sections.iter().enumerate() {
+        if index != newest && !opened(section) {
+            continue;
+        }
+        match section {
+            Section::Text(text) => {
+                wrap_live_text_into(buf, live, text, kind, 0, width);
+            }
+            Section::Item {
+                kind: item_kind,
+                title,
+                detail,
+            } => {
+                let style = item_kind.style();
+                let body = section_body(live, index, *item_kind, detail);
+                let marker = Line::from(vec![
+                    Span::styled(marker_with(marker_open(live, body, detail), 1), style),
+                    Span::styled(title.clone(), style),
+                ]);
+                let line = buf.len();
+                wrap_line_into(buf, &marker, width, *item_kind);
+                let path = vec![index];
+                headers.push(Header {
+                    line,
+                    path: path.clone(),
+                });
+                match body {
+                    Body::Whole => headers.extend(wrap_sections_into(
+                        buf,
+                        detail,
+                        *item_kind,
+                        width,
+                        1,
+                        &path,
+                        live.nested(),
+                    )),
+                    Body::Line => headers.extend(wrap_live_detail(
+                        buf,
+                        detail,
+                        *item_kind,
+                        width,
+                        body_columns(width, 1),
+                        &path,
+                    )),
+                    Body::None => {}
                 }
-                headers.extend(nested);
             }
         }
     }
     headers
 }
 
-/// Wraps only the tail of a text-only live body. The head is counted rather
-/// than built: a delta walks the body once and builds only the rows it shows.
-fn wrap_live_tail(buf: &mut Buf<'_>, text: &str, kind: LineKind, width: usize, rows: usize) {
-    let columns = body_columns(width);
-    let total: usize = text
-        .lines()
-        .map(|part| wrapped_row_count(part, columns))
-        .sum();
-    if total <= rows {
-        wrap_text_into(buf, text.lines(), kind, 0, width);
-        return;
+/// The text of a section of a growing row: a thought shows the line it is
+/// on, a call shows its label and the failure under it.
+fn wrap_live_text_into(
+    buf: &mut Buf<'_>,
+    live: Live,
+    text: &str,
+    kind: LineKind,
+    depth: usize,
+    width: usize,
+) {
+    if live.thought {
+        let line = clip_tail(live_line(text), body_columns(width, depth));
+        wrap_text_into(buf, std::iter::once(line.as_str()), kind, depth, width);
+    } else {
+        wrap_text_into(buf, text.lines(), kind, depth, width);
     }
-    let kept = kept_rows(rows);
-    let mut tail = Vec::new();
-    let mut tail_rows = 0;
-    for part in text.lines().rev() {
-        if tail_rows >= kept {
+}
+
+/// The body of a live item: one row of its text, the words it wrote last.
+fn wrap_live_detail(
+    buf: &mut Buf<'_>,
+    detail: &Collapsible,
+    kind: LineKind,
+    width: usize,
+    columns: usize,
+    path: &[usize],
+) -> Vec<Header> {
+    match detail.single_text() {
+        Some(text) => {
+            let line = clip_tail(live_line(text), columns);
+            wrap_text_into(buf, std::iter::once(line.as_str()), kind, 1, width);
+            Vec::new()
+        }
+        None => wrap_sections_into(buf, detail, kind, width, 1, path, Live::default()),
+    }
+}
+
+/// The line a stream is on: the last one it wrote.
+fn live_line(text: &str) -> &str {
+    text.lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+}
+
+/// The tail of `text` that fits in `columns`, with an ellipsis where text was
+/// cut: a stream shows its newest words.
+fn clip_tail(text: &str, columns: usize) -> String {
+    if columns == 0 || text.is_empty() {
+        return text.to_string();
+    }
+    let budget = columns - 1;
+    let mut width = 0;
+    let mut tail = None;
+    for (idx, ch) in text.char_indices().rev() {
+        let char_width = ch.width().unwrap_or(0);
+        if width + char_width > budget {
             break;
         }
-        tail_rows += wrapped_row_count(part, columns);
-        tail.push(part);
+        width += char_width;
+        tail = Some(idx);
     }
-    let body = buf.len();
-    wrap_text_into(buf, tail.into_iter().rev(), kind, 0, width);
-    buf.drain(body..body + (tail_rows - kept));
-    buf.insert_visual(body, earlier_lines_marker(total - kept));
+    match tail {
+        None => ELLIPSIS.to_string(),
+        Some(0) => text.to_string(),
+        Some(start) => format!("{ELLIPSIS}{}", &text[start..]),
+    }
 }
 
 /// Columns a body part may use. A zero width keeps a whole line on one row,
 /// the way `wrap_line_into` does.
-fn body_columns(width: usize) -> usize {
+fn body_columns(width: usize, depth: usize) -> usize {
     if width == 0 {
         return 0;
     }
-    width.saturating_sub(body_prefix(0).width()).max(1)
-}
-
-/// Rows a part takes once it is wrapped.
-fn wrapped_row_count(part: &str, columns: usize) -> usize {
-    if columns == 0 {
-        return 1;
-    }
-    let mut rest = part;
-    let mut rows = 1;
-    while !rest.is_empty() {
-        rest = split_at_width(rest, columns).1;
-        if !rest.is_empty() {
-            rows += 1;
-        }
-    }
-    rows
-}
-
-/// Rows a live body keeps once the marker row is set aside.
-fn kept_rows(rows: usize) -> usize {
-    rows.saturating_sub(MARKER_ROWS)
+    width.saturating_sub(body_prefix(depth).width()).max(1)
 }
 
 fn wrap_text_into<'a>(
@@ -567,24 +731,6 @@ fn wrap_text_into<'a>(
     }
 }
 
-/// Keeps a live body within `rows` screen rows, so deltas cannot push older
-/// rows out of the view. Rows dropped from the head — counted after wrapping,
-/// so a single long line may cost many of them — hide behind one marker row.
-fn window_live_body(buf: &mut Buf<'_>, nested: &mut Vec<Header>, body: usize, rows: usize) {
-    let total = buf.len() - body;
-    if total <= rows {
-        return;
-    }
-    let skipped = total - kept_rows(rows);
-    let cut = body + skipped;
-    buf.drain(body..cut);
-    buf.insert_visual(body, earlier_lines_marker(skipped));
-    nested.retain(|header| header.line >= cut);
-    for header in nested {
-        header.line -= skipped - MARKER_ROWS;
-    }
-}
-
 fn wrap_sections_into(
     buf: &mut Buf<'_>,
     collapsible: &Collapsible,
@@ -592,21 +738,32 @@ fn wrap_sections_into(
     width: usize,
     depth: usize,
     path: &[usize],
+    live: Live,
 ) -> Vec<Header> {
     let mut headers = Vec::new();
     for (idx, section) in collapsible.sections().iter().enumerate() {
         let mut path = path.to_vec();
         path.push(idx);
         match section {
-            Section::Text(text) => wrap_text_into(buf, text.lines(), kind, depth, width),
+            Section::Text(text) => {
+                if live.growing && depth == 0 {
+                    wrap_live_text_into(buf, live, text, kind, depth, width);
+                } else {
+                    wrap_text_into(buf, text.lines(), kind, depth, width);
+                }
+            }
             Section::Item {
                 kind: item_kind,
                 title,
                 detail,
             } => {
                 let style = item_kind.style();
+                let body = section_body(live, idx, *item_kind, detail);
                 let marker = Line::from(vec![
-                    Span::styled(marker_prefix(detail, depth + 1), style),
+                    Span::styled(
+                        marker_with(marker_open(live, body, detail), depth + 1),
+                        style,
+                    ),
                     Span::styled(title.clone(), style),
                 ]);
                 let line = buf.len();
@@ -615,15 +772,25 @@ fn wrap_sections_into(
                     line,
                     path: path.clone(),
                 });
-                if detail.is_expanded() {
-                    headers.extend(wrap_sections_into(
+                match body {
+                    Body::Whole => headers.extend(wrap_sections_into(
                         buf,
                         detail,
                         *item_kind,
                         width,
                         depth + 1,
                         &path,
-                    ));
+                        live.nested(),
+                    )),
+                    Body::Line => headers.extend(wrap_live_detail(
+                        buf,
+                        detail,
+                        *item_kind,
+                        width,
+                        body_columns(width, depth + 1),
+                        &path,
+                    )),
+                    Body::None => {}
                 }
             }
         }
@@ -1019,7 +1186,6 @@ mod tests {
     use super::*;
 
     const WIDTHS: [usize; 4] = [1, 7, 20, 80];
-    const LIVE_ROWS: [usize; 3] = [0, 1, MAX_LIVE_BODY_ROWS];
     const BODIES: [&str; 7] = [
         "",
         "short",
@@ -1030,54 +1196,215 @@ mod tests {
         "first\nsome long line that wraps many many times over a narrow column\nlast",
     ];
 
-    fn render(body: &str, width: usize, rows: usize, tail_only: bool) -> Vec<String> {
+    fn render_live(sections: Vec<Section>, width: usize, streaming: Option<usize>) -> Vec<String> {
+        render_call_or_thought(sections, width, streaming, true)
+    }
+
+    fn render_call(sections: Vec<Section>, width: usize) -> Vec<String> {
+        render_call_or_thought(sections, width, None, false)
+    }
+
+    fn render_call_or_thought(
+        sections: Vec<Section>,
+        width: usize,
+        streaming: Option<usize>,
+        thought: bool,
+    ) -> Vec<String> {
         let mut lines = Vec::new();
         let mut copies = Vec::new();
         let mut buf = Buf {
             lines: &mut lines,
             copies: &mut copies,
         };
-        if tail_only {
-            wrap_live_tail(&mut buf, body, LineKind::Thinking, width, rows);
-        } else {
-            let collapsible = Collapsible::new(body);
-            let start = buf.len();
-            let mut nested =
-                wrap_sections_into(&mut buf, &collapsible, LineKind::Thinking, width, 0, &[]);
-            window_live_body(&mut buf, &mut nested, start, rows);
-        }
+        let collapsible = Collapsible::from_sections(sections);
+        let live = Live {
+            growing: true,
+            streaming,
+            thought,
+        };
+        wrap_live_body(&mut buf, &collapsible, LineKind::Thinking, width, live);
         lines.iter().map(ToString::to_string).collect()
     }
 
+    fn render_growing(
+        sections: Vec<Section>,
+        width: usize,
+        streaming: Option<usize>,
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut copies = Vec::new();
+        let mut buf = Buf {
+            lines: &mut lines,
+            copies: &mut copies,
+        };
+        let collapsible = Collapsible::from_sections(sections);
+        let live = Live {
+            growing: true,
+            streaming,
+            thought: true,
+        };
+        wrap_sections_into(
+            &mut buf,
+            &collapsible,
+            LineKind::Thinking,
+            width,
+            0,
+            &[],
+            live,
+        );
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    fn thought(title: &str, text: &str) -> Section {
+        Section::Item {
+            kind: LineKind::Thinking,
+            title: title.to_string(),
+            detail: Collapsible::new(text),
+        }
+    }
+
     #[test]
-    fn live_tail_matches_wrapping_the_whole_body() {
+    fn a_live_body_is_one_row() {
         for body in BODIES {
             for width in WIDTHS {
-                for rows in LIVE_ROWS {
-                    assert_eq!(
-                        render(body, width, rows, true),
-                        render(body, width, rows, false),
-                        "body {body:?} at width {width} in {rows} rows"
-                    );
-                }
+                let rows = render_live(vec![Section::Text(body.to_string())], width, Some(0));
+                assert_eq!(rows.len(), 1, "body {body:?} at width {width}: {rows:?}");
             }
         }
     }
 
     #[test]
-    fn live_tail_matches_for_a_long_body() {
-        let body = (0..500)
-            .map(|i| format!("line {i} {}", "x".repeat(i % 37)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for width in WIDTHS {
-            for rows in LIVE_ROWS {
-                assert_eq!(
-                    render(&body, width, rows, true),
-                    render(&body, width, rows, false),
-                    "width {width} in {rows} rows"
-                );
-            }
-        }
+    fn a_live_body_shows_the_line_it_is_on() {
+        let rows = render_live(
+            vec![Section::Text("first\nsecond\nthird".to_string())],
+            40,
+            Some(0),
+        );
+        assert!(rows[0].contains("third"), "{rows:?}");
+        assert!(!rows[0].contains("first"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_live_body_clips_a_long_line() {
+        let rows = render_live(vec![Section::Text("z".repeat(40))], 20, Some(0));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains(ELLIPSIS), "{rows:?}");
+    }
+
+    #[test]
+    fn a_live_call_shows_its_label_and_the_failure_under_it() {
+        let rows = render_call(vec![Section::Text("Ran ls\nno such file".to_string())], 40);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].contains("Ran ls"), "{rows:?}");
+        assert!(rows[1].contains("no such file"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_live_body_keeps_a_diff_whole() {
+        let rows = render_live(
+            vec![Section::Item {
+                kind: LineKind::Diff,
+                title: "Edited src/main.rs".to_string(),
+                detail: Collapsible::new("- old\n+ new"),
+            }],
+            40,
+            None,
+        );
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert!(rows[0].contains("Edited src/main.rs"), "{rows:?}");
+        assert!(rows[2].contains("+ new"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_live_body_folds_a_diff_until_it_is_opened() {
+        let rows = render_live(
+            vec![Section::Item {
+                kind: LineKind::Diff,
+                title: "Edited src/main.rs".to_string(),
+                detail: Collapsible::collapsed("- old\n+ new"),
+            }],
+            40,
+            None,
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("Edited src/main.rs"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_live_body_shows_only_its_newest_item() {
+        let rows = render_live(
+            vec![
+                thought("older title", "older"),
+                thought("newer title", "newer line"),
+            ],
+            40,
+            Some(1),
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].contains("newer title"), "{rows:?}");
+        assert!(rows[1].contains("newer line"), "{rows:?}");
+        assert!(!rows.iter().any(|row| row.contains("older")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_growing_thought_is_never_shown_whole() {
+        let rows = render_live(
+            vec![thought("writing", "first\nsecond\nthird")],
+            40,
+            Some(0),
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[1].contains("third"), "{rows:?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("first")),
+            "a thought is never released in full: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn an_opened_thought_is_never_shown_whole() {
+        let mut detail = Collapsible::new("first\nsecond\nthird");
+        detail.toggle_pinned();
+        let rows = render_live(
+            vec![Section::Item {
+                kind: LineKind::Thinking,
+                title: "writing".to_string(),
+                detail,
+            }],
+            40,
+            Some(0),
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[1].contains("third"), "{rows:?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("first")),
+            "an opened thought is still one row: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_finished_section_shows_only_its_title() {
+        let rows = render_live(vec![thought("done", "the whole thought")], 40, None);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("done"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_growing_body_shows_finished_sections_by_their_title() {
+        let rows = render_growing(
+            vec![
+                thought("done", "the whole thought"),
+                thought("writing", "the line it is on"),
+            ],
+            40,
+            Some(1),
+        );
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert!(rows[0].contains("done"), "{rows:?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("the whole thought")),
+            "{rows:?}"
+        );
+        assert!(rows[2].contains("the line it is on"), "{rows:?}");
     }
 }
