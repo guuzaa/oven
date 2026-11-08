@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- `oven-tui`: a failed turn ends in red — `✗ Failed after 1.2s`, the mark and the word in bold red, the timing detail in the muted colour, and the reason the turn failed red all the way down. The mark opens the row once, so a narrow terminal hangs the rest of the line under it. A cancelled turn keeps the dim line it had
+
 ## [0.1.5] - 2026-11-08
 
 ### Added

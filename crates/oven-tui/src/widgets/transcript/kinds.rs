@@ -22,6 +22,8 @@ pub(crate) enum LineKind {
     ToolResult(bool),
     ShellResult(bool),
     Error,
+    /// The turn-end line of a turn that failed.
+    Failed,
     System,
     Separator,
 }
@@ -42,12 +44,14 @@ impl LineKind {
             | LineKind::Separator => theme::dim(),
             LineKind::ToolResult(false) | LineKind::ShellResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
+            LineKind::Failed => theme::fail_bold(),
         }
     }
 
     /// Assistant prose draws its gutter on the first line only and aligns the rest under the body.
+    /// A failure wears its mark the same way: the mark opens the row, the rest hangs under it.
     pub(super) fn gutter_once(self) -> bool {
-        self == LineKind::Text
+        matches!(self, LineKind::Text | LineKind::Failed)
     }
 
     /// A submitted prompt: the header of a turn. It stays pinned while that
@@ -61,6 +65,7 @@ impl LineKind {
             LineKind::User => "› ",
             LineKind::Shell => "$ ",
             LineKind::Text => "∙ ",
+            LineKind::Failed => "✗ ",
             LineKind::Thinking
             | LineKind::Activity
             | LineKind::Tool
@@ -70,6 +75,32 @@ impl LineKind {
             | LineKind::Error
             | LineKind::System
             | LineKind::Separator => "  ",
+        }
+    }
+}
+
+/// How a turn ended without an answer.
+#[derive(Clone, Copy)]
+pub(super) enum Outcome {
+    Failed,
+    Cancelled,
+}
+
+impl Outcome {
+    /// The word the turn-end line leads with.
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+
+    /// The row the outcome is drawn on: a failure is loud, a cancellation
+    /// reads like any other turn-end line.
+    pub(super) fn kind(self) -> LineKind {
+        match self {
+            Self::Failed => LineKind::Failed,
+            Self::Cancelled => LineKind::Separator,
         }
     }
 }

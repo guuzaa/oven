@@ -105,6 +105,7 @@ fn all_gutters_are_two_wide() {
         LineKind::ShellResult(true),
         LineKind::ShellResult(false),
         LineKind::Error,
+        LineKind::Failed,
         LineKind::System,
         LineKind::Separator,
     ];
@@ -4856,10 +4857,41 @@ fn a_failed_turn_says_it_failed_and_how_long_it_ran() {
 
     assert_eq!(
         kinds_of(&t),
-        vec![LineKind::User, LineKind::Error, LineKind::Separator]
+        vec![LineKind::User, LineKind::Error, LineKind::Failed]
     );
     assert_eq!(t.rows[1].text.as_str(), REASON);
     assert_eq!(t.rows[2].text.as_str(), FAILED_1_5S);
+}
+
+#[test]
+fn a_failed_turn_ends_in_red() {
+    let lines = format_lines(LineKind::Failed, FAILED_1_5S);
+    assert_eq!(lines[0].spans[0].content.as_ref(), " ✗ ");
+    assert_eq!(lines[0].spans[0].style, theme::fail_bold());
+    assert_eq!(lines[0].spans[1].content.as_ref(), "Failed");
+    assert_eq!(lines[0].spans[1].style, theme::fail_bold());
+    assert_eq!(lines[0].spans[2].content.as_ref(), " after 1.5s");
+    assert_eq!(lines[0].spans[2].style, theme::dim());
+}
+
+#[test]
+fn an_error_row_is_red_all_the_way() {
+    let lines = format_lines(LineKind::Error, "the model returned no answer");
+    assert_eq!(lines[0].spans[0].style, theme::error());
+    assert_eq!(
+        lines[0].spans[1].content.as_ref(),
+        "the model returned no answer"
+    );
+    assert_eq!(lines[0].spans[1].style, theme::error());
+}
+
+#[test]
+fn a_wrapped_failure_wears_its_mark_once() {
+    let mut t = Transcript::new();
+    t.push_row(LineKind::Failed, FAILED_1_5S);
+    ready(&mut t, Rect::new(0, 0, 12, 5));
+    let rows: Vec<String> = t.wrapped.iter().map(line_text).collect();
+    assert_eq!(rows, vec![" ✗ Failed af", "   ter 1.5s"]);
 }
 
 #[test]

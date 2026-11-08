@@ -33,6 +33,11 @@ pub fn fail() -> Style {
     Style::default().fg(FAILED)
 }
 
+/// The colour of a failure that ends a turn: loud enough to be its headline.
+pub fn fail_bold() -> Style {
+    Style::default().fg(FAILED).add_modifier(Modifier::BOLD)
+}
+
 pub fn error() -> Style {
     Style::default().fg(FAILED)
 }

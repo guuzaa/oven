@@ -821,16 +821,16 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
         } else {
             part.to_string()
         };
-        let body_span = match kind {
-            LineKind::Diff | LineKind::Shell | LineKind::Separator => {
-                Span::styled(body, line_style)
+        let body_spans = match kind {
+            LineKind::Diff | LineKind::Shell | LineKind::Separator | LineKind::Error => {
+                vec![Span::styled(body, line_style)]
             }
-            _ => Span::raw(body),
+            LineKind::Failed => failure_spans(&body),
+            _ => vec![Span::raw(body)],
         };
-        lines.push(Line::from(vec![
-            Span::styled(head.clone(), line_style),
-            body_span,
-        ]));
+        let mut spans = vec![Span::styled(head.clone(), line_style)];
+        spans.extend(body_spans);
+        lines.push(Line::from(spans));
     }
     if lines.is_empty() {
         lines.push(Line::from(vec![
@@ -843,21 +843,23 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
 
 /// A line's leading gutter span plus everything after it; `None` for a line
 /// without one, which passes through untouched.
-fn gutter_and_body(line: &Line<'_>) -> Option<(String, Style, String, Option<Style>)> {
+fn gutter_and_body(line: &Line<'static>) -> Option<(String, Style, Vec<Span<'static>>)> {
     let [head, rest @ ..] = line.spans.as_slice() else {
         return None;
     };
-    let body: String = rest.iter().map(|s| s.content.as_ref()).collect();
-    let body_style = rest
-        .first()
-        .map(|span| span.style)
-        .filter(|style| *style != Style::default());
-    Some((
-        head.content.as_ref().to_string(),
-        head.style,
-        body,
-        body_style,
-    ))
+    Some((head.content.as_ref().to_string(), head.style, rest.to_vec()))
+}
+
+/// A failure line leads with what went wrong; the timing detail trails in the
+/// muted colour, so the failure carries the line.
+fn failure_spans(text: &str) -> Vec<Span<'static>> {
+    let Some((label, detail)) = text.split_once(' ') else {
+        return vec![Span::styled(text.to_string(), theme::fail_bold())];
+    };
+    vec![
+        Span::styled(label.to_string(), theme::fail_bold()),
+        Span::styled(format!(" {detail}"), theme::dim()),
+    ]
 }
 
 fn wrap_line_into(buf: &mut Buf<'_>, line: &Line<'static>, width: usize, kind: LineKind) {
@@ -865,29 +867,42 @@ fn wrap_line_into(buf: &mut Buf<'_>, line: &Line<'static>, width: usize, kind: L
         buf.push_visual(line.clone());
         return;
     }
-    let Some((prefix, style, body, body_style)) = gutter_and_body(line) else {
+    let Some((prefix, style, body)) = gutter_and_body(line) else {
         buf.push_visual(line.clone());
         return;
     };
     let body_width = width.saturating_sub(prefix.width()).max(1);
-    if body.is_empty() {
+    if body.iter().all(|span| span.content.is_empty()) {
         buf.push_visual(Line::from(vec![
             Span::styled(prefix, style),
-            body_span(String::new(), body_style),
+            body_span(String::new(), None),
         ]));
         return;
     }
     let continuation = continuation_prefix(kind, &prefix);
-    let mut head = prefix.as_str();
-    let mut rest = body.as_str();
-    while !rest.is_empty() {
-        let (chunk, next) = split_at_width(rest, body_width);
-        buf.push_visual(Line::from(vec![
-            Span::styled(head.to_string(), style),
-            body_span(chunk.to_string(), body_style),
-        ]));
-        head = continuation.as_str();
-        rest = next;
+    let mut spans = vec![Span::styled(prefix.clone(), style)];
+    let mut used = 0usize;
+    let mut holds_text = false;
+    for span in body {
+        let mut rest = span.content.as_ref();
+        while !rest.is_empty() {
+            let (chunk, next) = split_at_width(rest, body_width - used);
+            spans.push(body_span(chunk.to_string(), Some(span.style)));
+            used += chunk.width();
+            holds_text = true;
+            rest = next;
+            if used >= body_width {
+                buf.push_visual(Line::from(std::mem::replace(
+                    &mut spans,
+                    vec![Span::styled(continuation.clone(), style)],
+                )));
+                used = 0;
+                holds_text = false;
+            }
+        }
+    }
+    if holds_text {
+        buf.push_visual(Line::from(spans));
     }
 }
 

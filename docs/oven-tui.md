@@ -374,6 +374,7 @@ Row kinds (`transcript/kinds.rs`) each carry a two-column gutter and a style:
 | `ToolResult(bool)` | `  ` | header is `Result`; body is collapsed output |
 | `ShellResult(bool)` | `  ` | last 100 lines of output |
 | `Error` | `  ` | a failure: the reason, in the words of whoever said it |
+| `Failed` | `✗ ` | the turn-end line of a failed turn, in red; the mark opens the row |
 | `System` | `  ` | approvals, cancellations, compaction |
 | `Separator` | `  ` | turn end: `Worked for 1.2s`, or a blank line when the
 duration is unknown |
@@ -440,12 +441,14 @@ A turn that stops before the model answered is drawn in the same shape as one
 that finished, so the end of a turn is always in the same place: the reason
 first, then the line that says how it ended and how long it ran. A failure is
 a red row with the reason, in the words of whoever gave it, followed by
-`Failed after 1.2s`; a cancellation is a dim `cancelled` row followed by
-`Cancelled after 1.2s`. The reason is never labelled twice: a provider that
-failed says `provider: api error (500): boom`, and the row says that, not
-`failed: provider: api error (500): boom`. Whatever text the answer had
-already streamed is marked with `…`, because it was cut off — the same marker
-a cancelled answer has always carried, now shared by every ending that
+`✗ Failed after 1.2s` — the mark and the word in bold red, the timing detail
+in the muted colour. The mark opens the row once, so a narrow terminal hangs
+the rest of the line under it. A cancellation is a dim `cancelled` row
+followed by `Cancelled after 1.2s`. The reason is never labelled twice: a
+provider that failed says `provider: api error (500): boom`, and the row says
+that, not `failed: provider: api error (500): boom`. Whatever text the answer
+had already streamed is marked with `…`, because it was cut off — the same
+marker a cancelled answer has always carried, now shared by every ending that
 stopped early.
 
 ### Subagents

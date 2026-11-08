@@ -19,7 +19,7 @@ use crate::core::component::{Action, KeyResult, State};
 use crate::core::theme;
 use crate::platform::clipboard;
 
-use super::kinds::{Header, LineKind, Row};
+use super::kinds::{Header, LineKind, Outcome, Row};
 use super::markdown::{CopyBuf, LineCopy, MarkdownStream};
 use super::selection::{SelPos, highlight_line};
 use super::wrap::{
@@ -44,10 +44,6 @@ const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 pub(super) use super::wrap::MAX_STICKY_PROMPT_ROWS;
 const NO_OUTPUT: &str = "(no output)";
 pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
-/// The turn-end line of a turn that failed.
-const FAILED: &str = "Failed";
-/// The turn-end line of a turn that was cancelled.
-const CANCELLED: &str = "Cancelled";
 /// The reason a cancelled turn gives.
 const CANCELLED_REASON: &str = "cancelled";
 
@@ -730,15 +726,15 @@ impl Transcript {
     }
 
     fn push_separator(&mut self) {
-        self.push_turn_end("");
+        self.push_turn_end("", LineKind::Separator);
     }
 
     fn push_elapsed(&mut self, duration_ms: u64) {
         if duration_ms == 0 {
-            self.push_turn_end("");
+            self.push_turn_end("", LineKind::Separator);
             return;
         }
-        self.push_turn_end(&format_elapsed(duration_ms));
+        self.push_turn_end(&format_elapsed(duration_ms), LineKind::Separator);
     }
 
     /// Settles an answer the turn did not finish: the text that arrived is
@@ -766,7 +762,7 @@ impl Transcript {
         &mut self,
         kind: LineKind,
         reason: &str,
-        outcome: &str,
+        outcome: Outcome,
         duration_ms: u64,
     ) {
         self.settle_pending();
@@ -775,22 +771,25 @@ impl Transcript {
     }
 
     /// The turn-end line of a turn that did not end with an answer.
-    fn push_outcome(&mut self, outcome: &str, duration_ms: u64) {
+    fn push_outcome(&mut self, outcome: Outcome, duration_ms: u64) {
         if duration_ms == 0 {
-            self.push_turn_end("");
+            self.push_turn_end("", LineKind::Separator);
             return;
         }
-        self.push_turn_end(&format_outcome(outcome, duration_ms));
+        self.push_turn_end(
+            &format_outcome(outcome.label(), duration_ms),
+            outcome.kind(),
+        );
     }
 
-    fn push_turn_end(&mut self, text: &str) {
+    fn push_turn_end(&mut self, text: &str, kind: LineKind) {
         if matches!(
             self.rows.last().map(|r| r.kind),
             Some(LineKind::Separator) | None
         ) {
             return;
         }
-        self.push_row(LineKind::Separator, text);
+        self.push_row(kind, text);
     }
 
     fn take_stream(&mut self) -> (LineKind, String) {
@@ -1522,14 +1521,19 @@ impl Transcript {
                     self.end_turn_unfinished(
                         LineKind::System,
                         CANCELLED_REASON,
-                        CANCELLED,
+                        Outcome::Cancelled,
                         *duration_ms,
                     );
                 }
                 AgentEvent::Turn(TurnEvent::Failed {
                     error, duration_ms, ..
                 }) => {
-                    self.end_turn_unfinished(LineKind::Error, &error.message, FAILED, *duration_ms);
+                    self.end_turn_unfinished(
+                        LineKind::Error,
+                        &error.message,
+                        Outcome::Failed,
+                        *duration_ms,
+                    );
                 }
             },
             AppEventKind::Shell(ev) => match ev {
