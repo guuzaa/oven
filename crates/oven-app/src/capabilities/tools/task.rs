@@ -199,7 +199,8 @@ impl Tool for TaskTool {
             return Ok(format!("[{name} started in the background. {REPORT_FOLLOWS}]").into());
         }
         // The user writing to the turn ends the wait, not the subagent: the
-        // turn answers them while the subagent works on.
+        // turn answers them while the subagent works on. A chat parked
+        // before the call counts too — the user is already waiting.
         let join = handle.join();
         tokio::pin!(join);
         let outcome = tokio::select! {

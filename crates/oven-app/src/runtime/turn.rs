@@ -60,8 +60,8 @@ impl Runtime {
             }
         };
         // Only what waited through the failed turn is quieted: this runs as
-        // the turn resolves, so a subagent that finishes afterwards finds an
-        // idle agent and wakes it.
+        // the turn resolves, with no await in between, so a subagent that
+        // finishes afterwards finds an idle agent and wakes it.
         if result.is_err() {
             self.shared.inbox().quiet();
         }

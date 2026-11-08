@@ -478,6 +478,7 @@ Config:
 enabled = true        # mount task / task_output / list_models
 max_concurrent = 4    # further spawns wait in `queued`
 max_iters = 60        # provider round trips one subagent may take
+wake_on_finish = true  # a background subagent finishing starts a turn on an idle driver
 ```
 
 `capabilities/mcp/` declares MCP servers in config (`mcps.<id>`, stdio via

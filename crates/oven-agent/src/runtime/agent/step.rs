@@ -91,6 +91,10 @@ impl Agent {
 
         let text = response.text();
         let usage = response.usage;
+        // A reply with no tool call ends the turn, and the inbox is left
+        // unread: a notice that arrived during this step is what starts the
+        // next turn on its own, so the driver answers it rather than
+        // dropping it.
         if !response.has_tool_calls() {
             return Ok(Step {
                 text,

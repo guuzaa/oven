@@ -52,6 +52,9 @@ pub struct NodeInfo {
     pub role: String,
     /// Short human label taken from the request that spawned it.
     pub label: String,
+    /// Whether the subagent reports through the inbox instead of to the
+    /// caller that spawned it. A `task` the user interrupted is moved here,
+    /// so it reports the way one started in the background does.
     pub background: bool,
     /// The agent that spawned it. With one level of nesting this is always
     /// the root agent, but the edge is what lets a caller rebuild the tree.

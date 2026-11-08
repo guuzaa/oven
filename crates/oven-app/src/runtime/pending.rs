@@ -67,6 +67,10 @@ impl TurnInbox {
     /// Keeps the waiting notices for the next turn without starting one for
     /// them: a turn the user cancelled, or one that failed, must not be
     /// followed by a turn nobody asked for.
+    ///
+    /// It quiets every notice parked at the moment it is called, so it
+    /// belongs right after the turn it quiets for: a notice that arrives
+    /// afterwards finds an idle agent and wakes it.
     pub(crate) fn quiet(&self) {
         for parked in self.items().iter_mut() {
             parked.wakes = false;
