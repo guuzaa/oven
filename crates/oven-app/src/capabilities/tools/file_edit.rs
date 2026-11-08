@@ -272,7 +272,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(outcome.detail.as_deref(), Some("- L2→two\n+ L2→2"));
+        assert_eq!(outcome.detail.as_deref(), Some("- 2:two\n+ 2:2"));
     }
 
     #[tokio::test]
@@ -296,7 +296,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             outcome.detail.as_deref(),
-            Some("- L9→b\n- L10→c\n+ L9→B\n+ L10→C\n+ L11→D")
+            Some("- 9:b\n- 10:c\n+ 9:B\n+ 10:C\n+ 11:D")
         );
     }
 
@@ -320,7 +320,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             outcome.detail.as_deref(),
-            Some("- L1→x\n+ L1→X\n- L2→y\n+ L2→Y")
+            Some("- 1:x\n+ 1:X\n- 2:y\n+ 2:Y")
         );
     }
 

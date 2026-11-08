@@ -31,6 +31,7 @@ use std::string::String;
 use std::sync::Arc;
 
 use oven_agent::Tool;
+use oven_host::numbered;
 use oven_proto::AgentError;
 use oven_proto::ToolView;
 use serde_json::Value;
@@ -173,11 +174,6 @@ fn input_str<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
-}
-
-/// A line of a file with its 1-based number, the way `file_read` reports it.
-fn numbered(line: usize, text: &str) -> String {
-    format!("L{line}→{text}")
 }
 
 /// A bare turn for tests that exercise a tool without driving a turn.

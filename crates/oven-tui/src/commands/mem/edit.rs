@@ -61,7 +61,7 @@ mod tests {
     fn a_changed_file_names_itself_and_shows_the_change() {
         assert_eq!(
             report(Path::new(PATH), "one\ntwo\n", "one\nthree\n"),
-            format!("{PATH}\n- two\n+ three")
+            format!("{PATH}\n- 2:two\n+ 2:three")
         );
     }
 }

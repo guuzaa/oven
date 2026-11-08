@@ -2174,7 +2174,7 @@ fn item_row_of(t: &Transcript, row: usize, needle: &str) -> u16 {
 }
 
 const EDIT_SUCCESS: &str = "edited src/main.rs: 1 edit(s), 3 bytes -> 3 bytes";
-const EDIT_LANDED: &str = "- L2→old\n+ L2→new";
+const EDIT_LANDED: &str = "- 2:old\n+ 2:new";
 const EDIT_ERROR: &str = "old_string not found";
 
 #[test]

@@ -13,6 +13,7 @@
 - `oven-tui`: a section the user opened is theirs — it keeps its place as more arrives and survives the folds that follow, so the body they are reading does not vanish under them. The marker of the newest section opens it for good and folds it away again, and the view keeps following the tail while the row grows, so opening a section does not freeze the screen
 - `oven-tui`: a call that changed a file names it in the row's title — `Edited src/main.rs, src/lib.rs` instead of `Edited 2 files`. One file is listed once, however often it was edited, and a call that failed names no file at all
 - `oven mem edit` reports what the editor changed: the file is named on the first line, and the lines that changed follow it, marked `-` and `+` the way a diff reads
+- A line number says its number and nothing else: `12:text`, not `L12:text`. `file_read`, `file_write` and the diff a landed edit reports all speak it, and `oven mem edit` names the line it changed
 - **Breaking:** `oven-agent`: `SubagentSpawner` grew `detach`; `PendingInbox` is an `async_trait` with a defaulted `user_waiting`
 - **Breaking:** `oven-proto`: `NodeInfo::notice` and `READ_RESULT_HINT` are gone; `oven-app` renders the notice with its report
 - **Breaking:** `oven-app`: `Session::append_records` and `Session::overwrite` are crate-private — the format a session file is written in is the store's business, and a caller writing behind its back would write the wrong one. `Session` still opens a file and reads it

@@ -37,7 +37,7 @@ impl Tool for FileReadTool {
     }
     fn description(&self) -> &'static str {
         "Read a UTF-8 text file. Returns selected source lines with their 1-based \
-         line numbers in the format `L<line>→<content>`, along with the file path \
+         line numbers in the format `<line>:<content>`, along with the file path \
          and returned line range. Optionally restrict the range with `offset` and `limit`."
     }
     fn schema(&self) -> Arc<Value> {
@@ -132,7 +132,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(out, "file: r.txt\nlines: 2-3\n\nL2→l2\nL3→l3\n");
+        assert_eq!(out, "file: r.txt\nlines: 2-3\n\n2:l2\n3:l3\n");
     }
 
     #[tokio::test]
@@ -161,7 +161,7 @@ mod tests {
             .run(&json!({"path": "r.txt"}), &test_context())
             .await
             .unwrap();
-        assert_eq!(out, "file: r.txt\nlines: 1-2\n\nL1→one\nL2→two");
+        assert_eq!(out, "file: r.txt\nlines: 1-2\n\n1:one\n2:two");
     }
 
     #[tokio::test]
@@ -174,6 +174,6 @@ mod tests {
             .run(&json!({"path": "r.txt", "offset": 2}), &test_context())
             .await
             .unwrap();
-        assert_eq!(out, "file: r.txt\nlines: 2-4\n\nL2→l2\nL3→l3\nL4→l4\n");
+        assert_eq!(out, "file: r.txt\nlines: 2-4\n\n2:l2\n3:l3\n4:l4\n");
     }
 }

@@ -139,7 +139,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             content,
-            "file: hello.txt\nlines: 1-2\n\nL1→line one\nL2→line two"
+            "file: hello.txt\nlines: 1-2\n\n1:line one\n2:line two"
         );
     }
 }

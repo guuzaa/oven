@@ -377,7 +377,8 @@ command context stays unaware of memory.
 the reading and writing, by opening a `MemoryStore` over `dirs::memory_roots`.
 `oven mem edit` opens the memory file in `$VISUAL` or `$EDITOR` and reports
 what the editor changed: the file is named on the first line and the lines
-that changed follow it, marked `-` and `+` the way a diff reads.
+that changed follow it, marked `-` and `+` the way a diff reads, each with
+the line it sits on.
 
 `/memory` and `oven mem` are the human's levers for the whole feature, which
 is why they ship in the same phase as the tools rather than after them.
