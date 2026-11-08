@@ -10,22 +10,37 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
     env:
       BUILD_TARGET: ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
-          - loongarch64-unknown-linux-musl
-          - aarch64-apple-darwin
-          - x86_64-apple-darwin
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-musl
+          - os: ubuntu-24.04
+            target: loongarch64-unknown-linux-musl
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            zig_target: x86_64-unknown-linux-gnu.2.28
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            zig_target: aarch64-unknown-linux-gnu.2.28
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94.0"
+          targets: ${{ matrix.target }}
 
       - name: Cargo cache
         uses: actions/cache@v5
@@ -35,23 +50,28 @@ jobs:
           restore-keys: |
               release-${{ matrix.target }}-
 
-      - name: Build libc target
-        if: endsWith(matrix.target, '-linux-gnu')
-        uses: zijiren233/cargo-cross@v1
+      - name: Install Zig
+        if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
         with:
-          toolchain: "1.94.0"
-          profile: release
-          targets: ${{ matrix.target }}
-          crt-static: false
-          glibc-version: "2.28"
+          version: "0.17.1"
+          cache-key: ${{ matrix.target }}
 
-      - name: Build non-libc target
-        if: ${{ !endsWith(matrix.target, '-linux-gnu') }}
-        uses: zijiren233/cargo-cross@v1
+      - name: Install cargo-zigbuild
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
         with:
-          toolchain: "1.94.0"
-          profile: release
-          targets: ${{ matrix.target }}
+          tool: cargo-zigbuild
+
+      - name: Build for Linux
+        if: runner.os == 'Linux'
+        env:
+          ZIG_TARGET: ${{ matrix.zig_target || matrix.target }}
+        run: cargo zigbuild --release --target "$ZIG_TARGET"
+
+      - name: Build for macOS
+        if: runner.os == 'macOS'
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
