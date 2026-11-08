@@ -7,6 +7,7 @@ rust-version = { workspace = true }
 
 [dependencies]
 ignore = { workspace = true }
+similar = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "sync", "time", "process"] }
 tokio-util = { workspace = true }

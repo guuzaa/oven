@@ -49,7 +49,7 @@ documented in [`oven-proto.md`](./oven-proto.md).
 | `oven-llm` | `Message`, `Usage`, provider I/O |
 | `oven-proto` | the protocol vocabulary: `Command`, `AppEvent`, `AppState`, `AgentEvent`, and the nouns they carry — a leaf crate on `oven-llm` and serde alone |
 | `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, the history buffer and its projection rules, the `SubagentSpawner` protocol, provider retry decoration |
-| `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation |
+| `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation, line diffs |
 | `oven-mem` | Durable memory: `Memory`, limits, id validation, file format, `MemoryStore`, catalog rendering |
 | `oven-app` | `App`, `AppBuilder`, the app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install |
 | `oven-tui` | render events and state; send commands; `oven mem` |
