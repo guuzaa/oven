@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.5] - 2026-11-08
 
 ### Added
 - A foreground subagent no longer holds the conversation: when the user writes to a turn that is waiting on `task`, the subagent moves to the background and `task` returns, so the turn answers the user while the subagent works on. `SubagentSpawner::detach` moves it, and `PendingInbox::user_waiting` / `TurnContext::user_waiting` say when the user has written
@@ -16,9 +16,12 @@
 - **Breaking:** `oven-agent`: `SubagentSpawner` grew `detach`; `PendingInbox` is an `async_trait` with a defaulted `user_waiting`
 - **Breaking:** `oven-proto`: `NodeInfo::notice` and `READ_RESULT_HINT` are gone; `oven-app` renders the notice with its report
 - **Breaking:** `oven-app`: `Session::append_records` and `Session::overwrite` are crate-private — the format a session file is written in is the store's business, and a caller writing behind its back would write the wrong one. `Session` still opens a file and reads it
+- `oven-llm`: a request with nothing to merge serializes straight to bytes — the body went through a `serde_json::Value` tree to be encoded, merged and encoded again, and the tree bought nothing when no `provider_options` and no vendor field had to go in. The keys keep the order the wire struct declares them, and the JSON is the same
+- `oven-tui`: a frame paints the rows it shows without cloning every visible line — the rows are borrowed, and only the ones the shimmer, the hover or the selection touch are copied. A live body counts the head it does not show instead of wrapping all of it, so a streamed delta builds only the rows on screen
 
 ### Fixed
 - A prompt lands after the text that was streaming: `TurnEvent::Prompt` appended its row without flushing the stream first, so a pending text would land after the question it belongs to
+- The status row shows the cache hit rate with one decimal: `65.8%`, not `65%`, so a cache that answered nearly everything stays distinguishable from one that answered a little less. The no-input case still hides the segment
 
 ## [0.1.4] - 2026-11-03
 
