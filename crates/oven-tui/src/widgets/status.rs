@@ -237,7 +237,7 @@ impl StatusBar {
         }
         let context = self.context_label()?;
         let label = match cache_hit_percent(&self.usage) {
-            Some(hit) => format!("{context} · cache {hit}%"),
+            Some(hit) => format!("{context} · cache {hit:.1}%"),
             None => context,
         };
         Some((label, gray))
@@ -352,10 +352,8 @@ fn context_percent(tokens: u32, window: Option<u32>) -> Option<u32> {
 /// Share of the last turn's input tokens that the cache answered — the reads
 /// are already counted among the input tokens; `None` while no input token has
 /// been recorded.
-fn cache_hit_percent(u: &Usage) -> Option<u32> {
-    (u.input_tokens > 0).then(|| {
-        u32::try_from(u64::from(u.cache_read_tokens) * 100 / u64::from(u.input_tokens)).unwrap_or(0)
-    })
+fn cache_hit_percent(u: &Usage) -> Option<f64> {
+    (u.input_tokens > 0).then(|| f64::from(u.cache_read_tokens) * 100.0 / f64::from(u.input_tokens))
 }
 
 fn human(n: u32) -> String {
@@ -380,10 +378,10 @@ mod tests {
 
     const MODEL: &str = "deepseek-chat";
     const ROOT: &str = "rust/oven";
-    const CTX: &str = "ctx 42% · cache 65%";
+    const CTX: &str = "ctx 42% · cache 65.8%";
     /// The same bar with no context window known: the count stands in for the
     /// share.
-    const COUNTED: &str = "ctx 2.0k · cache 65%";
+    const COUNTED: &str = "ctx 2.0k · cache 65.8%";
     const SHORT_REPLY: &str = "current model: gpt-4o";
 
     fn usage() -> Usage {
@@ -526,9 +524,10 @@ mod tests {
             cache_read_tokens: cache,
             reasoning_tokens: 0,
         };
-        assert_eq!(cache_hit_percent(&hit(100, 0)), Some(0));
-        assert_eq!(cache_hit_percent(&hit(100, 50)), Some(50));
-        assert_eq!(cache_hit_percent(&hit(100, 100)), Some(100));
+        assert_eq!(cache_hit_percent(&hit(100, 0)), Some(0.0));
+        assert_eq!(cache_hit_percent(&hit(100, 50)), Some(50.0));
+        assert_eq!(cache_hit_percent(&hit(100, 100)), Some(100.0));
+        assert_eq!(cache_hit_percent(&hit(1000, 789)), Some(78.9));
         assert_eq!(cache_hit_percent(&hit(0, 50)), None);
     }
 
