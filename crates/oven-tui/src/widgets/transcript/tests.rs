@@ -361,7 +361,7 @@ fn a_failed_tool_leaves_its_name_out_of_the_activity_title() {
     ));
     t.on_event(&tool_end(2, false, "unknown tool: edit"));
 
-    assert_eq!(t.rows[0].text, "Edited src/main.rs, 1 failed");
+    assert_eq!(t.rows[0].text, "Edited 1 file, 1 failed");
 }
 
 #[test]
@@ -850,7 +850,7 @@ fn edits_across_steps_sum_in_the_activity_title() {
     t.on_event(&tool_end(2, true, EDIT_SUCCESS));
 
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Edited src/main.rs, src/lib.rs");
+    assert_eq!(t.rows[0].text, "Edited 2 files");
     assert_eq!(
         item_titles(&t, 0),
         vec![
@@ -906,7 +906,7 @@ fn tool_steps_without_thinking_stay_one_activity() {
             LineKind::Separator
         ]
     );
-    assert_eq!(t.rows[1].text, "Edited src/main.rs, src\\lib.rs");
+    assert_eq!(t.rows[1].text, "Edited 2 files");
     assert_eq!(
         item_titles(&t, 1),
         vec![
@@ -931,10 +931,7 @@ fn blank_text_between_tool_steps_does_not_split_the_activity() {
             ],
             "gap {gap:?}"
         );
-        assert_eq!(
-            t.rows[1].text, "Edited src/main.rs, src\\lib.rs",
-            "gap {gap:?}"
-        );
+        assert_eq!(t.rows[1].text, "Edited 2 files", "gap {gap:?}");
         assert_eq!(t.rows[2].text, "done", "gap {gap:?}");
     }
 }
@@ -958,9 +955,9 @@ fn visible_text_between_tool_steps_still_splits_the_activity() {
         row_texts(&t),
         vec![
             "fix it",
-            "Edited src/main.rs",
+            "Edited 1 file",
             ASIDE,
-            "Edited src\\lib.rs",
+            "Edited 1 file",
             "done",
             ""
         ]
@@ -1000,7 +997,7 @@ fn seeded_blank_text_between_edits_stays_one_activity() {
             LineKind::Separator
         ]
     );
-    assert_eq!(t.rows[1].text, "Edited src/main.rs, src\\lib.rs");
+    assert_eq!(t.rows[1].text, "Edited 2 files");
 }
 
 #[test]
@@ -1323,7 +1320,7 @@ fn next_message_collapses_previous_details() {
     t.on_event(&tool_end(1, true, "edited"));
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
     assert!(t.rows[0].collapsible.as_ref().unwrap().is_expanded());
-    assert_eq!(t.rows[0].text, "Edited src/main.rs");
+    assert_eq!(t.rows[0].text, "Edited 1 file");
 
     t.on_event(&text_delta("done"));
     t.on_event(&completed());
@@ -2034,7 +2031,7 @@ fn live_diff_burst_shows_only_the_newest_edit() {
         "the burst closes once the turn moves on"
     );
 
-    let row = wrapped_row_of(&t, "Edited src/f01.rs");
+    let row = wrapped_row_of(&t, "Edited 10 files");
     double_click(&mut t, 2, row);
     let has = |needle: &str| {
         t.wrapped
@@ -2213,7 +2210,7 @@ fn file_edit_aggregates_with_a_nested_diff() {
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
 
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Edited src/main.rs");
+    assert_eq!(t.rows[0].text, "Edited 1 file");
     let burst = t.rows[0].collapsible.as_ref().expect("burst detail");
     assert!(burst.is_expanded(), "the edit shows while its turn runs");
     assert_eq!(burst.body(), "");
@@ -2262,7 +2259,7 @@ fn file_write_aggregates_with_a_nested_diff() {
     t.on_event(&tool_end(2, true, "wrote 17 bytes to out.txt"));
 
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Wrote out.txt");
+    assert_eq!(t.rows[0].text, "Wrote 1 file");
     assert_eq!(
         diff_items(&t),
         [(
@@ -2284,7 +2281,7 @@ fn mixed_burst_keeps_calls_in_invocation_order() {
     t.on_event(&tool_end(1, true, EDIT_SUCCESS));
     t.on_event(&tool_end(2, true, "ok"));
 
-    assert_eq!(t.rows[0].text, "Edited src/main.rs, Ran 1 command");
+    assert_eq!(t.rows[0].text, "Edited 1 file, Ran 1 command");
     assert_eq!(
         diff_items(&t),
         [("Edited src/main.rs".to_string(), "- old\n+ new".to_string())]
@@ -2324,7 +2321,7 @@ fn seed_file_edit_aggregates_with_a_nested_diff() {
         Message::tool_result("e1", EDIT_SUCCESS, false),
     ]);
     assert_eq!(kinds_of(&t), vec![LineKind::Activity]);
-    assert_eq!(t.rows[0].text, "Edited src/main.rs");
+    assert_eq!(t.rows[0].text, "Edited 1 file");
     assert_eq!(
         diff_items(&t),
         [("Edited src/main.rs".to_string(), "- old\n+ new".to_string())]
@@ -2346,7 +2343,7 @@ fn diff_double_click_toggles_burst_detail() {
     };
     assert!(!has(&t), "the burst collapses once the turn moves on");
 
-    let row = wrapped_row_of(&t, "Edited src/main.rs");
+    let row = wrapped_row_of(&t, "Edited 1 file");
     double_click(&mut t, 2, row);
     assert!(
         t.rows[0]
@@ -2402,7 +2399,7 @@ fn nested_item_double_click_toggles_only_its_own_diff() {
     };
     assert!(!has("- old", &t) && !has("- libold", &t));
 
-    let row = wrapped_row_of(&t, "Edited src/main.rs, src/lib.rs");
+    let row = wrapped_row_of(&t, "Edited 2 files");
     double_click(&mut t, 2, row);
     assert!(
         !has("- old", &t) && !has("- libold", &t),
@@ -2427,7 +2424,7 @@ fn nested_item_double_click_toggles_only_its_own_diff() {
     double_click(&mut t, 2, row);
     assert!(has("- old", &t) && has("- libold", &t));
 
-    let row = wrapped_row_of(&t, "Edited src/main.rs, src/lib.rs");
+    let row = wrapped_row_of(&t, "Edited 2 files");
     double_click(&mut t, 2, row);
     assert!(!has("- old", &t) && !has("- libold", &t), "the burst folds");
     assert_eq!(t.rows[0].headers.len(), 1, "the items are gone");

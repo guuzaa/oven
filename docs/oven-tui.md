@@ -417,8 +417,6 @@ thought shows its whole text.
 Tool calls that declare `view.collapse` are grouped into one `ToolBurst` row
 (`transcript/tools.rs`) whose title counts by kind — `Searched 3 patterns, Read
 1 file, 1 failed` — with the individual call summaries as the collapsed body.
-A call that changed a file names it instead of counting it: the title reads
-`Edited src/main.rs, src/lib.rs`, one file once however often it was edited.
 The row is upserted in place as calls finish, so a burst does not spam the log.
 Non-collapsing tools get their own row, plus a `Result` row on failure.
 While a call is in flight its row shimmers the same way: `live_tool_lines`

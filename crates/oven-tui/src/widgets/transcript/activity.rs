@@ -323,7 +323,7 @@ mod tests {
         activity.push_thinking("Thought for 1s", "again", false);
         activity.start_call("2".into(), "Edited src/b.rs", Some("- x\n+ y"));
 
-        assert_eq!(activity.project().0, "Edited src/a.rs, src/b.rs");
+        assert_eq!(activity.project().0, "Edited 2 files");
     }
 
     #[test]

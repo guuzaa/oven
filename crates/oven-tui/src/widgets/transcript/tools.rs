@@ -35,43 +35,20 @@ impl From<&str> for ToolKind {
 }
 
 impl ToolKind {
-    /// The word a call of this kind leads with.
-    fn verb(&self) -> &str {
-        match self {
-            Self::Searched => "Searched",
-            Self::Read => "Read",
-            Self::Ran => "Ran",
-            Self::Edited => "Edited",
-            Self::Wrote => "Wrote",
-            Self::Asked => "Asked",
-            Self::Fetched => "Fetched",
-            Self::Other(action) => action,
-        }
-    }
-
-    /// Whether the calls of this kind name the file they touched.
-    fn names_files(&self) -> bool {
-        matches!(self, Self::Edited | Self::Wrote)
-    }
-
     fn phrase(&self, count: usize) -> String {
-        let noun = match self {
-            Self::Searched => "pattern",
-            Self::Read => "file",
-            Self::Ran => "command",
-            Self::Edited | Self::Wrote => "file",
-            Self::Asked => "question",
-            Self::Fetched => "page",
-            Self::Other(_) => {
-                return if count == SINGLE_CALL {
-                    self.verb().to_owned()
-                } else {
-                    format!("{} ×{count}", self.verb())
-                };
-            }
+        let (verb, noun) = match self {
+            Self::Searched => ("Searched", "pattern"),
+            Self::Read => ("Read", "file"),
+            Self::Ran => ("Ran", "command"),
+            Self::Edited => ("Edited", "file"),
+            Self::Wrote => ("Wrote", "file"),
+            Self::Asked => ("Asked", "question"),
+            Self::Fetched => ("Fetched", "page"),
+            Self::Other(action) if count == SINGLE_CALL => return action.clone(),
+            Self::Other(action) => return format!("{action} ×{count}"),
         };
         let suffix = if count == SINGLE_CALL { "" } else { "s" };
-        format!("{} {count} {noun}{suffix}", self.verb())
+        format!("{verb} {count} {noun}{suffix}")
     }
 }
 
@@ -84,7 +61,6 @@ struct Call {
     label: String,
     diff: Option<String>,
     error: Option<String>,
-    failed: bool,
 }
 
 #[derive(Default)]
@@ -114,7 +90,6 @@ impl ToolBurst {
             label,
             diff: detail.map(str::to_string),
             error: None,
-            failed: false,
         });
         idx
     }
@@ -144,7 +119,6 @@ impl ToolBurst {
         let Some(call) = self.calls.get_mut(idx) else {
             return true;
         };
-        call.failed = failed;
         if let Some(detail) = detail.filter(|text| !text.is_empty()) {
             call.diff = Some(detail.to_string());
         }
@@ -173,42 +147,12 @@ impl ToolBurst {
         let mut parts: Vec<String> = self
             .groups
             .iter()
-            .map(|group| self.group_title(group))
+            .map(|group| group.kind.phrase(group.count))
             .collect();
         if self.failed > 0 {
             parts.push(format!("{} {FAILED_LABEL}", self.failed));
         }
         parts.join(TITLE_SEPARATOR)
-    }
-
-    /// The title of one group of calls: the files it changed when it changed
-    /// files, and how much of everything else it did.
-    fn group_title(&self, group: &ToolGroup) -> String {
-        if !group.kind.names_files() {
-            return group.kind.phrase(group.count);
-        }
-        let files = self.changed_files(&group.kind);
-        if files.is_empty() {
-            return group.kind.phrase(group.count);
-        }
-        format!("{} {}", group.kind.verb(), files.join(", "))
-    }
-
-    /// The files a kind of call changed, in the order it changed them and
-    /// without a repeat: a file edited twice is one file.
-    fn changed_files(&self, kind: &ToolKind) -> Vec<&str> {
-        let mut files: Vec<&str> = Vec::new();
-        for call in &self.calls {
-            if call.failed || &ToolKind::from(action_of(&call.label)) != kind {
-                continue;
-            }
-            if let Some(file) = file_of(&call.label)
-                && !files.contains(&file)
-            {
-                files.push(file);
-            }
-        }
-        files
     }
 
     /// Whether any call of the burst has yet to report a result.
@@ -264,13 +208,6 @@ fn action_of(label: &str) -> &str {
     label.split_once(' ').map_or(label, |(action, _)| action)
 }
 
-/// The file a call names, if it names one: the rest of its label.
-fn file_of(label: &str) -> Option<&str> {
-    let (_, rest) = label.split_once(' ')?;
-    let rest = rest.trim();
-    (!rest.is_empty()).then_some(rest)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Section, ToolBurst};
@@ -323,7 +260,7 @@ mod tests {
         burst.start("1".into(), "Edited src/main.rs", Some("- old\n+ new"));
         burst.start("2".into(), "Wrote out.txt", Some("+ hi"));
         assert!(burst.finish("1", None, false, None));
-        assert_eq!(burst.title(), "Edited src/main.rs, Wrote out.txt");
+        assert_eq!(burst.title(), "Edited 1 file, Wrote 1 file");
         assert_eq!(
             titles(&burst.sections()),
             ["item:Edited src/main.rs", "item:Wrote out.txt"]
@@ -340,25 +277,6 @@ mod tests {
             panic!("expected one item with a detail");
         };
         assert!(!detail.is_expanded(), "the reader opens the diff");
-    }
-
-    #[test]
-    fn a_file_edited_twice_is_listed_once() {
-        let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Edited src/main.rs", Some("- old\n+ new"));
-        burst.start("2".into(), "Edited src/main.rs", Some("- newer\n+ newer"));
-        burst.start("3".into(), "Edited src/lib.rs", Some("- x\n+ y"));
-
-        assert_eq!(burst.title(), "Edited src/main.rs, src/lib.rs");
-    }
-
-    #[test]
-    fn a_failed_edit_leaves_no_file_in_the_title() {
-        let mut burst = ToolBurst::default();
-        burst.start("1".into(), "Edited src/main.rs", Some("- old\n+ new"));
-        assert!(burst.finish("1", None, true, Some("old_string not found")));
-
-        assert_eq!(burst.title(), "1 failed");
     }
 
     #[test]
@@ -423,7 +341,7 @@ mod tests {
         burst.start("3".into(), "edit", None);
         assert!(burst.finish("3", None, true, Some("unknown tool: edit")));
 
-        assert_eq!(burst.title(), "Edited src/main.rs, 2 failed");
+        assert_eq!(burst.title(), "Edited 1 file, 2 failed");
     }
 
     #[test]
@@ -433,7 +351,7 @@ mod tests {
         burst.start("2".into(), "Edited", None);
         assert!(burst.finish("2", None, true, Some("unknown tool: Edited")));
 
-        assert_eq!(burst.title(), "Edited src/main.rs, 1 failed");
+        assert_eq!(burst.title(), "Edited 1 file, 1 failed");
     }
 
     #[test]
