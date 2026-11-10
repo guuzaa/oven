@@ -236,8 +236,8 @@ impl StatusBar {
             return Some((COMPACTING.to_string(), theme::accent()));
         }
         let context = self.context_label()?;
-        let label = match cache_hit_percent(&self.usage) {
-            Some(hit) => format!("{context} · cache {hit:.1}%"),
+        let label = match cache_hit_tenths(&self.usage) {
+            Some(tenths) => format!("{context} · cache {}.{}%", tenths / 10, tenths % 10),
             None => context,
         };
         Some((label, gray))
@@ -349,11 +349,12 @@ fn context_percent(tokens: u32, window: Option<u32>) -> Option<u32> {
     (tokens > 0).then(|| u32::try_from(u64::from(tokens) * 100 / u64::from(window)).unwrap_or(0))
 }
 
-/// Share of the last turn's input tokens that the cache answered — the reads
-/// are already counted among the input tokens; `None` while no input token has
-/// been recorded.
-fn cache_hit_percent(u: &Usage) -> Option<f64> {
-    (u.input_tokens > 0).then(|| f64::from(u.cache_read_tokens) * 100.0 / f64::from(u.input_tokens))
+/// Share of the last turn's input tokens that the cache answered, in tenths
+/// of a percent and truncated: a hit short of perfect must not read as a
+/// full 100%. The reads are already counted among the input tokens; `None`
+/// while no input token has been recorded.
+fn cache_hit_tenths(u: &Usage) -> Option<u64> {
+    (u.input_tokens > 0).then(|| u64::from(u.cache_read_tokens) * 1000 / u64::from(u.input_tokens))
 }
 
 fn human(n: u32) -> String {
@@ -378,10 +379,10 @@ mod tests {
 
     const MODEL: &str = "deepseek-chat";
     const ROOT: &str = "rust/oven";
-    const CTX: &str = "ctx 42% · cache 65.8%";
+    const CTX: &str = "ctx 42% · cache 65.7%";
     /// The same bar with no context window known: the count stands in for the
     /// share.
-    const COUNTED: &str = "ctx 2.0k · cache 65.8%";
+    const COUNTED: &str = "ctx 2.0k · cache 65.7%";
     const SHORT_REPLY: &str = "current model: gpt-4o";
 
     fn usage() -> Usage {
@@ -390,6 +391,25 @@ mod tests {
             output_tokens: 56,
             cache_read_tokens: 789,
             reasoning_tokens: 10,
+        }
+    }
+
+    /// A turn whose prompt came from the cache almost in full: 74 of 183_114
+    /// input tokens were fresh, so the hit is 99.96% and must not read as a
+    /// full 100%.
+    const NEAR_PERFECT: Usage = Usage {
+        input_tokens: 183_114,
+        output_tokens: 109,
+        cache_read_tokens: 183_040,
+        reasoning_tokens: 0,
+    };
+
+    fn hit(input: u32, cache: u32) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: 0,
+            cache_read_tokens: cache,
+            reasoning_tokens: 0,
         }
     }
 
@@ -517,18 +537,23 @@ mod tests {
 
     #[test]
     fn cache_hit_is_the_share_of_input_tokens_read_from_cache() {
-        assert_eq!(cache_hit_percent(&Usage::default()), None);
-        let hit = |input: u32, cache: u32| Usage {
-            input_tokens: input,
-            output_tokens: 0,
-            cache_read_tokens: cache,
-            reasoning_tokens: 0,
-        };
-        assert_eq!(cache_hit_percent(&hit(100, 0)), Some(0.0));
-        assert_eq!(cache_hit_percent(&hit(100, 50)), Some(50.0));
-        assert_eq!(cache_hit_percent(&hit(100, 100)), Some(100.0));
-        assert_eq!(cache_hit_percent(&hit(1000, 789)), Some(78.9));
-        assert_eq!(cache_hit_percent(&hit(0, 50)), None);
+        assert_eq!(cache_hit_tenths(&Usage::default()), None);
+        assert_eq!(cache_hit_tenths(&hit(100, 0)), Some(0));
+        assert_eq!(cache_hit_tenths(&hit(100, 50)), Some(500));
+        assert_eq!(cache_hit_tenths(&hit(100, 100)), Some(1000));
+        assert_eq!(cache_hit_tenths(&hit(1000, 789)), Some(789));
+        assert_eq!(cache_hit_tenths(&hit(0, 50)), None);
+    }
+
+    #[test]
+    fn a_near_perfect_hit_does_not_read_as_a_full_one() {
+        assert_eq!(cache_hit_tenths(&NEAR_PERFECT), Some(999));
+
+        let bar = StatusBar::new(MODEL, Path::new("/home/code/rust/oven"), NEAR_PERFECT)
+            .with_context(183_223, Some(200_000));
+        let rendered = row(120, &bar, &State::new());
+        assert!(rendered.contains("cache 99.9%"), "{rendered}");
+        assert!(!rendered.contains("cache 100.0%"), "{rendered}");
     }
 
     #[test]
