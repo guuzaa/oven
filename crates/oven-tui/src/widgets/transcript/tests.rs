@@ -3832,6 +3832,29 @@ fn seed_shell_envelope_renders_command_and_output() {
 }
 
 #[test]
+fn a_shell_result_shows_its_colour_codes_as_colours() {
+    let mut t = Transcript::new();
+    t.push_shell_output("\x1b[31mred\x1b[0m plain", true);
+    ready(&mut t, Rect::new(0, 0, 40, 5));
+    let body = &t.wrapped[0];
+    let text: String = body.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "   red plain");
+    assert_eq!(body.spans[1].style.fg, Some(Color::Red));
+    assert!(body.spans.iter().all(|s| !s.content.contains('\x1b')));
+}
+
+#[test]
+fn a_shell_result_without_colour_codes_stays_plain() {
+    let mut t = Transcript::new();
+    t.push_shell_output("a.rs", true);
+    ready(&mut t, Rect::new(0, 0, 40, 5));
+    let body = &t.wrapped[0];
+    let text: String = body.spans.iter().map(|s| s.content.as_ref()).collect();
+    assert_eq!(text, "   a.rs");
+    assert_eq!(body.spans[1].style, Style::default());
+}
+
+#[test]
 fn seed_does_not_treat_bang_user_text_as_shell() {
     let mut t = Transcript::new();
     t.seed(&[Message::user_text("! ls")]);

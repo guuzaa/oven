@@ -10,6 +10,7 @@ name = "oven"
 path = "src/bin/oven-cli.rs"
 
 [dependencies]
+ansi-to-tui = { workspace = true }
 oven-llm = { workspace = true }
 oven-app = { workspace = true }
 oven-host = { workspace = true }

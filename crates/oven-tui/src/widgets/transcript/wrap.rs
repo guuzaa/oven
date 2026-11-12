@@ -15,6 +15,7 @@ use super::kinds::{
     COLLAPSED_MARKER, EXPANDED_MARKER, Header, LINE_INDENT, LineKind, MESSAGE_INDENT,
 };
 use super::markdown::{LineCopy, MdLine, layout_table, render_markdown};
+use crate::core::shell;
 use crate::core::theme;
 
 pub(super) struct Buf<'a> {
@@ -802,9 +803,13 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
     let first_prefix = line_prefix(kind);
     let rest_prefix = continuation_prefix(kind, &first_prefix);
     let style = kind.style();
+    let output = match kind {
+        LineKind::ShellResult(_) => Some(shell::output_lines(text)),
+        _ => None,
+    };
     let mut lines = Vec::new();
     let mut prev_blank = false;
-    for part in text.lines() {
+    for (index, part) in text.lines().enumerate() {
         let blank = part.trim().is_empty();
         if blank && (prev_blank || lines.is_empty()) {
             continue;
@@ -816,17 +821,21 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
             &rest_prefix
         };
         let line_style = diff_line_style(part, style, kind);
-        let body = if blank {
-            String::new()
+        let body_spans = if let Some(parsed) = &output {
+            parsed.get(index).cloned().unwrap_or_default()
         } else {
-            part.to_string()
-        };
-        let body_spans = match kind {
-            LineKind::Diff | LineKind::Shell | LineKind::Separator | LineKind::Error => {
-                vec![Span::styled(body, line_style)]
+            let body = if blank {
+                String::new()
+            } else {
+                part.to_string()
+            };
+            match kind {
+                LineKind::Diff | LineKind::Shell | LineKind::Separator | LineKind::Error => {
+                    vec![Span::styled(body, line_style)]
+                }
+                LineKind::Failed => failure_spans(&body),
+                _ => vec![Span::raw(body)],
             }
-            LineKind::Failed => failure_spans(&body),
-            _ => vec![Span::raw(body)],
         };
         let mut spans = vec![Span::styled(head.clone(), line_style)];
         spans.extend(body_spans);

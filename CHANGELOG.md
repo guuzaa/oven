@@ -5,6 +5,9 @@
 ### Changed
 - `oven-tui`: a failed turn ends in red — `✗ Failed after 1.2s`, the mark and the word in bold red, the timing detail in the muted colour, and the reason the turn failed red all the way down. The mark opens the row once, so a narrow terminal hangs the rest of the line under it. A cancelled turn keeps the dim line it had
 
+### Fixed
+- `oven-tui`: a shell result shows the colours the command printed — the escape codes become styles instead of text on the screen, so a `git diff --color` reads the way it did in the terminal, and a copied selection carries no escape codes
+
 ## [0.1.5] - 2026-11-08
 
 ### Added

@@ -27,6 +27,7 @@ oven-llm = { path = "./crates/oven-llm" }
 
 # External dependencies
 anyhow = "1"
+ansi-to-tui = "8"
 async-trait = "0.1"
 eventsource-stream = "=0.2.3"
 proptest = "1"
