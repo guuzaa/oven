@@ -394,7 +394,11 @@ an open tool burst — renders its newest section, so a growing row cannot scrol
 older rows out of the view. A thought shows the line it is on, one row wide: a
 line too wide for the terminal is cut at the front and marked with an ellipsis,
 and the next line the model writes replaces it. A call shows its label and the
-failure under it, so a failed call still names the command it ran. A thought is
+failure under it, so a failed call still names the command it ran. Its label is
+one row wide as well: the arguments of a call are one long line as often as
+not, so a label too wide for the terminal is cut at the end and marked with an
+ellipsis, and the failure still shows under it. The whole label waits for the
+turn to end: opening the row afterwards shows the command in full. A thought is
 never released in full while the turn runs — not in the newest section, not in
 a section the user opened, not in a row the user opened; it shows the line it
 is on and waits for the turn to end for the rest. A diff waits folded: the

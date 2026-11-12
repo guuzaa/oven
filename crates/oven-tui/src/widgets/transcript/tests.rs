@@ -4946,3 +4946,40 @@ fn a_turn_that_stopped_early_marks_the_partial_answer_as_cut_off() {
         "an answer the turn did not finish is marked as cut off"
     );
 }
+
+#[test]
+fn a_call_whose_arguments_do_not_fit_keeps_its_row_one_line_tall() {
+    let mut t = Transcript::new();
+    let command = format!("echo {}", "x".repeat(400));
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": command }),
+    ));
+    wide(&mut t);
+
+    let rows: Vec<String> = t.wrapped.iter().map(line_text).collect();
+    assert_eq!(rows.len(), 2, "the header and the label: {rows:?}");
+    assert!(rows[1].contains("Ran echo xxxx"), "{rows:?}");
+    assert!(rows[1].ends_with('…'), "the label is cut: {rows:?}");
+}
+
+#[test]
+fn the_whole_command_shows_once_the_turn_is_over() {
+    let mut t = Transcript::new();
+    let command = format!("echo {}", "x".repeat(400));
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": command }),
+    ));
+    t.on_event(&completed());
+    ready(&mut t, Rect::new(0, 0, 80, 24));
+    toggle_row(&mut t, 0);
+
+    let rows: Vec<String> = t.wrapped.iter().map(line_text).collect();
+    assert!(
+        rows.iter().any(|row| row.contains(&"x".repeat(40))),
+        "the command shows in full: {rows:?}"
+    );
+}

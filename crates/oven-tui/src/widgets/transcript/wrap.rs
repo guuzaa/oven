@@ -638,7 +638,7 @@ fn wrap_live_body(
 }
 
 /// The text of a section of a growing row: a thought shows the line it is
-/// on, a call shows its label and the failure under it.
+/// on, a call shows its label and the failure under it, one row each.
 fn wrap_live_text_into(
     buf: &mut Buf<'_>,
     live: Live,
@@ -647,11 +647,16 @@ fn wrap_live_text_into(
     depth: usize,
     width: usize,
 ) {
+    let columns = body_columns(width, depth);
     if live.thought {
-        let line = clip_tail(live_line(text), body_columns(width, depth));
+        let line = clip_tail(live_line(text), columns);
         wrap_text_into(buf, std::iter::once(line.as_str()), kind, depth, width);
     } else {
-        wrap_text_into(buf, text.lines(), kind, depth, width);
+        // The arguments of a call are one long line as often as not, and a
+        // row that fills the screen hides the answer under it. A label shows
+        // its front, where the action it names is.
+        let lines: Vec<String> = text.lines().map(|line| clip_head(line, columns)).collect();
+        wrap_text_into(buf, lines.iter().map(String::as_str), kind, depth, width);
     }
 }
 
@@ -704,6 +709,29 @@ fn clip_tail(text: &str, columns: usize) -> String {
         Some(0) => text.to_string(),
         Some(start) => format!("{ELLIPSIS}{}", &text[start..]),
     }
+}
+
+/// The head of `text` that fits in `columns`, with an ellipsis where text was
+/// cut: a label shows the action it names, which sits at its front.
+fn clip_head(text: &str, columns: usize) -> String {
+    if columns == 0 || text.is_empty() {
+        return text.to_string();
+    }
+    let budget = columns - 1;
+    let mut width = 0;
+    let mut end = 0;
+    for (idx, ch) in text.char_indices() {
+        let char_width = ch.width().unwrap_or(0);
+        if width + char_width > budget {
+            break;
+        }
+        width += char_width;
+        end = idx + ch.len_utf8();
+    }
+    if end == text.len() {
+        return text.to_string();
+    }
+    format!("{}{ELLIPSIS}", &text[..end])
 }
 
 /// Columns a body part may use. A zero width keeps a whole line on one row,
@@ -1320,6 +1348,28 @@ mod tests {
         let rows = render_call(vec![Section::Text("Ran ls\nno such file".to_string())], 40);
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(rows[0].contains("Ran ls"), "{rows:?}");
+        assert!(rows[1].contains("no such file"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_call_whose_label_does_not_fit_stays_one_row() {
+        let rows = render_call(vec![Section::Text(format!("Ran {}", "x".repeat(200)))], 40);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("Ran xxx"), "{rows:?}");
+        assert!(rows[0].contains(ELLIPSIS), "{rows:?}");
+    }
+
+    #[test]
+    fn a_call_whose_label_does_not_fit_still_shows_its_failure() {
+        let rows = render_call(
+            vec![Section::Text(format!(
+                "Ran {}\nno such file",
+                "x".repeat(200)
+            ))],
+            40,
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows[0].contains(ELLIPSIS), "{rows:?}");
         assert!(rows[1].contains("no such file"), "{rows:?}");
     }
 
