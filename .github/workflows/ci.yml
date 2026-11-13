@@ -56,6 +56,10 @@ jobs:
       - name: Build on ${{ matrix.os }}
         run: cargo build
 
+      - name: Smoke test on ${{ matrix.os }}
+        shell: bash
+        run: ./target/debug/oven -h && ./target/debug/oven -V
+
       - name: Run tests on ${{ matrix.os }}
         run: cargo test
 
