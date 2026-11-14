@@ -1031,6 +1031,34 @@ async fn an_unmounted_tool_still_gets_a_result() {
     );
 }
 
+/// A name the model got wrong is answered with the tool it probably meant,
+/// so the next round can call the right one.
+#[tokio::test]
+async fn an_unmounted_tool_suggests_the_one_it_meant() {
+    let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(PairedTool {
+        name: "file_read",
+        signal: Arc::new(tokio::sync::Notify::new()),
+        waits: false,
+    })];
+    let mock = MockProvider::new(vec![
+        calls_response(&[("c1", "file_reads")]),
+        text_response("done"),
+    ]);
+    let mut agent = Agent::new(router_with(Box::new(mock)), tools);
+    let mut sink = VecEventSink::default();
+    run_plain(&mut agent, "go", &mut sink).await.unwrap();
+    assert!(
+        sink.events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Tool(ToolEvent::Finished {
+                result: ToolResult::Rejected { reason },
+                ..
+            }) if reason == "unknown tool: file_reads. Did you mean file_read?"
+        )),
+        "the refusal names the tool the model meant"
+    );
+}
+
 /// A truncated tool-call argument (`{`) used to fail the whole turn. The call
 /// is reported as a tool error instead, and any sibling call still runs.
 #[tokio::test]

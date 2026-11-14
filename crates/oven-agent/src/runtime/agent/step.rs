@@ -14,7 +14,7 @@ use oven_llm::{Message, Response, StopReason, Usage};
 use super::Agent;
 use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
 use crate::core::subagent::notice_message;
-use crate::core::tool::Tool;
+use crate::core::tool::{Tool, suggest};
 use crate::core::turn::{PendingInput, Step, StepCall, TurnContext, TurnOutput};
 use crate::core::view::{ToolEffect, ToolOutcome};
 use oven_proto::EventSink;
@@ -161,6 +161,11 @@ impl Agent {
                     .iter()
                     .find(|tool| tool.name() == call.name())
                     .cloned();
+                let suggestion = if tool.is_none() {
+                    suggest(call.name(), self.tools.iter().map(|tool| tool.name()))
+                } else {
+                    None
+                };
                 let caps = tool.as_ref().map(|tool| tool.caps());
                 let todos = tool
                     .as_ref()
@@ -180,6 +185,7 @@ impl Agent {
                     todos,
                     exclusive: caps.is_some_and(|caps| caps.exclusive),
                     argument_error,
+                    suggestion: suggestion.map(str::to_string),
                     tool,
                 }
             })
@@ -377,6 +383,9 @@ struct PlannedCall {
     exclusive: bool,
     /// Set when the tool arguments are not valid JSON. The call never runs.
     argument_error: Option<String>,
+    /// The mounted tool the name most likely meant, when the name is not
+    /// mounted at all.
+    suggestion: Option<String>,
     tool: Option<Arc<dyn Tool>>,
 }
 
@@ -434,9 +443,13 @@ async fn gate_calls(planned: &[PlannedCall], ctx: &TurnContext) -> Result<Vec<Ga
         // A gate that runs carries the tool it runs, so no later stage has to
         // go looking for one again — and an unmounted tool cannot run.
         let Some(tool) = call.tool.clone() else {
-            gates.push(Gate::Refused(ToolResult::Rejected {
-                reason: format!("unknown tool: {}", call.name),
-            }));
+            let reason = match &call.suggestion {
+                Some(suggestion) => {
+                    format!("unknown tool: {}. Did you mean {}?", call.name, suggestion)
+                }
+                None => format!("unknown tool: {}", call.name),
+            };
+            gates.push(Gate::Refused(ToolResult::Rejected { reason }));
             continue;
         };
         let gate = match ctx.mode().tool_access(tool.caps().permission) {

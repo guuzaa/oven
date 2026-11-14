@@ -181,6 +181,14 @@ nested loop — inherits the run it was called from instead of guessing. Tools
 mount as `Arc<dyn Tool>`: the driver and every subagent it spawns share one
 instance each, so spawning never reconnects an MCP server.
 
+A call to a tool that is not mounted is refused, and the refusal names the tool
+it most likely meant: `unknown tool: file_reads. Did you mean file_read?`. The
+nearest mounted tool is offered — a name in another case, the same words in
+another order, a word the tool carries, a misspelled word, a name that lost its
+separator — so the next round can call the right one. A name that resembles
+nothing mounted is left alone, which is better than naming a tool the model
+did not mean.
+
 ## App facade
 
 `App` is the only public app-runtime handle. `AppHandle` is gone. `AppBuilder` loads config, skills, tools, and MCP, then `open()` / `open_session()` spawns the actor. This app runtime is distinct from the `oven-host` infrastructure crate: the former coordinates commands and state, while the latter performs isolated filesystem and process operations.

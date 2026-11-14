@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- `oven-agent`: a call to a tool that is not mounted names the tool it meant — `unknown tool: file_reads. Did you mean file_read?`. The nearest mounted tool is offered, so the next round can call the right one: a name in another case, the same words in another order, a word the tool carries, a misspelled word, or a name that lost its separator all find their tool. A name that resembles nothing mounted is left alone
+
 ### Changed
 - `oven-tui`: a call's label is one row wide while the turn runs — the arguments of a call are one long line as often as not, so a label too wide for the terminal is cut at the end and marked with an ellipsis, and the failure still shows under it. The whole label waits for the turn to end, so opening the row afterwards shows the command in full
 - `oven-tui`: a failed turn ends in red — `✗ Failed after 1.2s`, the mark and the word in bold red, the timing detail in the muted colour, and the reason the turn failed red all the way down. The mark opens the row once, so a narrow terminal hangs the rest of the line under it. A cancelled turn keeps the dim line it had
