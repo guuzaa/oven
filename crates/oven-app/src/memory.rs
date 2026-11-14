@@ -19,6 +19,7 @@ pub(crate) const NO_EDITOR: &str = "neither VISUAL nor EDITOR is set";
 
 const SHOW: &str = "show";
 const RM: &str = "rm";
+const LIST_BULLET: &str = "- ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemoryAction {
@@ -93,6 +94,8 @@ pub(crate) async fn apply(store: &MemoryStore, action: MemoryAction) -> String {
     }
 }
 
+/// The listing, one section per scope: what the workspace remembers and
+/// what the user remembers, told apart.
 fn render_list(store: &MemoryStore) -> String {
     let mut entries = store.entries();
     if entries.is_empty() {
@@ -102,23 +105,32 @@ fn render_list(store: &MemoryStore) -> String {
         right
             .modified
             .cmp(&left.modified)
-            .then(left.scope.cmp(&right.scope))
             .then(left.id.cmp(&right.id))
     });
     let mut out = String::new();
-    for (index, entry) in entries.iter().enumerate() {
-        if index > 0 {
+    for scope in [MemoryScope::Workspace, MemoryScope::User] {
+        let mut group = entries
+            .iter()
+            .filter(|entry| entry.scope == scope)
+            .peekable();
+        if group.peek().is_none() {
+            continue;
+        }
+        if !out.is_empty() {
             out.push('\n');
         }
-        let _ = write!(
-            out,
-            "{}/{} ({}) {}",
-            entry.scope,
-            entry.id,
-            entry.kind.as_str(),
-            entry.description
-        );
+        let _ = writeln!(out, "{scope}:");
+        for entry in group {
+            let _ = writeln!(
+                out,
+                "{LIST_BULLET}{} ({}) {}",
+                entry.id,
+                entry.kind.as_str(),
+                entry.description
+            );
+        }
     }
+    let _ = out.pop();
     out
 }
 
@@ -202,6 +214,8 @@ mod tests {
     const SOURCE: &str = "01J8Z";
     const PREF_ID: &str = "clippy-before-done";
     const PREF_DESCRIPTION: &str = "Run cargo clippy before saying done.";
+    const OLDER_ID: &str = "older-fact";
+    const OLDER_DESCRIPTION: &str = "An older workspace fact.";
 
     fn id(raw: &str) -> MemoryId {
         MemoryId::new(raw).unwrap()
@@ -292,7 +306,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_is_newest_first_and_empty_when_none() {
+    async fn list_groups_the_scopes_and_is_empty_when_none() {
         let tmp = tempdir::TempDir::new("memory-list").unwrap();
         let workspace = tmp.path().join("workspace");
         let user = tmp.path().join("user");
@@ -309,6 +323,15 @@ mod tests {
             10,
         );
         write_memory(
+            &workspace,
+            OLDER_ID,
+            MemoryKind::Fact,
+            OLDER_DESCRIPTION,
+            PROXY_BODY,
+            None,
+            5,
+        );
+        write_memory(
             &user,
             PREF_ID,
             MemoryKind::Preference,
@@ -321,8 +344,19 @@ mod tests {
         assert_eq!(
             list(&store).await,
             format!(
-                "user/{PREF_ID} ({}) {PREF_DESCRIPTION}\nworkspace/{PROXY_ID} ({}) {PROXY_DESCRIPTION}",
-                MemoryKind::Preference.as_str(),
+                "workspace:\n- {PROXY_ID} ({}) {PROXY_DESCRIPTION}\n- {OLDER_ID} ({}) {OLDER_DESCRIPTION}\n\nuser:\n- {PREF_ID} ({}) {PREF_DESCRIPTION}",
+                MemoryKind::Fact.as_str(),
+                MemoryKind::Fact.as_str(),
+                MemoryKind::Preference.as_str()
+            )
+        );
+
+        let workspace_only = loaded(&workspace, &tmp.path().join("empty-user")).await;
+        assert_eq!(
+            list(&workspace_only).await,
+            format!(
+                "workspace:\n- {PROXY_ID} ({}) {PROXY_DESCRIPTION}\n- {OLDER_ID} ({}) {OLDER_DESCRIPTION}",
+                MemoryKind::Fact.as_str(),
                 MemoryKind::Fact.as_str()
             )
         );

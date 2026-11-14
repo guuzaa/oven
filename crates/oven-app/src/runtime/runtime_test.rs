@@ -4961,7 +4961,7 @@ async fn slash_memory_lists_shows_and_removes() {
     let handle = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
     assert_eq!(
         handle.prompt("/memory").await.unwrap(),
-        "user/newer (preference) new pref\nworkspace/older (fact) old fact"
+        "workspace:\n- older (fact) old fact\n\nuser:\n- newer (preference) new pref"
     );
     assert_eq!(
         handle.prompt("/memory show workspace/older").await.unwrap(),
@@ -4976,7 +4976,7 @@ async fn slash_memory_lists_shows_and_removes() {
     assert!(!user.join("newer.md").exists());
     assert_eq!(
         handle.prompt("/memory").await.unwrap(),
-        "workspace/older (fact) old fact"
+        "workspace:\n- older (fact) old fact"
     );
     handle.shutdown().await;
 }
