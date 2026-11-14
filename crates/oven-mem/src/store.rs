@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use tokio::fs;
 use tracing::warn;
 
-use crate::catalog::{IndexEntry, render_refs, within_catalog_budget};
+use crate::catalog::{Catalog, IndexEntry, render_refs, within_catalog_budget};
 use crate::error::MemoryError;
 use crate::format::{parse, render};
 use crate::model::{MAX_BODY, MAX_DESCRIPTION, Memory, MemoryId, MemoryScope};
@@ -131,7 +131,9 @@ impl MemoryStore {
         Ok(())
     }
 
-    pub fn catalog(&self) -> Option<String> {
+    /// The catalog as the model receives it: its text, and how many of the
+    /// indexed memories it holds.
+    pub fn catalog(&self) -> Option<Catalog> {
         let guard = self
             .index
             .read()
@@ -367,9 +369,17 @@ mod tests {
         })
         .await;
         let catalog = store.catalog().unwrap();
-        assert!(catalog.contains("- workspace/proxy-requires-http2 proxy fact"));
-        assert!(catalog.contains("- user/clippy-before-done run clippy"));
-        assert!(!catalog.contains(BODY_TOKEN));
+        assert!(
+            catalog
+                .text
+                .contains("- workspace/proxy-requires-http2 proxy fact")
+        );
+        assert!(
+            catalog
+                .text
+                .contains("- user/clippy-before-done run clippy")
+        );
+        assert!(!catalog.text.contains(BODY_TOKEN));
     }
 
     #[tokio::test]
@@ -388,9 +398,9 @@ mod tests {
         })
         .await;
         let catalog = store.catalog().unwrap();
-        assert!(catalog.contains("- workspace/ok kept"));
-        assert!(!catalog.contains("rejected"));
-        assert!(!catalog.contains("Bad"));
+        assert!(catalog.text.contains("- workspace/ok kept"));
+        assert!(!catalog.text.contains("rejected"));
+        assert!(!catalog.text.contains("Bad"));
     }
 
     #[tokio::test]
@@ -405,9 +415,9 @@ mod tests {
         })
         .await;
         let catalog = store.catalog().unwrap();
-        assert!(catalog.contains("- workspace/ok kept"));
-        assert!(!catalog.contains("broken"));
-        assert!(!catalog.contains("no frontmatter"));
+        assert!(catalog.text.contains("- workspace/ok kept"));
+        assert!(!catalog.text.contains("broken"));
+        assert!(!catalog.text.contains("no frontmatter"));
     }
 
     #[tokio::test]
@@ -438,10 +448,10 @@ mod tests {
         })
         .await;
         let catalog = store.catalog().unwrap();
-        assert!(catalog.contains("- workspace/ok kept"));
-        assert!(!catalog.contains("temp file"));
-        assert!(!catalog.contains("plain text"));
-        assert!(!catalog.contains("nested fact"));
+        assert!(catalog.text.contains("- workspace/ok kept"));
+        assert!(!catalog.text.contains("temp file"));
+        assert!(!catalog.text.contains("plain text"));
+        assert!(!catalog.text.contains("nested fact"));
     }
 
     #[tokio::test]
@@ -545,8 +555,8 @@ mod tests {
         })
         .await;
         let catalog = store.catalog().unwrap();
-        let new_at = catalog.find("- workspace/newer new fact").unwrap();
-        let old_at = catalog.find("- workspace/older old fact").unwrap();
+        let new_at = catalog.text.find("- workspace/newer new fact").unwrap();
+        let old_at = catalog.text.find("- workspace/older old fact").unwrap();
         assert!(new_at < old_at);
     }
 
@@ -585,6 +595,7 @@ mod tests {
             store
                 .catalog()
                 .unwrap()
+                .text
                 .contains("- workspace/proxy-requires-http2 proxy fact")
         );
     }
@@ -692,7 +703,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, MemoryError::Io { .. }));
         assert_eq!(store.catalog(), before);
-        assert!(before.unwrap().contains("kept fact"));
+        assert!(before.unwrap().text.contains("kept fact"));
     }
 
     #[tokio::test]
@@ -737,8 +748,8 @@ mod tests {
             .unwrap();
         assert!(!workspace.join("proxy-requires-http2.md").exists());
         let catalog = store.catalog().unwrap();
-        assert!(!catalog.contains("proxy-requires-http2"));
-        assert!(catalog.contains("- workspace/kept kept fact"));
+        assert!(!catalog.text.contains("proxy-requires-http2"));
+        assert!(catalog.text.contains("- workspace/kept kept fact"));
     }
 
     #[tokio::test]

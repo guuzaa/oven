@@ -71,7 +71,7 @@ fn append_block(mut system: String, block: &str) -> String {
 fn append_memory(mut system: String, store: &MemoryStore) -> String {
     system = append_block(system, MEMORY_PROMPT);
     match store.catalog() {
-        Some(catalog) => append_block(system, &catalog),
+        Some(catalog) => append_block(system, &catalog.text),
         None => system,
     }
 }

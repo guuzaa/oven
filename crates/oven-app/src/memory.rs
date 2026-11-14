@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use oven_mem::MemoryStore;
-use oven_mem::{Memory, MemoryError, MemoryId, MemoryScope, NOT_FOUND};
+use oven_mem::{MAX_CATALOG_CHARS, Memory, MemoryError, MemoryId, MemoryScope, NOT_FOUND};
 
 use crate::core::error::AppError;
 use crate::core::memory::{SOURCE_LABEL, header, parse_id, parse_scope};
@@ -20,6 +20,7 @@ pub(crate) const NO_EDITOR: &str = "neither VISUAL nor EDITOR is set";
 const SHOW: &str = "show";
 const RM: &str = "rm";
 const LIST_BULLET: &str = "- ";
+const CATALOG_LABEL: &str = "catalog";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemoryAction {
@@ -131,7 +132,25 @@ fn render_list(store: &MemoryStore) -> String {
         }
     }
     let _ = out.pop();
+    if let Some(footer) = catalog_footer(store) {
+        out.push_str("\n\n");
+        out.push_str(&footer);
+    }
     out
+}
+
+/// What the model gets to see. The catalog is truncated to its budget, so a
+/// memory can be listed here and still be invisible to the model.
+fn catalog_footer(store: &MemoryStore) -> Option<String> {
+    let shown = store.catalog()?.shown;
+    let total = store.entries().len();
+    Some(match shown == total {
+        true => format!("{CATALOG_LABEL}: {shown} of {total} memories in the model's catalog"),
+        false => format!(
+            "{CATALOG_LABEL}: {shown} of {total} memories in the model's catalog; \
+             the {MAX_CATALOG_CHARS}-char budget is full, so no new memory can be written"
+        ),
+    })
 }
 
 async fn show_ref(store: &MemoryStore, memory_ref: &MemoryRef) -> String {
@@ -202,7 +221,8 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use oven_mem::{
-        EMPTY_ID, INVALID_ID, MemoryId, MemoryKind, MemoryRoots, MemoryScope, MemoryStore,
+        EMPTY_ID, INVALID_ID, MAX_DESCRIPTION, MemoryId, MemoryKind, MemoryRoots, MemoryScope,
+        MemoryStore,
     };
 
     use super::*;
@@ -344,7 +364,7 @@ mod tests {
         assert_eq!(
             list(&store).await,
             format!(
-                "workspace:\n- {PROXY_ID} ({}) {PROXY_DESCRIPTION}\n- {OLDER_ID} ({}) {OLDER_DESCRIPTION}\n\nuser:\n- {PREF_ID} ({}) {PREF_DESCRIPTION}",
+                "workspace:\n- {PROXY_ID} ({}) {PROXY_DESCRIPTION}\n- {OLDER_ID} ({}) {OLDER_DESCRIPTION}\n\nuser:\n- {PREF_ID} ({}) {PREF_DESCRIPTION}\n\ncatalog: 3 of 3 memories in the model's catalog",
                 MemoryKind::Fact.as_str(),
                 MemoryKind::Fact.as_str(),
                 MemoryKind::Preference.as_str()
@@ -355,11 +375,40 @@ mod tests {
         assert_eq!(
             list(&workspace_only).await,
             format!(
-                "workspace:\n- {PROXY_ID} ({}) {PROXY_DESCRIPTION}\n- {OLDER_ID} ({}) {OLDER_DESCRIPTION}",
+                "workspace:\n- {PROXY_ID} ({}) {PROXY_DESCRIPTION}\n- {OLDER_ID} ({}) {OLDER_DESCRIPTION}\n\ncatalog: 2 of 2 memories in the model's catalog",
                 MemoryKind::Fact.as_str(),
                 MemoryKind::Fact.as_str()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn list_says_how_much_of_it_the_model_sees() {
+        let tmp = tempdir::TempDir::new("memory-list-budget").unwrap();
+        let workspace = tmp.path().join("workspace");
+        let user = tmp.path().join("user");
+        let description = "d".repeat(MAX_DESCRIPTION);
+        for n in 0..80 {
+            write_memory(
+                &workspace,
+                &format!("m{n:03}"),
+                MemoryKind::Fact,
+                &description,
+                "body\n",
+                None,
+                10,
+            );
+        }
+        let store = loaded(&workspace, &user).await;
+        let text = list(&store).await;
+        let footer = text.rsplit('\n').next().unwrap();
+        assert!(
+            footer.contains("of 80 memories in the model's catalog"),
+            "{footer}"
+        );
+        assert!(!footer.contains("80 of 80"), "{footer}");
+        assert!(footer.contains("budget is full"), "{footer}");
+        assert!(footer.contains("no new memory can be written"), "{footer}");
     }
 
     #[tokio::test]

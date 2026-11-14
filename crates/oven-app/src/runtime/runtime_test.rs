@@ -4961,7 +4961,7 @@ async fn slash_memory_lists_shows_and_removes() {
     let handle = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
     assert_eq!(
         handle.prompt("/memory").await.unwrap(),
-        "workspace:\n- older (fact) old fact\n\nuser:\n- newer (preference) new pref"
+        "workspace:\n- older (fact) old fact\n\nuser:\n- newer (preference) new pref\n\ncatalog: 2 of 2 memories in the model's catalog"
     );
     assert_eq!(
         handle.prompt("/memory show workspace/older").await.unwrap(),
@@ -4976,7 +4976,7 @@ async fn slash_memory_lists_shows_and_removes() {
     assert!(!user.join("newer.md").exists());
     assert_eq!(
         handle.prompt("/memory").await.unwrap(),
-        "workspace:\n- older (fact) old fact"
+        "workspace:\n- older (fact) old fact\n\ncatalog: 1 of 1 memories in the model's catalog"
     );
     handle.shutdown().await;
 }

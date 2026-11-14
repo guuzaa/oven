@@ -383,6 +383,13 @@ the line it sits on.
 `/memory` and `oven mem` are the human's levers for the whole feature, which
 is why they ship in the same phase as the tools rather than after them.
 
+The listing ends with what the model gets to see. The catalog is truncated to
+`MAX_CATALOG_CHARS`, so a memory can be listed and still be invisible to the
+model; the last line says how many of them reach the model's catalog, and when
+the budget is full, that no new memory can be written. Without it, the human
+would read a list of eighty memories while the model saw only the newest
+fifty-six, and the writes that fail because of it would come as a surprise.
+
 There is no `AppState` field and no `AppEvent` for memory in this phase. The
 write already renders as a tool call, and `/memory` answers the rest.
 
@@ -499,5 +506,6 @@ before they touch disk, the two writers are in `CHILD_TOOLS_EXCLUDED`,
 `memory_read` is in the `explore` tool set, and `memory_write` reports
 created versus replaced.
 - `/memory` and `oven mem`: list, show and rm go through the store, and `rm`
-of an unknown id is a reply, not an error.
+of an unknown id is a reply, not an error. The list ends with what the
+model's catalog holds, and says the budget is full when it leaves memories out.
 
