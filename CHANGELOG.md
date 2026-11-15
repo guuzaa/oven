@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.6] - 2026-11-15
 
 ### Added
 - `oven-agent`: a call to a tool that is not mounted names the tool it meant — `unknown tool: file_reads. Did you mean file_read?`. The nearest mounted tool is offered, so the next round can call the right one: a name in another case, the same words in another order, a word the tool carries, a misspelled word, or a name that lost its separator all find their tool. A name that resembles nothing mounted is left alone
@@ -8,9 +8,13 @@
 ### Changed
 - `oven-tui`: a call's label is one row wide while the turn runs — the arguments of a call are one long line as often as not, so a label too wide for the terminal is cut at the end and marked with an ellipsis, and the failure still shows under it. The whole label waits for the turn to end, so opening the row afterwards shows the command in full
 - `oven-tui`: a failed turn ends in red — `✗ Failed after 1.2s`, the mark and the word in bold red, the timing detail in the muted colour, and the reason the turn failed red all the way down. The mark opens the row once, so a narrow terminal hangs the rest of the line under it. A cancelled turn keeps the dim line it had
+- `oven-app`: a memory listing tells the two scopes apart — `/memory` and `oven mem ls` mixed both scopes into one flat list, so a memory's scope was only readable from its prefix. The listing has one section per scope, workspace first, and each entry drops the prefix the header already says
+- `oven-app`: a memory listing says how much of it the model sees — the catalog is truncated to its budget, so a memory can be listed and still be invisible to the model. The listing ends with `catalog: 56 of 80 memories in the model's catalog`, and a budget that is full says that no new memory can be written, which is what a failed write means
+- **Breaking:** `oven-mem`: the catalog is a type now — `render_catalog` and `MemoryStore::catalog` hand back a `Catalog { text, shown }` instead of a string, so the text the model receives and the count of the indexed memories it holds come together
 
 ### Fixed
 - `oven-tui`: a shell result shows the colours the command printed — the escape codes become styles instead of text on the screen, so a `git diff --color` reads the way it did in the terminal, and a copied selection carries no escape codes
+- `oven-tui`: the cache hit rate never rounds up to a full 100% — the share is cut to a tenth of a percent, so a hit short of perfect reads as `99.9%` and not as a whole
 
 ## [0.1.5] - 2026-11-08
 
