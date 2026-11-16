@@ -15,7 +15,7 @@ use crate::core::tool::Tool;
 use crate::core::turn::TurnContext;
 use crate::core::view::{ToolCaps, ToolEffect, ToolOutcome};
 use oven_proto::AgentError;
-use oven_proto::{AnswerResponse, Question, QuestionOption, TodoList, ToolPermission};
+use oven_proto::{AnswerResponse, Question, QuestionOption, TodoList, ToolPermission, ToolView};
 
 /// A tool that answers with a fixed output, under a fixed permission.
 pub(crate) struct StubTool {
@@ -24,6 +24,8 @@ pub(crate) struct StubTool {
     plan_only: bool,
     output: String,
     detail: Option<String>,
+    /// The wording of the call before it runs, e.g. `run ls -la`.
+    request: Option<String>,
     /// A file the call creates, so a test can tell whether it ran.
     creates: Option<PathBuf>,
 }
@@ -36,12 +38,19 @@ impl StubTool {
             plan_only: false,
             output: output.to_string(),
             detail: None,
+            request: None,
             creates: None,
         }
     }
 
     pub(crate) fn with_permission(mut self, permission: ToolPermission) -> Self {
         self.permission = permission;
+        self
+    }
+
+    /// The wording of the call before it runs, e.g. `run ls -la`.
+    pub(crate) fn with_request(mut self, request: &str) -> Self {
+        self.request = Some(request.to_string());
         self
     }
 
@@ -76,6 +85,17 @@ impl Tool for StubTool {
             plan_only: self.plan_only,
             permission: self.permission,
             exclusive: false,
+        }
+    }
+
+    fn request_view(&self, _input: &Value) -> ToolView {
+        match &self.request {
+            Some(summary) => ToolView {
+                summary: summary.clone(),
+                collapse: true,
+                detail: None,
+            },
+            None => self.view(_input),
         }
     }
 

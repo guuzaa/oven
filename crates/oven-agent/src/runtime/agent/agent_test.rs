@@ -580,6 +580,42 @@ async fn ask_requires_approval_before_running_bash() {
 }
 
 #[tokio::test]
+async fn an_approval_carries_the_call_as_it_is_asked_for() {
+    let mock = MockProvider::new(vec![
+        tool_response("call_1", "bash", json!({"command": "anything"})),
+        text_response("done"),
+    ]);
+    let mut agent = Agent::new(
+        router_with(Box::new(mock)),
+        vec![Arc::new(
+            StubTool::new("bash", "ran")
+                .with_permission(ToolPermission::Execute)
+                .with_request("run anything"),
+        )],
+    );
+    agent.set_mode(AgentMode::Ask);
+    let (requests, mut asked) = tokio::sync::mpsc::unbounded_channel();
+    let ctx = turn_ctx(&agent).with_requests(Arc::new(requests));
+    let mut sink = NullSink;
+    let turn = agent.run("run it", &ctx, &mut sink);
+    tokio::pin!(turn);
+
+    let request = tokio::select! {
+        request = asked.recv() => request.unwrap(),
+        _ = &mut turn => panic!("turn completed before requesting approval"),
+    };
+    let UserRequest::ApproveTool {
+        view, responder, ..
+    } = request.request
+    else {
+        panic!("the turn must ask to approve a tool call");
+    };
+    assert_eq!(view.summary, "run anything");
+    responder.send(ApprovalDecision::Approved).unwrap();
+    assert_eq!(turn.await.unwrap().text(), "done");
+}
+
+#[tokio::test]
 async fn the_answer_tool_blocks_the_turn_until_the_user_replies() {
     const QUESTION: &str = "which database?";
     const ANSWER: &str = "postgres";

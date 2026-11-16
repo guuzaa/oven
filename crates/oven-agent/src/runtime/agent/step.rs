@@ -458,7 +458,11 @@ async fn gate_calls(planned: &[PlannedCall], ctx: &TurnContext) -> Result<Vec<Ga
             }),
             ToolAccess::RequiresApproval => {
                 match ctx
-                    .approve(call.call_id, call.name.clone(), call.view.clone())
+                    .approve(
+                        call.call_id,
+                        call.name.clone(),
+                        tool.request_view(&call.input),
+                    )
                     .await
                 {
                     Some(ApprovalDecision::Approved) => Gate::Run(tool),

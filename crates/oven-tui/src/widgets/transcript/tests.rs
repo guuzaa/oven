@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use oven_app::{
     AgentError, AgentEvent, AppEvent, COMPACTION_CANCELLED, CompactionEvent, LocalShell,
-    NOTICE_MARK, ShellEvent, StepStop, StreamEvent, ToolCallId, ToolEvent, ToolResult, TurnEvent,
-    UserRequestId, present_tool,
+    NOTICE_MARK, ShellEvent, StepStop, StreamEvent, ToolCallId, ToolEvent, ToolResult, ToolView,
+    TurnEvent, UserRequestId, present_tool,
 };
 use oven_llm::{ContentBlock, Message, ToolUse};
 use ratatui::Terminal;
@@ -66,6 +66,15 @@ fn fill(t: &mut Transcript, n: usize) {
 
 fn row_texts(t: &Transcript) -> Vec<&str> {
     t.rows.iter().map(|r| r.text.as_str()).collect()
+}
+
+/// The view an approval carries: the call named before it runs.
+fn request_view(summary: &str) -> ToolView {
+    ToolView {
+        summary: summary.to_string(),
+        collapse: true,
+        detail: None,
+    }
 }
 
 /// The rows a transcript paints, top to bottom.
@@ -1572,7 +1581,7 @@ fn an_approval_starts_a_new_activity_below_the_notice() {
         request_id: UserRequestId(1),
         call_id: ToolCallId(2),
         name: "bash".into(),
-        view: present_tool("bash", &serde_json::json!({ "command": "rm -rf /" })),
+        view: request_view("run rm -rf /"),
     })));
     t.on_event(&tool_start(
         2,
@@ -1583,10 +1592,10 @@ fn an_approval_starts_a_new_activity_below_the_notice() {
 
     assert_eq!(
         kinds_of(&t),
-        vec![LineKind::Activity, LineKind::System, LineKind::Activity]
+        vec![LineKind::Activity, LineKind::Approval, LineKind::Activity]
     );
     assert_eq!(t.rows[0].text, "Ran 1 command");
-    assert_eq!(t.rows[1].text, "approval required: Ran rm -rf /");
+    assert_eq!(t.rows[1].text, "approval required · run rm -rf /");
     assert_eq!(t.rows[2].text, "Ran 1 command");
     assert_eq!(
         t.rows[2].collapsible.as_ref().expect("burst detail").body(),
@@ -1606,7 +1615,7 @@ fn an_approval_notice_is_drawn_above_the_call_it_asks_about() {
         request_id: UserRequestId(1),
         call_id: ToolCallId(2),
         name: "bash".into(),
-        view: present_tool("bash", &serde_json::json!({ "command": "ls" })),
+        view: request_view("run ls"),
     })));
     t.on_event(&tool_start(
         2,
@@ -1629,6 +1638,37 @@ fn an_approval_notice_is_drawn_above_the_call_it_asks_about() {
         notice < call,
         "the notice lands above the call it asks about"
     );
+}
+
+#[test]
+fn an_approval_notice_wears_its_own_colour() {
+    const WIDTH: u16 = 80;
+    const HEIGHT: u16 = 10;
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.start_user_turn("run it");
+    t.on_event(&agent(AgentEvent::Tool(ToolEvent::ApprovalRequested {
+        request_id: UserRequestId(1),
+        call_id: ToolCallId(2),
+        name: "bash".into(),
+        view: request_view("run ls"),
+    })));
+
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let row = (0..HEIGHT)
+        .find(|y| {
+            (0..WIDTH)
+                .map(|x| buffer[(x, *y)].symbol())
+                .collect::<String>()
+                .contains("approval required")
+        })
+        .expect("the notice is drawn");
+
+    assert_eq!(buffer[(3, row)].style().fg, theme::approval().fg);
 }
 
 #[test]

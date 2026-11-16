@@ -858,7 +858,11 @@ pub(super) fn format_lines(kind: LineKind, text: &str) -> Vec<Line<'static>> {
                 part.to_string()
             };
             match kind {
-                LineKind::Diff | LineKind::Shell | LineKind::Separator | LineKind::Error => {
+                LineKind::Diff
+                | LineKind::Shell
+                | LineKind::Separator
+                | LineKind::Error
+                | LineKind::Approval => {
                     vec![Span::styled(body, line_style)]
                 }
                 LineKind::Failed => failure_spans(&body),

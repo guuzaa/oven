@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use super::list;
 
 const NO_CHOICES: &str = "no choices";
-const APPROVAL_TITLE: &str = "permission required";
+const APPROVAL_TITLE: &str = "approval required";
 const APPROVAL_HINT: &str = "y approve · n reject · ctrl-c cancel";
 const APPROVAL_ITEMS: [(&str, &str); 2] = [
     ("Approve", "run this tool"),
@@ -141,5 +141,13 @@ mod tests {
         let mut popup = ChoicePopup::approval("bash", "run ls");
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(popup.handle_key(key), ChoicePopupAction::Cancel));
+    }
+
+    #[test]
+    fn an_approval_says_approval_and_names_the_call_to_come() {
+        let popup = ChoicePopup::approval("bash", "run ls -la");
+
+        assert_eq!(popup.title, "approval required · bash");
+        assert_eq!(popup.detail, "run ls -la");
     }
 }

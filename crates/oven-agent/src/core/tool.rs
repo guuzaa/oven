@@ -33,6 +33,12 @@ pub trait Tool: Send + Sync {
     fn view(&self, _input: &Value) -> ToolView {
         ToolView::named(self.name())
     }
+    /// How this call reads before it runs. A call that waits for the user's
+    /// approval names itself in the future tense: `run ls -la`, not
+    /// `Ran ls -la`.
+    fn request_view(&self, input: &Value) -> ToolView {
+        self.view(input)
+    }
     fn caps(&self) -> ToolCaps {
         ToolCaps::default()
     }

@@ -6,6 +6,8 @@ use ratatui::widgets::BorderType;
 const MUTED: Color = Color::DarkGray;
 /// The colour of what went wrong.
 const FAILED: Color = Color::Red;
+/// The colour of what waits for the user: a reply, an approval.
+const ATTENTION: Color = Color::Rgb(255, 140, 0);
 
 pub fn user() -> Style {
     Style::default()
@@ -86,7 +88,12 @@ pub fn ask_mode() -> Style {
 }
 
 pub fn reply() -> Style {
-    Style::default().fg(Color::Rgb(255, 140, 0))
+    Style::default().fg(ATTENTION)
+}
+
+/// The colour of a call that waits for the user to approve it.
+pub fn approval() -> Style {
+    Style::default().fg(ATTENTION)
 }
 
 pub fn selection() -> Style {

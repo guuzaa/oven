@@ -24,6 +24,8 @@ pub(crate) enum LineKind {
     Error,
     /// The turn-end line of a turn that failed.
     Failed,
+    /// A call that waits for the user to approve it.
+    Approval,
     System,
     Separator,
 }
@@ -45,13 +47,16 @@ impl LineKind {
             LineKind::ToolResult(false) | LineKind::ShellResult(false) => theme::fail(),
             LineKind::Error => theme::error(),
             LineKind::Failed => theme::fail_bold(),
+            LineKind::Approval => theme::approval(),
         }
     }
 
     /// Assistant prose draws its gutter on the first line only and aligns the rest under the body.
     /// A failure wears its mark the same way: the mark opens the row, the rest hangs under it.
+    /// An approval wears its mark the same way: one mark for one notice, however long the
+    /// call it asks about is.
     pub(super) fn gutter_once(self) -> bool {
-        matches!(self, LineKind::Text | LineKind::Failed)
+        matches!(self, LineKind::Text | LineKind::Failed | LineKind::Approval)
     }
 
     /// A submitted prompt: the header of a turn. It stays pinned while that
@@ -66,6 +71,7 @@ impl LineKind {
             LineKind::Shell => "$ ",
             LineKind::Text => "∙ ",
             LineKind::Failed => "✗ ",
+            LineKind::Approval => "◆ ",
             LineKind::Thinking
             | LineKind::Activity
             | LineKind::Tool

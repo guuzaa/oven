@@ -1462,10 +1462,12 @@ impl Transcript {
                 AgentEvent::Tool(ToolEvent::ApprovalRequested { view, .. }) => {
                     self.stop_live_thinking();
                     self.flush_streaming();
+                    // The call starts after the approval, so it belongs to a
+                    // fresh activity below the notice.
                     self.seal_activity();
                     self.push_row(
-                        LineKind::System,
-                        &format!("approval required: {}", view.summary),
+                        LineKind::Approval,
+                        &format!("approval required · {}", view.summary),
                     );
                 }
                 AgentEvent::Tool(ToolEvent::Started { call_id, view, .. }) => {

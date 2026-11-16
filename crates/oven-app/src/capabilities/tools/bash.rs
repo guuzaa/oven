@@ -23,6 +23,8 @@ pub struct BashTool {
 impl BashTool {
     pub const NAME: &'static str = "bash";
     pub const VERB: &'static str = "Ran";
+    /// How a command reads before it runs: `run ls -la`, not `Ran ls -la`.
+    const REQUEST_VERB: &'static str = "run";
 
     pub fn view_input(input: &Value) -> ToolView {
         labeled(Self::VERB, input, "command")
@@ -63,6 +65,9 @@ impl Tool for BashTool {
     }
     fn view(&self, input: &Value) -> ToolView {
         Self::view_input(input)
+    }
+    fn request_view(&self, input: &Value) -> ToolView {
+        labeled(Self::REQUEST_VERB, input, "command")
     }
     fn caps(&self) -> ToolCaps {
         ToolCaps {
@@ -217,6 +222,16 @@ mod tests {
             bash.resolve_timeout(&json!({"timeout_secs": 42})).unwrap(),
             Duration::from_secs(42)
         );
+    }
+
+    #[test]
+    fn a_command_asked_for_reads_in_the_future_tense() {
+        let tmp = tmp_dir();
+        let bash = BashTool::new(tmp.path());
+        let input = json!({ "command": "ls -la" });
+
+        assert_eq!(bash.view(&input).summary, "Ran ls -la");
+        assert_eq!(bash.request_view(&input).summary, "run ls -la");
     }
 
     #[tokio::test]
