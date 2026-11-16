@@ -1462,6 +1462,7 @@ impl Transcript {
                 AgentEvent::Tool(ToolEvent::ApprovalRequested { view, .. }) => {
                     self.stop_live_thinking();
                     self.flush_streaming();
+                    self.seal_activity();
                     self.push_row(
                         LineKind::System,
                         &format!("approval required: {}", view.summary),
@@ -1509,6 +1510,7 @@ impl Transcript {
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
                     self.stop_live_thinking();
                     self.flush_streaming();
+                    self.seal_activity();
                     self.push_row(
                         LineKind::System,
                         &format!("{LOOP_LIMIT_REACHED} ({max_iters} iterations)"),

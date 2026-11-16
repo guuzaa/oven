@@ -68,6 +68,18 @@ fn row_texts(t: &Transcript) -> Vec<&str> {
     t.rows.iter().map(|r| r.text.as_str()).collect()
 }
 
+/// The rows a transcript paints, top to bottom.
+fn drawn_rows(t: &mut Transcript, width: u16, height: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|f| t.draw(f, f.area(), &State::new()))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect()
+}
+
 #[test]
 fn thinking_header_has_no_gutter() {
     let mut t = Transcript::new();
@@ -1548,7 +1560,7 @@ fn live_tool_end_rewrites_same_summary_row() {
 }
 
 #[test]
-fn burst_keeps_its_own_row_when_another_row_interleaves() {
+fn an_approval_starts_a_new_activity_below_the_notice() {
     let mut t = Transcript::new();
     t.on_event(&tool_start(
         1,
@@ -1569,13 +1581,119 @@ fn burst_keeps_its_own_row_when_another_row_interleaves() {
     ));
     t.on_event(&tool_end(2, true, "ok"));
 
-    assert_eq!(kinds_of(&t), vec![LineKind::Activity, LineKind::System]);
-    assert_eq!(t.rows[0].text, "Ran 2 commands");
     assert_eq!(
-        t.rows[0].collapsible.as_ref().expect("burst detail").body(),
-        "Ran ls\nRan pwd"
+        kinds_of(&t),
+        vec![LineKind::Activity, LineKind::System, LineKind::Activity]
     );
+    assert_eq!(t.rows[0].text, "Ran 1 command");
     assert_eq!(t.rows[1].text, "approval required: Ran rm -rf /");
+    assert_eq!(t.rows[2].text, "Ran 1 command");
+    assert_eq!(
+        t.rows[2].collapsible.as_ref().expect("burst detail").body(),
+        "Ran pwd"
+    );
+}
+
+#[test]
+fn an_approval_notice_is_drawn_above_the_call_it_asks_about() {
+    const WIDTH: u16 = 80;
+    const HEIGHT: u16 = 20;
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.start_user_turn("run it");
+    t.on_event(&thinking("the shell needs a hand"));
+    t.on_event(&agent(AgentEvent::Tool(ToolEvent::ApprovalRequested {
+        request_id: UserRequestId(1),
+        call_id: ToolCallId(2),
+        name: "bash".into(),
+        view: present_tool("bash", &serde_json::json!({ "command": "ls" })),
+    })));
+    t.on_event(&tool_start(
+        2,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&tool_end(2, true, "ok"));
+
+    let rows = drawn_rows(&mut t, WIDTH, HEIGHT);
+    let notice = rows
+        .iter()
+        .position(|row| row.contains("approval required"))
+        .expect("the notice is drawn");
+    let call = rows
+        .iter()
+        .position(|row| row.contains(BURST_SUMMARY))
+        .expect("the call is drawn");
+
+    assert!(
+        notice < call,
+        "the notice lands above the call it asks about"
+    );
+}
+
+#[test]
+fn a_loop_limit_notice_starts_a_new_activity_below_it() {
+    let mut t = Transcript::new();
+    t.on_event(&tool_start(
+        1,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&tool_end(1, true, "ok"));
+    t.on_event(&loop_limit_reached(5));
+    t.on_event(&tool_start(
+        2,
+        "bash",
+        serde_json::json!({ "command": "pwd" }),
+    ));
+    t.on_event(&tool_end(2, true, "ok"));
+
+    assert_eq!(
+        kinds_of(&t),
+        vec![LineKind::Activity, LineKind::System, LineKind::Activity]
+    );
+    assert_eq!(t.rows[0].text, "Ran 1 command");
+    assert_eq!(
+        t.rows[1].text,
+        format!("{LOOP_LIMIT_REACHED} (5 iterations)")
+    );
+    assert_eq!(t.rows[2].text, "Ran 1 command");
+    assert_eq!(
+        t.rows[2].collapsible.as_ref().expect("burst detail").body(),
+        "Ran pwd"
+    );
+}
+
+#[test]
+fn a_loop_limit_notice_is_drawn_above_the_work_it_asks_about() {
+    const WIDTH: u16 = 80;
+    const HEIGHT: u16 = 20;
+    let mut t = Transcript::new();
+    wide(&mut t);
+    t.start_user_turn("run it");
+    t.on_event(&thinking("the shell needs a hand"));
+    t.on_event(&loop_limit_reached(5));
+    t.on_event(&tool_start(
+        2,
+        "bash",
+        serde_json::json!({ "command": "ls" }),
+    ));
+    t.on_event(&tool_end(2, true, "ok"));
+
+    let rows = drawn_rows(&mut t, WIDTH, HEIGHT);
+    let notice = rows
+        .iter()
+        .position(|row| row.contains(LOOP_LIMIT_REACHED))
+        .expect("the notice is drawn");
+    let call = rows
+        .iter()
+        .position(|row| row.contains(BURST_SUMMARY))
+        .expect("the call is drawn");
+
+    assert!(
+        notice < call,
+        "the notice lands above the work it asks about"
+    );
 }
 
 #[test]

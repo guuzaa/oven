@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- `oven-tui`: an approval notice lands above the call it asks about — in Ask mode the call only starts once the user answers, but it joined the activity that was already open, so the notice ended up under the row that showed the call. The approval now closes the activity it interrupts, and the call lands in a row of its own below the notice
+- `oven-tui`: the loop limit notice lands above the work it asks about — the turn asks before it takes another step, but the step joined the activity that was already open, so the notice ended up under the row that showed the call. The notice now closes the activity it interrupts, and the step lands in a row of its own below the notice
+
 ## [0.1.6] - 2026-11-15
 
 ### Added
