@@ -82,9 +82,10 @@ format, so any compatible provider works. The model can read and write files,
 run shell commands, and delegate jobs to subagents
 ([`docs/subagents.md`](docs/subagents.md)).
 
-- Durable memory under `.oven/memory` / `~/.oven/memory`, injected into the
-  system prompt and managed with `memory_read`, `memory_write`,
-  `memory_forget` or `/memory` ([`docs/memory.md`](docs/memory.md))
+- Durable memory in three layers (`project` and `global` under `~/.oven`,
+  `shared` in the repository's `.oven/memory`): the model notes what it learns
+  with `memory_note`, `/memory tidy` turns notes into memories, and the catalog
+  is injected into the system prompt ([`docs/memory.md`](docs/memory.md))
 - MCP servers mounted as `<server>_<tool>` ([`docs/oven-app.md`](docs/oven-app.md))
 - Sessions as JSONL files under `~/.oven/sessions/`, resumed with `-c`
 - The architecture is described in [`docs/architectures.md`](docs/architectures.md)
@@ -211,7 +212,7 @@ rewinds the last exchange when idle. `Shift+Tab` toggles plan or ask mode and
 | `/plan`  | Toggle plan mode: `/plan [on\|off]` |
 | `/agents` | List subagents; `/agents <name>` opens one, `/agents stop <name\|all>` stops them |
 | `/compact`  | Compact conversation history into a summary; auto-compaction triggers at `compact_threshold`. |
-| `/memory` | List, show or remove memories: `/memory [show <ref> \| rm <ref>]`, where `<ref>` is `workspace/<id>`, `user/<id>` or a bare id |
+| `/memory` | List and curate memories: `/memory [review \| tidy \| show <ref> \| rm <ref> \| mv <ref> <scope> \| approve <ref>]`, where `<ref>` is `project/<id>`, `shared/<id>`, `global/<id>` or a bare id |
 
 ## Logs
 

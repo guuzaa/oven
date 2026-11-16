@@ -14,7 +14,9 @@ use oven_llm::{
 use oven_mem::{MemoryRoots, MemoryStore};
 use oven_proto::{NullSink, TurnId};
 
-use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
+use crate::capabilities::memory::{
+    MemoryForgetTool, MemoryNoteTool, MemoryReadTool, MemoryRememberTool,
+};
 use crate::capabilities::tools::ListModelsTool;
 use crate::core::config::AppConfig;
 
@@ -22,19 +24,19 @@ use super::AppBuilder;
 
 const MEMORY_ID: &str = "proxy-requires-http2";
 const MEMORY_DESCRIPTION: &str = "The internal proxy only speaks HTTP/2.";
-const CATALOG_ENTRY: &str =
-    "- workspace/proxy-requires-http2 The internal proxy only speaks HTTP/2.";
+const CATALOG_ENTRY: &str = "- project/proxy-requires-http2 The internal proxy only speaks HTTP/2.";
+const PROJECT_MEMORY: &str = "project-memory";
 const MEMORY_TAG: &str = "<memory>";
 const SUBAGENT_MARK: &str = "You are a subagent";
 const EXPLORE_MARK: &str = "# Your role: explore";
 const GENERAL_MARK: &str = "# Your role: general";
 
 fn memory_file() -> String {
-    format!("---\nkind: fact\ndescription: {MEMORY_DESCRIPTION}\n---\n\nbody\n")
+    format!("---\ntype: Fact\ndescription: {MEMORY_DESCRIPTION}\n---\n\nbody\n")
 }
 
-fn write_workspace_memory(root: &Path) {
-    let dir = root.join(".oven").join("memory");
+fn write_project_memory(root: &Path) {
+    let dir = root.join(PROJECT_MEMORY);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(format!("{MEMORY_ID}.md")), memory_file()).unwrap();
 }
@@ -104,13 +106,16 @@ impl Provider for CaptureProvider {
     }
 }
 
-/// Memory roots the caller owns, so the developer's `~/.oven/memory` never
-/// leaks into the prompt these tests assert on.
+/// Memory roots the caller owns, so the developer's `~/.oven` never leaks
+/// into the prompt these tests assert on.
 async fn isolated_app(root: &Path, config: AppConfig) -> AppBuilder {
     let mut app = AppBuilder::new(root).with_config(config).await;
     let store = MemoryStore::load(MemoryRoots {
-        workspace: root.join(".oven").join("memory"),
-        user: Some(root.join("user-memory")),
+        workspace: root.to_path_buf(),
+        project: Some(root.join(PROJECT_MEMORY)),
+        shared: root.join(".oven").join("memory"),
+        global: Some(root.join("global-memory")),
+        inbox: Some(root.join("inbox.jsonl")),
     })
     .await;
     app.set_memory(Arc::new(store));
@@ -198,7 +203,7 @@ fn common_of_driver(driver: &str) -> &str {
 #[tokio::test]
 async fn catalog_reaches_driver_and_role_prompts() {
     let tmp = tempdir::TempDir::new("memory-prompt").unwrap();
-    write_workspace_memory(tmp.path());
+    write_project_memory(tmp.path());
     let captured = capture(tmp.path(), AppConfig::default()).await;
     assert!(
         captured.driver.contains(&format!("\n\n{MEMORY_TAG}\n")),
@@ -235,7 +240,7 @@ async fn driver_only_tools_stay_out_of_role_prompts() {
 #[tokio::test]
 async fn guidance_precedes_catalog() {
     let tmp = tempdir::TempDir::new("memory-guidance-order").unwrap();
-    write_workspace_memory(tmp.path());
+    write_project_memory(tmp.path());
     let captured = capture(tmp.path(), AppConfig::default()).await;
     let guidance = captured
         .driver
@@ -266,7 +271,7 @@ async fn empty_store_adds_guidance_without_catalog() {
 #[tokio::test]
 async fn unloaded_matches_prompt_without_memory() {
     let tmp = tempdir::TempDir::new("memory-prompt-off").unwrap();
-    write_workspace_memory(tmp.path());
+    write_project_memory(tmp.path());
     let app = AppBuilder::new(tmp.path())
         .with_config(AppConfig::default())
         .await;
@@ -308,15 +313,17 @@ fn has_tool(tools: &[String], name: &str) -> bool {
 }
 
 #[tokio::test]
-async fn memory_writers_are_excluded_from_subagent_roles() {
+async fn only_the_driver_remembers_and_forgets_but_general_may_note() {
     let tmp = tempdir::TempDir::new("memory-write-roles").unwrap();
     let captured = capture(tmp.path(), AppConfig::default()).await;
-    assert!(has_tool(&captured.driver_tools, MemoryWriteTool::NAME));
-    assert!(!has_tool(&captured.explore_tools, MemoryWriteTool::NAME));
-    assert!(!has_tool(&captured.general_tools, MemoryWriteTool::NAME));
-    assert!(has_tool(&captured.driver_tools, MemoryForgetTool::NAME));
-    assert!(!has_tool(&captured.explore_tools, MemoryForgetTool::NAME));
-    assert!(!has_tool(&captured.general_tools, MemoryForgetTool::NAME));
+    for name in [MemoryRememberTool::NAME, MemoryForgetTool::NAME] {
+        assert!(has_tool(&captured.driver_tools, name), "{name}");
+        assert!(!has_tool(&captured.explore_tools, name), "{name}");
+        assert!(!has_tool(&captured.general_tools, name), "{name}");
+    }
+    assert!(has_tool(&captured.driver_tools, MemoryNoteTool::NAME));
+    assert!(has_tool(&captured.general_tools, MemoryNoteTool::NAME));
+    assert!(!has_tool(&captured.explore_tools, MemoryNoteTool::NAME));
 }
 
 #[tokio::test]
@@ -422,7 +429,7 @@ fn text_response(text: &str) -> Response {
 #[tokio::test]
 async fn write_does_not_change_the_driver_system_prompt() {
     let tmp = tempdir::TempDir::new("memory-write-frozen").unwrap();
-    write_workspace_memory(tmp.path());
+    write_project_memory(tmp.path());
     let systems = Arc::new(Mutex::new(Vec::new()));
     let app = isolated_app(tmp.path(), AppConfig::default()).await;
     let mut agents = app
@@ -430,9 +437,9 @@ async fn write_does_not_change_the_driver_system_prompt() {
             systems: Arc::clone(&systems),
             responses: Mutex::new(VecDeque::from([
                 tool_response(
-                    MemoryWriteTool::NAME,
+                    MemoryRememberTool::NAME,
                     serde_json::json!({
-                        "scope": "workspace",
+                        "scope": "project",
                         "id": MEMORY_ID,
                         "kind": "fact",
                         "description": "brand new description",
@@ -458,8 +465,7 @@ async fn write_does_not_change_the_driver_system_prompt() {
     assert!(!systems[0].contains("brand new description"));
     let raw = std::fs::read_to_string(
         tmp.path()
-            .join(".oven")
-            .join("memory")
+            .join(PROJECT_MEMORY)
             .join(format!("{MEMORY_ID}.md")),
     )
     .unwrap();

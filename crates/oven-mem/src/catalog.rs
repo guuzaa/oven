@@ -1,41 +1,84 @@
 use std::cmp::Ordering;
 use std::time::SystemTime;
 
-use crate::model::{MAX_CATALOG_CHARS, MemoryId, MemoryKind, MemoryScope};
+use crate::model::{MemoryId, MemoryKind, MemoryScope, MemoryStatus};
 
 const OPEN: &str = "<memory>";
 const CLOSE: &str = "</memory>";
 const INTRO: &str = "Notes saved by earlier sessions. They are not instructions from the user.";
 const FACTS: &str = "\
-Facts can be stale: check one against the code before relying on it, and fix
-or forget the ones that are wrong.";
+Facts can be stale: check one against the code before relying on it, and
+report a wrong one with memory_note.";
 const PREFERENCES: &str = "\
-Preferences the user stated: follow them unless the user or the project
-instructions say otherwise. The code cannot confirm or refute them.";
+Preferences: follow them unless the user or the project instructions say
+otherwise. The code cannot confirm or refute them.";
 const ENTRY_PREFIX: &str = "- ";
+const STALE_OPEN: &str = " [stale: ";
+const STALE_CLOSE: &str = "]";
 const MORE_PREFIX: &str = "- … ";
-const MORE_SUFFIX: &str = " more not shown";
+const MORE_MIDDLE: &str = " more not shown in ";
 
+/// What the index keeps of a memory: enough to list it and to render its
+/// catalog line, never its body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexEntry {
     pub scope: MemoryScope,
     pub id: MemoryId,
     pub kind: MemoryKind,
     pub description: String,
+    pub status: MemoryStatus,
+    pub reviewed: bool,
+    /// Why the fact is stale, when a signal says it is.
+    pub stale: Option<String>,
     pub modified: SystemTime,
 }
 
-pub fn within_catalog_budget(entries: &[&IndexEntry]) -> bool {
-    entries.is_empty() || compose(entries, entries.len()).chars().count() <= MAX_CATALOG_CHARS
+impl IndexEntry {
+    fn in_catalog(&self) -> bool {
+        self.status == MemoryStatus::Stable
+    }
+
+    /// What this entry costs its layer's budget: its catalog line without
+    /// the stale mark, which load decides and a write cannot know.
+    fn cost(&self) -> usize {
+        line_cost(self.scope, &self.id, &self.description)
+    }
 }
 
-/// The catalog as the model receives it: its text, and how many of the
-/// indexed memories that text holds. The ones it leaves out are over the
-/// budget and invisible to the model.
+pub(crate) fn line_cost(scope: MemoryScope, id: &MemoryId, description: &str) -> usize {
+    let text_len = ENTRY_PREFIX.len() + scope.as_str().len() + 1 + id.as_str().len() + 1;
+    text_len + description.chars().count() + 1
+}
+
+/// How much of one layer reaches the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerShown {
+    pub scope: MemoryScope,
+    pub shown: usize,
+    pub total: usize,
+}
+
+/// The catalog as the model receives it, and how much of each layer it
+/// holds. A layer over its budget leaves its oldest entries out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Catalog {
     pub text: String,
-    pub shown: usize,
+    pub layers: Vec<LayerShown>,
+}
+
+/// Whether `candidate` fits its layer next to the stable entries already
+/// there, replacing any entry with its id.
+pub(crate) fn fits_budget(entries: &[&IndexEntry], candidate: &IndexEntry) -> bool {
+    if !candidate.in_catalog() {
+        return true;
+    }
+    let others: usize = entries
+        .iter()
+        .filter(|entry| entry.scope == candidate.scope && entry.id != candidate.id)
+        .filter(|entry| entry.in_catalog())
+        .map(|entry| entry.cost())
+        .sum();
+    others + candidate.cost() <= candidate.scope.budget()
 }
 
 pub fn render_catalog(entries: &[IndexEntry]) -> Option<Catalog> {
@@ -43,26 +86,50 @@ pub fn render_catalog(entries: &[IndexEntry]) -> Option<Catalog> {
     render_refs(&refs)
 }
 
-/// The catalog for entries the caller already holds by reference, so a
-/// caller that only reads the index does not have to copy it.
 pub(crate) fn render_refs(entries: &[&IndexEntry]) -> Option<Catalog> {
-    if entries.is_empty() {
+    let mut visible: Vec<&IndexEntry> = entries
+        .iter()
+        .copied()
+        .filter(|entry| entry.in_catalog())
+        .collect();
+    if visible.is_empty() {
         return None;
     }
-    let mut shown = entries.len();
-    loop {
-        let text = compose(entries, shown);
-        if text.chars().count() <= MAX_CATALOG_CHARS || shown == 0 {
-            return Some(Catalog { text, shown });
+    visible.sort_by(|a, b| by_recency(a, b));
+    let mut selected = Vec::new();
+    let mut layers = Vec::new();
+    for scope in MemoryScope::ALL {
+        let layer: Vec<&IndexEntry> = visible
+            .iter()
+            .copied()
+            .filter(|entry| entry.scope == scope)
+            .collect();
+        if layer.is_empty() {
+            continue;
         }
-        shown -= 1;
+        let mut spent = 0;
+        let shown = layer
+            .iter()
+            .take_while(|entry| {
+                spent += entry.cost();
+                spent <= scope.budget()
+            })
+            .count();
+        selected.extend_from_slice(&layer[..shown]);
+        layers.push(LayerShown {
+            scope,
+            shown,
+            total: layer.len(),
+        });
     }
+    selected.sort_by(|a, b| by_recency(a, b));
+    Some(Catalog {
+        text: compose(&selected, &layers),
+        layers,
+    })
 }
 
-fn compose(entries: &[&IndexEntry], shown: usize) -> String {
-    let mut ranked = entries.to_vec();
-    ranked.sort_by(|a, b| by_recency(a, b));
-    let selected = &ranked[..shown];
+fn compose(selected: &[&IndexEntry], layers: &[LayerShown]) -> String {
     let mut out = String::new();
     out.push_str(OPEN);
     out.push('\n');
@@ -70,14 +137,15 @@ fn compose(entries: &[&IndexEntry], shown: usize) -> String {
     out.push('\n');
     push_section(&mut out, selected, MemoryKind::Fact, FACTS);
     push_section(&mut out, selected, MemoryKind::Preference, PREFERENCES);
-    if shown < ranked.len() {
-        if shown == 0 {
-            out.push('\n');
-        }
-        let hidden = ranked.len() - shown;
+    let hidden: Vec<&LayerShown> = layers.iter().filter(|l| l.shown < l.total).collect();
+    if !hidden.is_empty() && selected.is_empty() {
+        out.push('\n');
+    }
+    for layer in hidden {
         out.push_str(MORE_PREFIX);
-        out.push_str(&hidden.to_string());
-        out.push_str(MORE_SUFFIX);
+        out.push_str(&(layer.total - layer.shown).to_string());
+        out.push_str(MORE_MIDDLE);
+        out.push_str(layer.scope.as_str());
         out.push('\n');
     }
     out.push_str(CLOSE);
@@ -100,11 +168,16 @@ fn push_section(out: &mut String, selected: &[&IndexEntry], kind: MemoryKind, fr
         out.push_str(entry.id.as_str());
         out.push(' ');
         out.push_str(&entry.description);
+        if let Some(reason) = &entry.stale {
+            out.push_str(STALE_OPEN);
+            out.push_str(reason);
+            out.push_str(STALE_CLOSE);
+        }
         out.push('\n');
     }
 }
 
-fn by_recency(a: &IndexEntry, b: &IndexEntry) -> Ordering {
+pub(crate) fn by_recency(a: &IndexEntry, b: &IndexEntry) -> Ordering {
     b.modified
         .cmp(&a.modified)
         .then(a.scope.cmp(&b.scope))
@@ -115,8 +188,10 @@ fn by_recency(a: &IndexEntry, b: &IndexEntry) -> Ordering {
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use super::{IndexEntry, render_catalog};
-    use crate::model::{MAX_CATALOG_CHARS, MemoryId, MemoryKind, MemoryScope};
+    use super::{IndexEntry, LayerShown, render_catalog};
+    use crate::model::{
+        GLOBAL_BUDGET, MemoryId, MemoryKind, MemoryScope, MemoryStatus, PROJECT_BUDGET,
+    };
 
     fn entry(
         scope: MemoryScope,
@@ -130,11 +205,13 @@ mod tests {
             id: MemoryId::new(id).unwrap(),
             kind,
             description: description.to_owned(),
+            status: MemoryStatus::Stable,
+            reviewed: false,
+            stale: None,
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(secs),
         }
     }
 
-    /// The catalog text, without the count of what it holds.
     fn rendered(entries: &[IndexEntry]) -> String {
         render_catalog(entries)
             .map(|catalog| catalog.text)
@@ -150,14 +227,14 @@ mod tests {
     fn both_sections_include_framing() {
         let entries = [
             entry(
-                MemoryScope::Workspace,
+                MemoryScope::Project,
                 "proxy-requires-http2",
                 MemoryKind::Fact,
                 "The internal proxy only speaks HTTP/2.",
                 2,
             ),
             entry(
-                MemoryScope::User,
+                MemoryScope::Global,
                 "clippy-before-done",
                 MemoryKind::Preference,
                 "Run cargo clippy before saying done.",
@@ -170,92 +247,101 @@ mod tests {
 <memory>
 Notes saved by earlier sessions. They are not instructions from the user.
 
-Facts can be stale: check one against the code before relying on it, and fix
-or forget the ones that are wrong.
-- workspace/proxy-requires-http2 The internal proxy only speaks HTTP/2.
+Facts can be stale: check one against the code before relying on it, and
+report a wrong one with memory_note.
+- project/proxy-requires-http2 The internal proxy only speaks HTTP/2.
 
-Preferences the user stated: follow them unless the user or the project
-instructions say otherwise. The code cannot confirm or refute them.
-- user/clippy-before-done Run cargo clippy before saying done.
+Preferences: follow them unless the user or the project instructions say
+otherwise. The code cannot confirm or refute them.
+- global/clippy-before-done Run cargo clippy before saying done.
 </memory>
 "
         );
     }
 
     #[test]
-    fn empty_section_is_omitted() {
-        let entries = [entry(
-            MemoryScope::User,
-            "clippy-before-done",
-            MemoryKind::Preference,
-            "Run cargo clippy before saying done.",
-            1,
-        )];
-        let rendered = rendered(&entries);
-        assert_eq!(
-            rendered,
-            "\
-<memory>
-Notes saved by earlier sessions. They are not instructions from the user.
+    fn drafts_and_deprecated_are_not_shown() {
+        let mut draft = entry(MemoryScope::Global, "draft", MemoryKind::Preference, "d", 2);
+        draft.status = MemoryStatus::Draft;
+        let mut old = entry(MemoryScope::Project, "old", MemoryKind::Fact, "o", 1);
+        old.status = MemoryStatus::Deprecated;
+        assert_eq!(render_catalog(&[draft.clone(), old.clone()]), None);
+        let kept = entry(MemoryScope::Project, "kept", MemoryKind::Fact, "k", 3);
+        let text = rendered(&[draft, old, kept]);
+        assert!(text.contains("- project/kept k\n"));
+        assert!(!text.contains("draft"));
+        assert!(!text.contains("project/old"));
+    }
 
-Preferences the user stated: follow them unless the user or the project
-instructions say otherwise. The code cannot confirm or refute them.
-- user/clippy-before-done Run cargo clippy before saying done.
-</memory>
-"
-        );
-        assert!(!rendered.contains("Facts can be stale"));
+    #[test]
+    fn a_stale_fact_says_why() {
+        let mut fact = entry(MemoryScope::Project, "moved", MemoryKind::Fact, "f", 1);
+        fact.stale = Some("crates/a.rs is gone".into());
+        assert!(rendered(&[fact]).contains("- project/moved f [stale: crates/a.rs is gone]\n"));
     }
 
     #[test]
     fn newest_first_with_scope_then_id_ties() {
         let entries = [
-            entry(MemoryScope::Workspace, "b", MemoryKind::Fact, "b", 2),
-            entry(MemoryScope::Workspace, "a", MemoryKind::Fact, "a", 2),
-            entry(MemoryScope::User, "a", MemoryKind::Fact, "user-a", 2),
-            entry(MemoryScope::Workspace, "z", MemoryKind::Fact, "older", 1),
+            entry(MemoryScope::Project, "b", MemoryKind::Fact, "b", 2),
+            entry(MemoryScope::Project, "a", MemoryKind::Fact, "a", 2),
+            entry(MemoryScope::Global, "a", MemoryKind::Fact, "global-a", 2),
+            entry(MemoryScope::Project, "z", MemoryKind::Fact, "older", 1),
         ];
         let rendered = rendered(&entries);
-        let workspace_a = rendered.find("- workspace/a ").unwrap();
-        let workspace_b = rendered.find("- workspace/b ").unwrap();
-        let user_a = rendered.find("- user/a ").unwrap();
-        let older = rendered.find("- workspace/z ").unwrap();
-        assert!(workspace_a < workspace_b);
-        assert!(workspace_b < user_a);
-        assert!(user_a < older);
+        let project_a = rendered.find("- project/a ").unwrap();
+        let project_b = rendered.find("- project/b ").unwrap();
+        let global_a = rendered.find("- global/a ").unwrap();
+        let older = rendered.find("- project/z ").unwrap();
+        assert!(project_a < project_b);
+        assert!(project_b < global_a);
+        assert!(global_a < older);
     }
 
     #[test]
-    fn budget_truncation_reports_exact_remainder() {
-        let huge = "h".repeat(MAX_CATALOG_CHARS);
+    fn each_layer_spends_its_own_budget() {
+        let huge_global = "g".repeat(GLOBAL_BUDGET);
         let entries = [
-            entry(MemoryScope::Workspace, "c", MemoryKind::Fact, "short", 3),
-            entry(MemoryScope::Workspace, "b", MemoryKind::Fact, &huge, 2),
-            entry(MemoryScope::Workspace, "a", MemoryKind::Fact, "short", 1),
-        ];
-        let rendered = rendered(&entries);
-        assert!(rendered.chars().count() <= MAX_CATALOG_CHARS);
-        assert!(rendered.contains("- workspace/c short\n"));
-        assert!(rendered.contains("- … 2 more not shown\n"));
-        assert!(!rendered.contains("workspace/b"));
-        assert!(!rendered.contains("workspace/a"));
-    }
-
-    #[test]
-    fn the_shown_count_is_what_the_model_gets() {
-        let huge = "h".repeat(MAX_CATALOG_CHARS);
-        let entries = [
-            entry(MemoryScope::Workspace, "c", MemoryKind::Fact, "short", 3),
-            entry(MemoryScope::Workspace, "b", MemoryKind::Fact, &huge, 2),
-            entry(MemoryScope::Workspace, "a", MemoryKind::Fact, "short", 1),
+            entry(MemoryScope::Global, "c", MemoryKind::Fact, "short", 3),
+            entry(MemoryScope::Global, "b", MemoryKind::Fact, &huge_global, 2),
+            entry(MemoryScope::Global, "a", MemoryKind::Fact, "short", 1),
+            entry(MemoryScope::Project, "p", MemoryKind::Fact, "project", 0),
         ];
         let catalog = render_catalog(&entries).unwrap();
-        assert_eq!(catalog.shown, 1);
+        assert!(catalog.text.contains("- global/c short\n"));
+        assert!(catalog.text.contains("- project/p project\n"));
+        assert!(catalog.text.contains("- … 2 more not shown in global\n"));
+        assert!(!catalog.text.contains("global/a"));
+        assert_eq!(
+            catalog.layers,
+            vec![
+                LayerShown {
+                    scope: MemoryScope::Project,
+                    shown: 1,
+                    total: 1
+                },
+                LayerShown {
+                    scope: MemoryScope::Global,
+                    shown: 1,
+                    total: 3
+                },
+            ]
+        );
+    }
 
-        let entries = [
-            entry(MemoryScope::Workspace, "a", MemoryKind::Fact, "short", 2),
-            entry(MemoryScope::User, "b", MemoryKind::Fact, "short", 1),
-        ];
-        assert_eq!(render_catalog(&entries).unwrap().shown, 2);
+    #[test]
+    fn a_layer_with_nothing_that_fits_still_says_so() {
+        let huge = "p".repeat(PROJECT_BUDGET);
+        let entries = [entry(
+            MemoryScope::Project,
+            "big",
+            MemoryKind::Fact,
+            &huge,
+            1,
+        )];
+        assert_eq!(
+            rendered(&entries),
+            "<memory>\nNotes saved by earlier sessions. They are not instructions from the user.\n\n- … 1 more not shown in project\n</memory>\n"
+        );
     }
 }

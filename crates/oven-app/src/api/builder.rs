@@ -17,7 +17,9 @@ use crate::App;
 use crate::ToolRegistry;
 use crate::capabilities::mcp::McpRegistry;
 use crate::capabilities::mcp::client::{DefaultMcpConnector, McpConnector};
-use crate::capabilities::memory::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
+use crate::capabilities::memory::{
+    MemoryForgetTool, MemoryNoteTool, MemoryReadTool, MemoryRememberTool,
+};
 use crate::capabilities::skills::{Skill, SkillRegistry};
 use crate::capabilities::subagent::{Role as SubagentRole, SubagentParts, Subagents};
 use crate::capabilities::tools::{
@@ -37,13 +39,14 @@ use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
 use oven_proto::AppId;
 
 /// Tools a subagent never mounts: the ones that speak to the user, manage
-/// the caller's plan, or would nest delegation.
+/// the caller's plan, would nest delegation, or act on what only the user
+/// can ask for.
 const CHILD_TOOLS_EXCLUDED: &[&str] = &[
     AnswerTool::NAME,
     TodoWriteTool::NAME,
     TaskTool::NAME,
     TaskOutputTool::NAME,
-    MemoryWriteTool::NAME,
+    MemoryRememberTool::NAME,
     MemoryForgetTool::NAME,
 ];
 
@@ -200,8 +203,9 @@ impl AppBuilder {
         self.config = config;
     }
 
-    /// Load durable memory from the workspace and user roots. Without it the
-    /// builder mounts no memory tools and adds nothing to the system prompt.
+    /// Load durable memory from its project, shared and global layers.
+    /// Without it the builder mounts no memory tools and adds nothing to the
+    /// system prompt.
     pub async fn load_memory(&mut self) {
         self.memory = Some(Arc::new(
             MemoryStore::load(dirs::memory_roots(&self.root)).await,
@@ -280,9 +284,14 @@ impl AppBuilder {
         base.extend(mcp_tools.into_iter().map(|t| Arc::new(t) as Arc<dyn Tool>));
         if let Some(store) = &self.memory {
             base.push(Arc::new(MemoryReadTool::new(Arc::clone(store))));
-            base.push(Arc::new(MemoryWriteTool::new(
+            base.push(Arc::new(MemoryNoteTool::new(
+                store.inbox(),
+                sessions.clone(),
+            )));
+            base.push(Arc::new(MemoryRememberTool::new(
                 Arc::clone(store),
                 sessions.clone(),
+                canonical_root(&self.root),
             )));
             base.push(Arc::new(MemoryForgetTool::new(Arc::clone(store))));
         }

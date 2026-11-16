@@ -5,28 +5,51 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use oven_mem::MemoryStore;
-use oven_mem::{MAX_CATALOG_CHARS, Memory, MemoryError, MemoryId, MemoryScope, NOT_FOUND};
+use oven_mem::{IndexEntry, MemoryError, MemoryId, MemoryScope, MemoryStatus, NOT_FOUND, Stamp};
 
 use crate::core::error::AppError;
-use crate::core::memory::{SOURCE_LABEL, header, parse_id, parse_scope};
+use crate::core::memory::{describe, parse_id, parse_scope};
 
 pub(crate) const NO_MEMORIES: &str = "no memories";
+pub(crate) const NO_DRAFTS: &str = "no drafts";
 pub(crate) const MEMORY_DISABLED: &str = "memory is disabled";
-pub(crate) const USAGE: &str = "usage: /memory [show <ref> | rm <ref>]";
-pub(crate) const AMBIGUOUS_MEMORY: &str = "memory id is in both scopes; qualify it";
+pub(crate) const USAGE: &str =
+    "usage: /memory [review | tidy | show <ref> | rm <ref> | mv <ref> <scope> | approve <ref>]";
+pub(crate) const TIDY_IN_APP: &str = "tidy needs a model; run /memory tidy inside oven";
+pub(crate) const AMBIGUOUS_MEMORY: &str = "memory id is in more than one layer; qualify it";
 pub(crate) const REMOVED_MEMORY: &str = "removed memory";
+pub(crate) const MOVED_MEMORY: &str = "moved memory";
+pub(crate) const APPROVED_MEMORY: &str = "approved memory";
 pub(crate) const NO_EDITOR: &str = "neither VISUAL nor EDITOR is set";
+pub(crate) const BUDGET_FULL: &str = "budget full";
+pub(crate) const AWAIT_REVIEW: &str = "await /memory review";
+pub(crate) const WAIT_FOR_TIDY: &str = "wait for /memory tidy";
 
+const REVIEW: &str = "review";
+const TIDY: &str = "tidy";
 const SHOW: &str = "show";
 const RM: &str = "rm";
+const MV: &str = "mv";
+const APPROVE: &str = "approve";
 const LIST_BULLET: &str = "- ";
+const NOT_LOADED: &str = "not loaded";
 const CATALOG_LABEL: &str = "catalog";
+const REVIEWED_MARK: &str = "reviewed";
+const STALE_OPEN: &str = " [stale: ";
+const STALE_CLOSE: &str = "]";
+const FOOTER_SEPARATOR: &str = "; ";
+const USER_VARS: [&str; 2] = ["USER", "USERNAME"];
+const UNKNOWN_HUMAN: &str = "local";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MemoryAction {
     List,
+    Review,
+    Tidy,
     Show(MemoryRef),
     Remove(MemoryRef),
+    Move(MemoryRef, MemoryScope),
+    Approve(MemoryRef),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,8 +62,15 @@ pub(crate) fn parse_command(args: &str) -> Result<MemoryAction, AppError> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     match tokens.as_slice() {
         [] => Ok(MemoryAction::List),
+        [REVIEW] => Ok(MemoryAction::Review),
+        [TIDY] => Ok(MemoryAction::Tidy),
         [SHOW, raw] => Ok(MemoryAction::Show(parse_ref(raw)?)),
         [RM, raw] => Ok(MemoryAction::Remove(parse_ref(raw)?)),
+        [MV, raw, scope] => Ok(MemoryAction::Move(
+            parse_ref(raw)?,
+            parse_scope(scope).map_err(AppError::Runtime)?,
+        )),
+        [APPROVE, raw] => Ok(MemoryAction::Approve(parse_ref(raw)?)),
         _ => Err(AppError::Runtime(USAGE.to_owned())),
     }
 }
@@ -63,12 +93,25 @@ pub async fn list(store: &MemoryStore) -> String {
     apply(store, MemoryAction::List).await
 }
 
+pub async fn review(store: &MemoryStore) -> String {
+    apply(store, MemoryAction::Review).await
+}
+
 pub async fn show(store: &MemoryStore, raw: &str) -> Result<String, AppError> {
     Ok(apply(store, MemoryAction::Show(parse_ref(raw)?)).await)
 }
 
 pub async fn remove(store: &MemoryStore, raw: &str) -> Result<String, AppError> {
     Ok(apply(store, MemoryAction::Remove(parse_ref(raw)?)).await)
+}
+
+pub async fn move_to(store: &MemoryStore, raw: &str, scope: &str) -> Result<String, AppError> {
+    let target = parse_scope(scope).map_err(AppError::Runtime)?;
+    Ok(apply(store, MemoryAction::Move(parse_ref(raw)?, target)).await)
+}
+
+pub async fn approve(store: &MemoryStore, raw: &str) -> Result<String, AppError> {
+    Ok(apply(store, MemoryAction::Approve(parse_ref(raw)?)).await)
 }
 
 pub async fn file_path(store: &MemoryStore, raw: &str) -> Result<PathBuf, AppError> {
@@ -88,28 +131,66 @@ pub fn editor_program(visual: Option<&str>, editor: Option<&str>) -> Result<Stri
 }
 
 pub(crate) async fn apply(store: &MemoryStore, action: MemoryAction) -> String {
-    match action {
-        MemoryAction::List => render_list(store),
+    let result = match action {
+        MemoryAction::List => Ok(render_list(store).await),
+        MemoryAction::Review => Ok(render_review(store)),
+        MemoryAction::Tidy => Err(TIDY_IN_APP.to_owned()),
         MemoryAction::Show(memory_ref) => show_ref(store, &memory_ref).await,
         MemoryAction::Remove(memory_ref) => remove_ref(store, &memory_ref).await,
+        MemoryAction::Move(memory_ref, target) => move_ref(store, &memory_ref, target).await,
+        MemoryAction::Approve(memory_ref) => approve_ref(store, &memory_ref).await,
+    };
+    result.unwrap_or_else(|text| text)
+}
+
+/// Every memory, one section per layer, newest first, then what the model
+/// sees of them and what waits for a person or for tidy.
+async fn render_list(store: &MemoryStore) -> String {
+    let entries = sorted_entries(store);
+    let mut out = match entries.is_empty() {
+        true => NO_MEMORIES.to_owned(),
+        false => render_layers(&entries),
+    };
+    let footer = footer(store, &entries).await;
+    if !footer.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&footer);
+    }
+    for skip in store.skipped() {
+        let _ = write!(
+            out,
+            "\n{NOT_LOADED}: {}/{} ({})",
+            skip.scope, skip.file, skip.reason
+        );
+    }
+    out
+}
+
+fn render_review(store: &MemoryStore) -> String {
+    let drafts: Vec<IndexEntry> = sorted_entries(store)
+        .into_iter()
+        .filter(|entry| entry.status == MemoryStatus::Draft)
+        .collect();
+    match drafts.is_empty() {
+        true => NO_DRAFTS.to_owned(),
+        false => render_layers(&drafts),
     }
 }
 
-/// The listing, one section per scope: what the workspace remembers and
-/// what the user remembers, told apart.
-fn render_list(store: &MemoryStore) -> String {
+fn sorted_entries(store: &MemoryStore) -> Vec<IndexEntry> {
     let mut entries = store.entries();
-    if entries.is_empty() {
-        return NO_MEMORIES.to_owned();
-    }
     entries.sort_by(|left, right| {
         right
             .modified
             .cmp(&left.modified)
             .then(left.id.cmp(&right.id))
     });
+    entries
+}
+
+fn render_layers(entries: &[IndexEntry]) -> String {
     let mut out = String::new();
-    for scope in [MemoryScope::Workspace, MemoryScope::User] {
+    for scope in MemoryScope::ALL {
         let mut group = entries
             .iter()
             .filter(|entry| entry.scope == scope)
@@ -122,448 +203,164 @@ fn render_list(store: &MemoryStore) -> String {
         }
         let _ = writeln!(out, "{scope}:");
         for entry in group {
-            let _ = writeln!(
+            let _ = write!(
                 out,
                 "{LIST_BULLET}{} ({}) {}",
                 entry.id,
-                entry.kind.as_str(),
+                marks(entry),
                 entry.description
             );
+            if let Some(reason) = &entry.stale {
+                let _ = write!(out, "{STALE_OPEN}{reason}{STALE_CLOSE}");
+            }
+            out.push('\n');
         }
     }
     let _ = out.pop();
-    if let Some(footer) = catalog_footer(store) {
-        out.push_str("\n\n");
-        out.push_str(&footer);
-    }
     out
 }
 
-/// What the model gets to see. The catalog is truncated to its budget, so a
-/// memory can be listed here and still be invisible to the model.
-fn catalog_footer(store: &MemoryStore) -> Option<String> {
-    let shown = store.catalog()?.shown;
-    let total = store.entries().len();
-    Some(match shown == total {
-        true => format!("{CATALOG_LABEL}: {shown} of {total} memories in the model's catalog"),
-        false => format!(
-            "{CATALOG_LABEL}: {shown} of {total} memories in the model's catalog; \
-             the {MAX_CATALOG_CHARS}-char budget is full, so no new memory can be written"
-        ),
-    })
-}
-
-async fn show_ref(store: &MemoryStore, memory_ref: &MemoryRef) -> String {
-    match load(store, memory_ref).await {
-        Ok(memory) => render_show(&memory),
-        Err(text) => text,
+/// `fact`, `preference, draft`, `fact, reviewed`: the kind, then whatever
+/// sets this memory apart from a stable, unreviewed one.
+fn marks(entry: &IndexEntry) -> String {
+    let mut marks = vec![entry.kind.as_str()];
+    if entry.status != MemoryStatus::Stable {
+        marks.push(entry.status.as_str());
     }
+    if entry.reviewed {
+        marks.push(REVIEWED_MARK);
+    }
+    marks.join(", ")
 }
 
-async fn remove_ref(store: &MemoryStore, memory_ref: &MemoryRef) -> String {
-    let (scope, id) = match resolve(store, memory_ref) {
-        Ok(found) => found,
-        Err(text) => return text,
+/// What the model gets to see, layer by layer, and what is waiting. A
+/// layer over its budget shows less than it holds.
+async fn footer(store: &MemoryStore, entries: &[IndexEntry]) -> String {
+    let mut parts = Vec::new();
+    if let Some(catalog) = store.catalog() {
+        let layers: Vec<String> = catalog
+            .layers
+            .iter()
+            .map(|layer| {
+                let mut text = format!("{} {} of {}", layer.scope, layer.shown, layer.total);
+                if layer.shown < layer.total {
+                    let _ = write!(text, " ({BUDGET_FULL})");
+                }
+                text
+            })
+            .collect();
+        parts.push(format!("{CATALOG_LABEL}: {}", layers.join(", ")));
+    }
+    let drafts = entries
+        .iter()
+        .filter(|entry| entry.status == MemoryStatus::Draft)
+        .count();
+    if drafts > 0 {
+        parts.push(format!(
+            "{drafts} {} {AWAIT_REVIEW}",
+            plural(drafts, "draft", "drafts")
+        ));
+    }
+    let notes = match store.inbox() {
+        Some(inbox) => inbox.count().await,
+        None => 0,
     };
-    match store.forget(scope, &id).await {
-        Ok(()) => format!("{REMOVED_MEMORY}: {scope}/{id}"),
-        Err(err) => err.to_string(),
+    if notes > 0 {
+        parts.push(format!(
+            "{notes} {} {WAIT_FOR_TIDY}",
+            plural(notes, "note", "notes")
+        ));
+    }
+    parts.join(FOOTER_SEPARATOR)
+}
+
+pub(crate) fn plural(count: usize, one: &'static str, many: &'static str) -> &'static str {
+    match count {
+        1 => one,
+        _ => many,
     }
 }
 
-async fn load(store: &MemoryStore, memory_ref: &MemoryRef) -> Result<Memory, String> {
+async fn show_ref(store: &MemoryStore, memory_ref: &MemoryRef) -> Result<String, String> {
     let (scope, id) = resolve(store, memory_ref)?;
-    store.read(scope, &id).await.map_err(|err| err.to_string())
+    let memory = store
+        .read(scope, &id)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(describe(&memory))
+}
+
+async fn remove_ref(store: &MemoryStore, memory_ref: &MemoryRef) -> Result<String, String> {
+    let (scope, id) = resolve(store, memory_ref)?;
+    store
+        .forget(scope, &id)
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(format!("{REMOVED_MEMORY}: {scope}/{id}"))
+}
+
+async fn move_ref(
+    store: &MemoryStore,
+    memory_ref: &MemoryRef,
+    target: MemoryScope,
+) -> Result<String, String> {
+    let (scope, id) = resolve(store, memory_ref)?;
+    let moved = store
+        .move_to(scope, &id, target, reviewer())
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(format!(
+        "{MOVED_MEMORY}: {scope}/{id} → {}",
+        moved.reference()
+    ))
+}
+
+async fn approve_ref(store: &MemoryStore, memory_ref: &MemoryRef) -> Result<String, String> {
+    let (scope, id) = resolve(store, memory_ref)?;
+    let approved = store
+        .approve(scope, &id, reviewer())
+        .await
+        .map_err(|err| err.to_string())?;
+    Ok(format!("{APPROVED_MEMORY}: {}", approved.reference()))
+}
+
+/// The person at the keyboard, as an OKF actor.
+fn reviewer() -> Stamp {
+    let name = USER_VARS
+        .iter()
+        .find_map(|var| {
+            std::env::var(var)
+                .ok()
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or_else(|| UNKNOWN_HUMAN.to_owned());
+    Stamp::human(name.trim())
 }
 
 fn resolve(store: &MemoryStore, memory_ref: &MemoryRef) -> Result<(MemoryScope, MemoryId), String> {
     match memory_ref {
-        MemoryRef::Scoped { scope, id } => {
-            if store.contains(*scope, id) {
-                Ok((*scope, id.clone()))
-            } else {
-                Err(MemoryError::NotFound {
-                    scope: *scope,
-                    id: id.clone(),
-                }
-                .to_string())
-            }
+        MemoryRef::Scoped { scope, id } if store.contains(*scope, id) => Ok((*scope, id.clone())),
+        MemoryRef::Scoped { scope, id } => Err(MemoryError::NotFound {
+            scope: *scope,
+            id: id.clone(),
         }
-        MemoryRef::Bare(id) => locate_bare(store, id),
+        .to_string()),
+        MemoryRef::Bare(id) => match store.scopes_of(id).as_slice() {
+            [] => Err(format!("{NOT_FOUND}: {id}")),
+            [scope] => Ok((*scope, id.clone())),
+            scopes => {
+                let refs: Vec<String> =
+                    scopes.iter().map(|scope| format!("{scope}/{id}")).collect();
+                Err(format!("{AMBIGUOUS_MEMORY}: {}", refs.join(" or ")))
+            }
+        },
     }
 }
 
-fn locate_bare(store: &MemoryStore, id: &MemoryId) -> Result<(MemoryScope, MemoryId), String> {
-    match store.scopes_of(id).as_slice() {
-        [] => Err(format!("{NOT_FOUND}: {id}")),
-        [scope] => Ok((*scope, id.clone())),
-        _ => Err(format!(
-            "{AMBIGUOUS_MEMORY}: {}/{id} or {}/{id}",
-            MemoryScope::Workspace,
-            MemoryScope::User
-        )),
-    }
-}
-
-fn render_show(memory: &Memory) -> String {
-    let mut out = header(memory);
-    if let Some(source) = &memory.source {
-        let _ = writeln!(out, "{SOURCE_LABEL}: {source}");
-    }
-    out.push('\n');
-    out.push_str(&memory.body);
-    out
-}
+#[path = "memory_tidy.rs"]
+pub(crate) mod tidy;
+pub(crate) use tidy::tidy;
 
 #[cfg(test)]
-mod tests {
-    use std::path::Path;
-    use std::time::{Duration, SystemTime};
-
-    use oven_mem::{
-        EMPTY_ID, INVALID_ID, MAX_DESCRIPTION, MemoryId, MemoryKind, MemoryRoots, MemoryScope,
-        MemoryStore,
-    };
-
-    use super::*;
-    use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL, UNKNOWN_SCOPE};
-
-    const PROXY_ID: &str = "proxy-requires-http2";
-    const PROXY_DESCRIPTION: &str = "The internal proxy only speaks HTTP/2.";
-    const PROXY_BODY: &str = "handshake resets\n";
-    const SOURCE: &str = "01J8Z";
-    const PREF_ID: &str = "clippy-before-done";
-    const PREF_DESCRIPTION: &str = "Run cargo clippy before saying done.";
-    const OLDER_ID: &str = "older-fact";
-    const OLDER_DESCRIPTION: &str = "An older workspace fact.";
-
-    fn id(raw: &str) -> MemoryId {
-        MemoryId::new(raw).unwrap()
-    }
-
-    fn scoped(scope: MemoryScope, raw: &str) -> MemoryRef {
-        MemoryRef::Scoped { scope, id: id(raw) }
-    }
-
-    #[test]
-    fn parses_each_form() {
-        assert_eq!(parse_command("").unwrap(), MemoryAction::List);
-        assert_eq!(parse_command("   ").unwrap(), MemoryAction::List);
-        assert_eq!(
-            parse_command(&format!("show workspace/{PROXY_ID}")).unwrap(),
-            MemoryAction::Show(scoped(MemoryScope::Workspace, PROXY_ID))
-        );
-        assert_eq!(
-            parse_command(&format!("rm user/{PREF_ID}")).unwrap(),
-            MemoryAction::Remove(scoped(MemoryScope::User, PREF_ID))
-        );
-        assert_eq!(
-            parse_command(&format!("show {PROXY_ID}")).unwrap(),
-            MemoryAction::Show(MemoryRef::Bare(id(PROXY_ID)))
-        );
-        assert_eq!(
-            parse_command(&format!("  rm   {PREF_ID}  ")).unwrap(),
-            MemoryAction::Remove(MemoryRef::Bare(id(PREF_ID)))
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_forms() {
-        for args in ["nope", "show", "rm", "show one two", "ls"] {
-            let err = parse_command(args).unwrap_err();
-            assert_eq!(err.to_string(), USAGE, "{args}");
-        }
-        let err = parse_command("show nope/proxy").unwrap_err();
-        assert_eq!(err.to_string(), format!("{UNKNOWN_SCOPE} 'nope'"));
-        let err = parse_command("rm ../x").unwrap_err();
-        assert_eq!(err.to_string(), format!("{UNKNOWN_SCOPE} '..'"));
-        let err = parse_command("show workspace/../x").unwrap_err();
-        assert_eq!(err.to_string(), INVALID_ID);
-        let err = parse_command("rm A").unwrap_err();
-        assert_eq!(err.to_string(), INVALID_ID);
-        let err = parse_command("show workspace/").unwrap_err();
-        assert_eq!(err.to_string(), EMPTY_ID);
-    }
-
-    fn write_memory(
-        dir: &Path,
-        memory_id: &str,
-        kind: MemoryKind,
-        description: &str,
-        body: &str,
-        source: Option<&str>,
-        secs: u64,
-    ) {
-        std::fs::create_dir_all(dir).unwrap();
-        let source_line = match source {
-            Some(source) => format!("source: {source}\n"),
-            None => String::new(),
-        };
-        let path = dir.join(format!("{memory_id}.md"));
-        std::fs::write(
-            &path,
-            format!(
-                "---\nkind: {}\ndescription: {description}\n{source_line}---\n\n{body}",
-                kind.as_str()
-            ),
-        )
-        .unwrap();
-        // SetFileTime needs FILE_WRITE_ATTRIBUTES; a read-only handle is denied on Windows.
-        std::fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-            .unwrap();
-    }
-
-    async fn loaded(workspace: &Path, user: &Path) -> MemoryStore {
-        MemoryStore::load(MemoryRoots {
-            workspace: workspace.to_path_buf(),
-            user: Some(user.to_path_buf()),
-        })
-        .await
-    }
-
-    #[tokio::test]
-    async fn list_groups_the_scopes_and_is_empty_when_none() {
-        let tmp = tempdir::TempDir::new("memory-list").unwrap();
-        let workspace = tmp.path().join("workspace");
-        let user = tmp.path().join("user");
-        let empty = loaded(&workspace, &user).await;
-        assert_eq!(list(&empty).await, NO_MEMORIES);
-
-        write_memory(
-            &workspace,
-            PROXY_ID,
-            MemoryKind::Fact,
-            PROXY_DESCRIPTION,
-            PROXY_BODY,
-            Some(SOURCE),
-            10,
-        );
-        write_memory(
-            &workspace,
-            OLDER_ID,
-            MemoryKind::Fact,
-            OLDER_DESCRIPTION,
-            PROXY_BODY,
-            None,
-            5,
-        );
-        write_memory(
-            &user,
-            PREF_ID,
-            MemoryKind::Preference,
-            PREF_DESCRIPTION,
-            "always\n",
-            None,
-            20,
-        );
-        let store = loaded(&workspace, &user).await;
-        assert_eq!(
-            list(&store).await,
-            format!(
-                "workspace:\n- {PROXY_ID} ({}) {PROXY_DESCRIPTION}\n- {OLDER_ID} ({}) {OLDER_DESCRIPTION}\n\nuser:\n- {PREF_ID} ({}) {PREF_DESCRIPTION}\n\ncatalog: 3 of 3 memories in the model's catalog",
-                MemoryKind::Fact.as_str(),
-                MemoryKind::Fact.as_str(),
-                MemoryKind::Preference.as_str()
-            )
-        );
-
-        let workspace_only = loaded(&workspace, &tmp.path().join("empty-user")).await;
-        assert_eq!(
-            list(&workspace_only).await,
-            format!(
-                "workspace:\n- {PROXY_ID} ({}) {PROXY_DESCRIPTION}\n- {OLDER_ID} ({}) {OLDER_DESCRIPTION}\n\ncatalog: 2 of 2 memories in the model's catalog",
-                MemoryKind::Fact.as_str(),
-                MemoryKind::Fact.as_str()
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn list_says_how_much_of_it_the_model_sees() {
-        let tmp = tempdir::TempDir::new("memory-list-budget").unwrap();
-        let workspace = tmp.path().join("workspace");
-        let user = tmp.path().join("user");
-        let description = "d".repeat(MAX_DESCRIPTION);
-        for n in 0..80 {
-            write_memory(
-                &workspace,
-                &format!("m{n:03}"),
-                MemoryKind::Fact,
-                &description,
-                "body\n",
-                None,
-                10,
-            );
-        }
-        let store = loaded(&workspace, &user).await;
-        let text = list(&store).await;
-        let footer = text.rsplit('\n').next().unwrap();
-        assert!(
-            footer.contains("of 80 memories in the model's catalog"),
-            "{footer}"
-        );
-        assert!(!footer.contains("80 of 80"), "{footer}");
-        assert!(footer.contains("budget is full"), "{footer}");
-        assert!(footer.contains("no new memory can be written"), "{footer}");
-    }
-
-    #[tokio::test]
-    async fn show_includes_kind_description_source_and_body() {
-        let tmp = tempdir::TempDir::new("memory-show").unwrap();
-        let workspace = tmp.path().join("workspace");
-        let user = tmp.path().join("user");
-        write_memory(
-            &workspace,
-            PROXY_ID,
-            MemoryKind::Fact,
-            PROXY_DESCRIPTION,
-            PROXY_BODY,
-            Some(SOURCE),
-            1,
-        );
-        write_memory(
-            &user,
-            PREF_ID,
-            MemoryKind::Preference,
-            PREF_DESCRIPTION,
-            "always\n",
-            None,
-            1,
-        );
-        let store = loaded(&workspace, &user).await;
-        assert_eq!(
-            show(&store, &format!("workspace/{PROXY_ID}"))
-                .await
-                .unwrap(),
-            format!(
-                "{KIND_LABEL}: {}\n{DESCRIPTION_LABEL}: {PROXY_DESCRIPTION}\n{SOURCE_LABEL}: {SOURCE}\n\n{PROXY_BODY}",
-                MemoryKind::Fact.as_str()
-            )
-        );
-        assert_eq!(
-            show(&store, PREF_ID).await.unwrap(),
-            format!(
-                "{KIND_LABEL}: {}\n{DESCRIPTION_LABEL}: {PREF_DESCRIPTION}\n\nalways\n",
-                MemoryKind::Preference.as_str()
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn ambiguous_bare_id_asks_to_qualify() {
-        let tmp = tempdir::TempDir::new("memory-ambiguous").unwrap();
-        let workspace = tmp.path().join("workspace");
-        let user = tmp.path().join("user");
-        write_memory(
-            &workspace,
-            PROXY_ID,
-            MemoryKind::Fact,
-            "workspace copy",
-            "ws\n",
-            None,
-            1,
-        );
-        write_memory(
-            &user,
-            PROXY_ID,
-            MemoryKind::Fact,
-            "user copy",
-            "user\n",
-            None,
-            2,
-        );
-        let store = loaded(&workspace, &user).await;
-        let text = show(&store, PROXY_ID).await.unwrap();
-        assert_eq!(
-            text,
-            format!(
-                "{AMBIGUOUS_MEMORY}: {}/{PROXY_ID} or {}/{PROXY_ID}",
-                MemoryScope::Workspace,
-                MemoryScope::User
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn remove_unknown_is_a_reply_and_known_is_removed() {
-        let tmp = tempdir::TempDir::new("memory-rm").unwrap();
-        let workspace = tmp.path().join("workspace");
-        let user = tmp.path().join("user");
-        write_memory(
-            &workspace,
-            PROXY_ID,
-            MemoryKind::Fact,
-            PROXY_DESCRIPTION,
-            PROXY_BODY,
-            None,
-            1,
-        );
-        let store = loaded(&workspace, &user).await;
-        let missing = "missing";
-        assert_eq!(
-            remove(&store, missing).await.unwrap(),
-            format!("{NOT_FOUND}: {missing}")
-        );
-        assert!(workspace.join(format!("{PROXY_ID}.md")).is_file());
-        assert_eq!(
-            remove(&store, &format!("workspace/{PROXY_ID}"))
-                .await
-                .unwrap(),
-            format!("{REMOVED_MEMORY}: {}/{PROXY_ID}", MemoryScope::Workspace)
-        );
-        assert!(!workspace.join(format!("{PROXY_ID}.md")).exists());
-        assert_eq!(list(&store).await, NO_MEMORIES);
-    }
-
-    #[tokio::test]
-    async fn edit_path_resolves_a_unique_ref() {
-        let tmp = tempdir::TempDir::new("memory-edit-path").unwrap();
-        let workspace = tmp.path().join("workspace");
-        let user = tmp.path().join("user");
-        write_memory(
-            &workspace,
-            PROXY_ID,
-            MemoryKind::Fact,
-            PROXY_DESCRIPTION,
-            PROXY_BODY,
-            None,
-            1,
-        );
-        write_memory(
-            &user,
-            PREF_ID,
-            MemoryKind::Preference,
-            PREF_DESCRIPTION,
-            "always\n",
-            None,
-            1,
-        );
-        let store = loaded(&workspace, &user).await;
-        assert_eq!(
-            file_path(&store, &format!("workspace/{PROXY_ID}"))
-                .await
-                .unwrap(),
-            workspace.join(format!("{PROXY_ID}.md"))
-        );
-        assert_eq!(
-            file_path(&store, PREF_ID).await.unwrap(),
-            user.join(format!("{PREF_ID}.md"))
-        );
-        let err = file_path(&store, "missing").await.unwrap_err();
-        assert_eq!(err.to_string(), format!("{NOT_FOUND}: missing"));
-    }
-
-    #[test]
-    fn editor_program_prefers_visual_and_errors_when_unset() {
-        assert_eq!(editor_program(Some("vim"), Some("nano")).unwrap(), "vim");
-        assert_eq!(editor_program(Some("  "), Some(" nano ")).unwrap(), "nano");
-        let err = editor_program(None, Some("  ")).unwrap_err();
-        assert_eq!(err.to_string(), NO_EDITOR);
-        let err = editor_program(None, None).unwrap_err();
-        assert_eq!(err.to_string(), NO_EDITOR);
-    }
-}
+#[path = "memory_test.rs"]
+mod memory_test;

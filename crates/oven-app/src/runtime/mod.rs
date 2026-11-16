@@ -29,6 +29,7 @@ use crate::core::state::{app_state, context_tokens, context_window};
 use crate::runtime::inbox::InboxReceiver;
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::shared::{Shared, apply_without_driver, save_provider_overlay};
+use crate::runtime::tidy::{AutoTidy, TIDY_RUNNING};
 use oven_proto::{AppEventKind, AppId, COMPACTION_CANCELLED, CompactionEvent};
 
 const NOTHING_TO_COMPACT_NOTICE: &str = "nothing to compact";
@@ -66,6 +67,7 @@ pub(crate) struct Runtime {
     /// it is appended after each turn.
     pub(crate) persisted_messages: usize,
     pub(crate) persisted_rev: u64,
+    pub(crate) auto_tidy: AutoTidy,
 }
 
 impl Runtime {
@@ -99,6 +101,7 @@ impl Runtime {
             policy,
             persisted_messages,
             persisted_rev,
+            auto_tidy: AutoTidy::default(),
         }
     }
 
@@ -131,6 +134,7 @@ impl Runtime {
             }
         }
         self.shutdown(&inbox);
+        self.auto_tidy.finish().await;
     }
 
     async fn handle(&mut self, input: Input) {
@@ -401,9 +405,16 @@ impl Runtime {
                 });
             }
             CommandOutcome::Memory(action) => {
-                let text = match &self.memory {
-                    Some(store) => crate::memory::apply(store, action).await,
-                    None => crate::memory::MEMORY_DISABLED.to_owned(),
+                let text = match (&self.memory, action) {
+                    (None, _) => crate::memory::MEMORY_DISABLED.to_owned(),
+                    (Some(_), crate::memory::MemoryAction::Tidy) if self.auto_tidy.is_running() => {
+                        TIDY_RUNNING.to_owned()
+                    }
+                    (Some(store), crate::memory::MemoryAction::Tidy) => {
+                        let cancel = self.shared.shutdown.child_token();
+                        crate::memory::tidy(store, &self.agent.aside(), &cancel).await
+                    }
+                    (Some(store), action) => crate::memory::apply(store, action).await,
                 };
                 self.emit(AppEventKind::Notification { text });
             }
@@ -808,6 +819,7 @@ fn slug_without_variant(raw: &str) -> String {
 pub(crate) mod inbox;
 pub(crate) mod pending;
 pub(crate) mod shared;
+pub(crate) mod tidy;
 mod turn;
 
 #[cfg(test)]

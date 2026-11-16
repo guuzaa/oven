@@ -1,33 +1,52 @@
 use oven_proto::ToolView;
 use serde_json::Value;
 
-use super::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool};
+use super::{MemoryForgetTool, MemoryNoteTool, MemoryReadTool, MemoryRememberTool};
 
 pub(crate) fn present_memory_tool(name: &str, input: &Value) -> Option<ToolView> {
-    let verb = match name {
-        MemoryWriteTool::NAME => MemoryWriteTool::VERB,
-        MemoryReadTool::NAME => MemoryReadTool::VERB,
-        MemoryForgetTool::NAME => MemoryForgetTool::VERB,
-        _ => return None,
-    };
-    Some(memory_view(verb, input))
+    match name {
+        MemoryNoteTool::NAME => Some(note_view(input)),
+        MemoryRememberTool::NAME => Some(memory_view(MemoryRememberTool::VERB, input)),
+        MemoryReadTool::NAME => Some(memory_view(MemoryReadTool::VERB, input)),
+        MemoryForgetTool::NAME => Some(memory_view(MemoryForgetTool::VERB, input)),
+        _ => None,
+    }
 }
 
+fn field<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// `Recalled project/proxy`: the verb and the memory, from a `ref` or from
+/// a `scope` and an `id`.
 pub(super) fn memory_view(verb: &str, input: &Value) -> ToolView {
-    let field = |key| {
-        input
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    };
-    match (field("scope"), field("id")) {
-        (Some(scope), Some(id)) => ToolView {
-            summary: format!("{verb} {scope}/{id}"),
-            collapse: true,
-            detail: None,
-        },
-        _ => ToolView::named(verb),
+    let reference = field(input, "ref").map(str::to_owned).or_else(|| {
+        let (scope, id) = (field(input, "scope")?, field(input, "id")?);
+        Some(format!("{scope}/{id}"))
+    });
+    match reference {
+        Some(reference) => collapsed(format!("{verb} {reference}")),
+        None => ToolView::named(verb),
+    }
+}
+
+/// `Noted preference`: a note has no id yet, so it is named by its kind.
+pub(super) fn note_view(input: &Value) -> ToolView {
+    match field(input, "kind") {
+        Some(kind) => collapsed(format!("{} {kind}", MemoryNoteTool::VERB)),
+        None => ToolView::named(MemoryNoteTool::VERB),
+    }
+}
+
+fn collapsed(summary: String) -> ToolView {
+    ToolView {
+        summary,
+        collapse: true,
+        detail: None,
     }
 }
 
@@ -35,36 +54,50 @@ pub(super) fn memory_view(verb: &str, input: &Value) -> ToolView {
 mod tests {
     use serde_json::json;
 
-    use super::{MemoryForgetTool, MemoryReadTool, MemoryWriteTool, present_memory_tool};
+    use super::{
+        MemoryForgetTool, MemoryNoteTool, MemoryReadTool, MemoryRememberTool, present_memory_tool,
+    };
 
-    const INPUT_ID: &str = "proxy-requires-http2";
+    const REF: &str = "project/proxy";
 
-    fn summary(name: &str) -> String {
-        present_memory_tool(name, &json!({ "scope": "workspace", "id": INPUT_ID }))
-            .unwrap()
-            .summary
+    fn summary(name: &str, input: serde_json::Value) -> String {
+        present_memory_tool(name, &input).unwrap().summary
     }
 
     #[test]
     fn memory_calls_read_as_human_actions() {
+        let by_ref = json!({ "ref": REF });
         assert_eq!(
-            summary(MemoryWriteTool::NAME),
-            format!("{} workspace/{INPUT_ID}", MemoryWriteTool::VERB)
+            summary(MemoryReadTool::NAME, by_ref.clone()),
+            format!("{} {REF}", MemoryReadTool::VERB)
         );
         assert_eq!(
-            summary(MemoryReadTool::NAME),
-            format!("{} workspace/{INPUT_ID}", MemoryReadTool::VERB)
+            summary(MemoryForgetTool::NAME, by_ref),
+            format!("{} {REF}", MemoryForgetTool::VERB)
         );
         assert_eq!(
-            summary(MemoryForgetTool::NAME),
-            format!("{} workspace/{INPUT_ID}", MemoryForgetTool::VERB)
+            summary(
+                MemoryRememberTool::NAME,
+                json!({ "scope": "project", "id": "proxy" })
+            ),
+            format!("{} {REF}", MemoryRememberTool::VERB)
+        );
+        assert_eq!(
+            summary(MemoryNoteTool::NAME, json!({ "kind": "fact" })),
+            format!("{} fact", MemoryNoteTool::VERB)
         );
     }
 
     #[test]
     fn incomplete_input_falls_back_to_the_verb() {
-        let view = present_memory_tool(MemoryWriteTool::NAME, &json!({ "id": INPUT_ID })).unwrap();
-        assert_eq!(view.summary, MemoryWriteTool::VERB);
+        assert_eq!(
+            summary(MemoryRememberTool::NAME, json!({ "id": "proxy" })),
+            MemoryRememberTool::VERB
+        );
+        assert_eq!(
+            summary(MemoryNoteTool::NAME, json!({})),
+            MemoryNoteTool::VERB
+        );
     }
 
     #[test]

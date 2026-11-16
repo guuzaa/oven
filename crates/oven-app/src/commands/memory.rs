@@ -10,7 +10,7 @@ impl SlashCommand for Memory {
     }
 
     fn description(&self) -> &'static str {
-        "List, show or remove memories: /memory [show <ref> | rm <ref>]"
+        "List and curate memories: /memory [review | tidy | show <ref> | rm <ref> | mv <ref> <scope> | approve <ref>]"
     }
 
     fn execute(&self, cx: &mut CommandContext<'_>, args: &str) -> Result<CommandOutcome, AppError> {

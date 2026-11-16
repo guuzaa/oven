@@ -93,6 +93,9 @@ impl Runtime {
         } else if !self.shared.shutdown.is_cancelled() {
             self.shared.set_phase(AppPhase::Idle);
         }
+        if result.is_ok() {
+            self.maybe_auto_tidy().await;
+        }
     }
 
     pub(crate) async fn run_slash(&mut self, name: &str, args: &str) {

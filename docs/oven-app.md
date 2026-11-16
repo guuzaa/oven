@@ -53,7 +53,7 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 | `src/capabilities/skills.rs` | skills: named guidance merged into the system prompt, and the registry that discovers them. |
 | `src/capabilities/subagent.rs` | delegated runs — the registry, the concurrency cap, one task per subagent. |
 | `src/capabilities/mcp/` | server registry plus the stdio/HTTP client that bridges remote tools. |
-| `src/capabilities/memory/` | `memory_read`, `memory_write`, `memory_forget` as agent tools. |
+| `src/capabilities/memory/` | `memory_read`, `memory_note`, `memory_remember`, `memory_forget` as agent tools. |
 | `src/capabilities/view.rs` | how a tool call renders when only its name and input survive. |
 | `src/core/config.rs` | the merged `AppConfig` and its file format. |
 | `src/core/session.rs` | JSONL persistence and the recent-session index. |
@@ -349,7 +349,7 @@ queue. `SlashRegistry::run_shared` runs a command with no driver at all, and
 | `/exit` | emits `goodbye` and `Exited` |
 | `/plan [on\|off]` | toggles plan mode; with no argument, reports the current mode and the todo summary |
 | `/agents [<name> \| stop <name\|all> \| forget <name>]` | lists subagents, or focuses, stops and drops one |
-| `/memory [show <ref> \| rm <ref>]` | lists memories, or shows or removes one. `<ref>` is `workspace/<id>`, `user/<id>`, or a bare id when it is unique |
+| `/memory [review \| tidy \| show <ref> \| rm <ref> \| mv <ref> <scope> \| approve <ref>]` | lists memories by layer, lists drafts, runs tidy, or shows, removes, moves or approves one. `<ref>` is `project/<id>`, `shared/<id>`, `global/<id>`, or a bare id when it is unique |
 
 Commands return a `CommandOutcome` the runtime interprets — `Reply` becomes a
 notification, `Passthrough` falls through to an agent turn, `Exit` emits
@@ -360,9 +360,15 @@ is performed by the runtime against the store the builder loaded. Nothing in
 `commands/` performs IO of its own.
 
 `memory.rs` is where the memory outcomes land. It is the single implementation
-of `list`, `show`, `remove` and `file_path` that `/memory` and `oven mem` share,
-so the slash popup and the CLI subcommand cannot disagree about a reference or
-a wording.
+of `list`, `review`, `show`, `remove`, `move_to`, `approve` and `file_path`
+that `/memory` and `oven mem` share, so the slash popup and the CLI subcommand
+cannot disagree about a reference or a wording. `/memory tidy` is the one
+outcome the runtime routes elsewhere: it needs the driver's model, so
+`memory_tidy.rs` gathers the inbox and the layers, calls
+`Agent::aside` and applies the plan. `runtime/tidy.rs` starts the same
+tidy in the background when a turn ends with more than 20 notes waiting,
+holds its task so the runtime can await it at exit, and stops retrying for
+the run once one has failed.
 
 `core/complete.rs` holds the prefix rule the completion lists in the TUI select with:
 ASCII-case-insensitive, an empty query keeping every key, and `matches_model`
@@ -422,8 +428,8 @@ its own `BUILTIN_TOOLS` — `file_read`, `file_write`, `file_edit`, `bash`,
 `glob`, `grep`, `web_fetch`, `todo_write` and `answer` — and the builder adds
 `skill_read` on top. After `AppBuilder::load_memory` — which the CLI calls
 unless `--amnesia` is passed — the builder also mounts `memory_read`,
-`memory_write` and `memory_forget` and appends the memory catalog to the system
-prompt. When `subagents.enabled`, `task`, `task_output`
+`memory_note`, `memory_remember` and `memory_forget` and appends the memory
+catalog to the system prompt. When `subagents.enabled`, `task`, `task_output`
 and `list_models` join as well. An empty config list means the built-in
 defaults; unknown names are skipped silently.
 
@@ -459,9 +465,10 @@ The roles a subagent may run as are partitioned by what a tool may do rather
 than listed by hand, so a tool that joins the read-only set reaches `explore`
 without touching `build_roles`: `explore` mounts only `ToolPermission::Read`
 tools with a read-only preamble, `general` mounts everything. Neither mounts
-`answer`, `todo_write`, `task`, `task_output`, `memory_write` or
-`memory_forget` — they speak to the user, manage the caller's plan, or would
-nest delegation.
+`answer`, `todo_write`, `task`, `task_output`, `memory_remember` or
+`memory_forget` — they speak to the user, manage the caller's plan, would nest
+delegation, or act on what only the user can ask for. `general` may
+`memory_note`: what a subagent learns reaches the inbox.
 
 The registry is the single source of truth. `AppState.subagents` mirrors it,
 `/agents` reads it, and `task_output` reads it, so a panel and a tool can never

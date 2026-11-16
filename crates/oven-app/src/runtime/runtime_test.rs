@@ -2,7 +2,7 @@ use crate::capabilities::subagent::{SubagentParts, Subagents};
 use crate::capabilities::tools::{MOVED_TO_BACKGROUND, TaskTool, TodoWriteTool};
 use crate::core::config::{AppConfig, ProfileBinding, ProviderConfig, ProviderSelection};
 use crate::core::event::EventBus;
-use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL};
+use crate::core::memory::{DESCRIPTION_LABEL, SOURCES_LABEL, TYPE_LABEL};
 use crate::core::session::{Session, canonical_root};
 use crate::memory::{AMBIGUOUS_MEMORY, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY};
 use crate::{App, AppBuilder, NOTICE_MARK, NodeStatus};
@@ -4914,14 +4914,19 @@ async fn cancelling_a_turn_cancels_its_subagent() {
     handle.shutdown().await;
 }
 
-async fn memory_store(workspace: &Path, user: &Path) -> Arc<oven_mem::MemoryStore> {
-    Arc::new(
-        oven_mem::MemoryStore::load(oven_mem::MemoryRoots {
-            workspace: workspace.to_path_buf(),
-            user: Some(user.to_path_buf()),
-        })
-        .await,
-    )
+/// Memory layers under `tmp`, so the developer's `~/.oven` never leaks in.
+fn memory_roots(tmp: &tempdir::TempDir) -> oven_mem::MemoryRoots {
+    oven_mem::MemoryRoots {
+        workspace: tmp.path().to_path_buf(),
+        project: Some(tmp.path().join("project")),
+        shared: tmp.path().join(".oven").join("memory"),
+        global: Some(tmp.path().join("global")),
+        inbox: Some(tmp.path().join("inbox.jsonl")),
+    }
+}
+
+async fn memory_store(tmp: &tempdir::TempDir) -> Arc<oven_mem::MemoryStore> {
+    Arc::new(oven_mem::MemoryStore::load(memory_roots(tmp)).await)
 }
 
 fn write_memory_file(dir: &Path, id: &str, kind: &str, description: &str, body: &str, secs: u64) {
@@ -4950,33 +4955,33 @@ async fn spawn_memory_app(tmp: &tempdir::TempDir, store: Arc<oven_mem::MemorySto
 #[tokio::test]
 async fn slash_memory_lists_shows_and_removes() {
     let tmp = tempdir::TempDir::new("app-runtime-memory").unwrap();
-    let workspace = tmp.path().join("workspace");
-    let user = tmp.path().join("user");
-    let empty = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    let project = tmp.path().join("project");
+    let global = tmp.path().join("global");
+    let empty = spawn_memory_app(&tmp, memory_store(&tmp).await).await;
     assert_eq!(empty.prompt("/memory").await.unwrap(), NO_MEMORIES);
     empty.shutdown().await;
 
-    write_memory_file(&workspace, "older", "fact", "old fact", "old body\n", 10);
-    write_memory_file(&user, "newer", "preference", "new pref", "new body\n", 20);
-    let handle = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    write_memory_file(&project, "older", "fact", "old fact", "old body\n", 10);
+    write_memory_file(&global, "newer", "preference", "new pref", "", 20);
+    let handle = spawn_memory_app(&tmp, memory_store(&tmp).await).await;
     assert_eq!(
         handle.prompt("/memory").await.unwrap(),
-        "workspace:\n- older (fact) old fact\n\nuser:\n- newer (preference) new pref\n\ncatalog: 2 of 2 memories in the model's catalog"
+        "project:\n- older (fact) old fact\n\nglobal:\n- newer (preference) new pref\n\ncatalog: project 1 of 1, global 1 of 1"
     );
     assert_eq!(
-        handle.prompt("/memory show workspace/older").await.unwrap(),
+        handle.prompt("/memory show project/older").await.unwrap(),
         format!(
-            "{KIND_LABEL}: fact\n{DESCRIPTION_LABEL}: old fact\n{SOURCE_LABEL}: session-1\n\nold body\n",
+            "{TYPE_LABEL}: fact\n{DESCRIPTION_LABEL}: old fact\n{SOURCES_LABEL}: session:session-1\n\nold body\n",
         )
     );
     assert_eq!(
-        handle.prompt("/memory rm user/newer").await.unwrap(),
-        format!("{REMOVED_MEMORY}: user/newer")
+        handle.prompt("/memory rm global/newer").await.unwrap(),
+        format!("{REMOVED_MEMORY}: global/newer")
     );
-    assert!(!user.join("newer.md").exists());
+    assert!(!global.join("newer.md").exists());
     assert_eq!(
         handle.prompt("/memory").await.unwrap(),
-        "workspace:\n- older (fact) old fact\n\ncatalog: 1 of 1 memories in the model's catalog"
+        "project:\n- older (fact) old fact\n\ncatalog: project 1 of 1"
     );
     handle.shutdown().await;
 }
@@ -4984,22 +4989,279 @@ async fn slash_memory_lists_shows_and_removes() {
 #[tokio::test]
 async fn slash_memory_ambiguous_bare_id_and_unknown_rm_are_replies() {
     let tmp = tempdir::TempDir::new("app-runtime-memory-ref").unwrap();
-    let workspace = tmp.path().join("workspace");
-    let user = tmp.path().join("user");
-    write_memory_file(&workspace, "shared", "fact", "from workspace", "ws\n", 1);
-    write_memory_file(&user, "shared", "fact", "from user", "user\n", 2);
-    let handle = spawn_memory_app(&tmp, memory_store(&workspace, &user).await).await;
+    let global = tmp.path().join("global");
+    write_memory_file(&tmp.path().join("project"), "dup", "fact", "here", "p\n", 1);
+    write_memory_file(&global, "dup", "fact", "everywhere", "g\n", 2);
+    let handle = spawn_memory_app(&tmp, memory_store(&tmp).await).await;
     assert_eq!(
-        handle.prompt("/memory show shared").await.unwrap(),
-        format!(
-            "{AMBIGUOUS_MEMORY}: {}/shared or {}/shared",
-            oven_mem::MemoryScope::Workspace,
-            oven_mem::MemoryScope::User
-        )
+        handle.prompt("/memory show dup").await.unwrap(),
+        format!("{AMBIGUOUS_MEMORY}: project/dup or global/dup")
     );
     let missing = handle.prompt("/memory rm missing").await.unwrap();
     assert_eq!(missing, format!("{NOT_FOUND}: missing"));
-    assert!(user.join("shared.md").is_file());
+    assert!(global.join("dup.md").is_file());
+    handle.shutdown().await;
+}
+
+/// Layers laid out the way `dirs` lays them out, under `tmp`, so tidy finds
+/// other projects beside this one and nowhere else.
+fn tidy_roots(tmp: &tempdir::TempDir) -> oven_mem::MemoryRoots {
+    let project = tmp.path().join("projects").join("this");
+    oven_mem::MemoryRoots {
+        project: Some(project.join("memory")),
+        inbox: Some(project.join("inbox.jsonl")),
+        ..memory_roots(tmp)
+    }
+}
+
+async fn spawn_tidy_app(tmp: &tempdir::TempDir, replies: Vec<Response>) -> App {
+    let mut app = AppBuilder::new(tmp.path());
+    app.set_memory(Arc::new(oven_mem::MemoryStore::load(tidy_roots(tmp)).await));
+    spawn_app(&app, Box::new(MockProvider::new(replies))).await
+}
+
+async fn note(roots: &oven_mem::MemoryRoots, text: &str) {
+    oven_mem::Inbox::new(roots.inbox.clone().unwrap())
+        .append(oven_mem::Note {
+            at: "2026-11-16T00:00:00Z".into(),
+            session: None,
+            kind: oven_mem::MemoryKind::Preference,
+            evidence: oven_mem::Evidence::UserSaid,
+            text: text.into(),
+            about: None,
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn slash_memory_tidy_applies_the_plan_and_consumes_the_notes() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-tidy").unwrap();
+    let roots = tidy_roots(&tmp);
+    let project = roots.project.clone().unwrap();
+    write_memory_file(&project, "old", "fact", "an old fact", "body\n", 1);
+    note(&roots, "user: no narrating comments").await;
+    let plan = r#"{"ops": [
+        {"op": "put", "scope": "project", "id": "comments", "type": "preference", "description": "Comments say why, not what."},
+        {"op": "delete", "ref": "project/old", "reason": "stale"}
+    ]}"#;
+    let handle = spawn_tidy_app(&tmp, vec![text_response(plan)]).await;
+    let report = handle.prompt("/memory tidy").await.unwrap();
+    assert_eq!(
+        report,
+        format!(
+            "tidy: 1 created, 1 deleted\n- created project/comments: Comments say why, not what.\n- deleted project/old: stale\n\nread 1 note; {}",
+            crate::memory::tidy::NEXT_START
+        )
+    );
+    assert!(!roots.inbox.as_ref().unwrap().exists());
+    assert!(project.join("comments.md").is_file());
+    assert!(!project.join("old.md").exists());
+    assert!(project.join("log.md").is_file());
+    assert_eq!(
+        handle.prompt("/memory").await.unwrap(),
+        "project:\n- comments (preference) Comments say why, not what.\n\ncatalog: project 1 of 1"
+    );
+    handle.shutdown().await;
+}
+
+const AUTOMATIC: &str = "(automatic)";
+const COMMENTS_PLAN: &str = r#"{"ops": [
+    {"op": "put", "scope": "project", "id": "comments", "type": "preference", "description": "Comments say why, not what."}
+]}"#;
+
+async fn notes(roots: &oven_mem::MemoryRoots, count: usize) {
+    for n in 0..count {
+        note(roots, &format!("note {n}")).await;
+    }
+}
+
+async fn inbox_count(roots: &oven_mem::MemoryRoots) -> usize {
+    oven_mem::Inbox::new(roots.inbox.clone().unwrap())
+        .count()
+        .await
+}
+
+/// The text of the next automatic tidy notice.
+async fn next_automatic_notice(rx: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>) -> String {
+    while let Some(event) = rx.recv().await {
+        if let AppEventKind::Notification { text } = &event.kind
+            && text.starts_with(AUTOMATIC)
+        {
+            return text.clone();
+        }
+    }
+    panic!("the app ended without an automatic tidy notice");
+}
+
+/// Every automatic tidy notice the app published, once it has shut down.
+fn automatic_notices(rx: &mut mpsc::UnboundedReceiver<Arc<AppEvent>>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEventKind::Notification { text } = &event.kind
+            && text.starts_with(AUTOMATIC)
+        {
+            out.push(text.clone());
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_turn_that_ends_past_the_note_threshold_tidies_in_the_background() {
+    let tmp = tempdir::TempDir::new("app-runtime-auto-tidy").unwrap();
+    let roots = tidy_roots(&tmp);
+    notes(&roots, crate::memory::tidy::AUTO_TIDY_NOTES + 1).await;
+    let handle = spawn_tidy_app(
+        &tmp,
+        vec![text_response("hi"), text_response(COMMENTS_PLAN)],
+    )
+    .await;
+    let mut rx = handle.subscribe();
+    assert_eq!(handle.prompt("hello").await.unwrap(), "hi");
+    let notice = next_automatic_notice(&mut rx).await;
+    assert!(
+        notice.starts_with(&format!("{AUTOMATIC} tidy: 1 created")),
+        "{notice}"
+    );
+    assert_eq!(inbox_count(&roots).await, 0);
+    assert!(roots.project.unwrap().join("comments.md").is_file());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_turn_at_the_threshold_does_not_tidy() {
+    let tmp = tempdir::TempDir::new("app-runtime-auto-tidy-below").unwrap();
+    let roots = tidy_roots(&tmp);
+    notes(&roots, crate::memory::tidy::AUTO_TIDY_NOTES).await;
+    let handle = spawn_tidy_app(&tmp, vec![text_response("hi")]).await;
+    let mut rx = handle.subscribe();
+    assert_eq!(handle.prompt("hello").await.unwrap(), "hi");
+    handle.shutdown().await;
+    assert_eq!(automatic_notices(&mut rx), Vec::<String>::new());
+    assert_eq!(
+        inbox_count(&roots).await,
+        crate::memory::tidy::AUTO_TIDY_NOTES
+    );
+}
+
+#[tokio::test]
+async fn a_failed_tidy_keeps_the_notes_and_is_not_retried_in_this_run() {
+    let tmp = tempdir::TempDir::new("app-runtime-auto-tidy-fail").unwrap();
+    let roots = tidy_roots(&tmp);
+    let count = crate::memory::tidy::AUTO_TIDY_NOTES + 1;
+    notes(&roots, count).await;
+    let handle = spawn_tidy_app(
+        &tmp,
+        vec![
+            text_response("hi"),
+            text_response("I would merge these."),
+            text_response("again"),
+        ],
+    )
+    .await;
+    let mut rx = handle.subscribe();
+    assert_eq!(handle.prompt("hello").await.unwrap(), "hi");
+    let notice = next_automatic_notice(&mut rx).await;
+    assert!(notice.contains(oven_mem::INVALID_PLAN), "{notice}");
+    assert!(
+        notice.ends_with(crate::runtime::tidy::RETRY_LATER),
+        "{notice}"
+    );
+    assert_eq!(handle.prompt("hello again").await.unwrap(), "again");
+    handle.shutdown().await;
+    assert_eq!(automatic_notices(&mut rx), Vec::<String>::new());
+    assert_eq!(inbox_count(&roots).await, count);
+}
+
+#[tokio::test]
+async fn a_tidy_cut_short_by_shutdown_leaves_the_notes() {
+    let tmp = tempdir::TempDir::new("app-runtime-auto-tidy-exit").unwrap();
+    let roots = tidy_roots(&tmp);
+    let count = crate::memory::tidy::AUTO_TIDY_NOTES + 1;
+    notes(&roots, count).await;
+    let mut app = AppBuilder::new(tmp.path());
+    app.set_memory(Arc::new(
+        oven_mem::MemoryStore::load(tidy_roots(&tmp)).await,
+    ));
+    let handle = spawn_app(
+        &app,
+        Box::new(HangingTidyProvider {
+            reply: text_response("hi"),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }),
+    )
+    .await;
+    assert_eq!(handle.prompt("hello").await.unwrap(), "hi");
+    handle.shutdown().await;
+    assert_eq!(inbox_count(&roots).await, count);
+}
+
+/// Answers the first call, then never answers: a tidy that is still
+/// waiting on the model when the app exits.
+struct HangingTidyProvider {
+    reply: Response,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Provider for HangingTidyProvider {
+    async fn complete(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<Response, ProviderError> {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            return Ok(self.reply.clone());
+        }
+        std::future::pending().await
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("mock".into())
+    }
+}
+
+#[tokio::test]
+async fn a_tidy_reply_without_a_plan_changes_nothing() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-tidy-bad").unwrap();
+    let roots = tidy_roots(&tmp);
+    note(&roots, "user: small PRs").await;
+    let handle = spawn_tidy_app(&tmp, vec![text_response("I would merge these.")]).await;
+    let report = handle.prompt("/memory tidy").await.unwrap();
+    assert!(report.starts_with(oven_mem::INVALID_PLAN), "{report}");
+    assert!(
+        report.ends_with(crate::memory::tidy::NOTHING_CHANGED),
+        "{report}"
+    );
+    let inbox = oven_mem::Inbox::new(roots.inbox.clone().unwrap());
+    assert_eq!(inbox.count().await, 1);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn tidy_with_nothing_to_read_does_not_call_the_model() {
+    let tmp = tempdir::TempDir::new("app-runtime-memory-tidy-empty").unwrap();
+    let handle = spawn_tidy_app(&tmp, vec![]).await;
+    assert_eq!(
+        handle.prompt("/memory tidy").await.unwrap(),
+        crate::memory::tidy::NOTHING_TO_TIDY
+    );
     handle.shutdown().await;
 }
 
@@ -5013,19 +5275,18 @@ async fn slash_memory_disabled_replies() {
 }
 
 #[tokio::test]
-async fn memory_source_follows_the_session_after_clear() {
+async fn a_remembered_source_follows_the_session_after_clear() {
     let tmp = tempdir::TempDir::new("app-runtime-memory-source").unwrap();
     let sessions = tmp.path().join("sessions");
     std::fs::create_dir_all(&sessions).unwrap();
-    let workspace = tmp.path().join(".oven").join("memory");
     let mut app = AppBuilder::new(tmp.path());
-    app.set_memory(memory_store(&workspace, &tmp.path().join("unused-user")).await);
+    app.set_memory(memory_store(&tmp).await);
     let write = |id: &str| {
         tool_response(
             "c1",
-            crate::capabilities::memory::MemoryWriteTool::NAME,
+            crate::capabilities::memory::MemoryRememberTool::NAME,
             serde_json::json!({
-                "scope": "workspace",
+                "scope": "project",
                 "id": id,
                 "kind": "fact",
                 "description": id,
@@ -5053,23 +5314,27 @@ async fn memory_source_follows_the_session_after_clear() {
         .expect("the second write's session has content");
     assert_ne!(new_id, "session-one");
 
-    let store = memory_store(&workspace, &tmp.path().join("unused-user")).await;
-    let first = store
-        .read(
-            oven_mem::MemoryScope::Workspace,
-            &oven_mem::MemoryId::new("first-fact").unwrap(),
-        )
-        .await
-        .unwrap();
-    let second = store
-        .read(
-            oven_mem::MemoryScope::Workspace,
-            &oven_mem::MemoryId::new("second-fact").unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.source.as_deref(), Some("session-one"));
-    assert_eq!(second.source.as_deref(), Some(new_id.as_str()));
+    let store = memory_store(&tmp).await;
+    let read = |raw: &'static str| {
+        let store = Arc::clone(&store);
+        async move {
+            store
+                .read(
+                    oven_mem::MemoryScope::Project,
+                    &oven_mem::MemoryId::new(raw).unwrap(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let first = read("first-fact").await;
+    let second = read("second-fact").await;
+    assert!(
+        first
+            .sources
+            .contains(&oven_mem::Source::session("session-one"))
+    );
+    assert!(second.sources.contains(&oven_mem::Source::session(&new_id)));
     handle.shutdown().await;
 }
 

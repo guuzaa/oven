@@ -1,7 +1,26 @@
 use std::path::{Path, PathBuf};
 
+use oven_mem::{MemoryRoots, project_key};
+
+const OVEN_DIR: &str = ".oven";
+const MEMORY_DIR: &str = "memory";
+const PROJECTS_DIR: &str = "projects";
+const INBOX_FILE: &str = "inbox.jsonl";
+
 fn oven_home() -> Option<PathBuf> {
-    std::env::home_dir().map(|h| h.join(".oven"))
+    std::env::home_dir().map(|h| h.join(OVEN_DIR))
+}
+
+/// Absolute, symlink-resolved form of a workspace root, falling back to the
+/// raw path when canonicalization fails. Used as the key for the session
+/// meta record, the `cwd_latest.json` index and the project memory layer,
+/// so all three agree.
+#[inline]
+pub fn canonical_root(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// `~/.oven`.
@@ -28,11 +47,26 @@ pub fn logs_dir() -> Option<PathBuf> {
     oven_home().map(|d| d.join("logs"))
 }
 
-/// Workspace `<root>/.oven/memory` and, when a home directory exists, `~/.oven/memory`.
-pub fn memory_roots(root: &Path) -> oven_mem::MemoryRoots {
-    oven_mem::MemoryRoots {
-        workspace: root.join(".oven").join("memory"),
-        user: oven_home().map(|home| home.join("memory")),
+/// `~/.oven/projects`: one directory per workspace root.
+#[inline]
+pub fn projects_dir() -> Option<PathBuf> {
+    oven_home().map(|d| d.join(PROJECTS_DIR))
+}
+
+/// `~/.oven/projects/<key>` for a workspace root.
+pub fn project_dir(root: &Path) -> Option<PathBuf> {
+    projects_dir().map(|d| d.join(project_key(&canonical_root(root))))
+}
+
+/// The memory layers of a workspace: `project` and `global` under the home
+/// directory, `shared` in the repository.
+pub fn memory_roots(root: &Path) -> MemoryRoots {
+    MemoryRoots {
+        workspace: root.to_path_buf(),
+        project: project_dir(root).map(|d| d.join(MEMORY_DIR)),
+        shared: root.join(OVEN_DIR).join(MEMORY_DIR),
+        global: oven_home().map(|home| home.join(MEMORY_DIR)),
+        inbox: project_dir(root).map(|d| d.join(INBOX_FILE)),
     }
 }
 
@@ -43,7 +77,7 @@ pub fn skill_dirs(root: &Path) -> Vec<PathBuf> {
     if let Some(d) = oven_home().map(|d| d.join("skills")) {
         dirs.push(d);
     }
-    dirs.push(root.join(".oven").join("skills"));
+    dirs.push(root.join(OVEN_DIR).join("skills"));
     dirs
 }
 
@@ -51,17 +85,28 @@ pub fn skill_dirs(root: &Path) -> Vec<PathBuf> {
 mod tests {
     use std::path::Path;
 
-    use super::memory_roots;
+    use oven_mem::project_key;
+
+    use super::{canonical_root, memory_roots};
 
     #[test]
-    fn memory_roots_place_workspace_under_oven_and_user_under_home() {
+    fn memory_layers_split_between_home_and_repository() {
         let root = Path::new("/workspace");
         let roots = memory_roots(root);
-        assert_eq!(roots.workspace, root.join(".oven").join("memory"));
-        if let Some(home) = std::env::home_dir() {
-            assert_eq!(roots.user, Some(home.join(".oven").join("memory")));
-        } else {
-            assert!(roots.user.is_none());
-        }
+        assert_eq!(roots.workspace, root);
+        assert_eq!(roots.shared, root.join(".oven").join("memory"));
+        let Some(home) = std::env::home_dir() else {
+            assert!(roots.project.is_none());
+            assert!(roots.global.is_none());
+            assert!(roots.inbox.is_none());
+            return;
+        };
+        let project = home
+            .join(".oven")
+            .join("projects")
+            .join(project_key(&canonical_root(root)));
+        assert_eq!(roots.global, Some(home.join(".oven").join("memory")));
+        assert_eq!(roots.project, Some(project.join("memory")));
+        assert_eq!(roots.inbox, Some(project.join("inbox.jsonl")));
     }
 }

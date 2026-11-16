@@ -50,7 +50,7 @@ documented in [`oven-proto.md`](./oven-proto.md).
 | `oven-proto` | the protocol vocabulary: `Command`, `AppEvent`, `AppState`, `AgentEvent`, and the nouns they carry — a leaf crate on `oven-llm` and serde alone |
 | `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, the history buffer and its projection rules, the `SubagentSpawner` protocol, provider retry decoration |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation, line diffs |
-| `oven-mem` | Durable memory: `Memory`, limits, id validation, file format, `MemoryStore`, catalog rendering |
+| `oven-mem` | Durable memory: `Memory`, limits, id validation, OKF file format, `MemoryStore` (layers, trash), `Inbox`, catalog rendering, tidy plan |
 | `oven-app` | `App`, `AppBuilder`, the app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install |
 | `oven-tui` | render events and state; send commands; `oven mem` |
 
@@ -172,7 +172,7 @@ oven-agent::Tool
   ├── GlobTool / GrepTool                         ──► globset + regex + oven-host walk
   ├── WebFetchTool                                ──► reqwest
   ├── TaskTool / TaskOutputTool                   ──► oven-agent SubagentSpawner (oven-app implements it)
-  └── memory_read / memory_write / memory_forget  ──► oven-mem MemoryStore
+  └── memory_read / note / remember / forget      ──► oven-mem MemoryStore, Inbox
 ```
 
 `Tool::run(&self, args, cx: &TurnContext)` receives the whole run context rather

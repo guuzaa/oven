@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `oven-mem`: memory lives in three layers — `project` (`~/.oven/projects/<key>/memory`, this project, only you), `global` (`~/.oven/memory`, every project) and `shared` (`<root>/.oven/memory`, the team's, read-only to the model). Each layer spends its own catalog budget, so one layer can no longer crowd another out
+- `oven-mem`: memories are OKF concept files — `type`, `description`, `why`, `status`, `anchors`, `stale_after`, `generated`, `verified`, `sources` — and unknown keys survive a rewrite. A fact whose anchor is gone, or whose `stale_after` has passed, says so in the catalog. A preference has no body: the description is the rule
+- `oven-app`: `memory_note` appends raw observations to the project's inbox, and `/memory tidy` turns the inbox and the curated layers into a change set in one model call: notes become memories, near-duplicates merge, stale ones go, and a global memory learned in one project is demoted back to it. A new global memory is a draft until a person approves it, and a memory a person reviewed is never touched. Every change lands in the layer's `log.md`
+- `oven-app`: `/memory review`, `mv <ref> <scope>` and `approve <ref>`, and the same as `oven mem review | mv | approve`. The listing marks drafts, reviewed and stale memories and says how many drafts and notes wait
+- `oven-app`: tidy starts itself — when a turn ends with more than 20 notes in the inbox, a background task tidies with the model the turn used, and a notice starting with `(automatic)` says how it went. Quitting cancels it and a failure is not retried for the rest of the run; either way the notes stay for a later run
+- `oven-agent`: `Agent::aside` hands out an `Aside` that makes one call with its own system prompt and message, outside the conversation
+
+### Changed
+
+- **Breaking:** `memory_write` is gone. The model notes what it learns with `memory_note`, and `memory_remember` writes a memory directly only when the user asks to remember something. `memory_read` and `memory_forget` take a `ref` such as `project/<id>`
+- **Breaking:** `oven-mem`: `MemoryScope` is `Project | Shared | Global`, `MemoryRoots` names each layer and the inbox, and `Catalog` reports how much of each layer it shows. Files from before are read as they are: `~/.oven/memory` is `global`, `<root>/.oven/memory` is `shared`, and `kind`/`source` read as `type`/`sources`
+- `oven-app`: removing a `project` or `global` memory moves it to the layer's `.trash/`
+- `oven-app`: `memory_remember` into `global` writes a draft, and the reply says it waits for `/memory approve`; a memory a person reviewed cannot be replaced by a model write
+- `oven-app`: a memory file that does not load (hand edit, bad id) is listed by `/memory` and `oven mem ls` as `not loaded` with the reason, instead of disappearing from the log only
+- `oven-app`: tidy reads at most 20000 characters of notes per run; the rest stay in the inbox for the next run, and the report says how many were left
+- `oven-mem`: the project directory key is reversible and never contains `.`: `\` and `.` are escaped, so no key is `..` and `/a/b` and `/a\b` no longer share one. Nothing on disk used the old key yet
+- `oven-agent`: tidy's prompt treats notes as data, not instructions, and says the kind in a note is only a hint
+
 ## [0.1.6] - 2026-11-15
 
 ### Added

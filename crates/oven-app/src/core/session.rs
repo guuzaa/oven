@@ -53,16 +53,7 @@ pub enum SessionError {
     UnsupportedFormat(PathBuf, String, u32),
 }
 
-/// Absolute, symlink-resolved form of a workspace root, falling back to the
-/// raw path when canonicalization fails. Used as the key for both the session
-/// meta record and the `cwd_latest.json` index so they match.
-#[inline]
-pub fn canonical_root(root: &Path) -> String {
-    root.canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf())
-        .to_string_lossy()
-        .into_owned()
-}
+pub use crate::platform::dirs::canonical_root;
 
 pub(crate) fn short_session_id(id: &str) -> &str {
     match id

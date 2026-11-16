@@ -1,13 +1,14 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
 use oven_mem::MemoryStore;
 use oven_proto::{AgentError, ToolPermission, ToolView};
 use serde_json::{Value, json};
-use std::sync::Arc;
 
 use super::view::memory_view;
-use super::{parse_id, parse_scope, required_str, scope_property};
-use crate::core::memory::header;
+use super::{parse_ref, ref_property};
+use crate::core::memory::describe;
 
 pub struct MemoryReadTool {
     store: Arc<MemoryStore>,
@@ -33,18 +34,15 @@ impl Tool for MemoryReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read one saved memory by scope and id. The system prompt lists every memory; \
-         this returns its kind, description and body."
+        "Read one saved memory by the ref the catalog lists it under. Returns its type, \
+         description, reason, anchors and body."
     }
 
     fn schema(&self) -> Arc<Value> {
         Arc::new(json!({
             "type": "object",
-            "properties": {
-                "scope": scope_property(),
-                "id": { "type": "string", "description": "Memory id, e.g. \"proxy-requires-http2\"." }
-            },
-            "required": ["scope", "id"]
+            "properties": { "ref": ref_property() },
+            "required": ["ref"]
         }))
     }
 
@@ -56,32 +54,28 @@ impl Tool for MemoryReadTool {
     }
 
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
-        let scope_raw = required_str(args, "scope", Self::NAME)?;
-        let id_raw = required_str(args, "id", Self::NAME)?;
-        let id = parse_id(id_raw)?;
-        let scope = parse_scope(Self::NAME, scope_raw)?;
+        let (scope, id) = parse_ref(args, Self::NAME)?;
         let memory = self
             .store
             .read(scope, &id)
             .await
             .map_err(|err| AgentError::from(err.to_string()))?;
-        let mut out = header(&memory);
-        out.push('\n');
-        out.push_str(&memory.body);
-        Ok(out.into())
+        Ok(describe(&memory).into())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use oven_agent::{CancellationToken, Selection, Tool, ToolOutcome, TurnContext};
     use oven_llm::ModelId;
-    use oven_mem::{INVALID_ID, MemoryRoots, MemoryStore, USER_SCOPE_UNAVAILABLE};
+    use oven_mem::{INVALID_ID, LAYER_UNAVAILABLE, MemoryRoots, MemoryStore};
     use oven_proto::{AgentMode, TurnId};
     use serde_json::json;
 
     use super::MemoryReadTool;
-    use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL};
+    use crate::core::memory::{DESCRIPTION_LABEL, TYPE_LABEL, UNKNOWN_SCOPE};
 
     fn turn() -> TurnContext {
         TurnContext::new(
@@ -91,64 +85,63 @@ mod tests {
         )
     }
 
-    async fn store(user: bool) -> (tempdir::TempDir, MemoryReadTool) {
-        let tmp = tempdir::TempDir::new("memory-read-tool").unwrap();
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let user_root = user.then(|| tmp.path().join("user"));
-        let loaded = MemoryStore::load(MemoryRoots {
-            workspace,
-            user: user_root,
+    async fn tool(tmp: &tempdir::TempDir, home: bool) -> MemoryReadTool {
+        let root = tmp.path().to_path_buf();
+        let store = MemoryStore::load(MemoryRoots {
+            workspace: root.clone(),
+            project: home.then(|| root.join("project")),
+            shared: root.join("shared"),
+            global: home.then(|| root.join("global")),
+            inbox: None,
         })
         .await;
-        (tmp, MemoryReadTool::new(std::sync::Arc::new(loaded)))
+        MemoryReadTool::new(Arc::new(store))
     }
 
     #[tokio::test]
     async fn returns_a_body_edited_after_the_store_loaded() {
-        let (tmp, tool) = store(false).await;
-        let path = tmp.path().join("workspace").join("proxy-requires-http2.md");
+        let tmp = tempdir::TempDir::new("memory-read-tool").unwrap();
+        let tool = tool(&tmp, true).await;
+        let dir = tmp.path().join("project");
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            &path,
-            "---\nkind: fact\ndescription: proxy fact\n---\n\nfirst body\n",
+            dir.join("proxy.md"),
+            "---\ntype: Fact\ndescription: proxy fact\n---\n\nedited body\n",
         )
         .unwrap();
-        std::fs::write(
-            &path,
-            "---\nkind: fact\ndescription: proxy fact\n---\n\nedited body\n",
-        )
-        .unwrap();
-        let ToolOutcome { output: out, .. } = tool
-            .run(
-                &json!({"scope": "workspace", "id": "proxy-requires-http2"}),
-                &turn(),
-            )
+        let ToolOutcome { output, .. } = tool
+            .run(&json!({"ref": "project/proxy"}), &turn())
             .await
             .unwrap();
-        assert!(out.contains(&format!("{KIND_LABEL}: fact\n")));
-        assert!(out.contains(&format!("{DESCRIPTION_LABEL}: proxy fact\n")));
-        assert!(out.contains("edited body\n"));
-        assert!(!out.contains("first body"));
+        assert!(output.contains(&format!("{TYPE_LABEL}: fact\n")));
+        assert!(output.contains(&format!("{DESCRIPTION_LABEL}: proxy fact\n")));
+        assert!(output.ends_with("\nedited body\n"));
     }
 
     #[tokio::test]
-    async fn rejects_an_invalid_id_before_reading() {
-        let (tmp, tool) = store(false).await;
+    async fn rejects_a_bad_ref_before_reading() {
+        let tmp = tempdir::TempDir::new("memory-read-bad").unwrap();
+        let tool = tool(&tmp, true).await;
         let err = tool
-            .run(&json!({"scope": "workspace", "id": "../x"}), &turn())
+            .run(&json!({"ref": "project/../x"}), &turn())
             .await
             .unwrap_err();
         assert_eq!(err.message, INVALID_ID);
-        assert!(!tmp.path().join("x.md").exists());
+        let err = tool
+            .run(&json!({"ref": "user/x"}), &turn())
+            .await
+            .unwrap_err();
+        assert!(err.message.contains(UNKNOWN_SCOPE), "{}", err.message);
     }
 
     #[tokio::test]
-    async fn user_scope_unavailable_is_a_tool_error() {
-        let (_tmp, tool) = store(false).await;
+    async fn a_layer_without_a_home_is_a_tool_error() {
+        let tmp = tempdir::TempDir::new("memory-read-no-home").unwrap();
+        let tool = tool(&tmp, false).await;
         let err = tool
-            .run(&json!({"scope": "user", "id": "shared-id"}), &turn())
+            .run(&json!({"ref": "global/x"}), &turn())
             .await
             .unwrap_err();
-        assert_eq!(err.message, USER_SCOPE_UNAVAILABLE);
+        assert_eq!(err.message, format!("{LAYER_UNAVAILABLE}: global"));
     }
 }

@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use oven_llm::{
-    CallOptions, Client, Message, Provider, ReasoningEffort, Request, Response, StreamCollector,
-    ToolChoice,
+    CallOptions, Client, Message, ModelId, Provider, ReasoningEffort, Request, Response,
+    StreamCollector, ToolChoice,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +15,7 @@ use oven_proto::AgentError;
 
 pub const NOTHING_TO_COMPACT: &str = "nothing to compact";
 const EMPTY_SUMMARY: &str = "provider returned an empty summary";
+pub const EMPTY_ASIDE: &str = "provider returned an empty reply";
 
 const COMPACT_PROMPT: &str = "Summarize this conversation so it can be \
 continued in a fresh session. Write a compact briefing that preserves:\n\
@@ -86,6 +87,55 @@ impl Agent {
             "history compacted"
         );
         Ok(stats)
+    }
+}
+
+/// One model call outside the conversation, detached from the agent that
+/// made it: the router and the options as they were, so a task that
+/// outlives a turn can still ask the model the agent was using.
+#[derive(Clone)]
+pub struct Aside {
+    router: Arc<Client>,
+    options: CallOptions,
+}
+
+impl Aside {
+    pub fn model(&self) -> &ModelId {
+        &self.options.model
+    }
+
+    /// The caller's system prompt and message, no tools and no history. The
+    /// reply's text, or an error when it is empty or `cancel` fires.
+    pub async fn complete(
+        &self,
+        system: &str,
+        prompt: impl Into<String>,
+        cancel: &CancellationToken,
+    ) -> Result<String, AgentError> {
+        if cancel.is_cancelled() {
+            return Err(AgentError::cancelled());
+        }
+        let mut req = Request::default();
+        req.system(system);
+        req.push_message(Message::user_text(prompt.into()));
+        req.tool_choice = ToolChoice::None;
+        let response =
+            request_summary(Arc::clone(&self.router), req, self.options.clone(), cancel).await?;
+        let text = response.text();
+        if text.trim().is_empty() {
+            return Err(AgentError::from(EMPTY_ASIDE));
+        }
+        Ok(text)
+    }
+}
+
+impl Agent {
+    /// A handle for calls outside the conversation, on the model selected now.
+    pub fn aside(&self) -> Aside {
+        Aside {
+            router: self.router(),
+            options: self.build_options(),
+        }
     }
 }
 
@@ -241,6 +291,26 @@ mod tests {
             "compaction instruction should be the final message"
         );
         assert_eq!(req.messages.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_aside_sends_only_its_own_prompt_and_keeps_history() {
+        let (mut agent, seen) = agent_with_summary_provider();
+        agent.push_history(Message::user_text("do the thing"));
+        let reply = agent
+            .aside()
+            .complete("aside system", "aside prompt", &CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(reply, "the summary");
+        assert_eq!(agent.history().count(), 1);
+        let requests = seen.lock().unwrap();
+        let req = &requests[0];
+        assert_eq!(req.system.as_deref(), Some("aside system"));
+        assert_eq!(req.messages.len(), 1);
+        assert_eq!(text_of(&req.messages[0]), "aside prompt");
+        assert!(req.tools.is_empty());
+        assert_eq!(req.tool_choice, ToolChoice::None);
     }
 
     #[tokio::test]

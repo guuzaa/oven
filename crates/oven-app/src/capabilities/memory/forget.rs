@@ -1,12 +1,13 @@
-use async_trait::async_trait;
-use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
-use oven_mem::MemoryStore;
-use oven_proto::{AgentError, ToolPermission, ToolView};
-use serde_json::{Value, json};
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use oven_agent::{Tool, ToolCaps, ToolOutcome, TurnContext};
+use oven_mem::{MemoryScope, MemoryStore, SHARED_READ_ONLY};
+use oven_proto::{AgentError, ToolPermission, ToolView};
+use serde_json::{Value, json};
+
 use super::view::memory_view;
-use super::{parse_id, parse_scope, required_str, scope_property};
+use super::{parse_ref, ref_property};
 
 const FORGOT_MEMORY: &str = "forgot memory";
 
@@ -34,17 +35,16 @@ impl Tool for MemoryForgetTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delete a saved memory by scope and id. Fails when the id is unknown."
+        "Delete a saved memory, only when the user asks you to forget it. A memory that \
+         turned out wrong gets a memory_note with about set instead. Fails when the ref \
+         is unknown or in the shared layer."
     }
 
     fn schema(&self) -> Arc<Value> {
         Arc::new(json!({
             "type": "object",
-            "properties": {
-                "scope": scope_property(),
-                "id": { "type": "string", "description": "Memory id to delete." }
-            },
-            "required": ["scope", "id"]
+            "properties": { "ref": ref_property() },
+            "required": ["ref"]
         }))
     }
 
@@ -56,10 +56,13 @@ impl Tool for MemoryForgetTool {
     }
 
     async fn run(&self, args: &Value, _cx: &TurnContext) -> Result<ToolOutcome, AgentError> {
-        let scope_raw = required_str(args, "scope", Self::NAME)?;
-        let id_raw = required_str(args, "id", Self::NAME)?;
-        let id = parse_id(id_raw)?;
-        let scope = parse_scope(Self::NAME, scope_raw)?;
+        let (scope, id) = parse_ref(args, Self::NAME)?;
+        if scope == MemoryScope::Shared {
+            return Err(AgentError::from(format!(
+                "{}: {SHARED_READ_ONLY}",
+                Self::NAME
+            )));
+        }
         self.store
             .forget(scope, &id)
             .await
@@ -70,13 +73,17 @@ impl Tool for MemoryForgetTool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use oven_agent::{CancellationToken, Selection, Tool, TurnContext};
     use oven_llm::ModelId;
-    use oven_mem::{MemoryRoots, MemoryStore, NOT_FOUND};
+    use oven_mem::{MemoryRoots, MemoryStore, NOT_FOUND, SHARED_READ_ONLY};
     use oven_proto::{AgentMode, TurnId};
     use serde_json::json;
 
     use super::{FORGOT_MEMORY, MemoryForgetTool};
+
+    const FACT: &str = "---\ntype: Fact\ndescription: proxy fact\n---\n\nbody\n";
 
     fn turn() -> TurnContext {
         TurnContext::new(
@@ -86,55 +93,44 @@ mod tests {
         )
     }
 
-    async fn loaded(tmp: &tempdir::TempDir) -> std::sync::Arc<MemoryStore> {
-        std::sync::Arc::new(
-            MemoryStore::load(MemoryRoots {
-                workspace: tmp.path().join("workspace"),
-                user: None,
-            })
-            .await,
-        )
-    }
-
-    #[tokio::test]
-    async fn unknown_id_fails() {
-        let tmp = tempdir::TempDir::new("memory-forget-tool").unwrap();
-        let tool = MemoryForgetTool::new(loaded(&tmp).await);
-        let err = tool
-            .run(&json!({"scope": "workspace", "id": "missing"}), &turn())
-            .await
-            .unwrap_err();
-        assert_eq!(err.message, format!("{NOT_FOUND}: workspace/missing"));
-    }
-
-    #[tokio::test]
-    async fn deletes_the_file() {
-        let tmp = tempdir::TempDir::new("memory-forget-ok").unwrap();
-        let workspace = tmp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let path = workspace.join("proxy-requires-http2.md");
-        std::fs::write(
-            &path,
-            "---\nkind: fact\ndescription: proxy fact\n---\n\nbody\n",
-        )
-        .unwrap();
+    async fn tool(tmp: &tempdir::TempDir) -> MemoryForgetTool {
+        for dir in ["project", "shared"] {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+            std::fs::write(tmp.path().join(dir).join("proxy.md"), FACT).unwrap();
+        }
         let store = MemoryStore::load(MemoryRoots {
-            workspace: workspace.clone(),
-            user: None,
+            workspace: tmp.path().to_path_buf(),
+            project: Some(tmp.path().join("project")),
+            shared: tmp.path().join("shared"),
+            global: None,
+            inbox: None,
         })
         .await;
-        let tool = MemoryForgetTool::new(std::sync::Arc::new(store));
+        MemoryForgetTool::new(Arc::new(store))
+    }
+
+    #[tokio::test]
+    async fn forgets_a_private_memory_and_refuses_shared() {
+        let tmp = tempdir::TempDir::new("memory-forget").unwrap();
+        let tool = tool(&tmp).await;
         let out = tool
-            .run(
-                &json!({"scope": "workspace", "id": "proxy-requires-http2"}),
-                &turn(),
-            )
+            .run(&json!({"ref": "project/proxy"}), &turn())
             .await
             .unwrap();
-        assert_eq!(
-            out.output,
-            format!("{FORGOT_MEMORY} workspace/proxy-requires-http2")
-        );
-        assert!(!path.exists());
+        assert_eq!(out.output, format!("{FORGOT_MEMORY} project/proxy"));
+        assert!(!tmp.path().join("project").join("proxy.md").exists());
+
+        let err = tool
+            .run(&json!({"ref": "shared/proxy"}), &turn())
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, format!("memory_forget: {SHARED_READ_ONLY}"));
+        assert!(tmp.path().join("shared").join("proxy.md").exists());
+
+        let err = tool
+            .run(&json!({"ref": "project/proxy"}), &turn())
+            .await
+            .unwrap_err();
+        assert_eq!(err.message, format!("{NOT_FOUND}: project/proxy"));
     }
 }

@@ -2024,8 +2024,10 @@ dependencies = [
 name = "oven-mem"
 version = "0.1.6"
 dependencies = [
+ "chrono",
  "oven-host",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempdir",
  "thiserror 2.0.21",
