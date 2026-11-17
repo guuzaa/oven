@@ -34,7 +34,7 @@ pub struct Cli {
     amnesia: bool,
 
     /// Write the trace of the run beside the workspace: one event per line
-    #[arg(long)]
+    #[arg(long, conflicts_with = "query")]
     trace: bool,
 
     #[command(subcommand)]
@@ -144,5 +144,30 @@ impl Cli {
         };
         log::shutdown();
         code
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn the_trace_is_written_only_when_it_is_asked_for() {
+        let plain = Cli::try_parse_from(["oven"]).unwrap();
+        assert!(!plain.trace);
+
+        let traced = Cli::try_parse_from(["oven", "--trace"]).unwrap();
+        assert!(traced.trace);
+    }
+
+    #[test]
+    fn a_trace_needs_a_session_and_a_query_has_none() {
+        let err = Cli::try_parse_from(["oven", "--trace", "-Q", "hi"]).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("--trace"), "{message}");
+        assert!(message.contains("--query"), "{message}");
     }
 }

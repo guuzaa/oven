@@ -647,6 +647,10 @@ pub(crate) fn spawn_runtime(
     // without a session has no trace file — the log still has the run.
     if let Some(id) = span_id.as_deref() {
         agents.events.start_trace(trace_path(&root, id));
+    } else if agents.events.wants_trace() {
+        tracing::warn!(
+            "the run was asked to trace, but it has no session: no trace file is written"
+        );
     }
     let (session_store, session_state) = if let Some(store) = attached {
         let has_content = agents.main.history().len() != 0;

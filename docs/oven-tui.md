@@ -86,7 +86,13 @@ it. The times are counted from the first event, and the `a/t` column is the
 agent and the turn, so a subagent's work reads apart from the driver's.
 
 A trace exists only for a run that asked for one: `oven --trace` writes it,
-a run without the flag leaves none behind.
+a run without the flag leaves none behind. A trace needs a session, so it
+conflicts with a one-shot query (`-Q`), and the CLI says so by naming both
+arguments:
+
+```text
+error: the argument '--trace' cannot be used with '--query <QUERY>'
+```
 
 ```text
   time     a/t  what happened

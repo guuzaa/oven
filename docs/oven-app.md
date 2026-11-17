@@ -322,8 +322,9 @@ from.
 
 The events travel the bus the frontend watches, so the trace holds what the
 frontend saw, in the order it saw it. A run without a session writes no trace
-file — the log is all there is. The file is written by a task of its own, so
-the last event of a run can be missing if the app leaves right after it.
+file — the log is all there is, and the runtime warns that the run asked for a
+trace it cannot write. The file is written by a task of its own, so the last
+event of a run can be missing if the app leaves right after it.
 
 Writing it is opt-in: the bus carries the switch (`EventBus::with_trace`), and
 `AppBuilder::with_trace(true)` turns it on — `oven --trace` in the CLI. A bus

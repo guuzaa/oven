@@ -81,6 +81,11 @@ impl EventBus {
         self.subscribers.clone()
     }
 
+    /// Whether the bus was asked to write a trace of the run.
+    pub(crate) fn wants_trace(&self) -> bool {
+        self.trace
+    }
+
     /// Records the agent's events into `path`, one per line, when the bus
     /// was asked to trace.
     ///

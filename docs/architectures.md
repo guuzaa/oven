@@ -467,9 +467,10 @@ frontend watches, so it holds what the frontend saw, in the order it saw
 it.
 
 A run without a session has no trace file — `oven query` writes no
-session, so the log is all there is. The file is written by a task of its
-own, so the last event of a run can be missing if the app leaves right
-after it; everything the writer reached is on disk.
+session, so the log is all there is, and the CLI refuses `--trace` next to
+`--query` rather than accepting a flag it cannot honour. The file is
+written by a task of its own, so the last event of a run can be missing
+if the app leaves right after it; everything the writer reached is on disk.
 
 The trace is written only when the run asks for it: the bus carries the
 switch, `oven --trace` turns it on, and a run that did not ask leaves no
