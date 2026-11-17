@@ -33,6 +33,10 @@ pub struct Cli {
     #[arg(long)]
     amnesia: bool,
 
+    /// Write the trace of the run beside the workspace: one event per line
+    #[arg(long)]
+    trace: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -64,7 +68,7 @@ impl Cli {
             eprintln!("warning: loading config: {e}");
         }
         self.load_memory(&mut builder).await;
-        builder
+        builder.with_trace(self.trace)
     }
 
     async fn load_memory(&self, builder: &mut AppBuilder) {
@@ -77,7 +81,7 @@ impl Cli {
         let mut builder = App::builder(&self.dir);
         builder.load_config().await?;
         self.load_memory(&mut builder).await;
-        builder.query(prompt).await
+        builder.with_trace(self.trace).query(prompt).await
     }
 
     async fn headless(&self, prompt: &str) -> ExitCode {
@@ -122,17 +126,17 @@ impl Cli {
         } else {
             match self.query.as_deref() {
                 Some(prompt) => {
-                    tracing::info!(root = %self.dir.display(), headless = true, amnesia = self.amnesia, "oven starting");
+                    tracing::info!(root = %self.dir.display(), headless = true, amnesia = self.amnesia, trace = self.trace, "oven starting");
                     self.headless(prompt.trim()).await
                 }
                 None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
                     let session = self.resolve_session_id().await;
-                    tracing::info!(root = %self.dir.display(), headless = false, amnesia = self.amnesia, "oven starting");
+                    tracing::info!(root = %self.dir.display(), headless = false, amnesia = self.amnesia, trace = self.trace, "oven starting");
                     self.interactive(session.as_deref()).await
                 }
                 None => {
                     eprintln!(
-                        "usage: oven [-C DIR] [--session ID] [--continue] [--amnesia] [-Q|--query QUERY]"
+                        "usage: oven [-C DIR] [--session ID] [--continue] [--amnesia] [--trace] [-Q|--query QUERY]"
                     );
                     ExitCode::from(2)
                 }

@@ -56,24 +56,40 @@ impl EventSink for BusSink {
 #[derive(Clone)]
 pub(crate) struct EventBus {
     subscribers: Subscribers,
+    /// Whether the run writes a trace of its events.
+    trace: bool,
 }
 
 impl EventBus {
     pub(crate) fn new() -> Self {
         Self {
             subscribers: Arc::new(Mutex::new(Vec::new())),
+            trace: false,
         }
+    }
+
+    /// Whether the bus writes a trace of the run's events.
+    ///
+    /// The bus carries the switch: a run that was not asked to trace never
+    /// starts a writer, so it leaves no file behind.
+    pub(crate) fn with_trace(mut self, trace: bool) -> Self {
+        self.trace = trace;
+        self
     }
 
     pub(crate) fn subscribers(&self) -> Subscribers {
         self.subscribers.clone()
     }
 
-    /// Records the agent's events into `path`, one per line.
+    /// Records the agent's events into `path`, one per line, when the bus
+    /// was asked to trace.
     ///
     /// The trace travels the same bus the frontend watches, so the file
     /// holds what the frontend saw, in the order it saw it.
-    pub(crate) fn trace(&self, path: PathBuf) {
+    pub(crate) fn start_trace(&self, path: PathBuf) {
+        if !self.trace {
+            return;
+        }
         let (sender, events) = mpsc::unbounded_channel();
         self.subscribers
             .lock()

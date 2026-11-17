@@ -6146,7 +6146,7 @@ async fn wait_for_trace(path: &Path) -> String {
 #[tokio::test]
 async fn a_run_with_a_session_writes_its_trace() {
     let tmp = tempdir::TempDir::new("app-runtime-trace").unwrap();
-    let app = AppBuilder::new(tmp.path());
+    let app = AppBuilder::new(tmp.path()).with_trace(true);
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock = MockProvider::new(vec![text_response("hello")]);
@@ -6160,4 +6160,21 @@ async fn a_run_with_a_session_writes_its_trace() {
     let written = wait_for_trace(&path).await;
     assert!(written.contains("\"kind\":\"completed\""), "{written}");
     assert!(written.contains("\"agent_id\":1"), "{written}");
+}
+
+#[tokio::test]
+async fn a_run_that_was_not_asked_to_trace_writes_no_trace() {
+    let tmp = tempdir::TempDir::new("app-runtime-no-trace").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mock = MockProvider::new(vec![text_response("hello")]);
+    let session = Session::open(&dir, "s1").await.unwrap();
+    let handle = spawn_app_session(&app, Box::new(mock), session).await;
+
+    assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
+    handle.shutdown().await;
+
+    let path = tmp.path().join(".oven").join("trace").join("s1.jsonl");
+    assert!(!path.exists(), "the trace must not be written: {path:?}");
 }

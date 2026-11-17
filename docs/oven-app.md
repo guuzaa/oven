@@ -325,6 +325,11 @@ frontend saw, in the order it saw it. A run without a session writes no trace
 file — the log is all there is. The file is written by a task of its own, so
 the last event of a run can be missing if the app leaves right after it.
 
+Writing it is opt-in: the bus carries the switch (`EventBus::with_trace`), and
+`AppBuilder::with_trace(true)` turns it on — `oven --trace` in the CLI. A bus
+that was not asked to trace never starts a writer, so the run leaves no file
+behind and no trace directory either.
+
 ## Slash commands
 
 `commands/` defines one trait and eight built-ins; the registry is extensible:

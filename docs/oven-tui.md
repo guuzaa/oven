@@ -60,8 +60,10 @@ happens; `core` performs none.
 `Cli` has these flags: `--cd/-C` (workspace root, global so it may follow a
 subcommand), `--session/-s` and `--continue/-c` (mutually exclusive session
 selection; an explicit id wins, otherwise the newest session for this root),
-`--query/-Q`, and `--amnesia` (skip loading durable memory for this run, in
-both interactive and headless modes; `oven mem` is unaffected).
+`--query/-Q`, `--amnesia` (skip loading durable memory for this run, in
+both interactive and headless modes; `oven mem` is unaffected), and `--trace`
+(write the trace of the run beside the workspace, one event per line, so the
+run can be read back after it happened; `oven trace` reads it).
 
 `Cli::run` dispatches to one of four modes:
 
@@ -82,6 +84,9 @@ the trace holds, and when it was last written. `oven trace show <id>` prints
 one run as a timeline: what happened, how long it took, and which agent did
 it. The times are counted from the first event, and the `a/t` column is the
 agent and the turn, so a subagent's work reads apart from the driver's.
+
+A trace exists only for a run that asked for one: `oven --trace` writes it,
+a run without the flag leaves none behind.
 
 ```text
   time     a/t  what happened

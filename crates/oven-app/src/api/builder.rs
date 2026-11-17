@@ -104,6 +104,9 @@ pub struct AppBuilder {
     instructions: Vec<InstructionDoc>,
     memory: Option<Arc<MemoryStore>>,
     mcp_connector: Arc<dyn McpConnector>,
+    /// Write the trace of the run beside the workspace: the agent's events,
+    /// one per line.
+    trace: bool,
 }
 
 impl AppBuilder {
@@ -118,6 +121,7 @@ impl AppBuilder {
             instructions: Vec::new(),
             memory: None,
             mcp_connector: Arc::new(DefaultMcpConnector),
+            trace: false,
         }
     }
 
@@ -127,6 +131,13 @@ impl AppBuilder {
 
     pub fn config(&self) -> &AppConfig {
         &self.config
+    }
+
+    /// Write the trace of the run beside the workspace: the agent's events,
+    /// one per line, so the run can be read back after it happened.
+    pub fn with_trace(mut self, trace: bool) -> Self {
+        self.trace = trace;
+        self
     }
 
     pub fn skills(&self) -> &SkillRegistry {
@@ -296,7 +307,7 @@ impl AppBuilder {
             child_system = append_memory(child_system, store);
         }
         let main_system = format!("{}\n\n{child_system}", TOP_LEVEL_PROMPT.trim());
-        let events = EventBus::new();
+        let events = EventBus::new().with_trace(self.trace);
         let (wake, wake_rx) = mpsc::unbounded_channel();
         // `wake` goes to the supervisor, which keeps the channel open; the
         // runtime only ever listens on it.
