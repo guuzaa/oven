@@ -49,6 +49,6 @@ pub use oven_proto::{
     ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId, UserRequestId, UserResponse,
 };
 pub use platform::shell::{LocalShell, ShellInput, display_shell_line};
-pub use platform::{dirs, log};
+pub use platform::{dirs, log, trace};
 
 pub mod memory;

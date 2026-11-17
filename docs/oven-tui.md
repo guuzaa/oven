@@ -30,6 +30,7 @@ platform    the OS the screens draw on
 | `cli` | `cli.rs` | clap parsing and mode selection |
 | `commands` | `commands/prompt.rs` | the line prompts a subcommand asks, and the terminal's no-echo input |
 | | `commands/model/` | `oven model`: `ls`, `add`, `rm` |
+| | `commands/trace/` | `oven trace`: `ls`, `show` |
 | `runtime` | `runtime/ui/mod.rs` | the `Ui` handle: the event loop, the queue flush, quitting |
 | | `runtime/ui/event.rs` | app events onto the screen: routing, overlay prompts, a submitted prompt |
 | | `runtime/ui/keys.rs` | terminal input: paste bursts, mouse, the key router, the `Esc` decision |
@@ -66,14 +67,35 @@ both interactive and headless modes; `oven mem` is unaffected).
 
 | Condition | Behavior |
 | --- | --- |
-| a subcommand is present | run it and exit; no session, no TUI (`oven model …`) |
-| `--query QUERY` present | headless: `AppBuilder::query`, print the response, exit. No TUI is started. |
+| a subcommand is present | run it and exit; no session, no TUI (`oven model …`) || `--query QUERY` present | headless: `AppBuilder::query`, print the response, exit. No TUI is started. |
 | `--query` absent and stdin/stdout are both TTYs | interactive: `Ui::run` |
 | `--query` absent and either side is not a TTY | print usage, exit code `2` |
 
 Warnings from config loading and session resolution go to stderr and never abort
 startup. On interactive exit the resolved session id is printed as
 ` oven -s {id}` so it can be copied back into a shell.
+
+### `oven trace`
+
+`oven trace ls` lists the runs of this workspace — the session id, how much
+the trace holds, and when it was last written. `oven trace show <id>` prints
+one run as a timeline: what happened, how long it took, and which agent did
+it. The times are counted from the first event, and the `a/t` column is the
+agent and the turn, so a subagent's work reads apart from the driver's.
+
+```text
+  time     a/t  what happened
+    +0ms   1/1  turn started
+    +0ms   1/1  step 1 started
+  +930ms   1/1  file_read started · Read .oven/config.toml
+  +1.00s   1/1  file_read finished in 71ms
+  +1.01s   1/1  step 1 finished · tool use · provider 930ms
+ +42.01s   1/1  provider retried 2× · waited 30.00s · status 429
+ +42.14s   1/1  turn completed in 41.00s · 4210 in, 88 out
+```
+
+What was said — the text of the turn and its reasoning — is left out unless
+`--text` asks for it; the trace file holds all of it either way.
 
 ### `oven model`
 

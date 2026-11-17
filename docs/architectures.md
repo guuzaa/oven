@@ -52,7 +52,7 @@ documented in [`oven-proto.md`](./oven-proto.md).
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation, line diffs |
 | `oven-mem` | Durable memory: `Memory`, limits, id validation, file format, `MemoryStore`, catalog rendering |
 | `oven-app` | `App`, `AppBuilder`, the app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install, the tracing projection of the agent event stream |
-| `oven-tui` | render events and state; send commands; `oven mem` |
+| `oven-tui` | render events and state; send commands; `oven mem`, `oven trace` |
 
 `oven-proto` is the protocol layer: the vocabulary a frontend and the app
 runtime share. It is a leaf — `oven-llm` for messages and tokens, serde for

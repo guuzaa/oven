@@ -16,17 +16,43 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use oven_proto::{
     AgentEvent, AgentEventEnvelope, AppEvent, AppEventKind, StreamEvent, ToolEvent, ToolResult,
     TurnEvent,
 };
+use thiserror::Error;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
 /// The target every projected event is logged under.
 const TARGET: &str = "oven.agent";
+
+#[derive(Debug, Error)]
+pub enum TraceError {
+    #[error("trace: {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("trace: {path}:{line}: {source}")]
+    Parse {
+        path: PathBuf,
+        line: usize,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+fn io(path: &Path, source: std::io::Error) -> TraceError {
+    TraceError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+}
 
 /// Logs one event under the agent target, with the ids every line carries.
 macro_rules! event {
@@ -42,9 +68,70 @@ macro_rules! event {
 
 /// Where the trace of a session lives, under the workspace.
 pub fn trace_path(root: &Path, session: &str) -> PathBuf {
-    root.join(".oven")
-        .join("trace")
-        .join(format!("{session}.jsonl"))
+    trace_dir(root).join(format!("{session}.jsonl"))
+}
+
+/// Where the traces of a workspace live.
+pub fn trace_dir(root: &Path) -> PathBuf {
+    root.join(".oven").join("trace")
+}
+
+/// One trace of a workspace.
+#[derive(Debug, Clone)]
+pub struct TraceSummary {
+    /// The session the run belongs to.
+    pub id: String,
+    /// How much the trace holds.
+    pub bytes: u64,
+    /// When it was last written.
+    pub modified: Option<SystemTime>,
+}
+
+/// The traces of a workspace, newest first.
+pub async fn list_traces(root: &Path) -> Result<Vec<TraceSummary>, TraceError> {
+    let dir = trace_dir(root);
+    let mut entries = match fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io(&dir, error)),
+    };
+    let mut traces = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| io(&dir, e))? {
+        let path = entry.path();
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let metadata = entry.metadata().await.map_err(|e| io(&path, e))?;
+        traces.push(TraceSummary {
+            id: id.to_owned(),
+            bytes: metadata.len(),
+            modified: metadata.modified().ok(),
+        });
+    }
+    traces.sort_by(|left, right| right.modified.cmp(&left.modified));
+    Ok(traces)
+}
+
+/// The events of one run, in the order they happened.
+pub async fn read_trace(root: &Path, session: &str) -> Result<Vec<AgentEventEnvelope>, TraceError> {
+    let path = trace_path(root, session);
+    let written = fs::read_to_string(&path).await.map_err(|e| io(&path, e))?;
+    let mut events = Vec::new();
+    for (index, line) in written.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = serde_json::from_str(line).map_err(|source| TraceError::Parse {
+            path: path.clone(),
+            line: index + 1,
+            source,
+        })?;
+        events.push(event);
+    }
+    Ok(events)
 }
 
 /// Records the agent's events into a trace file, one per line.
@@ -414,5 +501,42 @@ mod tests {
         assert!(lines[0].contains("\"index\":1"), "{}", lines[0]);
         assert!(lines[1].contains("\"index\":2"), "{}", lines[1]);
         assert!(lines[0].contains("\"turn_id\":2"), "{}", lines[0]);
+    }
+
+    #[tokio::test]
+    async fn a_trace_is_read_back_as_the_events_it_holds() {
+        let dir = tempdir::TempDir::new("oven-trace-read").unwrap();
+        let path = trace_path(dir.path(), "s1");
+        let (sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(path.clone(), events);
+        let task = tokio::spawn(writer.run());
+        sender
+            .send(Arc::new(AppEvent::new(AppEventKind::Agent(envelope(
+                AgentEvent::Turn(TurnEvent::StepStarted { index: 3 }),
+            )))))
+            .unwrap();
+        drop(sender);
+        task.await.unwrap();
+
+        let read = read_trace(dir.path(), "s1").await.unwrap();
+        assert_eq!(read.len(), 1);
+        assert!(
+            matches!(
+                read[0].event,
+                AgentEvent::Turn(TurnEvent::StepStarted { index: 3 })
+            ),
+            "the event comes back as it went in"
+        );
+
+        let traces = list_traces(dir.path()).await.unwrap();
+        assert_eq!(traces.len(), 1);
+        assert_eq!(traces[0].id, "s1");
+        assert!(traces[0].bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn a_workspace_without_traces_lists_none() {
+        let dir = tempdir::TempDir::new("oven-trace-none").unwrap();
+        assert!(list_traces(dir.path()).await.unwrap().is_empty());
     }
 }
