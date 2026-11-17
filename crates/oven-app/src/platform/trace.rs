@@ -20,7 +20,8 @@
 //! ended. The text as it streamed is left out, because it is the bulk of a
 //! trace and the session file holds it already. A trace that keeps every
 //! word is asked for; it is worth the space only when a run has to be read
-//! word by word.
+//! word by word. A run asked to be quiet keeps no trace at all, so it has
+//! no file and no writer.
 //!
 //! A workspace keeps the newest traces and drops the older ones, so the
 //! space the traces take is bounded by the number of runs and not by the
@@ -443,6 +444,18 @@ async fn remove_file(root: &Path, id: &str) -> usize {
     }
 }
 
+/// What the trace file keeps of the run.
+///
+/// A quiet run keeps no trace at all, so it has no writer: this is what a
+/// writer that exists keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kept {
+    /// The shape of the run: what happened, when, and how it ended.
+    Skeleton,
+    /// Everything the run said, as it said it.
+    Full,
+}
+
 /// Records the agent's events into a trace file, one per line.
 ///
 /// The file is the run as it happened: the events, in the order they
@@ -453,8 +466,10 @@ pub struct TraceWriter {
     root: PathBuf,
     run: TraceRun,
     events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
-    /// How much of the run the file keeps, and how many traces stay.
-    settings: TraceSettings,
+    /// What the file keeps of the run.
+    kept: Kept,
+    /// How many traces a workspace keeps. Zero keeps them all.
+    keep: usize,
     file: Option<BufWriter<fs::File>>,
     /// The events that are written but not yet on the disk.
     pending: usize,
@@ -462,21 +477,30 @@ pub struct TraceWriter {
 }
 
 impl TraceWriter {
+    /// The writer of a trace, when the run keeps one at all.
+    ///
+    /// A quiet run keeps no trace, so it has no writer: this is `None`.
     pub fn new(
         root: PathBuf,
         run: TraceRun,
         events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
         settings: TraceSettings,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        let kept = match settings.mode {
+            TraceMode::Quiet => return None,
+            TraceMode::Skeleton => Kept::Skeleton,
+            TraceMode::Full => Kept::Full,
+        };
+        Some(Self {
             root,
             run,
             events,
-            settings,
+            kept,
+            keep: settings.keep,
             file: None,
             pending: 0,
             lost: 0,
-        }
+        })
     }
 
     /// The file the run's trace lives in.
@@ -530,10 +554,10 @@ impl TraceWriter {
     /// Keeps the newest traces of the workspace and drops the older ones,
     /// so the space they take is bounded.
     async fn prune(&self) {
-        if self.settings.keep == 0 {
+        if self.keep == 0 {
             return;
         }
-        if let Err(error) = prune_to_newest(&self.root, self.settings.keep, self.run.id()).await {
+        if let Err(error) = prune_to_newest(&self.root, self.keep, self.run.id()).await {
             tracing::warn!(
                 error = %error,
                 "the older traces could not be removed"
@@ -584,13 +608,12 @@ impl TraceWriter {
     /// keeps everything, and the shape of it when the trace keeps the
     /// shape. An event the shape leaves out is not written at all.
     fn line(&self, envelope: &AgentEventEnvelope) -> Result<Option<String>, std::io::Error> {
-        let mut line = match self.settings.mode {
-            TraceMode::Full => serde_json::to_string(envelope),
-            TraceMode::Skeleton => match skeleton(envelope) {
+        let mut line = match self.kept {
+            Kept::Full => serde_json::to_string(envelope),
+            Kept::Skeleton => match skeleton(envelope) {
                 Some(event) => serde_json::to_string(&event),
                 None => return Ok(None),
             },
-            TraceMode::Quiet => return Ok(None),
         }
         .map_err(std::io::Error::other)?;
         line.push('\n');
@@ -1111,7 +1134,8 @@ mod tests {
         let run = start(Some("session-1"));
         let path = trace_path(dir, run.id());
         let (sender, events) = mpsc::unbounded_channel();
-        let writer = TraceWriter::new(dir.to_path_buf(), run, events, settings);
+        let writer = TraceWriter::new(dir.to_path_buf(), run, events, settings)
+            .expect("the run keeps a trace");
         let task = tokio::spawn(writer.run());
         for index in 1..=2 {
             sender.send(Arc::new(event(index))).unwrap();
@@ -1132,7 +1156,8 @@ mod tests {
             run,
             events,
             TraceSettings::default(),
-        );
+        )
+        .expect("the run keeps a trace");
         let task = tokio::spawn(writer.run());
 
         sender.send(Arc::new(event(1))).unwrap();
@@ -1265,7 +1290,8 @@ mod tests {
             run,
             events,
             TraceSettings::default(),
-        );
+        )
+        .expect("the run keeps a trace");
         let task = tokio::spawn(writer.run());
         drop(sender);
         task.await.unwrap();
@@ -1337,7 +1363,8 @@ mod tests {
             run,
             events,
             TraceSettings::default(),
-        );
+        )
+        .expect("the run keeps a trace");
         let task = tokio::spawn(writer.run());
         for (index, elapsed_ms) in [(1, 100), (2, 200), (3, 300)] {
             sender.send(Arc::new(timed(index, elapsed_ms))).unwrap();
@@ -1422,7 +1449,8 @@ mod tests {
         let run = start(Some("session-1"));
         let path = trace_path(dir, run.id());
         let (sender, events) = mpsc::unbounded_channel();
-        let writer = TraceWriter::new(dir.to_path_buf(), run, events, settings);
+        let writer = TraceWriter::new(dir.to_path_buf(), run, events, settings)
+            .expect("the run keeps a trace");
         let task = tokio::spawn(writer.run());
         sender.send(Arc::new(event)).unwrap();
         drop(sender);
@@ -1480,6 +1508,26 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("text_delta"), "{written}");
         assert!(written.contains("hello"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn a_quiet_run_has_no_writer() {
+        let dir = tempdir::TempDir::new("oven-trace-quiet").unwrap();
+        let run = start(Some("session-1"));
+        let path = trace_path(dir.path(), run.id());
+        let (_sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(
+            dir.path().to_path_buf(),
+            run,
+            events,
+            TraceSettings {
+                mode: TraceMode::Quiet,
+                ..TraceSettings::default()
+            },
+        );
+
+        assert!(writer.is_none(), "a quiet run writes no trace at all");
+        assert!(!path.exists(), "the run left no file behind");
     }
 
     #[tokio::test]

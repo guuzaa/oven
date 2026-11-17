@@ -12,7 +12,7 @@ use oven_proto::{
 };
 use tokio::sync::mpsc;
 
-use crate::platform::trace::{self, TraceMode, TraceSettings, TraceWriter};
+use crate::platform::trace::{self, TraceSettings, TraceWriter};
 
 /// The channels the bus fans out to.
 ///
@@ -61,7 +61,7 @@ impl EventSink for BusSink {
 #[derive(Clone)]
 pub(crate) struct EventBus {
     subscribers: Subscribers,
-    /// How much of the run its trace keeps, and how many traces stay.
+    /// What the trace of a run keeps, and how many traces stay.
     settings: TraceSettings,
 }
 
@@ -73,10 +73,10 @@ impl EventBus {
         }
     }
 
-    /// How much of the run the trace keeps, and how many traces stay.
+    /// What the trace of a run keeps, and how many traces stay.
     ///
-    /// The trace is written either way: this says how much of the run it
-    /// holds.
+    /// A quiet run writes no trace at all; the others keep the shape of
+    /// the run or every word of it.
     pub(crate) fn with_trace(mut self, settings: TraceSettings) -> Self {
         self.settings = settings;
         self
@@ -90,20 +90,20 @@ impl EventBus {
     ///
     /// The trace travels the same bus the frontend watches, so the file
     /// holds what the frontend saw, in the order it saw it. A run that was
-    /// asked to be quiet leaves no file behind.
+    /// asked to be quiet has no writer, so it leaves no file behind.
     pub(crate) fn start_trace(&self, root: &Path, session_id: Option<&str>) {
-        if self.settings.mode == TraceMode::Quiet {
-            return;
-        }
         let run = trace::start(session_id);
         let path = trace::trace_path(root, run.id());
-        tracing::info!(path = %path.display(), "the run writes its trace");
         let (sender, events) = mpsc::unbounded_channel();
+        let Some(writer) = TraceWriter::new(root.to_path_buf(), run, events, self.settings) else {
+            return;
+        };
+        tracing::info!(path = %path.display(), "the run writes its trace");
         self.subscribers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(sender);
-        tokio::spawn(TraceWriter::new(root.to_path_buf(), run, events, self.settings).run());
+        tokio::spawn(writer.run());
     }
 
     pub(crate) fn emit(&self, kind: AppEventKind) {

@@ -101,10 +101,10 @@ c8e2f1a09b6d  3e4f5678  1.1 KB  2 hours ago
 keeping. The trace directory also carries a `.gitignore`, so the traces stay
 out of the commits of the workspace they belong to.
 
-Every run writes a trace of its own, so a run that went wrong can be read
-back after it happened. The trace keeps the shape of the run: what happened,
-when, and how it ended. The text as it streamed is left out, because it is
-the bulk of a trace and the session file holds it already; `oven --trace
+Every run but a quiet one writes a trace of its own, so a run that went wrong
+can be read back after it happened. The trace keeps the shape of the run: what
+happened, when, and how it ended. The text as it streamed is left out, because
+it is the bulk of a trace and the session file holds it already; `oven --trace
 full` writes the whole run, word by word, for the runs that have to be read
 that way, and `oven --trace quiet` writes no trace at all.
 

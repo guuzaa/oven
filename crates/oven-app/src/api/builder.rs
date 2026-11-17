@@ -136,10 +136,10 @@ impl AppBuilder {
 
     /// What the trace beside the workspace keeps.
     ///
-    /// Every run writes a trace of its own, so a session that is resumed
-    /// leaves a second trace rather than a longer one. The trace keeps the
-    /// shape of the run; `TraceMode::Full` keeps every word of it, and
-    /// `TraceMode::Quiet` writes no trace at all.
+    /// Every run but a quiet one writes a trace of its own, so a session
+    /// that is resumed leaves a second trace rather than a longer one. The
+    /// trace keeps the shape of the run; `TraceMode::Full` keeps every
+    /// word of it, and `TraceMode::Quiet` writes no trace at all.
     pub fn with_trace_mode(mut self, mode: TraceMode) -> Self {
         self.trace_mode = mode;
         self

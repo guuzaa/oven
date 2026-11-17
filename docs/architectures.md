@@ -502,13 +502,14 @@ buffered: they reach the disk a turn at a time, so the tail of a run can be
 missing if the app leaves right after it; everything the writer reached is on
 disk. A write that fails does not end the trace: the event is lost, the rest
 of the run is still written, and the loss is reported when the run ends.
+
 Reading a trace skips the lines it cannot parse — a run that was killed
 mid-write leaves half a line behind — and counts them, so the events that
 were written whole are still readable. Only a trace that holds nothing but
 damage is refused.
 
-Every run writes a trace: the bus carries what the trace keeps,
-`TraceMode::Skeleton` by default, `TraceMode::Full` when `oven --trace
+Every run but a quiet one writes a trace: the bus carries what the trace
+keeps, `TraceMode::Skeleton` by default, `TraceMode::Full` when `oven --trace
 full` asks for every word, and `TraceMode::Quiet` when `oven --trace quiet`
 asks for none. The skeleton leaves out the text as it streamed and cuts every
 body it keeps, so the space a run takes is bounded. A workspace keeps the

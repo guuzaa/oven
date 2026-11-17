@@ -347,8 +347,8 @@ prune` remove the traces that are not wanted any more, and a workspace keeps
 the newest traces on its own — `trace_keep` in the config says how many, and
 `0` keeps them all.
 
-Writing it is not opt-in: every run writes a trace of its own. The bus
-carries what the trace keeps (`EventBus::with_trace`), and
+Writing it is not opt-in: every run but a quiet one writes a trace of its
+own. The bus carries what the trace keeps (`EventBus::with_trace`), and
 `AppBuilder::with_trace_mode` says it — `TraceMode::Skeleton` by default,
 `TraceMode::Full` for `oven --trace full` in the CLI, and `TraceMode::Quiet`
 for `oven --trace quiet`, which writes no trace at all. The skeleton keeps
