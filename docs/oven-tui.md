@@ -61,9 +61,10 @@ happens; `core` performs none.
 subcommand), `--session/-s` and `--continue/-c` (mutually exclusive session
 selection; an explicit id wins, otherwise the newest session for this root),
 `--query/-Q`, `--amnesia` (skip loading durable memory for this run, in
-both interactive and headless modes; `oven mem` is unaffected), and `--trace`
-(write every word of the run: the trace keeps the text as it streamed; by
-default the trace keeps the shape of the run).
+both interactive and headless modes; `oven mem` is unaffected), and `--trace
+MODE` (what the trace of the run keeps: `full` writes every word of it,
+`quiet` writes no trace at all; without the flag the trace keeps the shape of
+the run).
 
 `Cli::run` dispatches to one of four modes:
 
@@ -103,9 +104,9 @@ out of the commits of the workspace they belong to.
 Every run writes a trace of its own, so a run that went wrong can be read
 back after it happened. The trace keeps the shape of the run: what happened,
 when, and how it ended. The text as it streamed is left out, because it is
-the bulk of a trace and the session file holds it already; `oven --trace`
-writes the whole run, word by word, for the runs that have to be read that
-way.
+the bulk of a trace and the session file holds it already; `oven --trace
+full` writes the whole run, word by word, for the runs that have to be read
+that way, and `oven --trace quiet` writes no trace at all.
 
 A workspace keeps the newest traces and drops the older ones, so the
 space they take is bounded: `trace_keep` in the config says how many, and

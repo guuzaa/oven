@@ -12,7 +12,7 @@ use oven_proto::{
 };
 use tokio::sync::mpsc;
 
-use crate::platform::trace::{self, TraceSettings, TraceWriter};
+use crate::platform::trace::{self, TraceMode, TraceSettings, TraceWriter};
 
 /// The channels the bus fans out to.
 ///
@@ -89,8 +89,12 @@ impl EventBus {
     /// Records the agent's events into a trace of their own, one per line.
     ///
     /// The trace travels the same bus the frontend watches, so the file
-    /// holds what the frontend saw, in the order it saw it.
+    /// holds what the frontend saw, in the order it saw it. A run that was
+    /// asked to be quiet leaves no file behind.
     pub(crate) fn start_trace(&self, root: &Path, session_id: Option<&str>) {
+        if self.settings.mode == TraceMode::Quiet {
+            return;
+        }
         let run = trace::start(session_id);
         let path = trace::trace_path(root, run.id());
         tracing::info!(path = %path.display(), "the run writes its trace");

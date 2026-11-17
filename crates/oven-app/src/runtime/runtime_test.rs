@@ -5,6 +5,7 @@ use crate::core::event::EventBus;
 use crate::core::memory::{DESCRIPTION_LABEL, KIND_LABEL, SOURCE_LABEL};
 use crate::core::session::{Session, canonical_root};
 use crate::memory::{AMBIGUOUS_MEMORY, MEMORY_DISABLED, NO_MEMORIES, REMOVED_MEMORY};
+use crate::platform::trace::TraceMode;
 use crate::{App, AppBuilder, NOTICE_MARK, NodeStatus};
 use crate::{LocalShell, runtime::*};
 use oven_mem::NOT_FOUND;
@@ -6264,6 +6265,26 @@ async fn a_run_without_a_session_writes_its_trace() {
     assert!(
         written.contains("\"session_id\":null"),
         "the run had no session, and the trace says so: {written}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_asked_to_be_quiet_writes_no_trace() {
+    let tmp = tempdir::TempDir::new("app-runtime-quiet-trace").unwrap();
+    let app = AppBuilder::new(tmp.path()).with_trace_mode(TraceMode::Quiet);
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mock = MockProvider::new(vec![text_response("hello")]);
+    let session = Session::open(&dir, "s1").await.unwrap();
+    let handle = spawn_app_session(&app, Box::new(mock), session).await;
+
+    assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
+    handle.shutdown().await;
+
+    let traces = tmp.path().join(".oven").join("trace");
+    assert!(
+        trace_files(&traces).is_empty(),
+        "the run was asked to be quiet: {traces:?}"
     );
 }
 

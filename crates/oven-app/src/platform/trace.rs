@@ -95,9 +95,11 @@ fn io(path: &Path, source: std::io::Error) -> TraceError {
     }
 }
 
-/// How much of a run its trace keeps.
+/// What the trace of a run keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraceDepth {
+pub enum TraceMode {
+    /// No trace at all: the run leaves no file behind.
+    Quiet,
     /// The shape of the run: what happened, when, and how it ended.
     ///
     /// The text as it streamed is left out, because it is the bulk of a
@@ -110,8 +112,8 @@ pub enum TraceDepth {
 /// How a workspace keeps its traces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TraceSettings {
-    /// How much of a run the trace holds.
-    pub depth: TraceDepth,
+    /// What the trace of a run keeps.
+    pub mode: TraceMode,
     /// How many traces a workspace keeps. Zero keeps them all.
     pub keep: usize,
 }
@@ -119,7 +121,7 @@ pub struct TraceSettings {
 impl Default for TraceSettings {
     fn default() -> Self {
         Self {
-            depth: TraceDepth::Skeleton,
+            mode: TraceMode::Skeleton,
             keep: DEFAULT_KEEP,
         }
     }
@@ -582,12 +584,13 @@ impl TraceWriter {
     /// keeps everything, and the shape of it when the trace keeps the
     /// shape. An event the shape leaves out is not written at all.
     fn line(&self, envelope: &AgentEventEnvelope) -> Result<Option<String>, std::io::Error> {
-        let mut line = match self.settings.depth {
-            TraceDepth::Full => serde_json::to_string(envelope),
-            TraceDepth::Skeleton => match skeleton(envelope) {
+        let mut line = match self.settings.mode {
+            TraceMode::Full => serde_json::to_string(envelope),
+            TraceMode::Skeleton => match skeleton(envelope) {
                 Some(event) => serde_json::to_string(&event),
                 None => return Ok(None),
             },
+            TraceMode::Quiet => return Ok(None),
         }
         .map_err(std::io::Error::other)?;
         line.push('\n');
@@ -1467,7 +1470,7 @@ mod tests {
         let path = write_event(
             dir.path(),
             TraceSettings {
-                depth: TraceDepth::Full,
+                mode: TraceMode::Full,
                 ..TraceSettings::default()
             },
             said("hello"),

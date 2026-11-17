@@ -327,13 +327,12 @@ of the file names the run — its id, the session it belonged to and when it
 started — and the lines after it are the events.
 
 The events travel the bus the frontend watches, so the trace holds what the
-frontend saw, in the order it saw it. A run without a session writes no trace
-file — the log is all there is, and the runtime warns that the run asked for a
-trace it cannot write. The file is written by a task of its own, and the
-events are buffered: they reach the disk a turn at a time, so the tail of a
-run can be missing if the app leaves right after it. A write that
-fails does not end the trace: the event is lost, the rest of the run is still
-written, and the loss is reported when the run ends.
+frontend saw, in the order it saw it. A run without a session writes a trace
+as well, and its first line says it had no session. The file is written by a
+task of its own, and the events are buffered: they reach the disk a turn at a
+time, so the tail of a run can be missing if the app leaves right after it. A
+write that fails does not end the trace: the event is lost, the rest of the run
+is still written, and the loss is reported when the run ends.
 
 Reading a trace skips the lines it cannot parse — a run that was killed
 mid-write leaves half a line behind — and counts them, so the events that were
@@ -349,10 +348,11 @@ the newest traces on its own — `trace_keep` in the config says how many, and
 `0` keeps them all.
 
 Writing it is not opt-in: every run writes a trace of its own. The bus
-carries how much of the run the file keeps (`EventBus::with_depth`), and
-`AppBuilder::with_trace_depth` says it — `TraceDepth::Skeleton` by default,
-`TraceDepth::Full` for `oven --trace` in the CLI. The skeleton keeps every
-event but the text as it streamed, and cuts every body it keeps, so the
+carries what the trace keeps (`EventBus::with_trace`), and
+`AppBuilder::with_trace_mode` says it — `TraceMode::Skeleton` by default,
+`TraceMode::Full` for `oven --trace full` in the CLI, and `TraceMode::Quiet`
+for `oven --trace quiet`, which writes no trace at all. The skeleton keeps
+every event but the text as it streamed, and cuts every body it keeps, so the
 space a run takes is bounded. The full trace keeps every word.
 
 The failures of a run are in the log as well: the projection writes every
