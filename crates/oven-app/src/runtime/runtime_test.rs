@@ -6128,3 +6128,36 @@ async fn a_turn_whose_reply_says_nothing_fails_instead_of_reporting_success() {
     assert!(handle.state().levels.phase.is_idle());
     handle.shutdown().await;
 }
+
+/// The trace is written by a task of its own, so a test waits for the file
+/// to catch up rather than assuming it has.
+async fn wait_for_trace(path: &Path) -> String {
+    for _ in 0..200 {
+        if let Ok(written) = std::fs::read_to_string(path)
+            && written.contains("completed")
+        {
+            return written;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the trace was not written: {path:?}");
+}
+
+#[tokio::test]
+async fn a_run_with_a_session_writes_its_trace() {
+    let tmp = tempdir::TempDir::new("app-runtime-trace").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mock = MockProvider::new(vec![text_response("hello")]);
+    let session = Session::open(&dir, "s1").await.unwrap();
+    let handle = spawn_app_session(&app, Box::new(mock), session).await;
+
+    assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
+    handle.shutdown().await;
+
+    let path = tmp.path().join(".oven").join("trace").join("s1.jsonl");
+    let written = wait_for_trace(&path).await;
+    assert!(written.contains("\"kind\":\"completed\""), "{written}");
+    assert!(written.contains("\"agent_id\":1"), "{written}");
+}

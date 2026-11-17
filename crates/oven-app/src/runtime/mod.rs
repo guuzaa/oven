@@ -26,6 +26,7 @@ use crate::core::session::{
     record_session_span,
 };
 use crate::core::state::{app_state, context_tokens, context_window};
+use crate::platform::trace::trace_path;
 use crate::runtime::inbox::InboxReceiver;
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::shared::{Shared, apply_without_driver, save_provider_overlay};
@@ -641,6 +642,12 @@ pub(crate) fn spawn_runtime(
         .map(SessionStore::current_id)
         .or_else(|| session.as_ref().map(|open| open.id().to_string()));
     let span = current_or_session_span(span_id.as_deref());
+    // The trace of the run: the agent's events, one per line, beside the
+    // workspace. A run without a session has no trace file — the log
+    // still has the run.
+    if let Some(id) = span_id.as_deref() {
+        agents.events.trace(trace_path(&root, id));
+    }
     let (session_store, session_state) = if let Some(store) = attached {
         let has_content = agents.main.history().len() != 0;
         store.mark_content(has_content);

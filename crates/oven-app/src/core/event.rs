@@ -4,6 +4,7 @@
 //! the fan-out: one bus, many subscribers, and the sink a turn publishes
 //! through.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use oven_proto::{
@@ -11,7 +12,7 @@ use oven_proto::{
 };
 use tokio::sync::mpsc;
 
-use crate::platform::trace;
+use crate::platform::trace::{self, TraceWriter};
 
 /// The channels the bus fans out to.
 ///
@@ -66,6 +67,19 @@ impl EventBus {
 
     pub(crate) fn subscribers(&self) -> Subscribers {
         self.subscribers.clone()
+    }
+
+    /// Records the agent's events into `path`, one per line.
+    ///
+    /// The trace travels the same bus the frontend watches, so the file
+    /// holds what the frontend saw, in the order it saw it.
+    pub(crate) fn trace(&self, path: PathBuf) {
+        let (sender, events) = mpsc::unbounded_channel();
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(sender);
+        tokio::spawn(TraceWriter::new(path, events).run());
     }
 
     pub(crate) fn emit(&self, kind: AppEventKind) {

@@ -9,8 +9,21 @@
 //! so the default filter keeps the shape of a run and
 //! `RUST_LOG=oven.agent=trace` keeps every word of it. Everything is on the
 //! `oven.agent` target.
+//!
+//! The same stream is also written down, in full, as a trace file: the run
+//! as it happened, one event per line. The log is the readable view; the
+//! file is the record.
 
-use oven_proto::{AgentEvent, AgentEventEnvelope, StreamEvent, ToolEvent, ToolResult, TurnEvent};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use oven_proto::{
+    AgentEvent, AgentEventEnvelope, AppEvent, AppEventKind, StreamEvent, ToolEvent, ToolResult,
+    TurnEvent,
+};
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 
 /// The target every projected event is logged under.
 const TARGET: &str = "oven.agent";
@@ -25,6 +38,76 @@ macro_rules! event {
             $($field)*
         )
     };
+}
+
+/// Where the trace of a session lives, under the workspace.
+pub fn trace_path(root: &Path, session: &str) -> PathBuf {
+    root.join(".oven")
+        .join("trace")
+        .join(format!("{session}.jsonl"))
+}
+
+/// Records the agent's events into a trace file, one per line.
+///
+/// The file is the run as it happened: the events, in the order they
+/// happened, with the moment each one landed. It sits beside the
+/// workspace rather than in the session file, because the session file is
+/// the conversation and has to stay resumable.
+pub struct TraceWriter {
+    path: PathBuf,
+    events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
+    file: Option<fs::File>,
+}
+
+impl TraceWriter {
+    pub fn new(path: PathBuf, events: mpsc::UnboundedReceiver<Arc<AppEvent>>) -> Self {
+        Self {
+            path,
+            events,
+            file: None,
+        }
+    }
+
+    /// Writes the events as they arrive, until the bus stops publishing.
+    pub async fn run(mut self) {
+        while let Some(event) = self.events.recv().await {
+            let AppEventKind::Agent(envelope) = &event.kind else {
+                continue;
+            };
+            if let Err(error) = self.append(envelope).await {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    "the trace could not be written"
+                );
+                return;
+            }
+        }
+    }
+
+    /// Appends one event. The file is created on the first one.
+    async fn append(&mut self, envelope: &AgentEventEnvelope) -> std::io::Result<()> {
+        if self.file.is_none() {
+            if let Some(dir) = self.path.parent() {
+                fs::create_dir_all(dir).await?;
+            }
+            self.file = Some(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
+                    .await?,
+            );
+        }
+        let mut line = serde_json::to_string(envelope).map_err(std::io::Error::other)?;
+        line.push('\n');
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("the trace file is not open"))?;
+        file.write_all(line.as_bytes()).await?;
+        file.flush().await
+    }
 }
 
 /// Logs one agent event.
@@ -301,5 +384,35 @@ mod tests {
         assert!(line.contains("tool finished"), "{line}");
         assert!(line.contains("name=file_read"), "{line}");
         assert!(line.contains("duration_ms=42"), "{line}");
+    }
+
+    #[tokio::test]
+    async fn the_trace_holds_the_events_in_order() {
+        let dir = tempdir::TempDir::new("oven-trace").unwrap();
+        let path = trace_path(dir.path(), "s1");
+        assert_eq!(
+            path,
+            dir.path().join(".oven").join("trace").join("s1.jsonl"),
+            "the trace sits beside the workspace"
+        );
+
+        let (sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(path.clone(), events);
+        let task = tokio::spawn(writer.run());
+        for index in 1..=2 {
+            let event = AppEvent::new(AppEventKind::Agent(envelope(AgentEvent::Turn(
+                TurnEvent::StepStarted { index },
+            ))));
+            sender.send(Arc::new(event)).unwrap();
+        }
+        drop(sender);
+        task.await.expect("the writer finishes when the bus stops");
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = written.lines().collect();
+        assert_eq!(lines.len(), 2, "{written}");
+        assert!(lines[0].contains("\"index\":1"), "{}", lines[0]);
+        assert!(lines[1].contains("\"index\":2"), "{}", lines[1]);
+        assert!(lines[0].contains("\"turn_id\":2"), "{}", lines[0]);
     }
 }

@@ -62,7 +62,7 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 | `src/core/provider.rs` | routers, clients and the credential-free listings. |
 | `src/core/complete.rs` | the one prefix rule every completion list shares. |
 | `src/memory.rs` | the memory operations `/memory` and `oven mem` share. |
-| `src/platform/` | paths, the tracing subscriber, the local shell envelope. |
+| `src/platform/` | paths, the tracing subscriber, the trace of a run, the local shell envelope. |
 
 `App` has three constructors:
 
@@ -310,6 +310,20 @@ a session that was opened but never persisted stays invisible to `/continue`.
 `cwd_latest.json` sits next to the session files: a map of canonical workspace
 root to the session id most recently used there, so `--continue` answers one
 question with one read.
+
+## The trace of a run
+
+`platform/trace.rs` writes the run down twice. The tracing projection turns every
+agent event into a log line on the `oven.agent` target, and the trace file
+records the same events in full, one JSONL line per event, at
+`<workspace>/.oven/trace/<session-id>.jsonl`. The log is the readable view; the
+file is the record, and it is what a question about a finished run is answered
+from.
+
+The events travel the bus the frontend watches, so the trace holds what the
+frontend saw, in the order it saw it. A run without a session writes no trace
+file — the log is all there is. The file is written by a task of its own, so
+the last event of a run can be missing if the app leaves right after it.
 
 ## Slash commands
 

@@ -449,6 +449,34 @@ protocol has no vocabulary for — a provider that answers with nothing, a
 tool call whose arguments are not JSON, an MCP server that will not
 connect. Those are logged where they happen.
 
+## The trace file
+
+The log is a view; the trace file is the record. Every agent event is
+written to `<workspace>/.oven/trace/<session-id>.jsonl`, one event per
+line, in the order the events happened:
+
+```json
+{"agent_id":1,"turn_id":1,"at":1712345678901,"event":{"kind":"turn","data":{"kind":"started"}}}
+{"agent_id":1,"turn_id":1,"at":1712345678940,"event":{"kind":"tool","data":{"kind":"started","call_id":7,"name":"file_read","view":{"summary":"Read src/lib.rs","collapse":true}}}}
+```
+
+The file sits beside the workspace rather than in the session file, because
+the session file is the conversation and has to stay resumable; the trace
+is the process, and it is read, not replayed. It travels the same bus the
+frontend watches, so it holds what the frontend saw, in the order it saw
+it.
+
+A run without a session has no trace file — `oven query` writes no
+session, so the log is all there is. The file is written by a task of its
+own, so the last event of a run can be missing if the app leaves right
+after it; everything the writer reached is on disk.
+
+Reading it needs nothing but `jq`:
+
+```sh
+jq -r 'select(.event.kind == "turn") | [.at, .event.data.kind] | @tsv' .oven/trace/<id>.jsonl
+```
+
 ## App events
 
 ```rust
