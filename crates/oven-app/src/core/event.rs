@@ -4,7 +4,7 @@
 //! the fan-out: one bus, many subscribers, and the sink a turn publishes
 //! through.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use oven_proto::{
@@ -46,6 +46,11 @@ impl EventSink for BusSink {
     fn emit(&mut self, event: AgentEvent) {
         self.bus.emit_agent(self.agent_id, self.turn_id, event);
     }
+
+    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent) {
+        self.bus
+            .emit_agent_at(self.agent_id, self.turn_id, elapsed_ms, event);
+    }
 }
 
 /// Every event a frontend can see, fanning out to each subscriber.
@@ -86,21 +91,22 @@ impl EventBus {
         self.trace
     }
 
-    /// Records the agent's events into `path`, one per line, when the bus
-    /// was asked to trace.
+    /// Records the agent's events into a trace of their own, one per line,
+    /// when the bus was asked to trace.
     ///
     /// The trace travels the same bus the frontend watches, so the file
     /// holds what the frontend saw, in the order it saw it.
-    pub(crate) fn start_trace(&self, path: PathBuf) {
+    pub(crate) fn start_trace(&self, root: &Path, session_id: &str) {
         if !self.trace {
             return;
         }
+        let (run, path) = trace::start(root, session_id);
         let (sender, events) = mpsc::unbounded_channel();
         self.subscribers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(sender);
-        tokio::spawn(TraceWriter::new(path, events).run());
+        tokio::spawn(TraceWriter::new(path, run, events).run());
     }
 
     pub(crate) fn emit(&self, kind: AppEventKind) {
@@ -119,10 +125,26 @@ impl EventBus {
     /// happened and projected onto the log before it reaches the
     /// subscribers.
     pub(crate) fn emit_agent(&self, agent_id: AgentId, turn_id: TurnId, event: AgentEvent) {
+        self.emit_agent_at(agent_id, turn_id, oven_host::monotonic_ms(), event);
+    }
+
+    /// Emits an agent event that happened at a known moment.
+    ///
+    /// An event the agent only reports once the call it belongs to is over
+    /// keeps the moment it happened at, so the timeline it lands on says
+    /// where the time went.
+    pub(crate) fn emit_agent_at(
+        &self,
+        agent_id: AgentId,
+        turn_id: TurnId,
+        elapsed_ms: u64,
+        event: AgentEvent,
+    ) {
         let envelope = AgentEventEnvelope {
             agent_id,
             turn_id,
-            at: oven_host::now_ms(),
+            at: wall_clock_at(elapsed_ms),
+            elapsed_ms,
             event,
         };
         trace::project(&envelope);
@@ -134,4 +156,9 @@ impl EventBus {
         tracing::warn!(error = %message, "app error");
         self.emit(AppEventKind::Error { message });
     }
+}
+
+/// The wall-clock time of a moment on the monotonic clock.
+fn wall_clock_at(elapsed_ms: u64) -> u64 {
+    oven_host::now_ms().saturating_sub(oven_host::monotonic_ms().saturating_sub(elapsed_ms))
 }

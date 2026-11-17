@@ -9,7 +9,7 @@ use oven_llm::{
     Role, collect_stream,
 };
 
-use oven_host::as_ms;
+use oven_host::{as_ms, monotonic_ms};
 
 use super::Agent;
 use super::notify::{ThinkingSpan, thinking_span};
@@ -147,8 +147,9 @@ impl Agent {
 
         let mut thinking = ThinkingSpan::default();
         let mut calls = ToolCallGate::default();
+        let call_started_ms = monotonic_ms();
         let (outcome, report) = router.open_stream_with_report(&req, &options).await;
-        report_retries(report, sink);
+        report_retries(report, call_started_ms, sink);
         let stream = match outcome {
             Ok(stream) => stream,
             Err(error) => return Err(error.into()),
@@ -261,15 +262,20 @@ impl ToolCallGate {
 }
 
 /// Reports what a retried call cost, so the trace says where the time went.
-fn report_retries(report: CallReport, sink: &mut impl EventSink) {
-    if report.attempts == 0 {
-        return;
+///
+/// Each wait is reported where it happened: the event carries the moment the
+/// call was asked again, not the moment the call was finally answered.
+fn report_retries(report: CallReport, call_started_ms: u64, sink: &mut impl EventSink) {
+    for wait in report.waits {
+        sink.emit_at(
+            call_started_ms + wait.at_ms,
+            AgentEvent::Turn(TurnEvent::ProviderRetried {
+                retry: wait.retry,
+                waited_ms: wait.waited_ms,
+                status: wait.status,
+            }),
+        );
     }
-    sink.emit(AgentEvent::Turn(TurnEvent::ProviderRetried {
-        attempts: report.attempts,
-        waited_ms: report.waited_ms,
-        status: report.status,
-    }));
 }
 
 async fn complete_unstreamed(
@@ -279,8 +285,9 @@ async fn complete_unstreamed(
     sink: &mut impl EventSink,
 ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
     let started = Instant::now();
+    let call_started_ms = monotonic_ms();
     let (outcome, report) = router.complete_with_report(req, options).await;
-    report_retries(report, sink);
+    report_retries(report, call_started_ms, sink);
     let mut response = outcome?;
     strip_tool_call_text(&mut response);
     let reasoning = response.thinking();

@@ -6129,18 +6129,33 @@ async fn a_turn_whose_reply_says_nothing_fails_instead_of_reporting_success() {
     handle.shutdown().await;
 }
 
+/// The traces of a workspace, by name.
+fn trace_files(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    names.sort();
+    names
+}
+
 /// The trace is written by a task of its own, so a test waits for the file
 /// to catch up rather than assuming it has.
-async fn wait_for_trace(path: &Path) -> String {
+async fn wait_for_trace(dir: &Path) -> String {
     for _ in 0..200 {
-        if let Ok(written) = std::fs::read_to_string(path)
+        if let Some(name) = trace_files(dir).first()
+            && let Ok(written) = std::fs::read_to_string(dir.join(name))
             && written.contains("completed")
         {
             return written;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    panic!("the trace was not written: {path:?}");
+    panic!("the trace was not written: {dir:?}");
 }
 
 #[tokio::test]
@@ -6159,12 +6174,44 @@ async fn a_run_with_a_session_writes_its_trace() {
     assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
     handle.shutdown().await;
 
-    let path = tmp.path().join(".oven").join("trace").join("s1.jsonl");
-    let written = wait_for_trace(&path).await;
+    let traces = tmp.path().join(".oven").join("trace");
+    let written = wait_for_trace(&traces).await;
     assert!(written.contains("\"kind\":\"completed\""), "{written}");
     assert!(
         written.contains(&format!("\"agent_id\":{},", agent.0)),
         "{written}"
+    );
+    assert!(
+        written.contains("\"kind\":\"run\""),
+        "the trace names the run that wrote it: {written}"
+    );
+}
+
+#[tokio::test]
+async fn every_run_writes_a_trace_of_its_own() {
+    let tmp = tempdir::TempDir::new("app-runtime-trace-runs").unwrap();
+    let app = AppBuilder::new(tmp.path()).with_trace(true);
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mock = MockProvider::new(vec![text_response("hello")]);
+    let session = Session::open(&dir, "s1").await.unwrap();
+    let handle = spawn_app_session(&app, Box::new(mock), session).await;
+    assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
+    handle.shutdown().await;
+
+    let mock = MockProvider::new(vec![text_response("hello again")]);
+    let session = Session::open(&dir, "s1").await.unwrap();
+    let handle = spawn_app_session(&app, Box::new(mock), session).await;
+    assert_eq!(handle.prompt("hi again").await.unwrap(), "hello again");
+    handle.shutdown().await;
+
+    let traces = tmp.path().join(".oven").join("trace");
+    wait_for_trace(&traces).await;
+    assert_eq!(
+        trace_files(&traces).len(),
+        2,
+        "a resumed session writes a second trace, not a longer one"
     );
 }
 
@@ -6181,6 +6228,9 @@ async fn a_run_that_was_not_asked_to_trace_writes_no_trace() {
     assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
     handle.shutdown().await;
 
-    let path = tmp.path().join(".oven").join("trace").join("s1.jsonl");
-    assert!(!path.exists(), "the trace must not be written: {path:?}");
+    let traces = tmp.path().join(".oven").join("trace");
+    assert!(
+        trace_files(&traces).is_empty(),
+        "the trace must not be written: {traces:?}"
+    );
 }

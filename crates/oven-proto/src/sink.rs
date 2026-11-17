@@ -7,6 +7,17 @@ use crate::AgentEvent;
 /// runtime's bus instead.
 pub trait EventSink {
     fn emit(&mut self, event: AgentEvent);
+
+    /// Emits an event that happened at a known moment.
+    ///
+    /// The moment is in the monotonic milliseconds the process counts from
+    /// its start — the same clock the bus timestamps with. An event that
+    /// happened inside a call, and is only reported once the call is over,
+    /// keeps the moment it happened at.
+    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent) {
+        let _ = elapsed_ms;
+        self.emit(event);
+    }
 }
 
 #[derive(Debug, Default)]

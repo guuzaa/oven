@@ -8,14 +8,9 @@
 //! not retried.
 
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
-use futures::stream::BoxStream;
-
-use crate::domain::{CallOptions, ModelId, Request, Response, StreamEvent};
-use crate::provider::model::ModelInfo;
-use crate::provider::{Provider, ProviderError, ProviderKind, ProviderName, Result};
+use crate::provider::{ProviderError, Result};
 
 const TIMEOUT_STATUS: u16 = 408;
 const TOO_MANY_REQUESTS: u16 = 429;
@@ -75,16 +70,26 @@ impl RetryPolicy {
     }
 }
 
-/// What a call did to get its answer: the attempts it made and the waits
-/// between them.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CallReport {
-    /// How many times the call was retried.
-    pub attempts: u32,
-    /// How long the call waited between attempts, in milliseconds.
+/// One wait between two attempts of a retried call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryWait {
+    /// Which retry this was: 1 is the first time the call was asked again.
+    pub retry: u32,
+    /// How long the call waited, in milliseconds.
     pub waited_ms: u64,
-    /// The status the last failed attempt reported, when it had one.
+    /// How far into the call the wait ended, in milliseconds, counted from
+    /// the start of the call. It is what places the wait on a timeline.
+    pub at_ms: u64,
+    /// The status the attempt that failed reported, when it had one.
     pub status: Option<u16>,
+}
+
+/// What a call did to get its answer: the waits between its attempts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallReport {
+    /// The waits between attempts, in order. Empty when the call was not
+    /// retried.
+    pub waits: Vec<RetryWait>,
 }
 
 fn is_retryable(err: &ProviderError) -> bool {
@@ -158,21 +163,25 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    let started = Instant::now();
     let mut report = CallReport::default();
     let mut last_err = None;
     for attempt in 0..=policy.max_retries {
         if let Some(err) = last_err.as_ref() {
             let backoff = backoff_for(policy, attempt, err);
-            report.waited_ms += backoff.as_millis() as u64;
             log_retry(attempt, backoff, err);
             sleep(backoff).await;
+            report.waits.push(RetryWait {
+                retry: attempt,
+                waited_ms: backoff.as_millis() as u64,
+                at_ms: started.elapsed().as_millis() as u64,
+                status: status_of(err),
+            });
         }
         match op().await {
             Ok(value) => return (Ok(value), report),
             Err(err) => {
-                report.status = status_of(&err);
                 if attempt < policy.max_retries && is_retryable(&err) {
-                    report.attempts += 1;
                     last_err = Some(err);
                 } else {
                     return (Err(err), report);
@@ -194,332 +203,88 @@ where
     }
 }
 
-/// Wraps a provider with an optional timeout and a bounded retry.
-///
-/// [`new`](Self::new) does not retry and does not time out. Opt in with
-/// [`with_timeout`](Self::with_timeout), [`with_retries`](Self::with_retries),
-/// and [`with_base_backoff`](Self::with_base_backoff) before the provider is
-/// registered. `list_models` is never retried.
-pub struct RetryingProvider {
-    inner: Box<dyn Provider>,
-    policy: RetryPolicy,
-}
-
-impl RetryingProvider {
-    pub fn new(inner: impl Provider + 'static) -> Self {
-        Self {
-            inner: Box::new(inner),
-            policy: RetryPolicy::default(),
-        }
-    }
-
-    /// Timeout for one `complete` attempt. Elapsed time is HTTP 408, so it
-    /// is retried when retries are on. `stream` is not timed out.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.policy = self.policy.with_timeout(timeout);
-        self
-    }
-
-    /// Extra attempts after the first failure. `0` (the default) does not retry.
-    pub fn with_retries(mut self, max_retries: u32) -> Self {
-        self.policy = self.policy.with_retries(max_retries);
-        self
-    }
-
-    /// Base for exponential backoff. Default 500ms. A rate-limit `retry_after`
-    /// replaces it for that attempt.
-    pub fn with_base_backoff(mut self, base_backoff: Duration) -> Self {
-        self.policy = self.policy.with_base_backoff(base_backoff);
-        self
-    }
-}
-
-#[async_trait]
-impl Provider for RetryingProvider {
-    async fn complete(&self, req: &Request, options: &CallOptions) -> Result<Response> {
-        let policy = self.policy.clone();
-        let (outcome, _) = with_retry(&policy, || async {
-            match policy.timeout() {
-                Some(limit) => with_timeout(limit, self.inner.complete(req, options)).await,
-                None => self.inner.complete(req, options).await,
-            }
-        })
-        .await;
-        outcome
-    }
-
-    async fn stream(
-        &self,
-        req: &Request,
-        options: &CallOptions,
-    ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-        let (outcome, _) = with_retry(&self.policy, || self.inner.stream(req, options)).await;
-        outcome
-    }
-
-    fn known_models(&self) -> Vec<ModelInfo> {
-        self.inner.known_models()
-    }
-
-    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-        self.inner.resolve_model(id)
-    }
-
-    fn protocol(&self) -> Option<ProviderKind> {
-        self.inner.protocol()
-    }
-
-    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        self.inner.list_models().await
-    }
-
-    fn provider_name(&self) -> ProviderName {
-        self.inner.provider_name()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    use crate::domain::message::Role;
-
-    struct Flaky {
-        fails_before_success: u32,
-        calls: Arc<Mutex<u32>>,
-        stream_calls: Arc<Mutex<u32>>,
-        list_calls: Arc<Mutex<u32>>,
-    }
-
-    impl Flaky {
-        fn request() -> Request {
-            Request::builder().build()
-        }
-    }
-
-    #[async_trait]
-    impl Provider for Flaky {
-        async fn complete(&self, _req: &Request, _options: &CallOptions) -> Result<Response> {
-            let mut calls = self.calls.lock().unwrap();
-            *calls += 1;
-            if *calls <= self.fails_before_success {
+    #[tokio::test]
+    async fn retries_until_the_call_answers() {
+        let calls = Arc::new(Mutex::new(0u32));
+        let policy = RetryPolicy::new()
+            .with_retries(3)
+            .with_base_backoff(Duration::from_millis(1));
+        let (outcome, report) = with_retry(&policy, || async {
+            let mut seen = calls.lock().unwrap();
+            *seen += 1;
+            if *seen <= 2 {
                 return Err(ProviderError::Api {
                     status: 500,
                     body: "flaky".into(),
                 });
             }
-            Ok(response())
-        }
-
-        async fn stream(
-            &self,
-            _req: &Request,
-            _options: &CallOptions,
-        ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-            let mut calls = self.stream_calls.lock().unwrap();
-            *calls += 1;
-            if *calls <= self.fails_before_success {
-                return Err(ProviderError::Api {
-                    status: 500,
-                    body: "flaky stream".into(),
-                });
-            }
-            Ok(Box::pin(futures::stream::iter(vec![Ok(
-                StreamEvent::MessageStop,
-            )])))
-        }
-
-        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-            let mut calls = self.list_calls.lock().unwrap();
-            *calls += 1;
-            Err(ProviderError::Api {
-                status: 500,
-                body: "list failed".into(),
-            })
-        }
-
-        fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
-            let _ = id;
-            None
-        }
-
-        fn provider_name(&self) -> ProviderName {
-            ProviderName::Custom("mock".into())
-        }
-    }
-
-    fn response() -> Response {
-        Response {
-            id: "1".into(),
-            model: "mock".to_owned(),
-            role: Role::Assistant,
-            content: Vec::new(),
-            stop_reason: None,
-            usage: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn retries_complete_until_success() {
-        let calls = Arc::new(Mutex::new(0u32));
-        let provider = RetryingProvider::new(Flaky {
-            fails_before_success: 2,
-            calls: Arc::clone(&calls),
-            stream_calls: Arc::new(Mutex::new(0)),
-            list_calls: Arc::new(Mutex::new(0)),
+            Ok(())
         })
-        .with_retries(3)
-        .with_base_backoff(Duration::from_millis(1));
-        provider
-            .complete(&Flaky::request(), &CallOptions::new("mock"))
-            .await
-            .unwrap();
+        .await;
+
+        assert!(outcome.is_ok());
         assert_eq!(*calls.lock().unwrap(), 3);
+        assert_eq!(report.waits.len(), 2, "two attempts failed first");
     }
 
     #[tokio::test]
-    async fn does_not_retry_auth_errors() {
-        struct AuthFail;
-        #[async_trait]
-        impl Provider for AuthFail {
-            async fn complete(&self, _req: &Request, _options: &CallOptions) -> Result<Response> {
-                Err(ProviderError::Auth("bad key".into()))
-            }
-
-            async fn stream(
-                &self,
-                _req: &Request,
-                _options: &CallOptions,
-            ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-                unimplemented!()
-            }
-
-            fn known_models(&self) -> Vec<ModelInfo> {
-                Vec::new()
-            }
-
-            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-                None
-            }
-
-            fn protocol(&self) -> Option<ProviderKind> {
-                None
-            }
-
-            async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-                Ok(Vec::new())
-            }
-
-            fn provider_name(&self) -> ProviderName {
-                ProviderName::Custom("mock".into())
-            }
-        }
-
-        let provider = RetryingProvider::new(AuthFail)
+    async fn does_not_retry_an_error_that_is_not_worth_retrying() {
+        let calls = Arc::new(Mutex::new(0u32));
+        let policy = RetryPolicy::new()
             .with_retries(5)
             .with_base_backoff(Duration::from_millis(1));
-        let err = provider
-            .complete(&Flaky::request(), &CallOptions::new("mock"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::Auth(_)));
-    }
-
-    #[tokio::test]
-    async fn retries_stream_start_not_list_models() {
-        let stream_calls = Arc::new(Mutex::new(0u32));
-        let provider = RetryingProvider::new(Flaky {
-            fails_before_success: 1,
-            calls: Arc::new(Mutex::new(0)),
-            stream_calls: Arc::clone(&stream_calls),
-            list_calls: Arc::new(Mutex::new(0)),
+        let (outcome, report) = with_retry(&policy, || async {
+            let mut seen = calls.lock().unwrap();
+            *seen += 1;
+            Err::<(), _>(ProviderError::Auth("bad key".into()))
         })
-        .with_retries(3)
-        .with_base_backoff(Duration::from_millis(1));
-        let stream = provider
-            .stream(&Flaky::request(), &CallOptions::new("mock"))
-            .await
-            .unwrap();
-        let events: Vec<_> = futures::StreamExt::collect(stream).await;
-        assert_eq!(events.len(), 1);
+        .await;
 
-        let err = provider.list_models().await.unwrap_err();
-        assert!(matches!(err, ProviderError::Api { status: 500, .. }));
+        assert!(matches!(outcome, Err(ProviderError::Auth(_))));
+        assert_eq!(*calls.lock().unwrap(), 1);
+        assert!(report.waits.is_empty());
     }
 
     #[tokio::test]
-    async fn complete_timeout_is_a_retryable_408() {
-        struct Slow;
-        #[async_trait]
-        impl Provider for Slow {
-            async fn complete(&self, _req: &Request, _options: &CallOptions) -> Result<Response> {
+    async fn a_timeout_is_a_retryable_408() {
+        let policy = RetryPolicy::new().with_retries(0);
+        let (outcome, _) = with_retry(&policy, || async {
+            with_timeout(Duration::from_millis(10), async {
                 sleep(Duration::from_millis(50)).await;
-                Err(ProviderError::Api {
-                    status: 500,
-                    body: "late".into(),
-                })
-            }
-
-            async fn stream(
-                &self,
-                _req: &Request,
-                _options: &CallOptions,
-            ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-                unimplemented!()
-            }
-
-            fn known_models(&self) -> Vec<ModelInfo> {
-                Vec::new()
-            }
-
-            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-                None
-            }
-
-            fn protocol(&self) -> Option<ProviderKind> {
-                None
-            }
-
-            async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-                Ok(Vec::new())
-            }
-
-            fn provider_name(&self) -> ProviderName {
-                ProviderName::Custom("mock".into())
-            }
-        }
-
-        let provider = RetryingProvider::new(Slow)
-            .with_timeout(Duration::from_millis(10))
-            .with_retries(0);
-        let err = provider
-            .complete(&Flaky::request(), &CallOptions::new("mock"))
+                Ok::<(), ProviderError>(())
+            })
             .await
-            .unwrap_err();
+        })
+        .await;
+
         assert!(
-            matches!(err, ProviderError::Api { status: 408, .. }),
-            "{err}"
+            matches!(outcome, Err(ProviderError::Api { status: 408, .. })),
+            "{outcome:?}"
         );
     }
 
     #[tokio::test]
     async fn default_does_not_retry() {
         let calls = Arc::new(Mutex::new(0u32));
-        let provider = RetryingProvider::new(Flaky {
-            fails_before_success: 1,
-            calls: Arc::clone(&calls),
-            stream_calls: Arc::new(Mutex::new(0)),
-            list_calls: Arc::new(Mutex::new(0)),
+        let policy = RetryPolicy::new().with_base_backoff(Duration::from_millis(1));
+        let (outcome, report) = with_retry(&policy, || async {
+            let mut seen = calls.lock().unwrap();
+            *seen += 1;
+            Err::<(), _>(ProviderError::Api {
+                status: 500,
+                body: "flaky".into(),
+            })
         })
-        .with_retries(0)
-        .with_base_backoff(Duration::from_millis(1));
-        let err = provider
-            .complete(&Flaky::request(), &CallOptions::new("mock"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ProviderError::Api { status: 500, .. }));
+        .await;
+
+        assert!(outcome.is_err());
         assert_eq!(*calls.lock().unwrap(), 1);
+        assert!(report.waits.is_empty());
     }
 
     #[test]
@@ -545,57 +310,26 @@ mod tests {
 
     #[tokio::test]
     async fn the_report_says_what_the_retries_cost() {
-        struct AlwaysFails;
-        #[async_trait]
-        impl Provider for AlwaysFails {
-            async fn complete(&self, _req: &Request, _options: &CallOptions) -> Result<Response> {
-                Err(ProviderError::Api {
-                    status: 429,
-                    body: "slow down".into(),
-                })
-            }
-
-            async fn stream(
-                &self,
-                _req: &Request,
-                _options: &CallOptions,
-            ) -> Result<BoxStream<'static, Result<StreamEvent>>> {
-                unimplemented!()
-            }
-
-            fn known_models(&self) -> Vec<ModelInfo> {
-                Vec::new()
-            }
-
-            fn resolve_model(&self, _id: &ModelId) -> Option<&ModelInfo> {
-                None
-            }
-
-            fn protocol(&self) -> Option<ProviderKind> {
-                None
-            }
-
-            async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-                Ok(Vec::new())
-            }
-
-            fn provider_name(&self) -> ProviderName {
-                ProviderName::Custom("mock".into())
-            }
-        }
-
         let policy = RetryPolicy::new()
             .with_retries(2)
             .with_base_backoff(Duration::from_millis(5));
         let (outcome, report) = with_retry(&policy, || async {
-            AlwaysFails
-                .complete(&Flaky::request(), &CallOptions::new("mock"))
-                .await
+            Err::<(), _>(ProviderError::Api {
+                status: 429,
+                body: "slow down".into(),
+            })
         })
         .await;
+
         assert!(outcome.is_err());
-        assert_eq!(report.attempts, 2);
-        assert_eq!(report.waited_ms, 15, "5ms then 10ms");
-        assert_eq!(report.status, Some(429));
+        assert_eq!(report.waits.len(), 2);
+        assert_eq!(report.waits[0].retry, 1);
+        assert_eq!(report.waits[0].waited_ms, 5, "the first wait");
+        assert_eq!(report.waits[1].waited_ms, 10, "the second wait doubles");
+        assert_eq!(report.waits[0].status, Some(429));
+        assert!(
+            report.waits[1].at_ms >= report.waits[0].at_ms,
+            "the waits happen in order"
+        );
     }
 }

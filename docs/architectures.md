@@ -363,14 +363,18 @@ pub enum AgentEvent {
 Events are not numbered: arrival order on the subscriber channel is the
 order things happened in, and a `ToolCallId` is the key a frontend pairs
 `Started` / `OutputDelta` / `Finished` with. Each envelope carries the
-moment it happened, in Unix milliseconds, so a trace reads as a timeline
-and not only as an order.
+moment it happened twice: `at` is the wall-clock time in Unix milliseconds,
+and `elapsed_ms` is the monotonic distance from the start of the run.
+The wall clock says when the event happened against the rest of the world;
+the monotonic one says how far into the run it happened, and it keeps
+saying so when a clock correction moves the wall clock underneath the run.
+A trace reads as a timeline and not only as an order.
 
 ```text
 TurnEvent     Started | Completed { usage, duration_ms }
               Prompt { text }
               StepStarted { index } | StepFinished { index, stop, provider_ms }
-              ProviderRetried { attempts, waited_ms, status }
+              ProviderRetried { retry, waited_ms, status }
               Cancelled { duration_ms } | Failed { error, duration_ms }
               LoopLimitReached { request_id, max_iters }
 StreamEvent   TextDelta { text } | ThinkingDelta { text }
@@ -401,13 +405,14 @@ and the tool results enter the history in the order the model asked for
 them, which is the order a provider expects them back in. They are what lets a driver — or a strip on screen — report loop
 progress and a stop reason without reading the agent.
 
-`ProviderRetried` says what a retried call cost: how many times it was
-asked again, how long it waited between the attempts, and the status the
-last failure reported. It is a summary of the call, not a moment in it —
-the wait happened before the answer arrived. The retry itself belongs to
-the router: the policy is the router's, and the report is what the call
-hands back, so the agent learns what the retries cost without the provider
-knowing which turn it is serving.
+`ProviderRetried` says what one wait cost: which retry it was, how long
+the call waited, and the status the attempt that failed reported. There is
+one event per wait, and it lands where the wait happened rather than where
+the call ended, so the gap it explains is the gap on the timeline. The
+retry itself belongs to the router: the policy is the router's, and the
+report is what the call hands back — every wait, with the moment it ended
+— so the agent learns what the retries cost without the provider knowing
+which turn it is serving.
 
 `ThinkingDone` closes the thinking window the agent timed: it fires the moment
 the reasoning phase ends, ahead of the answer text or the tool call that ended
@@ -452,25 +457,40 @@ connect. Those are logged where they happen.
 ## The trace file
 
 The log is a view; the trace file is the record. Every agent event is
-written to `<workspace>/.oven/trace/<session-id>.jsonl`, one event per
-line, in the order the events happened:
+written to `<workspace>/.oven/trace/<run-id>.jsonl`, one event per line,
+in the order the events happened. Every run writes a file of its own, so a
+session that is resumed writes a second file rather than appending to the
+first, and a file stands for exactly one run:
 
 ```json
-{"agent_id":1,"turn_id":1,"at":1712345678901,"event":{"kind":"turn","data":{"kind":"started"}}}
-{"agent_id":1,"turn_id":1,"at":1712345678940,"event":{"kind":"tool","data":{"kind":"started","call_id":7,"name":"file_read","view":{"summary":"Read src/lib.rs","collapse":true}}}}
+{"kind":"run","id":"a3f9c2b1d4e7","session_id":"0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678","started_at":1712345678901}
+{"agent_id":1,"turn_id":1,"at":1712345678901,"elapsed_ms":120,"event":{"kind":"turn","data":{"kind":"started"}}}
+{"agent_id":1,"turn_id":1,"at":1712345678940,"elapsed_ms":160,"event":{"kind":"tool","data":{"kind":"started","call_id":7,"name":"file_read","view":{"summary":"Read src/lib.rs","collapse":true}}}}
 ```
+
+The first line names the run: which session it belonged to and when it
+started. The lines after it are the events.
 
 The file sits beside the workspace rather than in the session file, because
 the session file is the conversation and has to stay resumable; the trace
 is the process, and it is read, not replayed. It travels the same bus the
 frontend watches, so it holds what the frontend saw, in the order it saw
-it.
+it. It holds the whole conversation, so the trace directory carries a
+`.gitignore` that keeps the traces out of the commits of the workspace
+they belong to.
 
 A run without a session has no trace file — `oven query` writes no
 session, so the log is all there is, and the CLI refuses `--trace` next to
 `--query` rather than accepting a flag it cannot honour. The file is
 written by a task of its own, so the last event of a run can be missing
 if the app leaves right after it; everything the writer reached is on disk.
+A write that fails does not end the trace: the event is lost, the rest of
+the run is still written, and the loss is reported when the run ends.
+
+Reading a trace skips the lines it cannot parse — a run that was killed
+mid-write leaves half a line behind — and counts them, so the events that
+were written whole are still readable. Only a trace that holds nothing but
+damage is refused.
 
 The trace is written only when the run asks for it: the bus carries the
 switch, `oven --trace` turns it on, and a run that did not ask leaves no

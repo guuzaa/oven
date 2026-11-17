@@ -1,4 +1,4 @@
-//! The tracing projection of the agent event stream.
+//! The trace of a run: what the agent did, one event per line.
 //!
 //! The event stream is where the agent says what it did. This module turns
 //! that stream into log lines, so the log is a view of the same facts
@@ -10,25 +10,37 @@
 //! `RUST_LOG=oven.agent=trace` keeps every word of it. Everything is on the
 //! `oven.agent` target.
 //!
-//! The same stream is also written down, in full, as a trace file: the run
-//! as it happened, one event per line. The log is the readable view; the
-//! file is the record.
+//! The same stream is also written down, in full: the run as it happened,
+//! one event per line, in a file of its own. The log is the readable view;
+//! the file is the record. Every run gets its own file, so a session that
+//! is resumed writes a second file rather than appending to the first, and
+//! a file stands for exactly one run.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use oven_proto::{
     AgentEvent, AgentEventEnvelope, AppEvent, AppEventKind, StreamEvent, ToolEvent, ToolResult,
     TurnEvent,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
+
+use crate::platform::id;
 
 /// The target every projected event is logged under.
 const TARGET: &str = "oven.agent";
+/// How many characters a run id has: short enough to type, long enough to
+/// be a name of its own.
+const RUN_ID_LEN: usize = 12;
+/// What the trace directory tells git, so a trace never lands in a commit
+/// with the workspace it belongs to.
+const GITIGNORE: &str = "*\n!.gitignore\n";
 
 #[derive(Debug, Error)]
 pub enum TraceError {
@@ -45,6 +57,12 @@ pub enum TraceError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("trace: '{id}' is not a plain name")]
+    BadId { id: String },
+    #[error("trace: no run named '{id}'")]
+    NoSuchTrace { id: String },
+    #[error("trace: '{id}' names more than one run: {candidates}")]
+    AmbiguousTrace { id: String, candidates: String },
 }
 
 fn io(path: &Path, source: std::io::Error) -> TraceError {
@@ -66,21 +84,80 @@ macro_rules! event {
     };
 }
 
-/// Where the trace of a session lives, under the workspace.
-pub fn trace_path(root: &Path, session: &str) -> PathBuf {
-    trace_dir(root).join(format!("{session}.jsonl"))
-}
-
 /// Where the traces of a workspace live.
 pub fn trace_dir(root: &Path) -> PathBuf {
     root.join(".oven").join("trace")
 }
 
+/// Where the trace of one run lives.
+pub fn trace_path(root: &Path, id: &str) -> PathBuf {
+    trace_dir(root).join(format!("{id}.jsonl"))
+}
+
+/// A run of the agent, and the trace it writes.
+///
+/// It is the first line of the trace file, so a file read on its own says
+/// which run it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraceRun {
+    /// One run of the agent: the trace of one invocation.
+    Run {
+        /// The id of the run: the name of its file.
+        id: String,
+        /// The session the run belonged to.
+        session_id: String,
+        /// When the run started, in Unix milliseconds.
+        started_at: u64,
+    },
+}
+
+impl TraceRun {
+    /// The id of the run.
+    pub fn id(&self) -> &str {
+        match self {
+            TraceRun::Run { id, .. } => id,
+        }
+    }
+
+    /// The session the run belonged to.
+    pub fn session_id(&self) -> &str {
+        match self {
+            TraceRun::Run { session_id, .. } => session_id,
+        }
+    }
+
+    /// When the run started, in Unix milliseconds.
+    pub fn started_at(&self) -> u64 {
+        match self {
+            TraceRun::Run { started_at, .. } => *started_at,
+        }
+    }
+}
+
+/// Starts the trace of a run: what the run is called, and where it goes.
+pub fn start(root: &Path, session_id: &str) -> (TraceRun, PathBuf) {
+    let id = new_run_id();
+    let run = TraceRun::Run {
+        id: id.clone(),
+        session_id: session_id.to_owned(),
+        started_at: oven_host::now_ms(),
+    };
+    (run, trace_path(root, &id))
+}
+
+/// A name for a run: random, so two runs never share one.
+fn new_run_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..RUN_ID_LEN].to_owned()
+}
+
 /// One trace of a workspace.
 #[derive(Debug, Clone)]
 pub struct TraceSummary {
-    /// The session the run belongs to.
+    /// The run that wrote the trace.
     pub id: String,
+    /// The session the run belonged to, when the file names it.
+    pub session_id: Option<String>,
     /// How much the trace holds.
     pub bytes: u64,
     /// When it was last written.
@@ -98,15 +175,17 @@ pub async fn list_traces(root: &Path) -> Result<Vec<TraceSummary>, TraceError> {
     let mut traces = Vec::new();
     while let Some(entry) = entries.next_entry().await.map_err(|e| io(&dir, e))? {
         let path = entry.path();
-        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
-            continue;
-        };
         if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
             continue;
         }
+        let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
         let metadata = entry.metadata().await.map_err(|e| io(&path, e))?;
+        let run = read_run(&path).await;
         traces.push(TraceSummary {
             id: id.to_owned(),
+            session_id: run.as_ref().map(|run| run.session_id().to_owned()),
             bytes: metadata.len(),
             modified: metadata.modified().ok(),
         });
@@ -115,23 +194,176 @@ pub async fn list_traces(root: &Path) -> Result<Vec<TraceSummary>, TraceError> {
     Ok(traces)
 }
 
-/// The events of one run, in the order they happened.
-pub async fn read_trace(root: &Path, session: &str) -> Result<Vec<AgentEventEnvelope>, TraceError> {
-    let path = trace_path(root, session);
-    let written = fs::read_to_string(&path).await.map_err(|e| io(&path, e))?;
-    let mut events = Vec::new();
-    for (index, line) in written.lines().enumerate() {
+/// The trace of one run, read back as the events it holds.
+#[derive(Debug, Clone)]
+pub struct Trace {
+    /// The run that wrote the trace, when the file names it.
+    pub run: Option<TraceRun>,
+    /// The events, oldest first.
+    pub events: Vec<AgentEventEnvelope>,
+    /// How many lines could not be read. A run that was killed mid-write
+    /// leaves one behind; the rest of the trace is still worth reading.
+    pub damaged: usize,
+    /// How far into the run the first event happened, in the milliseconds
+    /// the run counts from. The times of a timeline are counted from it,
+    /// so a tail of a trace still says where it sits in the run.
+    pub base_elapsed_ms: u64,
+}
+
+/// Reads the trace of a run.
+///
+/// The id names the run, or is a prefix of it that names one run and no
+/// other. `tail` keeps the last events only, so a long trace does not have
+/// to be held in memory whole; the moment the run started at is kept all
+/// the same, so a tail still says where it sits in the run.
+pub async fn read_trace(root: &Path, id: &str, tail: Option<usize>) -> Result<Trace, TraceError> {
+    let path = find_trace(root, id).await?;
+    read_file(&path, tail).await
+}
+
+/// The file of the run named by `id`, or by a unique prefix of it.
+async fn find_trace(root: &Path, id: &str) -> Result<PathBuf, TraceError> {
+    if !id::is_safe_id(id) {
+        return Err(TraceError::BadId { id: id.to_owned() });
+    }
+    let exact = trace_path(root, id);
+    if fs::try_exists(&exact).await.map_err(|e| io(&exact, e))? {
+        return Ok(exact);
+    }
+    let dir = trace_dir(root);
+    let mut entries = match fs::read_dir(&dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(TraceError::NoSuchTrace { id: id.to_owned() });
+        }
+        Err(error) => return Err(io(&dir, error)),
+    };
+    let mut found: Vec<PathBuf> = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| io(&dir, e))? {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if stem.starts_with(id) {
+            found.push(path);
+        }
+    }
+    match found.len() {
+        0 => Err(TraceError::NoSuchTrace { id: id.to_owned() }),
+        1 => Ok(found.remove(0)),
+        _ => {
+            let candidates = found
+                .iter()
+                .filter_map(|path| path.file_stem())
+                .filter_map(|stem| stem.to_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TraceError::AmbiguousTrace {
+                id: id.to_owned(),
+                candidates,
+            })
+        }
+    }
+}
+
+/// Reads a trace file, line by line.
+async fn read_file(path: &Path, tail: Option<usize>) -> Result<Trace, TraceError> {
+    let file = fs::File::open(path).await.map_err(|e| io(path, e))?;
+    let mut lines = BufReader::new(file).lines();
+    let mut trace = Trace {
+        run: None,
+        events: Vec::new(),
+        damaged: 0,
+        base_elapsed_ms: 0,
+    };
+    let mut events: VecDeque<AgentEventEnvelope> = VecDeque::new();
+    let mut first_damage: Option<(usize, serde_json::Error)> = None;
+    let mut base: Option<u64> = None;
+    let mut number = 0usize;
+    while let Some(line) = lines.next_line().await.map_err(|e| io(path, e))? {
+        number += 1;
         if line.trim().is_empty() {
             continue;
         }
-        let event = serde_json::from_str(line).map_err(|source| TraceError::Parse {
-            path: path.clone(),
-            line: index + 1,
-            source,
-        })?;
-        events.push(event);
+        match serde_json::from_str::<AgentEventEnvelope>(&line) {
+            Ok(envelope) => {
+                base.get_or_insert(envelope.elapsed_ms);
+                events.push_back(envelope);
+            }
+            Err(error) => match serde_json::from_str::<TraceRun>(&line) {
+                Ok(run) => trace.run = Some(run),
+                Err(_) => {
+                    trace.damaged += 1;
+                    first_damage.get_or_insert((number, error));
+                }
+            },
+        }
+        if let Some(limit) = tail {
+            while events.len() > limit {
+                events.pop_front();
+            }
+        }
     }
-    Ok(events)
+    if trace.damaged > 0 && trace.run.is_none() && events.is_empty() {
+        let (line, source) = first_damage.expect("a damaged line was counted");
+        return Err(TraceError::Parse {
+            path: path.to_path_buf(),
+            line,
+            source,
+        });
+    }
+    trace.events = events.into_iter().collect();
+    trace.base_elapsed_ms = base.unwrap_or_default();
+    Ok(trace)
+}
+
+/// The run a trace file names, when its first line names one.
+async fn read_run(path: &Path) -> Option<TraceRun> {
+    let file = fs::File::open(path).await.ok()?;
+    let mut lines = BufReader::new(file).lines();
+    let line = lines.next_line().await.ok()??;
+    serde_json::from_str(&line).ok()
+}
+
+/// Removes the trace of a run.
+pub async fn remove_trace(root: &Path, id: &str) -> Result<(), TraceError> {
+    let path = find_trace(root, id).await?;
+    fs::remove_file(&path).await.map_err(|e| io(&path, e))
+}
+
+/// Removes the traces that are not worth keeping, and says how many went.
+///
+/// `keep` keeps the newest traces and drops the rest. `older_than` drops
+/// the traces that were last written longer ago than that.
+pub async fn prune_traces(
+    root: &Path,
+    keep: Option<usize>,
+    older_than: Option<Duration>,
+) -> Result<usize, TraceError> {
+    let traces = list_traces(root).await?;
+    let mut removed = 0;
+    for (index, trace) in traces.iter().enumerate() {
+        let too_many = keep.is_some_and(|keep| index >= keep);
+        let too_old = older_than.is_some_and(|age| {
+            trace.modified.is_some_and(|modified| {
+                SystemTime::now()
+                    .duration_since(modified)
+                    .unwrap_or_default()
+                    > age
+            })
+        });
+        if !too_many && !too_old {
+            continue;
+        }
+        let path = trace_path(root, &trace.id);
+        if fs::remove_file(&path).await.is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 /// Records the agent's events into a trace file, one per line.
@@ -142,50 +374,89 @@ pub async fn read_trace(root: &Path, session: &str) -> Result<Vec<AgentEventEnve
 /// the conversation and has to stay resumable.
 pub struct TraceWriter {
     path: PathBuf,
+    run: TraceRun,
     events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
     file: Option<fs::File>,
+    lost: usize,
 }
 
 impl TraceWriter {
-    pub fn new(path: PathBuf, events: mpsc::UnboundedReceiver<Arc<AppEvent>>) -> Self {
+    pub fn new(
+        path: PathBuf,
+        run: TraceRun,
+        events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
+    ) -> Self {
         Self {
             path,
+            run,
             events,
             file: None,
+            lost: 0,
         }
     }
 
     /// Writes the events as they arrive, until the bus stops publishing.
+    ///
+    /// A write that fails does not end the trace: the event is lost, the
+    /// rest of the run is still worth having, and the loss is reported when
+    /// the run ends.
     pub async fn run(mut self) {
+        if let Err(error) = self.open().await {
+            tracing::warn!(
+                path = %self.path.display(),
+                error = %error,
+                "the trace could not be opened"
+            );
+            return;
+        }
         while let Some(event) = self.events.recv().await {
             let AppEventKind::Agent(envelope) = &event.kind else {
                 continue;
             };
             if let Err(error) = self.append(envelope).await {
+                self.lost += 1;
                 tracing::warn!(
                     path = %self.path.display(),
                     error = %error,
+                    lost = self.lost,
                     "the trace could not be written"
                 );
-                return;
             }
+        }
+        if self.lost > 0 {
+            tracing::error!(
+                path = %self.path.display(),
+                lost = self.lost,
+                "the trace is incomplete: some events were lost"
+            );
         }
     }
 
-    /// Appends one event. The file is created on the first one.
-    async fn append(&mut self, envelope: &AgentEventEnvelope) -> std::io::Result<()> {
-        if self.file.is_none() {
-            if let Some(dir) = self.path.parent() {
-                fs::create_dir_all(dir).await?;
-            }
-            self.file = Some(
-                fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.path)
-                    .await?,
-            );
+    /// Opens the trace and writes its header.
+    ///
+    /// The file exists from the start of the run, so a run that raised no
+    /// event at all is still a run that happened.
+    async fn open(&mut self) -> std::io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir).await?;
+            fs::write(dir.join(".gitignore"), GITIGNORE).await?;
         }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)
+            .await?;
+        let mut line = serde_json::to_string(&self.run).map_err(std::io::Error::other)?;
+        line.push('\n');
+        file.write_all(line.as_bytes()).await?;
+        file.flush().await?;
+        self.file = Some(file);
+        Ok(())
+    }
+
+    /// Appends one event.
+    async fn append(&mut self, envelope: &AgentEventEnvelope) -> std::io::Result<()> {
         let mut line = serde_json::to_string(envelope).map_err(std::io::Error::other)?;
         line.push('\n');
         let file = self
@@ -252,16 +523,16 @@ fn project_turn(envelope: &AgentEventEnvelope, event: &TurnEvent) {
             "turn completed"
         ),
         TurnEvent::ProviderRetried {
-            attempts,
+            retry,
             waited_ms,
             status,
         } => event!(
             info,
             envelope,
-            attempts,
+            retry,
             waited_ms,
             status = ?status,
-            "provider retried"
+            "provider asked again"
         ),
         TurnEvent::Cancelled { duration_ms } => {
             event!(info, envelope, duration_ms, "turn cancelled")
@@ -432,24 +703,56 @@ mod tests {
             agent_id: AgentId(1),
             turn_id: TurnId(2),
             at: 0,
+            elapsed_ms: 0,
             event,
         }
+    }
+
+    fn event(index: usize) -> AppEvent {
+        AppEvent::new(AppEventKind::Agent(envelope(AgentEvent::Turn(
+            TurnEvent::StepStarted { index },
+        ))))
+    }
+
+    /// An event that happened at a known moment of the run.
+    fn timed(index: usize, elapsed_ms: u64) -> AppEvent {
+        AppEvent::new(AppEventKind::Agent(AgentEventEnvelope {
+            agent_id: AgentId(1),
+            turn_id: TurnId(2),
+            at: 0,
+            elapsed_ms,
+            event: AgentEvent::Turn(TurnEvent::StepStarted { index }),
+        }))
+    }
+
+    /// Writes a trace of two events, and returns the file it wrote.
+    async fn write_trace(dir: &Path) -> PathBuf {
+        let (run, path) = start(dir, "session-1");
+        let (sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(path.clone(), run, events);
+        let task = tokio::spawn(writer.run());
+        for index in 1..=2 {
+            sender.send(Arc::new(event(index))).unwrap();
+        }
+        drop(sender);
+        task.await.expect("the writer finishes when the bus stops");
+        path
     }
 
     #[test]
     fn a_retried_call_is_one_line() {
         let line = capture(|| {
             project(&envelope(AgentEvent::Turn(TurnEvent::ProviderRetried {
-                attempts: 2,
+                retry: 1,
                 waited_ms: 30_000,
                 status: Some(429),
             })));
         });
 
-        assert!(line.contains("provider retried"), "{line}");
+        assert!(line.contains("provider asked again"), "{line}");
         assert!(line.contains("agent_id=1"), "{line}");
         assert!(line.contains("turn_id=2"), "{line}");
-        assert!(line.contains("attempts=2"), "{line}");
+        assert!(line.contains("retry=1"), "{line}");
         assert!(line.contains("waited_ms=30000"), "{line}");
         assert!(line.contains("status=Some(429)"), "{line}");
     }
@@ -476,62 +779,148 @@ mod tests {
     #[tokio::test]
     async fn the_trace_holds_the_events_in_order() {
         let dir = tempdir::TempDir::new("oven-trace").unwrap();
-        let path = trace_path(dir.path(), "s1");
+        let path = write_trace(dir.path()).await;
         assert_eq!(
-            path,
-            dir.path().join(".oven").join("trace").join("s1.jsonl"),
+            path.parent(),
+            Some(dir.path().join(".oven").join("trace").as_path()),
             "the trace sits beside the workspace"
         );
 
-        let (sender, events) = mpsc::unbounded_channel();
-        let writer = TraceWriter::new(path.clone(), events);
-        let task = tokio::spawn(writer.run());
-        for index in 1..=2 {
-            let event = AppEvent::new(AppEventKind::Agent(envelope(AgentEvent::Turn(
-                TurnEvent::StepStarted { index },
-            ))));
-            sender.send(Arc::new(event)).unwrap();
-        }
-        drop(sender);
-        task.await.expect("the writer finishes when the bus stops");
-
         let written = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<_> = written.lines().collect();
-        assert_eq!(lines.len(), 2, "{written}");
-        assert!(lines[0].contains("\"index\":1"), "{}", lines[0]);
-        assert!(lines[1].contains("\"index\":2"), "{}", lines[1]);
-        assert!(lines[0].contains("\"turn_id\":2"), "{}", lines[0]);
+        assert_eq!(lines.len(), 3, "{written}");
+        assert!(lines[0].contains("\"kind\":\"run\""), "{}", lines[0]);
+        assert!(lines[1].contains("\"index\":1"), "{}", lines[1]);
+        assert!(lines[2].contains("\"index\":2"), "{}", lines[2]);
+        assert!(lines[1].contains("\"turn_id\":2"), "{}", lines[1]);
     }
 
     #[tokio::test]
     async fn a_trace_is_read_back_as_the_events_it_holds() {
         let dir = tempdir::TempDir::new("oven-trace-read").unwrap();
-        let path = trace_path(dir.path(), "s1");
-        let (sender, events) = mpsc::unbounded_channel();
-        let writer = TraceWriter::new(path.clone(), events);
-        let task = tokio::spawn(writer.run());
-        sender
-            .send(Arc::new(AppEvent::new(AppEventKind::Agent(envelope(
-                AgentEvent::Turn(TurnEvent::StepStarted { index: 3 }),
-            )))))
-            .unwrap();
-        drop(sender);
-        task.await.unwrap();
+        let path = write_trace(dir.path()).await;
+        let id = path.file_stem().unwrap().to_str().unwrap().to_owned();
 
-        let read = read_trace(dir.path(), "s1").await.unwrap();
-        assert_eq!(read.len(), 1);
+        let trace = read_trace(dir.path(), &id, None).await.unwrap();
+        assert_eq!(trace.events.len(), 2);
         assert!(
             matches!(
-                read[0].event,
-                AgentEvent::Turn(TurnEvent::StepStarted { index: 3 })
+                trace.events[0].event,
+                AgentEvent::Turn(TurnEvent::StepStarted { index: 1 })
             ),
             "the event comes back as it went in"
         );
+        assert_eq!(trace.run.as_ref().unwrap().session_id(), "session-1");
 
         let traces = list_traces(dir.path()).await.unwrap();
         assert_eq!(traces.len(), 1);
-        assert_eq!(traces[0].id, "s1");
+        assert_eq!(traces[0].id, id);
+        assert_eq!(traces[0].session_id.as_deref(), Some("session-1"));
         assert!(traces[0].bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn a_run_without_events_is_still_a_run() {
+        let dir = tempdir::TempDir::new("oven-trace-empty").unwrap();
+        let (run, path) = start(dir.path(), "session-1");
+        let (sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(path.clone(), run, events);
+        let task = tokio::spawn(writer.run());
+        drop(sender);
+        task.await.unwrap();
+
+        let traces = list_traces(dir.path()).await.unwrap();
+        assert_eq!(traces.len(), 1, "the run left a trace behind");
+        assert_eq!(traces[0].session_id.as_deref(), Some("session-1"));
+    }
+
+    #[tokio::test]
+    async fn a_damaged_line_does_not_hide_the_rest_of_the_trace() {
+        let dir = tempdir::TempDir::new("oven-trace-damaged").unwrap();
+        let path = write_trace(dir.path()).await;
+        let mut written = std::fs::read_to_string(&path).unwrap();
+        written.push_str("{\"agent_id\":1,\"turn_id\":2,\"at\":0,\"even");
+        std::fs::write(&path, written).unwrap();
+        let id = path.file_stem().unwrap().to_str().unwrap().to_owned();
+
+        let trace = read_trace(dir.path(), &id, None).await.unwrap();
+        assert_eq!(trace.events.len(), 2, "the good events are still there");
+        assert_eq!(trace.damaged, 1, "the damaged line is counted");
+    }
+
+    #[tokio::test]
+    async fn a_trace_of_nothing_but_damage_is_an_error() {
+        let dir = tempdir::TempDir::new("oven-trace-broken").unwrap();
+        let path = trace_path(dir.path(), "broken");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"agent_id\":1,\"turn_id\":2,\"at\":0,\"even").unwrap();
+
+        let error = read_trace(dir.path(), "broken", None).await.unwrap_err();
+        assert!(
+            matches!(error, TraceError::Parse { line: 1, .. }),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trace_id_cannot_leave_the_trace_directory() {
+        let dir = tempdir::TempDir::new("oven-trace-escape").unwrap();
+        let error = read_trace(dir.path(), "../../../outside", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TraceError::BadId { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_tail_keeps_the_last_events_only() {
+        let dir = tempdir::TempDir::new("oven-trace-tail").unwrap();
+        let path = write_trace(dir.path()).await;
+        let id = path.file_stem().unwrap().to_str().unwrap().to_owned();
+
+        let trace = read_trace(dir.path(), &id, Some(1)).await.unwrap();
+        assert_eq!(trace.events.len(), 1);
+        assert!(matches!(
+            trace.events[0].event,
+            AgentEvent::Turn(TurnEvent::StepStarted { index: 2 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tail_still_says_where_the_run_started() {
+        let dir = tempdir::TempDir::new("oven-trace-tail-base").unwrap();
+        let (run, path) = start(dir.path(), "session-1");
+        let (sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(path.clone(), run, events);
+        let task = tokio::spawn(writer.run());
+        for (index, elapsed_ms) in [(1, 100), (2, 200), (3, 300)] {
+            sender.send(Arc::new(timed(index, elapsed_ms))).unwrap();
+        }
+        drop(sender);
+        task.await.unwrap();
+        let id = path.file_stem().unwrap().to_str().unwrap().to_owned();
+
+        let trace = read_trace(dir.path(), &id, Some(1)).await.unwrap();
+        assert_eq!(trace.events.len(), 1, "the tail keeps the last event");
+        assert_eq!(
+            trace.base_elapsed_ms, 100,
+            "the run still starts at its first event"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trace_can_be_removed_and_pruned() {
+        let dir = tempdir::TempDir::new("oven-trace-prune").unwrap();
+        let first = write_trace(dir.path()).await;
+        let second = write_trace(dir.path()).await;
+        let id = second.file_stem().unwrap().to_str().unwrap().to_owned();
+
+        remove_trace(dir.path(), &id).await.unwrap();
+        assert!(!second.exists(), "the trace is gone");
+        assert!(first.exists(), "the other trace is not touched");
+
+        let removed = prune_traces(dir.path(), Some(0), None).await.unwrap();
+        assert_eq!(removed, 1);
+        assert!(!first.exists());
     }
 
     #[tokio::test]

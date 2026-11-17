@@ -105,7 +105,7 @@ pub struct AppBuilder {
     memory: Option<Arc<MemoryStore>>,
     mcp_connector: Arc<dyn McpConnector>,
     /// Write the trace of the run beside the workspace: the agent's events,
-    /// one per line.
+    /// one per line, in a file of their own.
     trace: bool,
 }
 
@@ -135,6 +135,9 @@ impl AppBuilder {
 
     /// Write the trace of the run beside the workspace: the agent's events,
     /// one per line, so the run can be read back after it happened.
+    ///
+    /// Every run writes a trace of its own, so a session that is resumed
+    /// leaves a second trace rather than a longer one.
     pub fn with_trace(mut self, trace: bool) -> Self {
         self.trace = trace;
         self

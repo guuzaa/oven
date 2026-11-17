@@ -1512,14 +1512,12 @@ impl Transcript {
                     self.push_row(LineKind::System, notice_body(text));
                 }
                 AgentEvent::Turn(TurnEvent::ProviderRetried {
-                    attempts,
-                    waited_ms,
-                    ..
+                    retry, waited_ms, ..
                 }) => {
                     self.flush_streaming();
                     self.push_row(
                         LineKind::System,
-                        &format!("{PROVIDER_RETRIED} ({attempts} times, waited {waited_ms}ms)"),
+                        &format!("{PROVIDER_RETRIED} (retry {retry}, waited {waited_ms}ms)"),
                     );
                 }
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {

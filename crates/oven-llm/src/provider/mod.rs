@@ -20,7 +20,7 @@ pub use completions::CompletionsProvider;
 pub use error::{ProviderError, Result};
 pub use model::{ModelCapabilities, ModelInfo, Pricing};
 pub use responses::ResponsesProvider;
-pub use retry::{CallReport, RetryPolicy, RetryingProvider};
+pub use retry::{CallReport, RetryPolicy, RetryWait};
 pub use router::{Client, Router, RouterError, RouterHandle};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use validate::{ValidationError, estimate_input_tokens, validate_request};

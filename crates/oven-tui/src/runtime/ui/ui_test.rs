@@ -325,6 +325,7 @@ async fn a_subagents_task_opens_its_transcript() {
         agent_id: alpha.id,
         turn_id: TurnId(1),
         at: 0,
+        elapsed_ms: 0,
         event: AgentEvent::Turn(TurnEvent::Prompt {
             text: "read note.txt and report what it says".to_string(),
         }),
@@ -760,6 +761,7 @@ async fn an_appended_prompt_leaves_the_queue_and_joins_the_transcript() {
         agent_id: ui.views.main_id(),
         turn_id: TurnId(1),
         at: 0,
+        elapsed_ms: 0,
         event: AgentEvent::Turn(TurnEvent::UserAppended {
             text: TEST_ANSWER.to_string(),
         }),

@@ -26,7 +26,6 @@ use crate::core::session::{
     record_session_span,
 };
 use crate::core::state::{app_state, context_tokens, context_window};
-use crate::platform::trace::trace_path;
 use crate::runtime::inbox::InboxReceiver;
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::shared::{Shared, apply_without_driver, save_provider_overlay};
@@ -629,6 +628,7 @@ pub(crate) fn spawn_runtime(
     user_config_path: Option<PathBuf>,
 ) -> App {
     let (inbox_tx, inbox_rx) = inbox::channel();
+    oven_host::pin_base();
     let subscribers = agents.events.subscribers();
     let slash = Arc::new(SlashRegistry::with_builtin());
     let provider = config
@@ -642,15 +642,17 @@ pub(crate) fn spawn_runtime(
         .map(SessionStore::current_id)
         .or_else(|| session.as_ref().map(|open| open.id().to_string()));
     let span = current_or_session_span(span_id.as_deref());
-    // The trace of the run: the agent's events, one per line, beside the
-    // workspace. It is written only when the run asked for it, and a run
-    // without a session has no trace file — the log still has the run.
-    if let Some(id) = span_id.as_deref() {
-        agents.events.start_trace(trace_path(&root, id));
-    } else if agents.events.wants_trace() {
-        tracing::warn!(
-            "the run was asked to trace, but it has no session: no trace file is written"
-        );
+    // The trace of the run: the agent's events, one per line, in a file of
+    // their own beside the workspace. It is written only when the run asked
+    // for it, and a run without a session has no trace file — the log still
+    // has the run.
+    if agents.events.wants_trace() {
+        match span_id.as_deref() {
+            Some(session_id) => agents.events.start_trace(&root, session_id),
+            None => tracing::warn!(
+                "the run was asked to trace, but it has no session: no trace file is written"
+            ),
+        }
     }
     let (session_store, session_state) = if let Some(store) = attached {
         let has_content = agents.main.history().len() != 0;

@@ -30,7 +30,7 @@ platform    the OS the screens draw on
 | `cli` | `cli.rs` | clap parsing and mode selection |
 | `commands` | `commands/prompt.rs` | the line prompts a subcommand asks, and the terminal's no-echo input |
 | | `commands/model/` | `oven model`: `ls`, `add`, `rm` |
-| | `commands/trace/` | `oven trace`: `ls`, `show` |
+| | `commands/trace/` | `oven trace`: `ls`, `show`, `rm`, `prune` |
 | `runtime` | `runtime/ui/mod.rs` | the `Ui` handle: the event loop, the queue flush, quitting |
 | | `runtime/ui/event.rs` | app events onto the screen: routing, overlay prompts, a submitted prompt |
 | | `runtime/ui/keys.rs` | terminal input: paste bursts, mouse, the key router, the `Esc` decision |
@@ -62,8 +62,9 @@ subcommand), `--session/-s` and `--continue/-c` (mutually exclusive session
 selection; an explicit id wins, otherwise the newest session for this root),
 `--query/-Q`, `--amnesia` (skip loading durable memory for this run, in
 both interactive and headless modes; `oven mem` is unaffected), and `--trace`
-(write the trace of the run beside the workspace, one event per line, so the
-run can be read back after it happened; `oven trace` reads it).
+(write the trace of the run beside the workspace, one event per line, in a
+file of the run's own, so the run can be read back after it happened;
+`oven trace` reads it).
 
 `Cli::run` dispatches to one of four modes:
 
@@ -79,11 +80,25 @@ startup. On interactive exit the resolved session id is printed as
 
 ### `oven trace`
 
-`oven trace ls` lists the runs of this workspace — the session id, how much
-the trace holds, and when it was last written. `oven trace show <id>` prints
-one run as a timeline: what happened, how long it took, and which agent did
-it. The times are counted from the first event, and the `a/t` column is the
-agent and the turn, so a subagent's work reads apart from the driver's.
+`oven trace ls` lists the runs of this workspace — the run id, the session it
+belonged to, how much the trace holds, and when it was last written.
+`oven trace show <id>` prints one run as a timeline: what happened, how long
+it took, and which agent did it. The times are counted from the first event,
+and the `a/t` column is the agent and the turn, so a subagent's work reads
+apart from the driver's. The id may be shortened to a prefix that names one
+run and no other.
+
+```text
+run           session    size  age
+a3f9c2b1d4e7  3e4f5678  114 B  just now
+c8e2f1a09b6d  3e4f5678  1.1 KB  2 hours ago
+```
+
+`oven trace rm <id>` removes one trace, and `oven trace prune --keep N` or
+`oven trace prune --older-than DAYS` removes the ones that are not worth
+keeping. The traces hold the whole conversation, so they are worth clearing
+out; the trace directory also carries a `.gitignore`, so they stay out of the
+commits of the workspace they belong to.
 
 A trace exists only for a run that asked for one: `oven --trace` writes it,
 a run without the flag leaves none behind. A trace needs a session, so it
@@ -95,18 +110,25 @@ error: the argument '--trace' cannot be used with '--query <QUERY>'
 ```
 
 ```text
+run a3f9c2b1d4e7 · session 3e4f5678 · started 2 hours ago
   time     a/t  what happened
     +0ms   1/1  turn started
     +0ms   1/1  step 1 started
   +930ms   1/1  file_read started · Read .oven/config.toml
   +1.00s   1/1  file_read finished in 71ms
   +1.01s   1/1  step 1 finished · tool use · provider 930ms
- +42.01s   1/1  provider retried 2× · waited 30.00s · status 429
+ +42.01s   1/1  provider asked again (retry 1) · waited 30.00s · status 429
  +42.14s   1/1  turn completed in 41.00s · 4210 in, 88 out
 ```
 
 What was said — the text of the turn and its reasoning — is left out unless
 `--text` asks for it; the trace file holds all of it either way.
+
+`--tail N` shows the last N events only, for a trace too long to read at
+once. The times are still counted from the start of the run, so a tail says
+where it sits in it. A trace that holds a line the reader cannot parse — a
+run that was killed mid-write leaves one behind — still shows the events that
+were written whole, and says how many lines were left out.
 
 ### `oven model`
 

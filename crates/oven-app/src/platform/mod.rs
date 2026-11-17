@@ -2,6 +2,7 @@
 //! another app module.
 
 pub mod dirs;
+pub mod id;
 pub mod log;
 pub mod shell;
 pub mod trace;

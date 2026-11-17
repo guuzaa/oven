@@ -33,7 +33,8 @@ pub struct Cli {
     #[arg(long)]
     amnesia: bool,
 
-    /// Write the trace of the run beside the workspace: one event per line
+    /// Write the trace of the run beside the workspace: one event per line,
+    /// in a file of the run's own
     #[arg(long, conflicts_with = "query")]
     trace: bool,
 

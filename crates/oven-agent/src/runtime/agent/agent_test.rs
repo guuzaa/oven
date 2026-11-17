@@ -2815,6 +2815,8 @@ async fn a_reply_cut_off_by_the_token_limit_fails_the_turn() {
 struct FlakyOnce {
     calls: AtomicU32,
     answer: Response,
+    /// How long the answering attempt takes.
+    delay: Duration,
 }
 
 #[async_trait]
@@ -2826,6 +2828,7 @@ impl Provider for FlakyOnce {
                 body: "slow down".into(),
             });
         }
+        tokio::time::sleep(self.delay).await;
         Ok(self.answer.clone())
     }
 
@@ -2855,13 +2858,29 @@ fn reported_retries(sink: &VecEventSink) -> Vec<(u32, u64, Option<u16>)> {
         .iter()
         .filter_map(|event| match event {
             AgentEvent::Turn(TurnEvent::ProviderRetried {
-                attempts,
+                retry,
                 waited_ms,
                 status,
-            }) => Some((*attempts, *waited_ms, *status)),
+            }) => Some((*retry, *waited_ms, *status)),
             _ => None,
         })
         .collect()
+}
+
+/// A sink that keeps the moment every event was stamped with.
+#[derive(Default)]
+struct TimedSink {
+    stamped: Vec<(u64, AgentEvent)>,
+}
+
+impl EventSink for TimedSink {
+    fn emit(&mut self, event: AgentEvent) {
+        self.stamped.push((oven_host::monotonic_ms(), event));
+    }
+
+    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent) {
+        self.stamped.push((elapsed_ms, event));
+    }
 }
 
 fn router_retrying(provider: Box<dyn Provider>) -> Router {
@@ -2881,6 +2900,7 @@ async fn a_retried_call_is_reported() {
         router_retrying(Box::new(FlakyOnce {
             calls: AtomicU32::new(0),
             answer: text_response("done"),
+            delay: Duration::ZERO,
         })),
         Vec::new(),
     );
@@ -2908,5 +2928,31 @@ async fn a_call_that_was_not_retried_is_not_reported() {
     assert!(
         reported_retries(&sink).is_empty(),
         "nothing was retried, so nothing is reported"
+    );
+}
+
+#[tokio::test]
+async fn a_retry_is_stamped_where_the_wait_happened() {
+    let mut agent = Agent::new(
+        router_retrying(Box::new(FlakyOnce {
+            calls: AtomicU32::new(0),
+            answer: text_response("done"),
+            delay: Duration::from_millis(50),
+        })),
+        Vec::new(),
+    );
+    let mut sink = TimedSink::default();
+
+    run_plain(&mut agent, "go", &mut sink).await.unwrap();
+
+    let (moment, _) = sink
+        .stamped
+        .iter()
+        .find(|(_, event)| matches!(event, AgentEvent::Turn(TurnEvent::ProviderRetried { .. })))
+        .expect("the turn reports the retry");
+    let last = sink.stamped.last().expect("the turn reported something").0;
+    assert!(
+        last - moment >= 40,
+        "the retry is stamped where the wait was, not where the call ended: {moment} vs {last}"
     );
 }

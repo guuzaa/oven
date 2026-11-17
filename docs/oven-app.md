@@ -316,15 +316,36 @@ question with one read.
 `platform/trace.rs` writes the run down twice. The tracing projection turns every
 agent event into a log line on the `oven.agent` target, and the trace file
 records the same events in full, one JSONL line per event, at
-`<workspace>/.oven/trace/<session-id>.jsonl`. The log is the readable view; the
+`<workspace>/.oven/trace/<run-id>.jsonl`. The log is the readable view; the
 file is the record, and it is what a question about a finished run is answered
 from.
+
+The unit of a trace file is the run, not the session: every run writes a file
+of its own, so a session that is resumed writes a second file rather than
+appending to the first, and a file stands for exactly one run. The first line
+of the file names the run — its id, the session it belonged to and when it
+started — and the lines after it are the events.
 
 The events travel the bus the frontend watches, so the trace holds what the
 frontend saw, in the order it saw it. A run without a session writes no trace
 file — the log is all there is, and the runtime warns that the run asked for a
 trace it cannot write. The file is written by a task of its own, so the last
-event of a run can be missing if the app leaves right after it.
+event of a run can be missing if the app leaves right after it. A write that
+fails does not end the trace: the event is lost, the rest of the run is still
+written, and the loss is reported when the run ends.
+
+Reading a trace skips the lines it cannot parse — a run that was killed
+mid-write leaves half a line behind — and counts them, so the events that were
+written whole are still readable. Only a trace that holds nothing but damage is
+refused. `read_trace` reads the file line by line and keeps the last events
+only when it is asked for the tail of a long trace; the tail still carries the
+moment the run started at, so the times of a timeline say where they sit in
+the run.
+
+The trace holds the whole conversation, tool output included, so the trace
+directory carries a `.gitignore` that keeps the traces out of the commits of
+the workspace they belong to. `oven trace rm` and `oven trace prune` remove
+the traces that are not wanted any more.
 
 Writing it is opt-in: the bus carries the switch (`EventBus::with_trace`), and
 `AppBuilder::with_trace(true)` turns it on — `oven --trace` in the CLI. A bus

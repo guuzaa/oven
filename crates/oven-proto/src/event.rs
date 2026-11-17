@@ -16,6 +16,13 @@ pub struct AgentEventEnvelope {
     pub turn_id: TurnId,
     /// Unix milliseconds when the event was emitted.
     pub at: u64,
+    /// Milliseconds since the run started, on a monotonic clock.
+    ///
+    /// `at` says when the event happened in wall time, which is what orders
+    /// it against the rest of the world. This says how far into the run it
+    /// happened, and it keeps saying so when the wall clock is corrected
+    /// under the run's feet.
+    pub elapsed_ms: u64,
     pub event: AgentEvent,
 }
 
@@ -52,15 +59,16 @@ pub enum TurnEvent {
         /// event's timestamp and the one that started it.
         provider_ms: u64,
     },
-    /// The provider had to be asked again: the call was retried, and it
-    /// waited before each retry. A summary of the call rather than a moment
-    /// in it — the wait happened before the answer arrived.
+    /// The provider had to be asked again: the call waited, and then asked
+    /// once more. One event per wait, so the timeline shows where the wait
+    /// was rather than only how long it was.
     ProviderRetried {
-        /// How many times the call was retried.
-        attempts: u32,
-        /// How long the call waited between attempts, in milliseconds.
+        /// Which retry this was: 1 is the first time the call was asked
+        /// again.
+        retry: u32,
+        /// How long the call waited before asking again, in milliseconds.
         waited_ms: u64,
-        /// The status the last failed attempt reported, when it had one.
+        /// The status the attempt that failed reported, when it had one.
         status: Option<u16>,
     },
     /// A chat typed while the turn was running, appended after the tool

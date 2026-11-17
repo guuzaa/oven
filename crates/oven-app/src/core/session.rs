@@ -64,7 +64,9 @@ pub fn canonical_root(root: &Path) -> String {
         .into_owned()
 }
 
-pub(crate) fn short_session_id(id: &str) -> &str {
+/// The short form of a session id: the last few characters, the way a
+/// session is named in a log line.
+pub fn short_session_id(id: &str) -> &str {
     match id
         .char_indices()
         .nth_back(SHORT_SESSION_ID_LEN.saturating_sub(1))
@@ -563,7 +565,7 @@ fn encode_records(records: &[Record]) -> String {
 }
 
 fn validate_id(id: &str) -> Result<(), SessionError> {
-    if id.is_empty() || id.contains('/') || id.contains('\\') || id == "." || id == ".." {
+    if !crate::platform::id::is_safe_id(id) {
         return Err(SessionError::BadId(id.to_string()));
     }
     Ok(())

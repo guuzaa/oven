@@ -72,6 +72,7 @@ pub(crate) fn app_event(event: oven_app::AgentEvent) -> oven_app::AppEvent {
         agent_id: oven_app::AgentId(1),
         turn_id: oven_app::TurnId(1),
         at: 0,
+        elapsed_ms: 0,
         event,
     })
 }
