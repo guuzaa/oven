@@ -21,7 +21,7 @@ use oven_proto::EventSink;
 use oven_proto::TodoList;
 use oven_proto::ToolCallId;
 use oven_proto::ToolView;
-use oven_proto::{AgentError, MAX_ITERS_EXCEEDED};
+use oven_proto::{AGENT_TARGET, AgentError, MAX_ITERS_EXCEEDED};
 use oven_proto::{AgentEvent, CallOutcome, ToolEvent, ToolResult, TurnEvent};
 use oven_proto::{AgentMode, ToolAccess};
 use oven_proto::{ApprovalDecision, LoopLimitDecision};
@@ -61,20 +61,25 @@ impl Agent {
     /// prompt promises the model when it asks it to batch independent calls,
     /// and it is the difference between three subagents working in parallel
     /// and three subagents working one after another.
+    ///
+    /// `index` is the step's number in its turn: the caller counts the
+    /// steps, and the events it reads back name the step they belong to.
     pub async fn step(
         &mut self,
         sink: &mut impl EventSink,
         ctx: &TurnContext,
+        index: usize,
     ) -> Result<Step, AgentError> {
         let (response, thinking, provider_ms) = self.complete_response(sink).await?;
         if let Some(error) = reply_problem(&response) {
-            tracing::warn!(
-                stop_reason = ?response.stop_reason,
-                blocks = response.content.len(),
-                output_tokens = response.usage.map(|usage| usage.output_tokens),
-                error = %error.message,
-                "the reply cannot end the turn"
-            );
+            sink.emit(AgentEvent::Turn(TurnEvent::StepRejected {
+                index,
+                error: error.clone(),
+                stop_reason: response.stop_reason,
+                blocks: response.content.len(),
+                usage: response.usage,
+                provider_ms,
+            }));
             return Err(error);
         }
         self.acknowledge_request_notes();
@@ -285,7 +290,7 @@ impl Agent {
                 for _ in 0..policy.max_iters {
                     index += 1;
                     sink.emit(AgentEvent::Turn(TurnEvent::StepStarted { index }));
-                    let step = self.step(sink, ctx).await?;
+                    let step = self.step(sink, ctx, index).await?;
                     self.history.note_committed();
                     sink.emit(AgentEvent::Turn(TurnEvent::StepFinished {
                         index,
@@ -346,7 +351,7 @@ impl Agent {
         if !ctx.has_user() {
             return Err(AgentError::max_iters_exceeded());
         }
-        tracing::warn!(max_iters, "{MAX_ITERS_EXCEEDED}");
+        tracing::warn!(target: AGENT_TARGET, max_iters, "{MAX_ITERS_EXCEEDED}");
         match ctx.request_loop_continue(max_iters).await {
             Some(decision) => Ok(decision),
             None => Err(AgentError::cancelled()),
@@ -428,7 +433,7 @@ async fn gate_calls(planned: &[PlannedCall], ctx: &TurnContext) -> Result<Vec<Ga
     let mut gates = Vec::with_capacity(planned.len());
     for call in planned {
         if let Some(error) = call.argument_error.clone() {
-            tracing::warn!(tool = %call.name, %error, "tool arguments were not valid JSON");
+            tracing::warn!(target: AGENT_TARGET, tool = %call.name, %error, "tool arguments were not valid JSON");
             gates.push(Gate::Refused(ToolResult::Failed {
                 output: Some(truncate(&format!("error: {error}"), MAX_TOOL_OUTPUT_BYTES)),
                 error,
@@ -571,7 +576,7 @@ async fn run_calls(
             // keeps the promise of one record per call even if that breaks.
             None => {
                 let call = &planned[index];
-                tracing::error!(tool = %call.name, "a running tool call left no record");
+                tracing::error!(target: AGENT_TARGET, tool = %call.name, "a running tool call left no record");
                 CallRecord::of(&ToolResult::Failed {
                     error: format!("tool '{}' was never run", call.name),
                     output: Some(format!("tool '{}' was never run", call.name)),

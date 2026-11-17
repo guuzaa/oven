@@ -5,10 +5,18 @@
 //! carries the moment it happened, so a trace reads as a timeline and not
 //! only as an order.
 
-use oven_llm::Usage;
+use oven_llm::{StopReason, Usage};
 use serde::{Deserialize, Serialize};
 
 use crate::{AgentError, AgentId, Question, TodoList, ToolCallId, ToolView, TurnId, UserRequestId};
+
+/// The target every fact about a run is logged under.
+///
+/// The agent writes the facts it has, the app writes them again as a
+/// projection of the event stream, and both land under this target: one
+/// filter then keeps the whole run, and nothing about it is lost between
+/// the layer that knows and the layer that reads.
+pub const AGENT_TARGET: &str = "oven.agent";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentEventEnvelope {
@@ -57,6 +65,26 @@ pub enum TurnEvent {
         /// How long the provider took to answer this step, retries
         /// included. The step's own wall time is the gap between this
         /// event's timestamp and the one that started it.
+        provider_ms: u64,
+    },
+    /// The provider answered, but the reply cannot end the turn: it
+    /// carries no answer, or it was cut off.
+    ///
+    /// It says what the provider sent, so a reader can tell a model that
+    /// stopped on its own from one that was cut off, and a reader of a
+    /// trace can see the facts without the log.
+    StepRejected {
+        /// Which step of the turn it was.
+        index: usize,
+        /// Why the reply could not end the turn.
+        error: AgentError,
+        /// What the provider said it stopped for.
+        stop_reason: Option<StopReason>,
+        /// How many content blocks the reply carried.
+        blocks: usize,
+        /// What the provider said it used.
+        usage: Option<Usage>,
+        /// How long the provider took to answer.
         provider_ms: u64,
     },
     /// The provider had to be asked again: the call waited, and then asked
@@ -255,6 +283,25 @@ mod tests {
             index: 2,
             stop: StepStop::ToolUse,
             provider_ms: 120,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), event);
+    }
+
+    #[test]
+    fn a_rejected_reply_survives_the_wire() {
+        let event = AgentEvent::Turn(TurnEvent::StepRejected {
+            index: 1,
+            error: AgentError::from("the model returned no answer"),
+            stop_reason: Some(StopReason::EndTurn),
+            blocks: 1,
+            usage: Some(Usage {
+                input_tokens: 1200,
+                output_tokens: 653,
+                cache_read_tokens: 0,
+                reasoning_tokens: 653,
+            }),
+            provider_ms: 410,
         });
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), event);

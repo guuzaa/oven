@@ -70,7 +70,8 @@ file of the run's own, so the run can be read back after it happened;
 
 | Condition | Behavior |
 | --- | --- |
-| a subcommand is present | run it and exit; no session, no TUI (`oven model …`) || `--query QUERY` present | headless: `AppBuilder::query`, print the response, exit. No TUI is started. |
+| a subcommand is present | run it and exit; no session, no TUI (`oven model …`) |
+| `--query QUERY` present | headless: `AppBuilder::query`, print the response, exit. No TUI is started. |
 | `--query` absent and stdin/stdout are both TTYs | interactive: `Ui::run` |
 | `--query` absent and either side is not a TTY | print usage, exit code `2` |
 
@@ -110,6 +111,11 @@ arguments:
 error: the argument '--trace' cannot be used with '--query <QUERY>'
 ```
 
+A run that left no trace behind still says what went wrong: everything about
+a run is logged under the `oven.agent` target, so the default filter keeps
+the failures and `RUST_LOG=oven.agent=trace` keeps every word of the run.
+The log is at `~/.oven/logs/oven.log`.
+
 ```text
 run a3f9c2b1d4e7 · session 3e4f5678 · started 2 hours ago
 agent 1
@@ -125,6 +131,19 @@ agent 1
 The tree says what belongs to what: the work of a step sits under the step,
 the output of a call under the call, and the work of a turn under the turn.
 A subagent takes a tree of its own, so its steps read apart from the driver's.
+
+A reply the provider sent that cannot end the turn — it carries no answer,
+or it was cut off — sits under the step it rejected, and says what the
+provider sent:
+
+```text
+run c8e2f1a09b6d · session 3e4f5678 · started 2 hours ago
+agent 1
+└── turn 1
+    ├── step 1 · +0ms
+    │   └── ✗ the model returned no answer · stop end_turn · 1 blocks · 653 tokens · provider 412ms
+    └── ✗ turn failed after 412ms · the model returned no answer
+```
 
 What was said — the text of the turn and its reasoning — is left out unless
 `--text` asks for it; the trace file holds all of it either way.

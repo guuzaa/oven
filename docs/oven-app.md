@@ -329,8 +329,9 @@ started — and the lines after it are the events.
 The events travel the bus the frontend watches, so the trace holds what the
 frontend saw, in the order it saw it. A run without a session writes no trace
 file — the log is all there is, and the runtime warns that the run asked for a
-trace it cannot write. The file is written by a task of its own, so the last
-event of a run can be missing if the app leaves right after it. A write that
+trace it cannot write. The file is written by a task of its own, and the
+events are buffered: they reach the disk a turn at a time, so the tail of a
+run can be missing if the app leaves right after it. A write that
 fails does not end the trace: the event is lost, the rest of the run is still
 written, and the loss is reported when the run ends.
 
@@ -350,6 +351,14 @@ Writing it is opt-in: the bus carries the switch (`EventBus::with_trace`), and
 `AppBuilder::with_trace(true)` turns it on — `oven --trace` in the CLI. A bus
 that was not asked to trace never starts a writer, so the run leaves no file
 behind and no trace directory either.
+
+A run that was not asked to trace still leaves its failures in the log: the
+projection writes every agent event under the `oven.agent` target, and the
+default filter keeps what happened at `info`. A reply the provider sent that
+cannot end the turn — it carries no answer, or it was cut off — is reported
+as it happens, with what the provider stopped for, how many blocks it sent
+and what it used, so the question "why did the model answer with nothing" is
+answered by the log of the run that failed, with or without a trace file.
 
 ## Slash commands
 

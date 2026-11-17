@@ -12,7 +12,7 @@ use oven_host::now_ms;
 use oven_llm::{Message, Role, Usage};
 
 use crate::core::subagent::is_notice;
-use oven_proto::{Record, SESSION_FORMAT_VERSION, SessionMeta};
+use oven_proto::{AGENT_TARGET, Record, SESSION_FORMAT_VERSION, SessionMeta};
 
 type Timestamp = u64;
 
@@ -302,6 +302,7 @@ impl History {
             None => self.turn_usage.push((*usage, timestamp)),
         }
         tracing::debug!(
+            target: AGENT_TARGET,
             input_tokens = usage.input_tokens,
             output_tokens = usage.output_tokens,
             cache_read_tokens = usage.cache_read_tokens,

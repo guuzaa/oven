@@ -6,17 +6,23 @@
 - `oven-tui`: `oven --trace` writes the trace of the run beside the workspace, one event per line, in a file of the run's own — a run that did not ask for one leaves no file behind, so the trace is a tool for the run that went wrong
 - `oven-tui`: `oven trace` reads a run back — `ls` lists the runs of the workspace, `show` prints one as a tree of the agent, the turns it took, the steps of each turn and what happened inside them, so the work of a step sits under the step and the output of a call under the call. A subagent takes a tree of its own, so its steps read apart from the driver's. `rm` removes one, and `prune --keep N` / `--older-than DAYS` removes the ones that are not worth keeping. The id may be shortened to a prefix that names one run and no other
 - `oven-tui`: `oven trace show --tail N` shows the last N events of a run, for a trace too long to read at once. The steps still say when they started, counted from the start of the run, so a tail says where it sits in it
+- `oven-proto`: `TurnEvent::StepRejected` says that the provider answered, but the reply cannot end the turn — it carries the step it belongs to, the reason, what the provider stopped for, how many content blocks it sent, what it used and how long it took. A reply that carries no answer, or one cut off by the output token limit, is now a fact of the run and not only a line in the log
+- `oven-proto`: `TurnEvent::ProviderRetried` says one wait — it carries which retry it was and how long that wait was, and there is one of them per wait, so the timeline shows where the time went
+- `oven-proto`: `AGENT_TARGET` names the target every fact about a run is logged under, so the layer that knows a fact and the layer that reads it agree on where it lives
 
 ### Changed
 - `oven-tui`: the times of a trace read in the units a person reads — `930ms`, `1.83s`, `1m 05s`, `1h 01m`, `1d 03h` — a step says when it started and how long it took, and an age that was written before the first minute now says how many seconds ago it was
 - `oven-app`: a trace is a run, not a session — a run that asked for a trace writes a file of its own under `<workspace>/.oven/trace/`, so a session that is resumed writes a second trace rather than appending to the first. The first line of the file names the run: its id, the session it belonged to, and when it started
 - `oven-app`: a trace that was killed mid-write is still readable — the lines that cannot be parsed are skipped and counted, so the events that were written whole are still there. Only a trace that holds nothing but damage is refused
 - `oven-app`: a write that fails does not end the trace — the event is lost, the rest of the run is still written, and the loss is reported when the run ends
+- `oven-app`: the trace is written in buffers — the events reach the disk a turn at a time instead of one write per event, so a run of thousands of lines costs a few writes rather than thousands. The file is current at the end of every turn, and the tail of a run can be missing if the app is killed before the last flush
 - `oven-app`: the log is a projection of the event stream — every agent event is stamped with the moment it happened and written to the `oven.agent` target (what happened at `info`, what was said at `trace`), and the agent layer stopped writing the same facts twice
+- `oven-agent`: everything the agent logs is written under the `oven.agent` target, and so is everything the runtime logs about a turn — the turn it opens, the shell it runs, the subagents it starts. `RUST_LOG=oven.agent=trace` keeps the whole run, and it no longer hides the facts that explain a failure
+- `oven-agent`: `Agent::step` takes the number of the step it is, so the events it reports name the step they belong to
 - `oven-tui`: a trace needs a session — `oven --trace` refuses to run next to `--query` and names both arguments, and a run that asks for a trace it cannot write says so in the log rather than leaving none behind in silence
 - `oven-tui`: the trace listing says what it holds — a header, the short ids the app uses elsewhere, columns that fit their content, and an age that reads `1 hour ago` and not `1 hours ago`
 - `oven-llm`: `RetryingProvider` is gone — the retry belongs to the router alone, and a provider that wraps a provider could retry twice
-- **Breaking:** `oven-proto`: `TurnEvent::ProviderRetried` says one wait instead of a summary — it carries which retry it was and how long that wait was, and there is one of them per wait
+- `oven-llm`: `StopReason` reads as the word it is written as — `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`
 - **Breaking:** `oven-proto`: `AgentEventEnvelope` carries `elapsed_ms` — the monotonic distance from the start of the run, next to the wall clock `at`. A clock correction no longer moves the ground under a timeline
 - **Breaking:** `oven-proto`: `ToolEvent::Finished` carries the tool that ran and how long it took, and `TurnEvent::StepFinished` carries how long the provider took
 - **Breaking:** `oven-proto`: `AppEvent::agent_with` is gone — `AppEvent::agent` takes the envelope, and the envelope carries the moment the event happened
@@ -28,6 +34,8 @@
 - `oven-tui`: an approval notice lands above the call it asks about — in Ask mode the call only starts once the user answers, but it joined the activity that was already open, so the notice ended up under the row that showed the call. The approval now closes the activity it interrupts, and the call lands in a row of its own below the notice
 - `oven-tui`: the loop limit notice lands above the work it asks about — the turn asks before it takes another step, but the step joined the activity that was already open, so the notice ended up under the row that showed the call. The notice now closes the activity it interrupts, and the step lands in a row of its own below the notice
 - `oven-app`: a trace file cannot be read outside the trace directory — the id is checked the way a session id is checked, so an id that names a path is refused
+- `oven-app`: a reply that cannot end the turn says what the provider sent — what it stopped for, how many blocks it sent and what it used. The facts were in a log line under a target that the documented filter turned off, so they were nowhere to be found when a model answered with nothing
+- `oven-tui`: the mode table of `oven-tui.md` renders again — two rows were joined into one
 
 ## [0.1.6] - 2026-11-15
 

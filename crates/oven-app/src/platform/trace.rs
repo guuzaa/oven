@@ -15,6 +15,12 @@
 //! the file is the record. Every run gets its own file, so a session that
 //! is resumed writes a second file rather than appending to the first, and
 //! a file stands for exactly one run.
+//!
+//! The events are buffered and reach the disk a turn at a time: a run
+//! writes thousands of lines, and one write per line costs more than the
+//! trace is worth. The file is current at the end of every turn, and the
+//! tail of a run can be missing if the app is killed before the last
+//! flush.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -22,22 +28,22 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use oven_proto::{
-    AgentEvent, AgentEventEnvelope, AppEvent, AppEventKind, StreamEvent, ToolEvent, ToolResult,
-    TurnEvent,
+    AGENT_TARGET, AgentEvent, AgentEventEnvelope, AppEvent, AppEventKind, StreamEvent, ToolEvent,
+    ToolResult, TurnEvent,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::mpsc;
 
 use crate::platform::id;
 
-/// The target every projected event is logged under.
-const TARGET: &str = "oven.agent";
 /// How many characters a run id has: short enough to type, long enough to
 /// be a name of its own.
 const RUN_ID_LEN: usize = 12;
+/// How much of the trace is held in memory before it reaches the disk.
+const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 /// What the trace directory tells git, so a trace never lands in a commit
 /// with the workspace it belongs to.
 const GITIGNORE: &str = "*\n!.gitignore\n";
@@ -76,7 +82,7 @@ fn io(path: &Path, source: std::io::Error) -> TraceError {
 macro_rules! event {
     ($level:ident, $envelope:expr, $($field:tt)*) => {
         tracing::$level!(
-            target: TARGET,
+            target: AGENT_TARGET,
             agent_id = $envelope.agent_id.0,
             turn_id = $envelope.turn_id.0,
             $($field)*
@@ -190,7 +196,7 @@ pub async fn list_traces(root: &Path) -> Result<Vec<TraceSummary>, TraceError> {
             modified: metadata.modified().ok(),
         });
     }
-    traces.sort_by(|left, right| right.modified.cmp(&left.modified));
+    traces.sort_by_key(|trace| std::cmp::Reverse(trace.modified));
     Ok(traces)
 }
 
@@ -376,7 +382,9 @@ pub struct TraceWriter {
     path: PathBuf,
     run: TraceRun,
     events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
-    file: Option<fs::File>,
+    file: Option<BufWriter<fs::File>>,
+    /// The events that are written but not yet on the disk.
+    pending: usize,
     lost: usize,
 }
 
@@ -391,6 +399,7 @@ impl TraceWriter {
             run,
             events,
             file: None,
+            pending: 0,
             lost: 0,
         }
     }
@@ -421,8 +430,13 @@ impl TraceWriter {
                     lost = self.lost,
                     "the trace could not be written"
                 );
+                continue;
+            }
+            if ends_turn(envelope) {
+                self.flush().await;
             }
         }
+        self.flush().await;
         if self.lost > 0 {
             tracing::error!(
                 path = %self.path.display(),
@@ -441,7 +455,7 @@ impl TraceWriter {
             fs::create_dir_all(dir).await?;
             fs::write(dir.join(".gitignore"), GITIGNORE).await?;
         }
-        let mut file = fs::OpenOptions::new()
+        let file = fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
@@ -449,6 +463,7 @@ impl TraceWriter {
             .await?;
         let mut line = serde_json::to_string(&self.run).map_err(std::io::Error::other)?;
         line.push('\n');
+        let mut file = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
         file.write_all(line.as_bytes()).await?;
         file.flush().await?;
         self.file = Some(file);
@@ -464,8 +479,48 @@ impl TraceWriter {
             .as_mut()
             .ok_or_else(|| std::io::Error::other("the trace file is not open"))?;
         file.write_all(line.as_bytes()).await?;
-        file.flush().await
+        self.pending += 1;
+        Ok(())
     }
+
+    /// Puts what is buffered on the disk.
+    ///
+    /// The events that were waiting for it are lost when the flush fails,
+    /// and they are counted: the trace says how much of it is missing.
+    async fn flush(&mut self) {
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        match file.flush().await {
+            Ok(()) => self.pending = 0,
+            Err(error) => {
+                self.lost += self.pending;
+                self.pending = 0;
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %error,
+                    lost = self.lost,
+                    "the trace could not be flushed"
+                );
+            }
+        }
+    }
+}
+
+/// Whether the event ends a turn.
+///
+/// The trace is flushed there, so the file is current at the end of every
+/// turn and not only at the end of the run.
+fn ends_turn(envelope: &AgentEventEnvelope) -> bool {
+    matches!(
+        envelope.event,
+        AgentEvent::Turn(
+            TurnEvent::Completed { .. }
+                | TurnEvent::Failed { .. }
+                | TurnEvent::Cancelled { .. }
+                | TurnEvent::LoopLimitReached { .. }
+        )
+    )
 }
 
 /// Logs one agent event.
@@ -505,6 +560,25 @@ fn project_turn(envelope: &AgentEventEnvelope, event: &TurnEvent) {
             stop = ?stop,
             provider_ms,
             "step finished"
+        ),
+        TurnEvent::StepRejected {
+            index,
+            error,
+            stop_reason,
+            blocks,
+            usage,
+            provider_ms,
+        } => event!(
+            info,
+            envelope,
+            index,
+            error = %error.message,
+            stop_reason = ?stop_reason,
+            blocks,
+            input_tokens = usage.map(|usage| usage.input_tokens),
+            output_tokens = usage.map(|usage| usage.output_tokens),
+            provider_ms,
+            "the reply cannot end the turn"
         ),
         TurnEvent::UserAppended { text } => {
             event!(info, envelope, text = %text, "user message appended")
@@ -658,7 +732,8 @@ fn project_tool(envelope: &AgentEventEnvelope, event: &ToolEvent) {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use oven_proto::{AgentId, TurnId};
+    use oven_llm::{StopReason, Usage};
+    use oven_proto::{AgentError, AgentId, TurnId};
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
@@ -725,6 +800,30 @@ mod tests {
         }))
     }
 
+    /// The event that ends a turn.
+    fn completed() -> AppEvent {
+        AppEvent::new(AppEventKind::Agent(envelope(AgentEvent::Turn(
+            TurnEvent::Completed {
+                usage: Usage::default(),
+                duration_ms: 12,
+            },
+        ))))
+    }
+
+    /// Waits for the trace to hold `marker`, the way a reader of a run in
+    /// progress sees it.
+    async fn wait_for(path: &Path, marker: &str) -> String {
+        for _ in 0..200 {
+            if let Ok(written) = std::fs::read_to_string(path)
+                && written.contains(marker)
+            {
+                return written;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the trace did not reach the disk: {path:?}");
+    }
+
     /// Writes a trace of two events, and returns the file it wrote.
     async fn write_trace(dir: &Path) -> PathBuf {
         let (run, path) = start(dir, "session-1");
@@ -737,6 +836,24 @@ mod tests {
         drop(sender);
         task.await.expect("the writer finishes when the bus stops");
         path
+    }
+
+    #[tokio::test]
+    async fn the_trace_is_on_the_disk_at_the_end_of_a_turn() {
+        let dir = tempdir::TempDir::new("oven-trace-flush").unwrap();
+        let (run, path) = start(dir.path(), "session-1");
+        let (sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(path.clone(), run, events);
+        let task = tokio::spawn(writer.run());
+
+        sender.send(Arc::new(event(1))).unwrap();
+        sender.send(Arc::new(completed())).unwrap();
+
+        let written = wait_for(&path, "\"kind\":\"completed\"").await;
+        assert!(written.contains("\"index\":1"), "{written}");
+
+        drop(sender);
+        task.await.expect("the writer finishes when the bus stops");
     }
 
     #[test]
@@ -755,6 +872,36 @@ mod tests {
         assert!(line.contains("retry=1"), "{line}");
         assert!(line.contains("waited_ms=30000"), "{line}");
         assert!(line.contains("status=Some(429)"), "{line}");
+    }
+
+    #[test]
+    fn a_rejected_reply_says_what_the_provider_sent() {
+        let line = capture(|| {
+            project(&envelope(AgentEvent::Turn(TurnEvent::StepRejected {
+                index: 2,
+                error: AgentError::from("the model returned no answer"),
+                stop_reason: Some(StopReason::EndTurn),
+                blocks: 1,
+                usage: Some(Usage {
+                    input_tokens: 1200,
+                    output_tokens: 653,
+                    cache_read_tokens: 0,
+                    reasoning_tokens: 653,
+                }),
+                provider_ms: 410,
+            })));
+        });
+
+        assert!(line.contains("the reply cannot end the turn"), "{line}");
+        assert!(line.contains("index=2"), "{line}");
+        assert!(
+            line.contains("error=the model returned no answer"),
+            "{line}"
+        );
+        assert!(line.contains("stop_reason=Some(EndTurn)"), "{line}");
+        assert!(line.contains("blocks=1"), "{line}");
+        assert!(line.contains("output_tokens=653"), "{line}");
+        assert!(line.contains("provider_ms=410"), "{line}");
     }
 
     #[test]

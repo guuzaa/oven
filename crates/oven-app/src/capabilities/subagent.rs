@@ -18,7 +18,8 @@ use oven_agent::{
 use oven_host::{as_ms, now_ms};
 use oven_llm::{ModelId, Usage};
 use oven_proto::{
-    AgentError, AgentEvent, AgentId, EventSink, NodeInfo, NodeStatus, ToolEvent, TurnEvent, TurnId,
+    AGENT_TARGET, AgentError, AgentEvent, AgentId, EventSink, NodeInfo, NodeStatus, ToolEvent,
+    TurnEvent, TurnId,
 };
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
@@ -394,7 +395,7 @@ impl SubagentSpawner for Subagents {
         let Some(name) = detached else {
             return false;
         };
-        tracing::info!(subagent = %name, "subagent moved to the background");
+        tracing::info!(target: AGENT_TARGET, subagent = %name, "subagent moved to the background");
         self.notify();
         true
     }
@@ -543,6 +544,7 @@ async fn run_subagent(owner: Arc<Subagents>, mut child: Child, done: oneshot::Se
         .find(|entry| entry.info.id == child.id)
         .map_or((0, 0), |entry| (entry.info.tool_calls, entry.info.steps));
     tracing::info!(
+        target: AGENT_TARGET,
         subagent = %child.name,
         status = status.label(),
         duration_ms,

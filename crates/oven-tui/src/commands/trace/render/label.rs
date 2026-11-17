@@ -2,7 +2,7 @@
 
 use oven_app::StepStop;
 
-use super::format::{brief, headline, span};
+use super::format::{brief, headline, plural, span};
 use super::model::{Kind, Note, Outcome, StepEnd, ToolCall};
 
 /// The line of a node.
@@ -117,6 +117,32 @@ fn note(note: &Note) -> String {
         }
         Note::Question { text } => format!("? a tool asked · {}", brief(text)),
         Note::Output { text } => format!("▸ output · {}", brief(text)),
+        Note::Rejected {
+            message,
+            stop_reason,
+            blocks,
+            output_tokens,
+            provider_ms,
+        } => {
+            let mut text = format!("✗ {}", brief(message));
+            for part in [
+                stop_reason.as_ref().map(|reason| format!("stop {reason}")),
+                Some(format!(
+                    "{blocks} {}",
+                    plural(*blocks as u64, "block", "blocks")
+                )),
+                output_tokens
+                    .map(|tokens| format!("{tokens} {}", plural(tokens, "token", "tokens"))),
+                Some(format!("provider {}", span(*provider_ms))),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                text.push_str(" · ");
+                text.push_str(&part);
+            }
+            text
+        }
     }
 }
 
@@ -177,6 +203,38 @@ mod tests {
         });
 
         assert_eq!(label(&output), "▸ output · a.txt");
+    }
+
+    #[test]
+    fn a_rejected_reply_says_what_the_provider_sent() {
+        let rejected = Kind::Note(Note::Rejected {
+            message: "the model returned no answer".to_owned(),
+            stop_reason: Some("end_turn".to_owned()),
+            blocks: 1,
+            output_tokens: Some(653),
+            provider_ms: 410,
+        });
+
+        assert_eq!(
+            label(&rejected),
+            "✗ the model returned no answer · stop end_turn · 1 block · 653 tokens · provider 410ms"
+        );
+    }
+
+    #[test]
+    fn a_rejected_reply_without_a_stop_reason_says_what_it_knows() {
+        let rejected = Kind::Note(Note::Rejected {
+            message: "the reply was cut off by the model's output token limit".to_owned(),
+            stop_reason: None,
+            blocks: 0,
+            output_tokens: None,
+            provider_ms: 90,
+        });
+
+        assert_eq!(
+            label(&rejected),
+            "✗ the reply was cut off by the model's output token limit · 0 blocks · provider 90ms"
+        );
     }
 
     #[test]

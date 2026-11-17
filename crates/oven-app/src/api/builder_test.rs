@@ -136,7 +136,7 @@ async fn capture_app(app: AppBuilder) -> CapturedPrompt {
     );
     agents
         .main
-        .step(&mut NullSink, &ctx)
+        .step(&mut NullSink, &ctx, 1)
         .await
         .expect("driver step");
     for (role, prompt) in [("explore", "look"), ("general", "do")] {
@@ -449,8 +449,8 @@ async fn write_does_not_change_the_driver_system_prompt() {
         CancellationToken::new(),
         agents.main.selection(),
     );
-    agents.main.step(&mut NullSink, &ctx).await.unwrap();
-    agents.main.step(&mut NullSink, &ctx).await.unwrap();
+    agents.main.step(&mut NullSink, &ctx, 1).await.unwrap();
+    agents.main.step(&mut NullSink, &ctx, 2).await.unwrap();
     let systems = systems.lock().unwrap().clone();
     assert_eq!(systems.len(), 2);
     assert_eq!(systems[0], systems[1]);

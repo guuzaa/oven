@@ -2398,7 +2398,7 @@ async fn compact_reshows_todo_list_on_the_next_request_only() {
     assert!(content_has(last, TODO_LIST_HEADING));
 
     let ctx = turn_ctx(&agent);
-    agent.step(&mut NullSink, &ctx).await.unwrap();
+    agent.step(&mut NullSink, &ctx, 1).await.unwrap();
     assert!(!has_todo_list(&agent.build_request()));
 }
 
@@ -2809,6 +2809,46 @@ async fn a_reply_cut_off_by_the_token_limit_fails_the_turn() {
         "the turn must say it failed: {:?}",
         sink.events
     );
+}
+
+#[tokio::test]
+async fn a_rejected_reply_says_what_the_provider_sent() {
+    let mut response = empty_response();
+    response.content = vec![ContentBlock::thinking("the model thinks")];
+    response.usage = Some(Usage {
+        input_tokens: 1200,
+        output_tokens: 653,
+        cache_read_tokens: 0,
+        reasoning_tokens: 653,
+    });
+    let mut agent = Agent::new(
+        router_with(Box::new(MockProvider::new(vec![response]))),
+        Vec::new(),
+    );
+    let mut sink = VecEventSink::default();
+
+    run_plain(&mut agent, "hi", &mut sink).await.unwrap_err();
+
+    let rejected = sink
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Turn(TurnEvent::StepRejected {
+                index,
+                error,
+                stop_reason,
+                blocks,
+                usage,
+                ..
+            }) => Some((*index, error.clone(), *stop_reason, *blocks, *usage)),
+            _ => None,
+        })
+        .expect("the turn says the reply was rejected");
+    assert_eq!(rejected.0, 1, "the rejection names its step");
+    assert_eq!(rejected.1.message, REPLY_EMPTY);
+    assert_eq!(rejected.2, Some(StopReason::EndTurn));
+    assert_eq!(rejected.3, 1, "the provider sent one block");
+    assert_eq!(rejected.4.map(|usage| usage.output_tokens), Some(653));
 }
 
 /// Fails the first call with a rate limit, then answers.

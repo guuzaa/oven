@@ -14,6 +14,7 @@ use oven_host::{as_ms, monotonic_ms};
 use super::Agent;
 use super::notify::{ThinkingSpan, thinking_span};
 use crate::core::prompt_template;
+use oven_proto::AGENT_TARGET;
 use oven_proto::AgentError;
 use oven_proto::EventSink;
 use oven_proto::{AgentEvent, StreamEvent, TurnEvent};
@@ -88,6 +89,7 @@ impl Agent {
         if todo_notice {
             messages.push(Arc::new(Message::user_text(self.todos.render_todo_block())));
             tracing::debug!(
+                target: AGENT_TARGET,
                 mode = mode.label(),
                 todo_items = self.todos.items.len(),
                 "todo notice appended"
@@ -96,6 +98,7 @@ impl Agent {
         if plan_reminder {
             messages.push(Arc::new(Message::user_text(prompt_template::PLAN_REMINDER)));
             tracing::debug!(
+                target: AGENT_TARGET,
                 mode = mode.label(),
                 todo_misses = self.todo_misses,
                 todo_items = self.todos.items.len(),
@@ -123,6 +126,7 @@ impl Agent {
             .ok()
             .and_then(|(response, _)| response.stop_reason);
         tracing::debug!(
+            target: AGENT_TARGET,
             model = %self.model(),
             duration_ms = provider_ms,
             ?stop_reason,

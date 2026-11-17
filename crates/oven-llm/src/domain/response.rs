@@ -64,6 +64,19 @@ impl AddAssign for Usage {
     }
 }
 
+/// 停止原因的可读形式：日志和界面上都用这个名字。
+impl std::fmt::Display for StopReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::EndTurn => "end_turn",
+            Self::StopSequence => "stop_sequence",
+            Self::ToolUse => "tool_use",
+            Self::MaxTokens => "max_tokens",
+        };
+        formatter.write_str(name)
+    }
+}
+
 /// 响应终止原因，与具体 provider 无关。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use oven_agent::{CancellationToken, PendingInbox, TurnContext};
 use oven_host::run_shell_command;
 use oven_llm::Message;
+use oven_proto::AGENT_TARGET;
 use oven_proto::TurnId;
 
 use crate::commands::CommandContext;
@@ -21,6 +22,7 @@ impl Runtime {
     pub(crate) async fn start_turn(&mut self, prompt: Option<String>) {
         let turn_id = TurnId::next();
         tracing::info!(
+            target: AGENT_TARGET,
             turn_id = turn_id.0,
             mode = self.agent.mode().label(),
             model = %self.agent.model(),
@@ -99,7 +101,7 @@ impl Runtime {
         let cx = &mut CommandContext::with_agent(&mut self.agent, &self.shared.subagents);
         match self.slash.run(cx, name, args) {
             Ok(outcome) => {
-                tracing::info!(name, "slash command");
+                tracing::info!(target: AGENT_TARGET, name, "slash command");
                 self.apply_slash(outcome).await;
             }
             Err(e) => self.emit_error(e.to_string()),
@@ -108,7 +110,7 @@ impl Runtime {
 
     pub(crate) async fn run_shell(&mut self, command: String) {
         let turn_id = TurnId::next();
-        tracing::info!(turn_id = turn_id.0, "shell started");
+        tracing::info!(target: AGENT_TARGET, turn_id = turn_id.0, "shell started");
         let cancel = CancellationToken::new();
         self.shared.begin_turn(turn_id, cancel.clone());
         self.emit(AppEventKind::Shell(ShellEvent::Started {
@@ -143,7 +145,7 @@ impl Runtime {
         match &shell.error {
             None => {
                 let exit_code = shell.exit_code.unwrap_or(0);
-                tracing::info!(exit_code, "shell finished");
+                tracing::info!(target: AGENT_TARGET, exit_code, "shell finished");
                 self.emit(AppEventKind::Shell(ShellEvent::Finished {
                     command: command.clone(),
                     output: shell.output.clone(),
@@ -151,7 +153,7 @@ impl Runtime {
                 }));
             }
             Some(error) => {
-                tracing::warn!(error = %error, "shell failed");
+                tracing::warn!(target: AGENT_TARGET, error = %error, "shell failed");
                 self.emit(AppEventKind::Shell(ShellEvent::Failed {
                     command: command.clone(),
                     error: error.clone(),

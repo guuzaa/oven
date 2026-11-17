@@ -1497,6 +1497,7 @@ impl Transcript {
                 | AgentEvent::Turn(TurnEvent::Started)
                 | AgentEvent::Turn(TurnEvent::StepStarted { .. })
                 | AgentEvent::Turn(TurnEvent::StepFinished { .. })
+                | AgentEvent::Turn(TurnEvent::StepRejected { .. })
                 | AgentEvent::Usage { .. }
                 | AgentEvent::TodosChanged { .. } => {}
                 AgentEvent::Turn(TurnEvent::UserAppended { text }) => {

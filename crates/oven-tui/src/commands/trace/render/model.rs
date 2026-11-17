@@ -118,6 +118,15 @@ pub enum Note {
     Output {
         text: String,
     },
+    /// A reply the provider sent that cannot end the turn: it carried no
+    /// answer, or it was cut off. It says what the provider sent.
+    Rejected {
+        message: String,
+        stop_reason: Option<String>,
+        blocks: usize,
+        output_tokens: Option<u64>,
+        provider_ms: u64,
+    },
 }
 
 /// The run as a forest, one root per agent. The events are put back in the
@@ -342,6 +351,23 @@ impl Builder {
             TurnEvent::UserAppended { text } => {
                 self.note_inside(key, Note::UserAppended { text: text.clone() });
             }
+            TurnEvent::StepRejected {
+                error,
+                stop_reason,
+                blocks,
+                usage,
+                provider_ms,
+                ..
+            } => self.note_inside(
+                key,
+                Note::Rejected {
+                    message: error.message.clone(),
+                    stop_reason: stop_reason.map(|reason| reason.to_string()),
+                    blocks: *blocks,
+                    output_tokens: usage.map(|usage| usage.output_tokens as u64),
+                    provider_ms: *provider_ms,
+                },
+            ),
             TurnEvent::NoticeAppended { text } => {
                 self.note_inside(key, Note::NoticeAppended { text: text.clone() });
             }
@@ -508,7 +534,8 @@ fn outcome_of(result: &ToolResult) -> Outcome {
 
 #[cfg(test)]
 mod tests {
-    use oven_app::{AgentId, ToolCallId, ToolOutputStream, ToolView, TurnId};
+    use oven_app::{AgentError, AgentId, ToolCallId, ToolOutputStream, ToolView, TurnId};
+    use oven_llm::{StopReason, Usage};
 
     use super::*;
 
@@ -751,6 +778,55 @@ mod tests {
             panic!("a tool call");
         };
         assert_eq!(step.children[0].children.len(), 1);
+    }
+
+    #[test]
+    fn a_rejected_reply_sits_under_the_step_it_rejected() {
+        let forest = build(
+            &trace(vec![
+                at(
+                    1,
+                    1,
+                    0,
+                    AgentEvent::Turn(TurnEvent::StepStarted { index: 1 }),
+                ),
+                at(
+                    1,
+                    1,
+                    410,
+                    AgentEvent::Turn(TurnEvent::StepRejected {
+                        index: 1,
+                        error: AgentError::from("the model returned no answer"),
+                        stop_reason: Some(StopReason::EndTurn),
+                        blocks: 1,
+                        usage: Some(Usage {
+                            input_tokens: 1200,
+                            output_tokens: 653,
+                            cache_read_tokens: 0,
+                            reasoning_tokens: 653,
+                        }),
+                        provider_ms: 410,
+                    }),
+                ),
+            ]),
+            false,
+        );
+
+        let step = &forest[0].children[0].children[0];
+        let Kind::Note(Note::Rejected {
+            message,
+            stop_reason,
+            blocks,
+            output_tokens,
+            ..
+        }) = &step.children[0].kind
+        else {
+            panic!("the rejection sits under its step");
+        };
+        assert_eq!(message, "the model returned no answer");
+        assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(*blocks, 1);
+        assert_eq!(*output_tokens, Some(653));
     }
 
     #[test]

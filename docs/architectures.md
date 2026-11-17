@@ -375,6 +375,7 @@ it as a tree of agents, turns and steps, and every step says when it started.
 TurnEvent     Started | Completed { usage, duration_ms }
               Prompt { text }
               StepStarted { index } | StepFinished { index, stop, provider_ms }
+              StepRejected { index, error, stop_reason, blocks, usage, provider_ms }
               ProviderRetried { retry, waited_ms, status }
               Cancelled { duration_ms } | Failed { error, duration_ms }
               LoopLimitReached { request_id, max_iters }
@@ -415,6 +416,14 @@ report is what the call hands back — every wait, with the moment it ended
 — so the agent learns what the retries cost without the provider knowing
 which turn it is serving.
 
+`StepRejected` says the provider answered, but the reply cannot end the
+turn: it carries no answer, or it was cut off. It names the step it
+belongs to, the reason, what the provider stopped for, how many content
+blocks it sent, what it used, and how long it took — so a reader can tell
+a model that stopped on its own from one that was cut off, and a reader of
+a trace or of the log can see the facts without the raw reply. The turn
+fails after it, and the failure says what the step rejected.
+
 `ThinkingDone` closes the thinking window the agent timed: it fires the moment
 the reasoning phase ends, ahead of the answer text or the tool call that ended
 it, so the transcript never has to guess a duration. `LoopLimitReached`,
@@ -450,10 +459,17 @@ streams, what a tool writes — is logged at `trace`, so the default filter
 keeps the shape of a run and `RUST_LOG=oven.agent=trace` keeps every word
 of it.
 
-Tracing keeps one other job: the engine's own anomalies, the ones the
-protocol has no vocabulary for — a provider that answers with nothing, a
-tool call whose arguments are not JSON, an MCP server that will not
-connect. Those are logged where they happen.
+Everything about a run is logged under that one target: the agent's own
+facts, the turn the runtime opens, the shell it runs, the subagents it
+starts. `oven.agent` is the target of the protocol crate
+(`oven_proto::AGENT_TARGET`), so the layer that knows a fact and the layer
+that reads it agree on where the fact lives, and one filter keeps the whole
+run.
+
+The engine's own anomalies — the ones the protocol has no vocabulary for,
+such as a tool call whose arguments are not JSON, or an MCP server that
+will not connect — are logged where they happen, under the target of the
+crate that saw them.
 
 ## The trace file
 
@@ -483,8 +499,9 @@ they belong to.
 A run without a session has no trace file — `oven query` writes no
 session, so the log is all there is, and the CLI refuses `--trace` next to
 `--query` rather than accepting a flag it cannot honour. The file is
-written by a task of its own, so the last event of a run can be missing
-if the app leaves right after it; everything the writer reached is on disk.
+written by a task of its own, and the events are buffered: they reach the
+disk a turn at a time, so the tail of a run can be missing if the app
+leaves right after it; everything the writer reached is on disk.
 A write that fails does not end the trace: the event is lost, the rest of
 the run is still written, and the loss is reported when the run ends.
 
