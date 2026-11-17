@@ -6152,6 +6152,9 @@ async fn a_run_with_a_session_writes_its_trace() {
     let mock = MockProvider::new(vec![text_response("hello")]);
     let session = Session::open(&dir, "s1").await.unwrap();
     let handle = spawn_app_session(&app, Box::new(mock), session).await;
+    // The agent id is a counter every test in the binary shares, so the
+    // trace is asked for the id it was given.
+    let agent = handle.agent_id();
 
     assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
     handle.shutdown().await;
@@ -6159,7 +6162,10 @@ async fn a_run_with_a_session_writes_its_trace() {
     let path = tmp.path().join(".oven").join("trace").join("s1.jsonl");
     let written = wait_for_trace(&path).await;
     assert!(written.contains("\"kind\":\"completed\""), "{written}");
-    assert!(written.contains("\"agent_id\":1"), "{written}");
+    assert!(
+        written.contains(&format!("\"agent_id\":{},", agent.0)),
+        "{written}"
+    );
 }
 
 #[tokio::test]
