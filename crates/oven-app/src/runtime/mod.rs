@@ -643,17 +643,9 @@ pub(crate) fn spawn_runtime(
         .or_else(|| session.as_ref().map(|open| open.id().to_string()));
     let span = current_or_session_span(span_id.as_deref());
     // The trace of the run: the agent's events, one per line, in a file of
-    // their own beside the workspace. It is written only when the run asked
-    // for it, and a run without a session has no trace file — the log still
-    // has the run.
-    if agents.events.wants_trace() {
-        match span_id.as_deref() {
-            Some(session_id) => agents.events.start_trace(&root, session_id),
-            None => tracing::warn!(
-                "the run was asked to trace, but it has no session: no trace file is written"
-            ),
-        }
-    }
+    // their own beside the workspace. Every run writes one, so a run that
+    // went wrong can be read back after it happened.
+    agents.events.start_trace(&root, span_id.as_deref());
     let (session_store, session_state) = if let Some(store) = attached {
         let has_content = agents.main.history().len() != 0;
         store.mark_content(has_content);

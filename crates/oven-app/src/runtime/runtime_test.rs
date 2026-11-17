@@ -6158,10 +6158,22 @@ async fn wait_for_trace(dir: &Path) -> String {
     panic!("the trace was not written: {dir:?}");
 }
 
+/// Waits for the traces of a workspace to settle at `count`: the writer
+/// prunes them when a run ends, which is a task of its own.
+async fn wait_for_trace_count(dir: &Path, count: usize) {
+    for _ in 0..200 {
+        if trace_files(dir).len() == count {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the traces did not settle at {count}: {dir:?}");
+}
+
 #[tokio::test]
 async fn a_run_with_a_session_writes_its_trace() {
     let tmp = tempdir::TempDir::new("app-runtime-trace").unwrap();
-    let app = AppBuilder::new(tmp.path()).with_trace(true);
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
     let mock = MockProvider::new(vec![text_response("hello")]);
@@ -6190,7 +6202,7 @@ async fn a_run_with_a_session_writes_its_trace() {
 #[tokio::test]
 async fn every_run_writes_a_trace_of_its_own() {
     let tmp = tempdir::TempDir::new("app-runtime-trace-runs").unwrap();
-    let app = AppBuilder::new(tmp.path()).with_trace(true);
+    let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
     std::fs::create_dir_all(&dir).unwrap();
 
@@ -6216,7 +6228,7 @@ async fn every_run_writes_a_trace_of_its_own() {
 }
 
 #[tokio::test]
-async fn a_run_that_was_not_asked_to_trace_writes_no_trace() {
+async fn a_run_that_was_not_asked_to_trace_writes_one_anyway() {
     let tmp = tempdir::TempDir::new("app-runtime-no-trace").unwrap();
     let app = AppBuilder::new(tmp.path());
     let dir = tmp.path().join("sessions");
@@ -6229,8 +6241,57 @@ async fn a_run_that_was_not_asked_to_trace_writes_no_trace() {
     handle.shutdown().await;
 
     let traces = tmp.path().join(".oven").join("trace");
+    let written = wait_for_trace(&traces).await;
     assert!(
-        trace_files(&traces).is_empty(),
-        "the trace must not be written: {traces:?}"
+        written.contains("\"kind\":\"completed\""),
+        "the run left a trace behind: {written}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_without_a_session_writes_its_trace() {
+    let tmp = tempdir::TempDir::new("app-runtime-trace-no-session").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![text_response("hello")]);
+    let handle = spawn_app(&app, Box::new(mock)).await;
+
+    assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
+    handle.shutdown().await;
+
+    let traces = tmp.path().join(".oven").join("trace");
+    let written = wait_for_trace(&traces).await;
+    assert!(written.contains("\"kind\":\"completed\""), "{written}");
+    assert!(
+        written.contains("\"session_id\":null"),
+        "the run had no session, and the trace says so: {written}"
+    );
+}
+
+#[tokio::test]
+async fn a_workspace_keeps_as_many_traces_as_the_config_says() {
+    let tmp = tempdir::TempDir::new("app-runtime-trace-keep").unwrap();
+    let config = AppConfig {
+        trace_keep: 1,
+        ..AppConfig::default()
+    };
+    let app = AppBuilder::new(tmp.path()).with_config(config).await;
+    let dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for _ in 0..2 {
+        let mock = MockProvider::new(vec![text_response("hello")]);
+        let session = Session::open(&dir, "s1").await.unwrap();
+        let handle = spawn_app_session(&app, Box::new(mock), session).await;
+        assert_eq!(handle.prompt("hi").await.unwrap(), "hello");
+        handle.shutdown().await;
+    }
+
+    let traces = tmp.path().join(".oven").join("trace");
+    wait_for_trace(&traces).await;
+    wait_for_trace_count(&traces, 1).await;
+    assert_eq!(
+        trace_files(&traces).len(),
+        1,
+        "the config says how many traces stay"
     );
 }

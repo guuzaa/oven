@@ -3,7 +3,8 @@
 ## [Unreleased]
 
 ### Added
-- `oven-tui`: `oven --trace` writes the trace of the run beside the workspace, one event per line, in a file of the run's own — a run that did not ask for one leaves no file behind, so the trace is a tool for the run that went wrong
+- `oven-tui`: every run writes a trace of the run beside the workspace, one event per line, in a file of the run's own — the trace keeps the shape of the run: what happened, when, and how it ended. `oven --trace` writes the whole run, word by word, for the runs that have to be read that way, and a workspace keeps the newest traces, so the space they take is bounded
+- `oven-app`: `trace_keep` in the config says how many traces a workspace keeps — the newest ones stay and the older ones go, and `0` keeps them all
 - `oven-tui`: `oven trace` reads a run back — `ls` lists the runs of the workspace, `show` prints one as a tree of the agent, the turns it took, the steps of each turn and what happened inside them, so the work of a step sits under the step and the output of a call under the call. A subagent takes a tree of its own, so its steps read apart from the driver's. `rm` removes one, and `prune --keep N` / `--older-than DAYS` removes the ones that are not worth keeping. The id may be shortened to a prefix that names one run and no other
 - `oven-tui`: `oven trace show --tail N` shows the last N events of a run, for a trace too long to read at once. The steps still say when they started, counted from the start of the run, so a tail says where it sits in it
 - `oven-proto`: `TurnEvent::StepRejected` says that the provider answered, but the reply cannot end the turn — it carries the step it belongs to, the reason, what the provider stopped for, how many content blocks it sent, what it used and how long it took. A reply that carries no answer, or one cut off by the output token limit, is now a fact of the run and not only a line in the log
@@ -19,7 +20,7 @@
 - `oven-app`: the log is a projection of the event stream — every agent event is stamped with the moment it happened and written to the `oven.agent` target (what happened at `info`, what was said at `trace`), and the agent layer stopped writing the same facts twice
 - `oven-agent`: everything the agent logs is written under the `oven.agent` target, and so is everything the runtime logs about a turn — the turn it opens, the shell it runs, the subagents it starts. `RUST_LOG=oven.agent=trace` keeps the whole run, and it no longer hides the facts that explain a failure
 - `oven-agent`: `Agent::step` takes the number of the step it is, so the events it reports name the step they belong to
-- `oven-tui`: a trace needs a session — `oven --trace` refuses to run next to `--query` and names both arguments, and a run that asks for a trace it cannot write says so in the log rather than leaving none behind in silence
+- `oven-tui`: a trace no longer needs a session — every run writes one, a one-shot query included, and the first line names the session only when the run belonged to one
 - `oven-tui`: the trace listing says what it holds — a header, the short ids the app uses elsewhere, columns that fit their content, and an age that reads `1 hour ago` and not `1 hours ago`
 - `oven-llm`: `RetryingProvider` is gone — the retry belongs to the router alone, and a provider that wraps a provider could retry twice
 - `oven-llm`: `StopReason` reads as the word it is written as — `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`

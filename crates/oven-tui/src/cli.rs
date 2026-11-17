@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
+use oven_app::trace::TraceDepth;
 use oven_app::{App, AppBuilder, AppError, dirs, log, session};
 
 use crate::commands::{self, Command};
@@ -33,9 +34,9 @@ pub struct Cli {
     #[arg(long)]
     amnesia: bool,
 
-    /// Write the trace of the run beside the workspace: one event per line,
-    /// in a file of the run's own
-    #[arg(long, conflicts_with = "query")]
+    /// Write every word of the run: the trace keeps the text as it
+    /// streamed. Without it the trace keeps the shape of the run.
+    #[arg(long)]
     trace: bool,
 
     #[command(subcommand)]
@@ -63,13 +64,22 @@ impl Cli {
         }
     }
 
+    /// How much of the run its trace keeps.
+    fn trace_depth(&self) -> TraceDepth {
+        if self.trace {
+            TraceDepth::Full
+        } else {
+            TraceDepth::Skeleton
+        }
+    }
+
     async fn builder(&self) -> AppBuilder {
         let mut builder = App::builder(&self.dir);
         if let Err(e) = builder.load_config().await {
             eprintln!("warning: loading config: {e}");
         }
         self.load_memory(&mut builder).await;
-        builder.with_trace(self.trace)
+        builder.with_trace_depth(self.trace_depth())
     }
 
     async fn load_memory(&self, builder: &mut AppBuilder) {
@@ -82,7 +92,10 @@ impl Cli {
         let mut builder = App::builder(&self.dir);
         builder.load_config().await?;
         self.load_memory(&mut builder).await;
-        builder.with_trace(self.trace).query(prompt).await
+        builder
+            .with_trace_depth(self.trace_depth())
+            .query(prompt)
+            .await
     }
 
     async fn headless(&self, prompt: &str) -> ExitCode {
@@ -155,20 +168,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_trace_is_written_only_when_it_is_asked_for() {
+    fn the_trace_keeps_every_word_only_when_it_is_asked_for() {
         let plain = Cli::try_parse_from(["oven"]).unwrap();
-        assert!(!plain.trace);
+        assert_eq!(plain.trace_depth(), TraceDepth::Skeleton);
 
         let traced = Cli::try_parse_from(["oven", "--trace"]).unwrap();
-        assert!(traced.trace);
+        assert_eq!(traced.trace_depth(), TraceDepth::Full);
     }
 
     #[test]
-    fn a_trace_needs_a_session_and_a_query_has_none() {
-        let err = Cli::try_parse_from(["oven", "--trace", "-Q", "hi"]).unwrap_err();
+    fn a_query_keeps_its_trace_too() {
+        let err = Cli::try_parse_from(["oven", "--trace", "-Q", "hi"]).unwrap();
 
-        let message = err.to_string();
-        assert!(message.contains("--trace"), "{message}");
-        assert!(message.contains("--query"), "{message}");
+        assert_eq!(err.trace_depth(), TraceDepth::Full);
     }
 }

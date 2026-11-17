@@ -496,23 +496,24 @@ it. It holds the whole conversation, so the trace directory carries a
 `.gitignore` that keeps the traces out of the commits of the workspace
 they belong to.
 
-A run without a session has no trace file — `oven query` writes no
-session, so the log is all there is, and the CLI refuses `--trace` next to
-`--query` rather than accepting a flag it cannot honour. The file is
-written by a task of its own, and the events are buffered: they reach the
-disk a turn at a time, so the tail of a run can be missing if the app
-leaves right after it; everything the writer reached is on disk.
-A write that fails does not end the trace: the event is lost, the rest of
-the run is still written, and the loss is reported when the run ends.
+A run without a session still writes a trace, and the first line says it
+had none. The file is written by a task of its own, and the events are
+buffered: they reach the disk a turn at a time, so the tail of a run can be
+missing if the app leaves right after it; everything the writer reached is on
+disk. A write that fails does not end the trace: the event is lost, the rest
+of the run is still written, and the loss is reported when the run ends.
 
 Reading a trace skips the lines it cannot parse — a run that was killed
 mid-write leaves half a line behind — and counts them, so the events that
 were written whole are still readable. Only a trace that holds nothing but
 damage is refused.
 
-The trace is written only when the run asks for it: the bus carries the
-switch, `oven --trace` turns it on, and a run that did not ask leaves no
-file behind.
+Every run writes a trace: the bus carries how much of the run the file
+keeps, `TraceDepth::Skeleton` by default and `TraceDepth::Full` when
+`oven --trace` asks for every word. The skeleton leaves out the text as it
+streamed and cuts every body it keeps, so the space a run takes is bounded.
+A workspace keeps the newest traces — `trace_keep` in the config says how
+many — so the space they take is bounded too.
 
 Reading it needs nothing but `jq`:
 

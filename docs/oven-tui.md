@@ -62,9 +62,8 @@ subcommand), `--session/-s` and `--continue/-c` (mutually exclusive session
 selection; an explicit id wins, otherwise the newest session for this root),
 `--query/-Q`, `--amnesia` (skip loading durable memory for this run, in
 both interactive and headless modes; `oven mem` is unaffected), and `--trace`
-(write the trace of the run beside the workspace, one event per line, in a
-file of the run's own, so the run can be read back after it happened;
-`oven trace` reads it).
+(write every word of the run: the trace keeps the text as it streamed; by
+default the trace keeps the shape of the run).
 
 `Cli::run` dispatches to one of four modes:
 
@@ -98,23 +97,23 @@ c8e2f1a09b6d  3e4f5678  1.1 KB  2 hours ago
 
 `oven trace rm <id>` removes one trace, and `oven trace prune --keep N` or
 `oven trace prune --older-than DAYS` removes the ones that are not worth
-keeping. The traces hold the whole conversation, so they are worth clearing
-out; the trace directory also carries a `.gitignore`, so they stay out of the
-commits of the workspace they belong to.
+keeping. The trace directory also carries a `.gitignore`, so the traces stay
+out of the commits of the workspace they belong to.
 
-A trace exists only for a run that asked for one: `oven --trace` writes it,
-a run without the flag leaves none behind. A trace needs a session, so it
-conflicts with a one-shot query (`-Q`), and the CLI says so by naming both
-arguments:
+Every run writes a trace of its own, so a run that went wrong can be read
+back after it happened. The trace keeps the shape of the run: what happened,
+when, and how it ended. The text as it streamed is left out, because it is
+the bulk of a trace and the session file holds it already; `oven --trace`
+writes the whole run, word by word, for the runs that have to be read that
+way.
 
-```text
-error: the argument '--trace' cannot be used with '--query <QUERY>'
-```
+A workspace keeps the newest traces and drops the older ones, so the
+space they take is bounded: `trace_keep` in the config says how many, and
+`0` keeps them all.
 
-A run that left no trace behind still says what went wrong: everything about
-a run is logged under the `oven.agent` target, so the default filter keeps
-the failures and `RUST_LOG=oven.agent=trace` keeps every word of the run.
-The log is at `~/.oven/logs/oven.log`.
+Everything about a run is also logged under the `oven.agent` target, so the
+default filter keeps the failures and `RUST_LOG=oven.agent=trace` keeps
+every word of the run. The log is at `~/.oven/logs/oven.log`.
 
 ```text
 run a3f9c2b1d4e7 · session 3e4f5678 · started 2 hours ago

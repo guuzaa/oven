@@ -27,7 +27,7 @@ pub fn tree(trace: &Trace, text: bool) -> String {
             out,
             "run {} · session {} · started {}",
             run.id(),
-            short_id(Some(run.session_id())),
+            short_id(run.session_id()),
             age(started_at(run))
         );
     }
@@ -175,7 +175,7 @@ mod tests {
         let mut trace = trace(vec![envelope(0, AgentEvent::Turn(TurnEvent::Started))]);
         trace.run = Some(TraceRun::Run {
             id: "a3f9c2b1d4e7".to_owned(),
-            session_id: "0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678".to_owned(),
+            session_id: Some("0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678".to_owned()),
             started_at: unix_ms(SystemTime::now() - Duration::from_secs(60 * 60)),
         });
 

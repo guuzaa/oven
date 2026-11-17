@@ -342,23 +342,26 @@ refused. `read_trace` reads the file line by line and keeps the last events
 only when it is asked for the tail of a long trace; the tail still carries the
 moment the run started at, so the steps still say where they sit in the run.
 
-The trace holds the whole conversation, tool output included, so the trace
-directory carries a `.gitignore` that keeps the traces out of the commits of
-the workspace they belong to. `oven trace rm` and `oven trace prune` remove
-the traces that are not wanted any more.
+The trace directory carries a `.gitignore` that keeps the traces out of
+the commits of the workspace they belong to. `oven trace rm` and `oven trace
+prune` remove the traces that are not wanted any more, and a workspace keeps
+the newest traces on its own — `trace_keep` in the config says how many, and
+`0` keeps them all.
 
-Writing it is opt-in: the bus carries the switch (`EventBus::with_trace`), and
-`AppBuilder::with_trace(true)` turns it on — `oven --trace` in the CLI. A bus
-that was not asked to trace never starts a writer, so the run leaves no file
-behind and no trace directory either.
+Writing it is not opt-in: every run writes a trace of its own. The bus
+carries how much of the run the file keeps (`EventBus::with_depth`), and
+`AppBuilder::with_trace_depth` says it — `TraceDepth::Skeleton` by default,
+`TraceDepth::Full` for `oven --trace` in the CLI. The skeleton keeps every
+event but the text as it streamed, and cuts every body it keeps, so the
+space a run takes is bounded. The full trace keeps every word.
 
-A run that was not asked to trace still leaves its failures in the log: the
-projection writes every agent event under the `oven.agent` target, and the
-default filter keeps what happened at `info`. A reply the provider sent that
-cannot end the turn — it carries no answer, or it was cut off — is reported
-as it happens, with what the provider stopped for, how many blocks it sent
-and what it used, so the question "why did the model answer with nothing" is
-answered by the log of the run that failed, with or without a trace file.
+The failures of a run are in the log as well: the projection writes every
+agent event under the `oven.agent` target, and the default filter keeps what
+happened at `info`. A reply the provider sent that cannot end the turn — it
+carries no answer, or it was cut off — is reported as it happens, with what
+the provider stopped for, how many blocks it sent and what it used, so the
+question "why did the model answer with nothing" is answered by the log of
+the run that failed, with or without a trace file.
 
 ## Slash commands
 

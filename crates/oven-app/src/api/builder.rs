@@ -32,6 +32,7 @@ use crate::core::session::{
     Session, SessionStore, canonical_root, session_format_version, session_span, working_dir_notice,
 };
 use crate::platform::dirs;
+use crate::platform::trace::{TraceDepth, TraceSettings};
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
 use oven_proto::AppId;
@@ -104,9 +105,9 @@ pub struct AppBuilder {
     instructions: Vec<InstructionDoc>,
     memory: Option<Arc<MemoryStore>>,
     mcp_connector: Arc<dyn McpConnector>,
-    /// Write the trace of the run beside the workspace: the agent's events,
-    /// one per line, in a file of their own.
-    trace: bool,
+    /// How much of the run the trace beside the workspace keeps: the agent's
+    /// events, one per line, in a file of their own.
+    trace_depth: TraceDepth,
 }
 
 impl AppBuilder {
@@ -121,7 +122,7 @@ impl AppBuilder {
             instructions: Vec::new(),
             memory: None,
             mcp_connector: Arc::new(DefaultMcpConnector),
-            trace: false,
+            trace_depth: TraceDepth::Skeleton,
         }
     }
 
@@ -133,13 +134,13 @@ impl AppBuilder {
         &self.config
     }
 
-    /// Write the trace of the run beside the workspace: the agent's events,
-    /// one per line, so the run can be read back after it happened.
+    /// How much of the run the trace beside the workspace keeps.
     ///
     /// Every run writes a trace of its own, so a session that is resumed
-    /// leaves a second trace rather than a longer one.
-    pub fn with_trace(mut self, trace: bool) -> Self {
-        self.trace = trace;
+    /// leaves a second trace rather than a longer one. The trace keeps the
+    /// shape of the run; `TraceDepth::Full` keeps every word of it.
+    pub fn with_trace_depth(mut self, depth: TraceDepth) -> Self {
+        self.trace_depth = depth;
         self
     }
 
@@ -310,7 +311,10 @@ impl AppBuilder {
             child_system = append_memory(child_system, store);
         }
         let main_system = format!("{}\n\n{child_system}", TOP_LEVEL_PROMPT.trim());
-        let events = EventBus::new().with_trace(self.trace);
+        let events = EventBus::new().with_trace(TraceSettings {
+            depth: self.trace_depth,
+            keep: self.config.trace_keep,
+        });
         let (wake, wake_rx) = mpsc::unbounded_channel();
         // `wake` goes to the supervisor, which keeps the channel open; the
         // runtime only ever listens on it.

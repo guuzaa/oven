@@ -10,11 +10,21 @@
 //! `RUST_LOG=oven.agent=trace` keeps every word of it. Everything is on the
 //! `oven.agent` target.
 //!
-//! The same stream is also written down, in full: the run as it happened,
-//! one event per line, in a file of its own. The log is the readable view;
-//! the file is the record. Every run gets its own file, so a session that
-//! is resumed writes a second file rather than appending to the first, and
+//! The same stream is also written down: the run as it happened, one event
+//! per line, in a file of its own. The log is the readable view; the file
+//! is the record. Every run gets its own file, so a session that is
+//! resumed writes a second file rather than appending to the first, and
 //! a file stands for exactly one run.
+//!
+//! The file keeps the shape of the run: what happened, when, and how it
+//! ended. The text as it streamed is left out, because it is the bulk of a
+//! trace and the session file holds it already. A trace that keeps every
+//! word is asked for; it is worth the space only when a run has to be read
+//! word by word.
+//!
+//! A workspace keeps the newest traces and drops the older ones, so the
+//! space the traces take is bounded by the number of runs and not by the
+//! number of turns.
 //!
 //! The events are buffered and reach the disk a turn at a time: a run
 //! writes thousands of lines, and one write per line costs more than the
@@ -22,14 +32,15 @@
 //! tail of a run can be missing if the app is killed before the last
 //! flush.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use oven_proto::{
-    AGENT_TARGET, AgentEvent, AgentEventEnvelope, AppEvent, AppEventKind, StreamEvent, ToolEvent,
-    ToolResult, TurnEvent,
+    AGENT_TARGET, AgentError, AgentEvent, AgentEventEnvelope, AppEvent, AppEventKind, StreamEvent,
+    ToolEvent, ToolResult, ToolView, TurnEvent,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -42,6 +53,12 @@ use crate::platform::id;
 /// How many characters a run id has: short enough to type, long enough to
 /// be a name of its own.
 const RUN_ID_LEN: usize = 12;
+/// How many traces a workspace keeps: the newest ones, the older ones go.
+pub const DEFAULT_KEEP: usize = 2;
+/// How much of a body the trace of a run keeps.
+const MAX_BODY_BYTES: usize = 4 * 1024;
+/// The mark that says a body was cut.
+const CUT_MARK: &str = "\n...[truncated]";
 /// How much of the trace is held in memory before it reaches the disk.
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 /// What the trace directory tells git, so a trace never lands in a commit
@@ -78,6 +95,36 @@ fn io(path: &Path, source: std::io::Error) -> TraceError {
     }
 }
 
+/// How much of a run its trace keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraceDepth {
+    /// The shape of the run: what happened, when, and how it ended.
+    ///
+    /// The text as it streamed is left out, because it is the bulk of a
+    /// trace and the session file holds it already.
+    Skeleton,
+    /// Everything the run said, as it said it.
+    Full,
+}
+
+/// How a workspace keeps its traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceSettings {
+    /// How much of a run the trace holds.
+    pub depth: TraceDepth,
+    /// How many traces a workspace keeps. Zero keeps them all.
+    pub keep: usize,
+}
+
+impl Default for TraceSettings {
+    fn default() -> Self {
+        Self {
+            depth: TraceDepth::Skeleton,
+            keep: DEFAULT_KEEP,
+        }
+    }
+}
+
 /// Logs one event under the agent target, with the ids every line carries.
 macro_rules! event {
     ($level:ident, $envelope:expr, $($field:tt)*) => {
@@ -111,8 +158,8 @@ pub enum TraceRun {
     Run {
         /// The id of the run: the name of its file.
         id: String,
-        /// The session the run belonged to.
-        session_id: String,
+        /// The session the run belonged to, when it belonged to one.
+        session_id: Option<String>,
         /// When the run started, in Unix milliseconds.
         started_at: u64,
     },
@@ -126,10 +173,10 @@ impl TraceRun {
         }
     }
 
-    /// The session the run belonged to.
-    pub fn session_id(&self) -> &str {
+    /// The session the run belonged to, when it belonged to one.
+    pub fn session_id(&self) -> Option<&str> {
         match self {
-            TraceRun::Run { session_id, .. } => session_id,
+            TraceRun::Run { session_id, .. } => session_id.as_deref(),
         }
     }
 
@@ -141,15 +188,13 @@ impl TraceRun {
     }
 }
 
-/// Starts the trace of a run: what the run is called, and where it goes.
-pub fn start(root: &Path, session_id: &str) -> (TraceRun, PathBuf) {
-    let id = new_run_id();
-    let run = TraceRun::Run {
-        id: id.clone(),
-        session_id: session_id.to_owned(),
+/// Starts the trace of a run: what the run is called.
+pub fn start(session_id: Option<&str>) -> TraceRun {
+    TraceRun::Run {
+        id: new_run_id(),
+        session_id: session_id.map(str::to_owned),
         started_at: oven_host::now_ms(),
-    };
-    (run, trace_path(root, &id))
+    }
 }
 
 /// A name for a run: random, so two runs never share one.
@@ -191,7 +236,9 @@ pub async fn list_traces(root: &Path) -> Result<Vec<TraceSummary>, TraceError> {
         let run = read_run(&path).await;
         traces.push(TraceSummary {
             id: id.to_owned(),
-            session_id: run.as_ref().map(|run| run.session_id().to_owned()),
+            session_id: run
+                .as_ref()
+                .and_then(|run| run.session_id().map(str::to_owned)),
             bytes: metadata.len(),
             modified: metadata.modified().ok(),
         });
@@ -364,12 +411,34 @@ pub async fn prune_traces(
         if !too_many && !too_old {
             continue;
         }
-        let path = trace_path(root, &trace.id);
-        if fs::remove_file(&path).await.is_ok() {
-            removed += 1;
-        }
+        removed += remove_file(root, &trace.id).await;
     }
     Ok(removed)
+}
+
+/// Keeps the newest traces of a workspace and removes the rest.
+///
+/// The trace of the run that is still being written stays whatever its
+/// age: it is not over yet.
+async fn prune_to_newest(root: &Path, keep: usize, current: &str) -> Result<usize, TraceError> {
+    let traces = list_traces(root).await?;
+    let mut removed = 0;
+    for (index, trace) in traces.iter().enumerate() {
+        if index < keep || trace.id == current {
+            continue;
+        }
+        removed += remove_file(root, &trace.id).await;
+    }
+    Ok(removed)
+}
+
+/// Removes the file of a run, and says whether it went.
+async fn remove_file(root: &Path, id: &str) -> usize {
+    if fs::remove_file(trace_path(root, id)).await.is_ok() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Records the agent's events into a trace file, one per line.
@@ -379,9 +448,11 @@ pub async fn prune_traces(
 /// workspace rather than in the session file, because the session file is
 /// the conversation and has to stay resumable.
 pub struct TraceWriter {
-    path: PathBuf,
+    root: PathBuf,
     run: TraceRun,
     events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
+    /// How much of the run the file keeps, and how many traces stay.
+    settings: TraceSettings,
     file: Option<BufWriter<fs::File>>,
     /// The events that are written but not yet on the disk.
     pending: usize,
@@ -390,18 +461,25 @@ pub struct TraceWriter {
 
 impl TraceWriter {
     pub fn new(
-        path: PathBuf,
+        root: PathBuf,
         run: TraceRun,
         events: mpsc::UnboundedReceiver<Arc<AppEvent>>,
+        settings: TraceSettings,
     ) -> Self {
         Self {
-            path,
+            root,
             run,
             events,
+            settings,
             file: None,
             pending: 0,
             lost: 0,
         }
+    }
+
+    /// The file the run's trace lives in.
+    fn path(&self) -> PathBuf {
+        trace_path(&self.root, self.run.id())
     }
 
     /// Writes the events as they arrive, until the bus stops publishing.
@@ -412,7 +490,7 @@ impl TraceWriter {
     pub async fn run(mut self) {
         if let Err(error) = self.open().await {
             tracing::warn!(
-                path = %self.path.display(),
+                path = %self.path().display(),
                 error = %error,
                 "the trace could not be opened"
             );
@@ -425,7 +503,7 @@ impl TraceWriter {
             if let Err(error) = self.append(envelope).await {
                 self.lost += 1;
                 tracing::warn!(
-                    path = %self.path.display(),
+                    path = %self.path().display(),
                     error = %error,
                     lost = self.lost,
                     "the trace could not be written"
@@ -439,9 +517,24 @@ impl TraceWriter {
         self.flush().await;
         if self.lost > 0 {
             tracing::error!(
-                path = %self.path.display(),
+                path = %self.path().display(),
                 lost = self.lost,
                 "the trace is incomplete: some events were lost"
+            );
+        }
+        self.prune().await;
+    }
+
+    /// Keeps the newest traces of the workspace and drops the older ones,
+    /// so the space they take is bounded.
+    async fn prune(&self) {
+        if self.settings.keep == 0 {
+            return;
+        }
+        if let Err(error) = prune_to_newest(&self.root, self.settings.keep, self.run.id()).await {
+            tracing::warn!(
+                error = %error,
+                "the older traces could not be removed"
             );
         }
     }
@@ -451,7 +544,8 @@ impl TraceWriter {
     /// The file exists from the start of the run, so a run that raised no
     /// event at all is still a run that happened.
     async fn open(&mut self) -> std::io::Result<()> {
-        if let Some(dir) = self.path.parent() {
+        let path = self.path();
+        if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).await?;
             fs::write(dir.join(".gitignore"), GITIGNORE).await?;
         }
@@ -459,7 +553,7 @@ impl TraceWriter {
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&self.path)
+            .open(&path)
             .await?;
         let mut line = serde_json::to_string(&self.run).map_err(std::io::Error::other)?;
         line.push('\n');
@@ -472,8 +566,9 @@ impl TraceWriter {
 
     /// Appends one event.
     async fn append(&mut self, envelope: &AgentEventEnvelope) -> std::io::Result<()> {
-        let mut line = serde_json::to_string(envelope).map_err(std::io::Error::other)?;
-        line.push('\n');
+        let Some(line) = self.line(envelope)? else {
+            return Ok(());
+        };
         let file = self
             .file
             .as_mut()
@@ -481,6 +576,22 @@ impl TraceWriter {
         file.write_all(line.as_bytes()).await?;
         self.pending += 1;
         Ok(())
+    }
+
+    /// The line the event is written as: the event itself when the trace
+    /// keeps everything, and the shape of it when the trace keeps the
+    /// shape. An event the shape leaves out is not written at all.
+    fn line(&self, envelope: &AgentEventEnvelope) -> Result<Option<String>, std::io::Error> {
+        let mut line = match self.settings.depth {
+            TraceDepth::Full => serde_json::to_string(envelope),
+            TraceDepth::Skeleton => match skeleton(envelope) {
+                Some(event) => serde_json::to_string(&event),
+                None => return Ok(None),
+            },
+        }
+        .map_err(std::io::Error::other)?;
+        line.push('\n');
+        Ok(Some(line))
     }
 
     /// Puts what is buffered on the disk.
@@ -497,7 +608,7 @@ impl TraceWriter {
                 self.lost += self.pending;
                 self.pending = 0;
                 tracing::warn!(
-                    path = %self.path.display(),
+                    path = %self.path().display(),
                     error = %error,
                     lost = self.lost,
                     "the trace could not be flushed"
@@ -521,6 +632,168 @@ fn ends_turn(envelope: &AgentEventEnvelope) -> bool {
                 | TurnEvent::LoopLimitReached { .. }
         )
     )
+}
+
+/// The event the trace keeps when it keeps the shape of the run.
+///
+/// The text as it streamed is left out: it is the bulk of a trace, and the
+/// session file holds the text already. Every other event is kept, with
+/// its bodies cut, so a tool that printed a megabyte does not fill the
+/// file.
+fn skeleton(envelope: &AgentEventEnvelope) -> Option<AgentEventEnvelope> {
+    let event = match &envelope.event {
+        AgentEvent::Turn(turn) => AgentEvent::Turn(cut_turn(turn)),
+        AgentEvent::Stream(stream) => AgentEvent::Stream(cut_stream(stream)?),
+        AgentEvent::Tool(tool) => AgentEvent::Tool(cut_tool(tool)?),
+        AgentEvent::TodosChanged { todos } => AgentEvent::TodosChanged {
+            todos: todos.clone(),
+        },
+        AgentEvent::Usage { usage } => AgentEvent::Usage { usage: *usage },
+    };
+    Some(AgentEventEnvelope {
+        agent_id: envelope.agent_id,
+        turn_id: envelope.turn_id,
+        at: envelope.at,
+        elapsed_ms: envelope.elapsed_ms,
+        event,
+    })
+}
+
+/// The turn, with its bodies cut.
+fn cut_turn(turn: &TurnEvent) -> TurnEvent {
+    match turn {
+        TurnEvent::Prompt { text } => TurnEvent::Prompt {
+            text: cut(text).into_owned(),
+        },
+        TurnEvent::UserAppended { text } => TurnEvent::UserAppended {
+            text: cut(text).into_owned(),
+        },
+        TurnEvent::NoticeAppended { text } => TurnEvent::NoticeAppended {
+            text: cut(text).into_owned(),
+        },
+        TurnEvent::StepRejected {
+            index,
+            error,
+            stop_reason,
+            blocks,
+            usage,
+            provider_ms,
+        } => TurnEvent::StepRejected {
+            index: *index,
+            error: cut_error(error),
+            stop_reason: *stop_reason,
+            blocks: *blocks,
+            usage: *usage,
+            provider_ms: *provider_ms,
+        },
+        TurnEvent::Failed { error, duration_ms } => TurnEvent::Failed {
+            error: cut_error(error),
+            duration_ms: *duration_ms,
+        },
+        other => other.clone(),
+    }
+}
+
+/// The stream event, when the shape of the run keeps it.
+fn cut_stream(stream: &StreamEvent) -> Option<StreamEvent> {
+    match stream {
+        StreamEvent::TextDelta { .. } | StreamEvent::ThinkingDelta { .. } => None,
+        StreamEvent::ThinkingDone { duration_ms } => Some(StreamEvent::ThinkingDone {
+            duration_ms: *duration_ms,
+        }),
+    }
+}
+
+/// The tool event, when the shape of the run keeps it.
+fn cut_tool(tool: &ToolEvent) -> Option<ToolEvent> {
+    match tool {
+        ToolEvent::OutputDelta { .. } => None,
+        ToolEvent::ApprovalRequested {
+            request_id,
+            call_id,
+            name,
+            view,
+        } => Some(ToolEvent::ApprovalRequested {
+            request_id: *request_id,
+            call_id: *call_id,
+            name: name.clone(),
+            view: cut_view(view),
+        }),
+        ToolEvent::Started {
+            call_id,
+            name,
+            view,
+        } => Some(ToolEvent::Started {
+            call_id: *call_id,
+            name: name.clone(),
+            view: cut_view(view),
+        }),
+        ToolEvent::QuestionAsked {
+            request_id,
+            question,
+        } => Some(ToolEvent::QuestionAsked {
+            request_id: *request_id,
+            question: question.clone(),
+        }),
+        ToolEvent::Finished {
+            call_id,
+            name,
+            result,
+            duration_ms,
+            detail,
+        } => Some(ToolEvent::Finished {
+            call_id: *call_id,
+            name: name.clone(),
+            result: cut_result(result),
+            duration_ms: *duration_ms,
+            detail: detail.as_deref().map(|detail| cut(detail).into_owned()),
+        }),
+    }
+}
+
+/// The view of a tool, with its body cut.
+fn cut_view(view: &ToolView) -> ToolView {
+    ToolView {
+        summary: cut(&view.summary).into_owned(),
+        collapse: view.collapse,
+        detail: view
+            .detail
+            .as_deref()
+            .map(|detail| cut(detail).into_owned()),
+    }
+}
+
+/// The result of a tool, with its body cut.
+fn cut_result(result: &ToolResult) -> ToolResult {
+    match result {
+        ToolResult::Success { output } => ToolResult::Success {
+            output: cut(output).into_owned(),
+        },
+        ToolResult::Failed { error, output } => ToolResult::Failed {
+            error: cut(error).into_owned(),
+            output: output.as_deref().map(|output| cut(output).into_owned()),
+        },
+        ToolResult::Rejected { reason } => ToolResult::Rejected {
+            reason: cut(reason).into_owned(),
+        },
+        ToolResult::Cancelled => ToolResult::Cancelled,
+    }
+}
+
+/// The error of a turn, with its body cut.
+fn cut_error(error: &AgentError) -> AgentError {
+    AgentError {
+        message: cut(&error.message).into_owned(),
+    }
+}
+
+/// A body, cut to [`MAX_BODY_BYTES`].
+fn cut(body: &str) -> Cow<'_, str> {
+    if body.len() <= MAX_BODY_BYTES {
+        return Cow::Borrowed(body);
+    }
+    let head = &body[..body.floor_char_boundary(MAX_BODY_BYTES)];
+    Cow::Owned(format!("{head}{CUT_MARK}"))
 }
 
 /// Logs one agent event.
@@ -826,9 +1099,16 @@ mod tests {
 
     /// Writes a trace of two events, and returns the file it wrote.
     async fn write_trace(dir: &Path) -> PathBuf {
-        let (run, path) = start(dir, "session-1");
+        write_trace_at(dir, TraceSettings::default()).await
+    }
+
+    /// Writes a trace of two events, as deep as it is asked for, and
+    /// returns the file it wrote.
+    async fn write_trace_at(dir: &Path, settings: TraceSettings) -> PathBuf {
+        let run = start(Some("session-1"));
+        let path = trace_path(dir, run.id());
         let (sender, events) = mpsc::unbounded_channel();
-        let writer = TraceWriter::new(path.clone(), run, events);
+        let writer = TraceWriter::new(dir.to_path_buf(), run, events, settings);
         let task = tokio::spawn(writer.run());
         for index in 1..=2 {
             sender.send(Arc::new(event(index))).unwrap();
@@ -841,9 +1121,15 @@ mod tests {
     #[tokio::test]
     async fn the_trace_is_on_the_disk_at_the_end_of_a_turn() {
         let dir = tempdir::TempDir::new("oven-trace-flush").unwrap();
-        let (run, path) = start(dir.path(), "session-1");
+        let run = start(Some("session-1"));
+        let path = trace_path(dir.path(), run.id());
         let (sender, events) = mpsc::unbounded_channel();
-        let writer = TraceWriter::new(path.clone(), run, events);
+        let writer = TraceWriter::new(
+            dir.path().to_path_buf(),
+            run,
+            events,
+            TraceSettings::default(),
+        );
         let task = tokio::spawn(writer.run());
 
         sender.send(Arc::new(event(1))).unwrap();
@@ -957,7 +1243,7 @@ mod tests {
             ),
             "the event comes back as it went in"
         );
-        assert_eq!(trace.run.as_ref().unwrap().session_id(), "session-1");
+        assert_eq!(trace.run.as_ref().unwrap().session_id(), Some("session-1"));
 
         let traces = list_traces(dir.path()).await.unwrap();
         assert_eq!(traces.len(), 1);
@@ -969,9 +1255,14 @@ mod tests {
     #[tokio::test]
     async fn a_run_without_events_is_still_a_run() {
         let dir = tempdir::TempDir::new("oven-trace-empty").unwrap();
-        let (run, path) = start(dir.path(), "session-1");
+        let run = start(Some("session-1"));
         let (sender, events) = mpsc::unbounded_channel();
-        let writer = TraceWriter::new(path.clone(), run, events);
+        let writer = TraceWriter::new(
+            dir.path().to_path_buf(),
+            run,
+            events,
+            TraceSettings::default(),
+        );
         let task = tokio::spawn(writer.run());
         drop(sender);
         task.await.unwrap();
@@ -1035,9 +1326,15 @@ mod tests {
     #[tokio::test]
     async fn a_tail_still_says_where_the_run_started() {
         let dir = tempdir::TempDir::new("oven-trace-tail-base").unwrap();
-        let (run, path) = start(dir.path(), "session-1");
+        let run = start(Some("session-1"));
+        let path = trace_path(dir.path(), run.id());
         let (sender, events) = mpsc::unbounded_channel();
-        let writer = TraceWriter::new(path.clone(), run, events);
+        let writer = TraceWriter::new(
+            dir.path().to_path_buf(),
+            run,
+            events,
+            TraceSettings::default(),
+        );
         let task = tokio::spawn(writer.run());
         for (index, elapsed_ms) in [(1, 100), (2, 200), (3, 300)] {
             sender.send(Arc::new(timed(index, elapsed_ms))).unwrap();
@@ -1074,5 +1371,134 @@ mod tests {
     async fn a_workspace_without_traces_lists_none() {
         let dir = tempdir::TempDir::new("oven-trace-none").unwrap();
         assert!(list_traces(dir.path()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_workspace_keeps_only_the_newest_traces() {
+        let dir = tempdir::TempDir::new("oven-trace-keep").unwrap();
+        for _ in 0..3 {
+            write_trace(dir.path()).await;
+        }
+
+        let traces = list_traces(dir.path()).await.unwrap();
+        assert_eq!(traces.len(), DEFAULT_KEEP, "the older traces are gone");
+    }
+
+    #[tokio::test]
+    async fn a_workspace_keeps_as_many_traces_as_it_is_told() {
+        let dir = tempdir::TempDir::new("oven-trace-keep-three").unwrap();
+        let settings = TraceSettings {
+            keep: 3,
+            ..TraceSettings::default()
+        };
+        for _ in 0..4 {
+            write_trace_at(dir.path(), settings).await;
+        }
+
+        let traces = list_traces(dir.path()).await.unwrap();
+        assert_eq!(traces.len(), 3, "the older traces are gone");
+    }
+
+    #[tokio::test]
+    async fn a_workspace_that_keeps_no_limit_keeps_every_trace() {
+        let dir = tempdir::TempDir::new("oven-trace-keep-all").unwrap();
+        let settings = TraceSettings {
+            keep: 0,
+            ..TraceSettings::default()
+        };
+        for _ in 0..3 {
+            write_trace_at(dir.path(), settings).await;
+        }
+
+        let traces = list_traces(dir.path()).await.unwrap();
+        assert_eq!(traces.len(), 3, "nothing is pruned");
+    }
+
+    /// Writes a trace of one event, and returns the file it wrote.
+    async fn write_event(dir: &Path, settings: TraceSettings, event: AppEvent) -> PathBuf {
+        let run = start(Some("session-1"));
+        let path = trace_path(dir, run.id());
+        let (sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(dir.to_path_buf(), run, events, settings);
+        let task = tokio::spawn(writer.run());
+        sender.send(Arc::new(event)).unwrap();
+        drop(sender);
+        task.await.expect("the writer finishes when the bus stops");
+        path
+    }
+
+    /// The event that carries a word as it was said.
+    fn said(text: &str) -> AppEvent {
+        AppEvent::new(AppEventKind::Agent(envelope(AgentEvent::Stream(
+            StreamEvent::TextDelta {
+                text: text.to_owned(),
+            },
+        ))))
+    }
+
+    /// The event that says a tool printed something.
+    fn printed(output: &str) -> AppEvent {
+        AppEvent::new(AppEventKind::Agent(envelope(AgentEvent::Tool(
+            ToolEvent::Finished {
+                call_id: oven_proto::ToolCallId(7),
+                name: "bash".into(),
+                result: ToolResult::Success {
+                    output: output.to_owned(),
+                },
+                detail: None,
+                duration_ms: 42,
+            },
+        ))))
+    }
+
+    #[tokio::test]
+    async fn the_skeleton_leaves_out_the_text_as_it_streamed() {
+        let dir = tempdir::TempDir::new("oven-trace-shape").unwrap();
+        let path = write_event(dir.path(), TraceSettings::default(), said("hello")).await;
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("text_delta"), "{written}");
+        assert!(!written.contains("hello"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn the_full_trace_keeps_every_word() {
+        let dir = tempdir::TempDir::new("oven-trace-full").unwrap();
+        let path = write_event(
+            dir.path(),
+            TraceSettings {
+                depth: TraceDepth::Full,
+                ..TraceSettings::default()
+            },
+            said("hello"),
+        )
+        .await;
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("text_delta"), "{written}");
+        assert!(written.contains("hello"), "{written}");
+    }
+
+    #[tokio::test]
+    async fn the_skeleton_cuts_a_body_that_is_too_long() {
+        let dir = tempdir::TempDir::new("oven-trace-cut").unwrap();
+        let body = "x".repeat(MAX_BODY_BYTES * 2);
+        let path = write_event(dir.path(), TraceSettings::default(), printed(&body)).await;
+        let id = path.file_stem().unwrap().to_str().unwrap().to_owned();
+
+        let trace = read_trace(dir.path(), &id, None).await.unwrap();
+        let AgentEvent::Tool(ToolEvent::Finished {
+            result: ToolResult::Success { output },
+            ..
+        }) = &trace.events[0].event
+        else {
+            panic!("the event is not the one that was written");
+        };
+        assert!(
+            output.len() <= MAX_BODY_BYTES + CUT_MARK.len(),
+            "the body is cut: {}",
+            output.len()
+        );
+        assert!(output.ends_with(CUT_MARK), "the cut says so");
     }
 }

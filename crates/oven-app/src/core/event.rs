@@ -12,7 +12,7 @@ use oven_proto::{
 };
 use tokio::sync::mpsc;
 
-use crate::platform::trace::{self, TraceWriter};
+use crate::platform::trace::{self, TraceSettings, TraceWriter};
 
 /// The channels the bus fans out to.
 ///
@@ -61,24 +61,24 @@ impl EventSink for BusSink {
 #[derive(Clone)]
 pub(crate) struct EventBus {
     subscribers: Subscribers,
-    /// Whether the run writes a trace of its events.
-    trace: bool,
+    /// How much of the run its trace keeps, and how many traces stay.
+    settings: TraceSettings,
 }
 
 impl EventBus {
     pub(crate) fn new() -> Self {
         Self {
             subscribers: Arc::new(Mutex::new(Vec::new())),
-            trace: false,
+            settings: TraceSettings::default(),
         }
     }
 
-    /// Whether the bus writes a trace of the run's events.
+    /// How much of the run the trace keeps, and how many traces stay.
     ///
-    /// The bus carries the switch: a run that was not asked to trace never
-    /// starts a writer, so it leaves no file behind.
-    pub(crate) fn with_trace(mut self, trace: bool) -> Self {
-        self.trace = trace;
+    /// The trace is written either way: this says how much of the run it
+    /// holds.
+    pub(crate) fn with_trace(mut self, settings: TraceSettings) -> Self {
+        self.settings = settings;
         self
     }
 
@@ -86,27 +86,20 @@ impl EventBus {
         self.subscribers.clone()
     }
 
-    /// Whether the bus was asked to write a trace of the run.
-    pub(crate) fn wants_trace(&self) -> bool {
-        self.trace
-    }
-
-    /// Records the agent's events into a trace of their own, one per line,
-    /// when the bus was asked to trace.
+    /// Records the agent's events into a trace of their own, one per line.
     ///
     /// The trace travels the same bus the frontend watches, so the file
     /// holds what the frontend saw, in the order it saw it.
-    pub(crate) fn start_trace(&self, root: &Path, session_id: &str) {
-        if !self.trace {
-            return;
-        }
-        let (run, path) = trace::start(root, session_id);
+    pub(crate) fn start_trace(&self, root: &Path, session_id: Option<&str>) {
+        let run = trace::start(session_id);
+        let path = trace::trace_path(root, run.id());
+        tracing::info!(path = %path.display(), "the run writes its trace");
         let (sender, events) = mpsc::unbounded_channel();
         self.subscribers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(sender);
-        tokio::spawn(TraceWriter::new(path, run, events).run());
+        tokio::spawn(TraceWriter::new(root.to_path_buf(), run, events, self.settings).run());
     }
 
     pub(crate) fn emit(&self, kind: AppEventKind) {
