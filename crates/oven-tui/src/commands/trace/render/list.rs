@@ -95,6 +95,7 @@ mod tests {
         let traces = vec![TraceSummary {
             id: "a3f9c2b1d4e7".to_owned(),
             session_id: Some("0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678".to_owned()),
+            started_at: None,
             bytes: 2048,
             modified: None,
         }];

@@ -16,6 +16,7 @@ use oven_app::trace::{Trace, TraceRun};
 use self::format::{age, plural, short_id};
 
 const NO_EVENTS: &str = "the run raised no events";
+const NO_RUNS: &str = "the session has no runs left";
 
 /// The run as a tree: which agent, which turn, which step, and what happened
 /// inside them. Every step says when it started, counted from the first
@@ -48,6 +49,21 @@ pub fn tree(trace: &Trace, text: bool) -> String {
         let _ = writeln!(out, "{}", damaged_note(trace.damaged));
     }
     out.trim_end().to_owned()
+}
+
+/// The runs of one session, oldest first: each run a tree of its own.
+///
+/// A session that is resumed writes a run of its own, so a session reads as
+/// the runs it went through, one after the other.
+pub fn session(traces: &[Trace], text: bool) -> String {
+    if traces.is_empty() {
+        return NO_RUNS.to_owned();
+    }
+    traces
+        .iter()
+        .map(|trace| tree(trace, text))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// When the run started, as a moment on the wall clock.
@@ -153,6 +169,37 @@ mod tests {
             tree(&trace, false).contains("2 lines were damaged"),
             "{trace:?}"
         );
+    }
+
+    /// A run of a session, as the trace file names it.
+    fn run_of(id: &str) -> TraceRun {
+        TraceRun::Run {
+            id: id.to_owned(),
+            session_id: Some("0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678".to_owned()),
+            started_at: unix_ms(SystemTime::now() - Duration::from_secs(60)),
+        }
+    }
+
+    #[test]
+    fn the_runs_of_a_session_read_one_after_the_other() {
+        let mut first = trace(vec![envelope(0, AgentEvent::Turn(TurnEvent::Started))]);
+        first.run = Some(run_of("a3f9c2b1d4e7"));
+        let mut second = trace(vec![envelope(0, AgentEvent::Turn(TurnEvent::Started))]);
+        second.run = Some(run_of("b2c1d0e9f8a7"));
+
+        let session = session(&[first, second], false);
+
+        assert!(session.contains("run a3f9c2b1d4e7"), "{session}");
+        assert!(session.contains("run b2c1d0e9f8a7"), "{session}");
+        assert!(
+            session.find("a3f9c2b1d4e7").unwrap() < session.find("b2c1d0e9f8a7").unwrap(),
+            "{session}"
+        );
+    }
+
+    #[test]
+    fn a_session_without_runs_says_so() {
+        assert_eq!(session(&[], false), NO_RUNS);
     }
 
     #[test]

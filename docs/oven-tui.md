@@ -101,6 +101,12 @@ c8e2f1a09b6d  3e4f5678  1.1 KB  2 hours ago
 keeping. The trace directory also carries a `.gitignore`, so the traces stay
 out of the commits of the workspace they belong to.
 
+A session that is resumed writes a run of its own, so the runs of a session
+are the traces that name it. `oven trace ls --session <id>` lists only those,
+and `oven trace show --session <id>` prints them all, oldest first, one tree
+after the other. The session may be named by its whole id, by a prefix of it,
+or by the short form the listing shows.
+
 Every run but a quiet one writes a trace of its own, so a run that went wrong
 can be read back after it happened. The trace keeps the shape of the run: what
 happened, when, and how it ended. The text as it streamed is left out, because

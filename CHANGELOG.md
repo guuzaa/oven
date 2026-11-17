@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- `oven-tui`: the runs of a session can be found and read as one — `oven trace ls --session <id>` lists the runs of one session, and `oven trace show --session <id>` prints them all, oldest first, one tree per run. A session that is resumed writes a run of its own, so the runs of a session are the traces that name it. The session may be named by its whole id, by a prefix of it, or by the short form the listing shows
 - `oven-tui`: every run writes a trace of the run beside the workspace, one event per line, in a file of the run's own — the trace keeps the shape of the run: what happened, when, and how it ended. `oven --trace full` writes the whole run, word by word, for the runs that have to be read that way, `oven --trace quiet` writes no trace at all, and a workspace keeps the newest traces, so the space they take is bounded
 - `oven-app`: `trace_keep` in the config says how many traces a workspace keeps — the newest ones stay and the older ones go, and `0` keeps them all
 - `oven-tui`: `oven trace` reads a run back — `ls` lists the runs of the workspace, `show` prints one as a tree of the agent, the turns it took, the steps of each turn and what happened inside them, so the work of a step sits under the step and the output of a call under the call. A subagent takes a tree of its own, so its steps read apart from the driver's. `rm` removes one, and `prune --keep N` / `--older-than DAYS` removes the ones that are not worth keeping. The id may be shortened to a prefix that names one run and no other

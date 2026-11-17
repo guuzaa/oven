@@ -516,6 +516,14 @@ body it keeps, so the space a run takes is bounded. A workspace keeps the
 newest traces — `trace_keep` in the config says how many — so the space they
 take is bounded too.
 
+A session that is resumed writes a run of its own, so the runs of a session
+are the traces that name it. The first line of a trace says the session it
+belonged to, and that is the way back from a run to the conversation it was
+part of. `oven trace ls --session <id>` lists the runs of one session and
+`oven trace show --session <id>` reads them all, oldest first. The session may
+be named by its whole id, by a prefix of it, or by the short form the listing
+shows.
+
 Reading it needs nothing but `jq`:
 
 ```sh

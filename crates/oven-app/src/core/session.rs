@@ -32,7 +32,6 @@ use oven_llm::Usage;
 use oven_proto::{Record, SESSION_FORMAT_VERSION, SESSION_FORMAT_WITHOUT_VERSION, SessionMeta};
 use thiserror::Error;
 
-const SHORT_SESSION_ID_LEN: usize = 8;
 const SESSION_SPAN_NAME: &str = "session";
 const SESSION_SPAN_ID_FIELD: &str = "id";
 
@@ -66,15 +65,7 @@ pub fn canonical_root(root: &Path) -> String {
 
 /// The short form of a session id: the last few characters, the way a
 /// session is named in a log line.
-pub fn short_session_id(id: &str) -> &str {
-    match id
-        .char_indices()
-        .nth_back(SHORT_SESSION_ID_LEN.saturating_sub(1))
-    {
-        Some((i, _)) => &id[i..],
-        None => id,
-    }
-}
+pub use crate::platform::id::short_session_id;
 
 pub(crate) fn session_span(id: Option<&str>) -> tracing::Span {
     match id {
@@ -588,19 +579,6 @@ mod tests {
         let outer = session_span(Some("0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678"));
         let inner = outer.in_scope(|| current_or_session_span(Some("other-id")));
         assert_eq!(outer.id(), inner.id());
-    }
-
-    #[test]
-    fn short_session_id_takes_last_eight_chars() {
-        assert_eq!(
-            short_session_id("0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678"),
-            "3e4f5678"
-        );
-        assert_eq!(short_session_id("12345678"), "12345678");
-        assert_eq!(short_session_id("123456789"), "23456789");
-        assert_eq!(short_session_id("abc"), "abc");
-        assert_eq!(short_session_id(""), "");
-        assert_eq!(short_session_id("x会话abcdef"), "会话abcdef");
     }
 
     fn message_record(timestamp: u64, message: Message) -> Record {

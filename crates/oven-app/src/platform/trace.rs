@@ -212,6 +212,8 @@ pub struct TraceSummary {
     pub id: String,
     /// The session the run belonged to, when the file names it.
     pub session_id: Option<String>,
+    /// When the run started, in Unix milliseconds, when the file names it.
+    pub started_at: Option<u64>,
     /// How much the trace holds.
     pub bytes: u64,
     /// When it was last written.
@@ -242,12 +244,64 @@ pub async fn list_traces(root: &Path) -> Result<Vec<TraceSummary>, TraceError> {
             session_id: run
                 .as_ref()
                 .and_then(|run| run.session_id().map(str::to_owned)),
+            started_at: run.as_ref().map(|run| run.started_at()),
             bytes: metadata.len(),
             modified: metadata.modified().ok(),
         });
     }
     traces.sort_by_key(|trace| std::cmp::Reverse(trace.modified));
     Ok(traces)
+}
+
+/// The runs of one session, oldest first.
+///
+/// A session that is resumed writes a run of its own, so the runs of a
+/// session are the traces that name it. The ones that were pruned are
+/// gone: what is left is what the session still has.
+pub async fn traces_of_session(
+    root: &Path,
+    session: &str,
+) -> Result<Vec<TraceSummary>, TraceError> {
+    let mut traces: Vec<TraceSummary> = list_traces(root)
+        .await?
+        .into_iter()
+        .filter(|trace| {
+            trace
+                .session_id
+                .as_deref()
+                .is_some_and(|id| session_matches(id, session))
+        })
+        .collect();
+    traces.sort_by_key(|trace| trace.started_at.unwrap_or_default());
+    Ok(traces)
+}
+
+/// The traces of the runs of one session, oldest first.
+pub async fn read_session(
+    root: &Path,
+    session: &str,
+    tail: Option<usize>,
+) -> Result<Vec<Trace>, TraceError> {
+    let mut traces = Vec::new();
+    for summary in traces_of_session(root, session).await? {
+        traces.push(read_trace(root, &summary.id, tail).await?);
+    }
+    Ok(traces)
+}
+
+/// Whether a query names a session id.
+///
+/// The query may be the whole id, a prefix of it, or the short form a
+/// listing shows: the last few characters of the id. A suffix shorter than
+/// that is no name — it would match more than one id.
+pub fn session_matches(session: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return false;
+    }
+    if session == query || session.starts_with(query) {
+        return true;
+    }
+    query.chars().count() >= id::SHORT_ID_LEN && session.ends_with(query)
 }
 
 /// The trace of one run, read back as the events it holds.
@@ -1551,5 +1605,79 @@ mod tests {
             output.len()
         );
         assert!(output.ends_with(CUT_MARK), "the cut says so");
+    }
+
+    /// Writes the trace of a run that belonged to a session, and returns
+    /// the file it wrote.
+    async fn write_run(dir: &Path, run: TraceRun) -> PathBuf {
+        let path = trace_path(dir, run.id());
+        let (sender, events) = mpsc::unbounded_channel();
+        let writer = TraceWriter::new(
+            dir.to_path_buf(),
+            run,
+            events,
+            TraceSettings {
+                keep: 0,
+                ..TraceSettings::default()
+            },
+        )
+        .expect("the run keeps a trace");
+        let task = tokio::spawn(writer.run());
+        sender.send(Arc::new(event(1))).unwrap();
+        drop(sender);
+        task.await.expect("the writer finishes when the bus stops");
+        path
+    }
+
+    /// A run of a session, named and placed in time.
+    fn run_of(id: &str, session: &str, started_at: u64) -> TraceRun {
+        TraceRun::Run {
+            id: id.to_owned(),
+            session_id: Some(session.to_owned()),
+            started_at,
+        }
+    }
+
+    #[test]
+    fn a_session_is_named_by_its_id_a_prefix_of_it_or_its_short_form() {
+        let id = "0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678";
+
+        assert!(session_matches(id, id));
+        assert!(session_matches(id, "0193c2a1"));
+        assert!(session_matches(id, "3e4f5678"));
+        assert!(
+            !session_matches(id, "3e4f567"),
+            "a shorter tail names no id"
+        );
+        assert!(!session_matches(id, ""));
+        assert!(!session_matches(id, "9a0b1c2d"));
+    }
+
+    #[tokio::test]
+    async fn the_runs_of_a_session_are_the_traces_that_name_it() {
+        let dir = tempdir::TempDir::new("oven-trace-session").unwrap();
+        write_run(dir.path(), run_of("run-1", "session-1", 200)).await;
+        write_run(dir.path(), run_of("run-2", "session-2", 300)).await;
+        write_run(dir.path(), run_of("run-3", "session-1", 100)).await;
+
+        let runs = traces_of_session(dir.path(), "session-1").await.unwrap();
+
+        assert_eq!(runs.len(), 2, "the runs of the session: {runs:?}");
+        assert_eq!(runs[0].id, "run-3", "the oldest run comes first");
+        assert_eq!(runs[1].id, "run-1");
+        assert_eq!(runs[0].started_at, Some(100));
+    }
+
+    #[tokio::test]
+    async fn the_runs_of_a_session_are_read_back_together() {
+        let dir = tempdir::TempDir::new("oven-trace-read-session").unwrap();
+        write_run(dir.path(), run_of("run-1", "session-1", 200)).await;
+        write_run(dir.path(), run_of("run-2", "session-1", 100)).await;
+
+        let traces = read_session(dir.path(), "session-1", None).await.unwrap();
+
+        assert_eq!(traces.len(), 2);
+        assert_eq!(traces[0].run.as_ref().map(|run| run.id()), Some("run-2"));
+        assert_eq!(traces[1].run.as_ref().map(|run| run.id()), Some("run-1"));
     }
 }
