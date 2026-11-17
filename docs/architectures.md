@@ -368,7 +368,8 @@ and `elapsed_ms` is the monotonic distance from the start of the run.
 The wall clock says when the event happened against the rest of the world;
 the monotonic one says how far into the run it happened, and it keeps
 saying so when a clock correction moves the wall clock underneath the run.
-A trace reads as a timeline and not only as an order.
+A trace reads as a timeline and not only as an order: `oven trace show` draws
+it as a tree of agents, turns and steps, and every step says when it started.
 
 ```text
 TurnEvent     Started | Completed { usage, duration_ms }

@@ -339,8 +339,7 @@ mid-write leaves half a line behind — and counts them, so the events that were
 written whole are still readable. Only a trace that holds nothing but damage is
 refused. `read_trace` reads the file line by line and keeps the last events
 only when it is asked for the tail of a long trace; the tail still carries the
-moment the run started at, so the times of a timeline say where they sit in
-the run.
+moment the run started at, so the steps still say where they sit in the run.
 
 The trace holds the whole conversation, tool output included, so the trace
 directory carries a `.gitignore` that keeps the traces out of the commits of

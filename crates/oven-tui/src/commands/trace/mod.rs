@@ -24,7 +24,7 @@ pub(crate) struct Args {
 enum TraceCommand {
     /// List the runs of this workspace, newest first
     Ls,
-    /// Show what one run did, in the order it did it
+    /// Show what one run did, as a tree of agents, turns and steps
     Show(ShowArgs),
     /// Remove the trace of one run
     Rm(RmArgs),
@@ -71,7 +71,7 @@ async fn execute(args: &Args, root: &Path) -> Result<String, AppError> {
         TraceCommand::Ls => Ok(render::list(&trace::list_traces(root).await?)),
         TraceCommand::Show(show) => {
             let trace = trace::read_trace(root, &show.id, show.tail).await?;
-            Ok(render::timeline(&trace, show.text))
+            Ok(render::tree(&trace, show.text))
         }
         TraceCommand::Rm(rm) => {
             trace::remove_trace(root, &rm.id).await?;

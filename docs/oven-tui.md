@@ -82,15 +82,16 @@ startup. On interactive exit the resolved session id is printed as
 
 `oven trace ls` lists the runs of this workspace — the run id, the session it
 belonged to, how much the trace holds, and when it was last written.
-`oven trace show <id>` prints one run as a timeline: what happened, how long
-it took, and which agent did it. The times are counted from the first event,
-and the `a/t` column is the agent and the turn, so a subagent's work reads
-apart from the driver's. The id may be shortened to a prefix that names one
-run and no other.
+`oven trace show <id>` prints one run as a tree: the agent, the turns it took,
+the steps of each turn, and what happened inside them. Every step says when
+it started, counted from the first event of the run, and how long it took.
+The times read in the units a person reads — `930ms`, `1.83s`, `1m 05s`,
+`1h 01m` — so a run that lasted an hour does not read as `3600.00s`.
+The id may be shortened to a prefix that names one run and no other.
 
 ```text
 run           session    size  age
-a3f9c2b1d4e7  3e4f5678  114 B  just now
+a3f9c2b1d4e7  3e4f5678  114 B  a second ago
 c8e2f1a09b6d  3e4f5678  1.1 KB  2 hours ago
 ```
 
@@ -111,24 +112,28 @@ error: the argument '--trace' cannot be used with '--query <QUERY>'
 
 ```text
 run a3f9c2b1d4e7 · session 3e4f5678 · started 2 hours ago
-  time     a/t  what happened
-    +0ms   1/1  turn started
-    +0ms   1/1  step 1 started
-  +930ms   1/1  file_read started · Read .oven/config.toml
-  +1.00s   1/1  file_read finished in 71ms
-  +1.01s   1/1  step 1 finished · tool use · provider 930ms
- +42.01s   1/1  provider asked again (retry 1) · waited 30.00s · status 429
- +42.14s   1/1  turn completed in 41.00s · 4210 in, 88 out
+agent 1
+└── turn 1
+    ├── step 1 · +0ms · 1.01s · tool use · provider 930ms
+    │   └── ✓ file_read · Read .oven/config.toml · 71ms
+    ├── step 2 · +1.01s · 31.13s · final answer · provider 31.13s
+    │   ├── ↻ provider retry 1 · waited 30.00s · status 429
+    │   └── Σ usage · 4210 in, 88 out
+    └── ✓ turn completed in 32.14s · 4210 in, 88 out
 ```
+
+The tree says what belongs to what: the work of a step sits under the step,
+the output of a call under the call, and the work of a turn under the turn.
+A subagent takes a tree of its own, so its steps read apart from the driver's.
 
 What was said — the text of the turn and its reasoning — is left out unless
 `--text` asks for it; the trace file holds all of it either way.
 
 `--tail N` shows the last N events only, for a trace too long to read at
-once. The times are still counted from the start of the run, so a tail says
-where it sits in it. A trace that holds a line the reader cannot parse — a
-run that was killed mid-write leaves one behind — still shows the events that
-were written whole, and says how many lines were left out.
+once. The steps still say when they started, counted from the start of the
+run, so a tail says where it sits in it. A trace that holds a line the reader
+cannot parse — a run that was killed mid-write leaves one behind — still shows
+the events that were written whole, and says how many lines were left out.
 
 ### `oven model`
 

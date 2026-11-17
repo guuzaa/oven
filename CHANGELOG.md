@@ -3,17 +3,23 @@
 ## [Unreleased]
 
 ### Added
-- `oven-tui`: `oven trace` reads a run back — `ls` lists the runs of the workspace, `show` prints one as a timeline of what happened and how long it took, `rm` removes one, and `prune --keep N` / `--older-than DAYS` removes the ones that are not worth keeping. The id may be shortened to a prefix that names one run and no other
-- `oven-tui`: `oven trace show --tail N` shows the last N events of a run, for a trace too long to read at once. The times are still counted from the start of the run, so a tail says where it sits in it
+- `oven-tui`: `oven --trace` writes the trace of the run beside the workspace, one event per line, in a file of the run's own — a run that did not ask for one leaves no file behind, so the trace is a tool for the run that went wrong
+- `oven-tui`: `oven trace` reads a run back — `ls` lists the runs of the workspace, `show` prints one as a tree of the agent, the turns it took, the steps of each turn and what happened inside them, so the work of a step sits under the step and the output of a call under the call. A subagent takes a tree of its own, so its steps read apart from the driver's. `rm` removes one, and `prune --keep N` / `--older-than DAYS` removes the ones that are not worth keeping. The id may be shortened to a prefix that names one run and no other
+- `oven-tui`: `oven trace show --tail N` shows the last N events of a run, for a trace too long to read at once. The steps still say when they started, counted from the start of the run, so a tail says where it sits in it
 
 ### Changed
-- `oven-app`: a trace is a run, not a session — every run writes a file of its own under `<workspace>/.oven/trace/`, so a session that is resumed writes a second trace rather than appending to the first. The first line of the file names the run: its id, the session it belonged to, and when it started
+- `oven-tui`: the times of a trace read in the units a person reads — `930ms`, `1.83s`, `1m 05s`, `1h 01m`, `1d 03h` — a step says when it started and how long it took, and an age that was written before the first minute now says how many seconds ago it was
+- `oven-app`: a trace is a run, not a session — a run that asked for a trace writes a file of its own under `<workspace>/.oven/trace/`, so a session that is resumed writes a second trace rather than appending to the first. The first line of the file names the run: its id, the session it belonged to, and when it started
 - `oven-app`: a trace that was killed mid-write is still readable — the lines that cannot be parsed are skipped and counted, so the events that were written whole are still there. Only a trace that holds nothing but damage is refused
 - `oven-app`: a write that fails does not end the trace — the event is lost, the rest of the run is still written, and the loss is reported when the run ends
+- `oven-app`: the log is a projection of the event stream — every agent event is stamped with the moment it happened and written to the `oven.agent` target (what happened at `info`, what was said at `trace`), and the agent layer stopped writing the same facts twice
+- `oven-tui`: a trace needs a session — `oven --trace` refuses to run next to `--query` and names both arguments, and a run that asks for a trace it cannot write says so in the log rather than leaving none behind in silence
 - `oven-tui`: the trace listing says what it holds — a header, the short ids the app uses elsewhere, columns that fit their content, and an age that reads `1 hour ago` and not `1 hours ago`
 - `oven-llm`: `RetryingProvider` is gone — the retry belongs to the router alone, and a provider that wraps a provider could retry twice
 - **Breaking:** `oven-proto`: `TurnEvent::ProviderRetried` says one wait instead of a summary — it carries which retry it was and how long that wait was, and there is one of them per wait
 - **Breaking:** `oven-proto`: `AgentEventEnvelope` carries `elapsed_ms` — the monotonic distance from the start of the run, next to the wall clock `at`. A clock correction no longer moves the ground under a timeline
+- **Breaking:** `oven-proto`: `ToolEvent::Finished` carries the tool that ran and how long it took, and `TurnEvent::StepFinished` carries how long the provider took
+- **Breaking:** `oven-proto`: `AppEvent::agent_with` is gone — `AppEvent::agent` takes the envelope, and the envelope carries the moment the event happened
 - `oven-agent`: a retried call says where it waited — one event per wait, carrying the moment the wait ended, so the timeline shows where the time went rather than only how long the call waited
 - `oven-tui`: an approval says what it is and where it comes from — the transcript notice and the popup both read `approval required` now, the call names itself in the future tense (`run cargo test --workspace`, not `Ran cargo test --workspace`), and the notice wears a marker and a colour of its own, so the one line that waits for the user does not read like another system note
 - `oven-agent`: a tool can say how its call reads before it runs — `Tool::request_view` gives the wording a call is asked with, and the approval a user answers carries that wording instead of the one the call leaves behind
