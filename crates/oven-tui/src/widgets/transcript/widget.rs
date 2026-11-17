@@ -44,6 +44,7 @@ const DOUBLE_CLICK_TIMEOUT: Duration = Duration::from_millis(500);
 pub(super) use super::wrap::MAX_STICKY_PROMPT_ROWS;
 const NO_OUTPUT: &str = "(no output)";
 pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
+pub(super) const PROVIDER_RETRIED: &str = "provider retried";
 /// The reason a cancelled turn gives.
 const CANCELLED_REASON: &str = "cancelled";
 
@@ -1479,6 +1480,7 @@ impl Transcript {
                     call_id,
                     result,
                     detail,
+                    ..
                 }) => {
                     let (ok, output) = match result {
                         ToolResult::Success { output } => (true, output.as_str()),
@@ -1508,6 +1510,17 @@ impl Transcript {
                 AgentEvent::Turn(TurnEvent::NoticeAppended { text }) => {
                     self.flush_streaming();
                     self.push_row(LineKind::System, notice_body(text));
+                }
+                AgentEvent::Turn(TurnEvent::ProviderRetried {
+                    attempts,
+                    waited_ms,
+                    ..
+                }) => {
+                    self.flush_streaming();
+                    self.push_row(
+                        LineKind::System,
+                        &format!("{PROVIDER_RETRIED} ({attempts} times, waited {waited_ms}ms)"),
+                    );
                 }
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
                     self.stop_live_thinking();

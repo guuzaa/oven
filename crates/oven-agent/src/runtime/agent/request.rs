@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use oven_llm::{
-    CallOptions, Client, ContentBlock, Message, ModelId, Provider, Request, Response, Role,
-    complete_streaming,
+    CallOptions, CallReport, Client, ContentBlock, Message, ModelId, Provider, Request, Response,
+    Role, collect_stream,
 };
 
 use oven_host::as_ms;
@@ -16,7 +16,7 @@ use super::notify::{ThinkingSpan, thinking_span};
 use crate::core::prompt_template;
 use oven_proto::AgentError;
 use oven_proto::EventSink;
-use oven_proto::{AgentEvent, StreamEvent};
+use oven_proto::{AgentEvent, StreamEvent, TurnEvent};
 use oven_proto::{AgentMode, ToolAccess};
 
 /// Some models write a tool call as text instead of a structured call. The
@@ -114,20 +114,21 @@ impl Agent {
     pub(super) async fn complete_response(
         &mut self,
         sink: &mut impl EventSink,
-    ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
+    ) -> Result<(Response, Option<(u64, u64)>, u64), AgentError> {
         let started = Instant::now();
         let result = self.complete_or_stream(sink).await;
+        let provider_ms = as_ms(started.elapsed());
         let stop_reason = result
             .as_ref()
             .ok()
             .and_then(|(response, _)| response.stop_reason);
         tracing::debug!(
             model = %self.model(),
-            duration_ms = as_ms(started.elapsed()),
+            duration_ms = provider_ms,
             ?stop_reason,
             "llm request complete"
         );
-        result
+        result.map(|(response, thinking)| (response, thinking, provider_ms))
     }
 
     pub(super) async fn complete_or_stream(
@@ -146,7 +147,13 @@ impl Agent {
 
         let mut thinking = ThinkingSpan::default();
         let mut calls = ToolCallGate::default();
-        let mut response = match complete_streaming(router.as_ref(), &req, &options, |event| {
+        let (outcome, report) = router.open_stream_with_report(&req, &options).await;
+        report_retries(report, sink);
+        let stream = match outcome {
+            Ok(stream) => stream,
+            Err(error) => return Err(error.into()),
+        };
+        let mut response = match collect_stream(stream, |event| {
             if let Some(text) = event.thinking_delta() {
                 if !text.is_empty() {
                     thinking.note();
@@ -253,6 +260,18 @@ impl ToolCallGate {
     }
 }
 
+/// Reports what a retried call cost, so the trace says where the time went.
+fn report_retries(report: CallReport, sink: &mut impl EventSink) {
+    if report.attempts == 0 {
+        return;
+    }
+    sink.emit(AgentEvent::Turn(TurnEvent::ProviderRetried {
+        attempts: report.attempts,
+        waited_ms: report.waited_ms,
+        status: report.status,
+    }));
+}
+
 async fn complete_unstreamed(
     req: &Request,
     options: &CallOptions,
@@ -260,7 +279,9 @@ async fn complete_unstreamed(
     sink: &mut impl EventSink,
 ) -> Result<(Response, Option<(u64, u64)>), AgentError> {
     let started = Instant::now();
-    let mut response = router.complete(req, options).await?;
+    let (outcome, report) = router.complete_with_report(req, options).await;
+    report_retries(report, sink);
+    let mut response = outcome?;
     strip_tool_call_text(&mut response);
     let reasoning = response.thinking();
     let span = (!reasoning.is_empty()).then(|| thinking_span(started.elapsed()));

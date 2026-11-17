@@ -798,11 +798,14 @@ mod tests {
                 view: ToolView::named("write"),
             })
         };
-        let finished = |call_id, result| {
+        let finished = |call_id: ToolCallId, result: ToolResult| {
+            let duration_ms = if result.executed() { 1 } else { 0 };
             AgentEvent::Tool(ToolEvent::Finished {
                 call_id,
+                name: "write".into(),
                 result,
                 detail: None,
+                duration_ms,
             })
         };
 

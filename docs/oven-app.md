@@ -372,9 +372,10 @@ and the setup wizard.
 
 ## Providers and config
 
-`provider.rs` turns config into a `Router`. Every provider with a usable key is
-registered wrapped in `RetryingProvider` (timeout, retries, exponential backoff
-from config). If nothing registers, `open` fails with
+`provider.rs` turns config into a `Router`. The router carries the retry
+policy (timeout, retries, exponential backoff from config), and every
+provider with a usable key is registered as it is. If nothing registers,
+`open` fails with
 `no API key for any provider; set provider.api_key or run /setup`, but the
 interactive path deliberately returns an *empty* router instead, so the startup
 can show the setup wizard rather than an error.

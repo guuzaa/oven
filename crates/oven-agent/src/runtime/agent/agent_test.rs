@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt, iter};
 use oven_llm::{
     CallOptions, Delta, ModelId, ModelInfo, ProviderError, ProviderName, Result as LlmResult,
-    StopReason, StreamEvent as LlmStreamEvent,
+    RetryPolicy, StopReason, StreamEvent as LlmStreamEvent,
 };
 use oven_proto::ToolCallId;
 use oven_proto::TurnId;
@@ -26,6 +26,7 @@ use oven_proto::{ApprovalDecision, LoopLimitDecision, MAX_ITERS_EXCEEDED, StepSt
 use oven_proto::{StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use serde_json::json;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -731,7 +732,7 @@ async fn event_sequence_for_tool_calling_turn() {
     let steps: Vec<(usize, StepStop)> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::Turn(TurnEvent::StepFinished { index, stop }) => Some((*index, *stop)),
+            AgentEvent::Turn(TurnEvent::StepFinished { index, stop, .. }) => Some((*index, *stop)),
             _ => None,
         })
         .collect();
@@ -2807,5 +2808,105 @@ async fn a_reply_cut_off_by_the_token_limit_fails_the_turn() {
         ),
         "the turn must say it failed: {:?}",
         sink.events
+    );
+}
+
+/// Fails the first call with a rate limit, then answers.
+struct FlakyOnce {
+    calls: AtomicU32,
+    answer: Response,
+}
+
+#[async_trait]
+impl Provider for FlakyOnce {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(ProviderError::Api {
+                status: 429,
+                body: "slow down".into(),
+            });
+        }
+        Ok(self.answer.clone())
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("flaky".into())
+    }
+}
+
+/// The retries a turn reported, in the order it reported them.
+fn reported_retries(sink: &VecEventSink) -> Vec<(u32, u64, Option<u16>)> {
+    sink.events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Turn(TurnEvent::ProviderRetried {
+                attempts,
+                waited_ms,
+                status,
+            }) => Some((*attempts, *waited_ms, *status)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn router_retrying(provider: Box<dyn Provider>) -> Router {
+    let mut router = Router::new();
+    router.register(provider);
+    router.with_retry_policy(
+        RetryPolicy::new()
+            .with_retries(1)
+            .with_base_backoff(Duration::from_millis(2)),
+    );
+    router
+}
+
+#[tokio::test]
+async fn a_retried_call_is_reported() {
+    let mut agent = Agent::new(
+        router_retrying(Box::new(FlakyOnce {
+            calls: AtomicU32::new(0),
+            answer: text_response("done"),
+        })),
+        Vec::new(),
+    );
+    let mut sink = VecEventSink::default();
+
+    run_plain(&mut agent, "go", &mut sink).await.unwrap();
+
+    assert_eq!(
+        reported_retries(&sink),
+        vec![(1, 2, Some(429))],
+        "the turn says what the retry cost"
+    );
+}
+
+#[tokio::test]
+async fn a_call_that_was_not_retried_is_not_reported() {
+    let mut agent = Agent::new(
+        router_retrying(Box::new(MockProvider::new(vec![text_response("done")]))),
+        Vec::new(),
+    );
+    let mut sink = VecEventSink::default();
+
+    run_plain(&mut agent, "go", &mut sink).await.unwrap();
+
+    assert!(
+        reported_retries(&sink).is_empty(),
+        "nothing was retried, so nothing is reported"
     );
 }

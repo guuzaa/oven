@@ -68,5 +68,10 @@ pub(crate) fn idle_levels() -> oven_app::AppLevels {
 
 #[cfg(test)]
 pub(crate) fn app_event(event: oven_app::AgentEvent) -> oven_app::AppEvent {
-    oven_app::AppEvent::agent_with(oven_app::AgentId(1), oven_app::TurnId(1), event)
+    oven_app::AppEvent::agent(oven_app::AgentEventEnvelope {
+        agent_id: oven_app::AgentId(1),
+        turn_id: oven_app::TurnId(1),
+        at: 0,
+        event,
+    })
 }

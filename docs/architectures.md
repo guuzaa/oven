@@ -46,12 +46,12 @@ documented in [`oven-proto.md`](./oven-proto.md).
 
 | Crate | Owns |
 | --- | --- |
-| `oven-llm` | `Message`, `Usage`, provider I/O |
+| `oven-llm` | `Message`, `Usage`, provider I/O, the retry policy and the report of what a call cost |
 | `oven-proto` | the protocol vocabulary: `Command`, `AppEvent`, `AppState`, `AgentEvent`, and the nouns they carry — a leaf crate on `oven-llm` and serde alone |
-| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, the history buffer and its projection rules, the `SubagentSpawner` protocol, provider retry decoration |
+| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, the history buffer and its projection rules, the `SubagentSpawner` protocol |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation, line diffs |
 | `oven-mem` | Durable memory: `Memory`, limits, id validation, file format, `MemoryStore`, catalog rendering |
-| `oven-app` | `App`, `AppBuilder`, the app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install |
+| `oven-app` | `App`, `AppBuilder`, the app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install, the tracing projection of the agent event stream |
 | `oven-tui` | render events and state; send commands; `oven mem` |
 
 `oven-proto` is the protocol layer: the vocabulary a frontend and the app
@@ -78,13 +78,13 @@ core           nouns and their pure rules: identity, events, history and its
 | `runtime` | `runtime/agent/mod.rs` | the `Agent` handle: tools, history, router, the mode and model the next step runs with |
 | | `runtime/agent/request.rs` | one provider request and its reply: streamed when the provider streams, one shot otherwise |
 | | `runtime/agent/step.rs` | one round trip and the tools it asked for: gating, approvals, calls in flight, result order |
-| | `runtime/agent/notify.rs` | the thinking window, per-call logging, the tool-output cap |
+| | `runtime/agent/notify.rs` | the thinking window, the duration of a call, the tool-output cap |
 | | `runtime/compact.rs` | compaction: replace the history with an LLM-written summary |
 | `core` | `core/history/` | the message buffer, and the rules that project it into records |
 | | `core/turn.rs` | `TurnContext`, `RunPolicy`, `Step`, `TurnOutput` |
 | | `core/interaction.rs` | the user-request protocol: one request out, one reply back |
 | | `core/tool.rs` | the `Tool` protocol: what a call is, what it may do, what it leaves behind |
-| | `core/subagent.rs`, `core/retry.rs` | the spawner protocol; `RetryingProvider` |
+| | `core/subagent.rs` | the spawner protocol |
 
 A noun a lower layer needs lives in the lower layer: `ToolCaps` is core
 vocabulary that a tool declares, so it sits in `core` rather than beside the
@@ -347,6 +347,7 @@ Emitted during one LLM turn. History and model stay on the committed `Message` /
 pub struct AgentEventEnvelope {
     pub agent_id: AgentId,
     pub turn_id: TurnId,
+    pub at: u64,
     pub event: AgentEvent,
 }
 
@@ -359,14 +360,17 @@ pub enum AgentEvent {
 }
 ```
 
-Events are not numbered and not timestamped: arrival order on the subscriber
-channel is the order things happened in, and a `ToolCallId` is the key a
-frontend pairs `Started` / `OutputDelta` / `Finished` with.
+Events are not numbered: arrival order on the subscriber channel is the
+order things happened in, and a `ToolCallId` is the key a frontend pairs
+`Started` / `OutputDelta` / `Finished` with. Each envelope carries the
+moment it happened, in Unix milliseconds, so a trace reads as a timeline
+and not only as an order.
 
 ```text
 TurnEvent     Started | Completed { usage, duration_ms }
               Prompt { text }
-              StepStarted { index } | StepFinished { index, stop }
+              StepStarted { index } | StepFinished { index, stop, provider_ms }
+              ProviderRetried { attempts, waited_ms, status }
               Cancelled { duration_ms } | Failed { error, duration_ms }
               LoopLimitReached { request_id, max_iters }
 StreamEvent   TextDelta { text } | ThinkingDelta { text }
@@ -375,11 +379,19 @@ ToolEvent     ApprovalRequested { request_id, call_id, name, view }
               QuestionAsked { request_id, question }
               Started { call_id, name, view }
               OutputDelta { call_id, stream, text }
-              Finished { call_id, result }
+              Finished { call_id, name, result, detail, duration_ms }
 ```
 
+`Finished` names the tool it ran and how long it ran, so the event stands
+on its own: a reader pairs it with `Started` by `call_id` to follow one
+call, and reads it alone to see what happened. `duration_ms` is zero when
+the call never ran — a call the gate refused, or one the user declined.
+
 `StepStarted` / `StepFinished` bound one provider round trip, `index` counting
-from 1. The calls inside one step run at the same time — `Started` is reported
+from 1. `provider_ms` is how long the provider took to answer that step,
+retries included; the step's own wall time is the gap between the two
+events' timestamps, and the tools inside it carry their own durations. The
+calls inside one step run at the same time — `Started` is reported
 for all of them, then `Finished` as each lands — so a response that asks for
 three subagents gets three working at once. Approvals are still asked one at a
 time, tools that declare `ToolCaps::exclusive` (the ones that rewrite a file
@@ -388,6 +400,14 @@ own — they wait for the calls that share the step, and those wait for them —
 and the tool results enter the history in the order the model asked for
 them, which is the order a provider expects them back in. They are what lets a driver — or a strip on screen — report loop
 progress and a stop reason without reading the agent.
+
+`ProviderRetried` says what a retried call cost: how many times it was
+asked again, how long it waited between the attempts, and the status the
+last failure reported. It is a summary of the call, not a moment in it —
+the wait happened before the answer arrived. The retry itself belongs to
+the router: the policy is the router's, and the report is what the call
+hands back, so the agent learns what the retries cost without the provider
+knowing which turn it is serving.
 
 `ThinkingDone` closes the thinking window the agent timed: it fires the moment
 the reasoning phase ends, ahead of the answer text or the tool call that ended
@@ -409,6 +429,25 @@ id.
 Tool input is not on `ToolEvent::Started`. The UI uses `ToolView`. `view.diff` paints `+/-` lines as a file diff. Full arguments live on the committed `Message`.
 
 Final assistant text is the concatenation of `TextDelta`s (or `TurnOutput` / history), not a duplicated `Done { text }`.
+
+## The log is a view of the events
+
+The agent says what it did on the event stream. The log is a projection of
+that stream: `oven-app`'s `platform::trace` turns every agent event into a
+tracing record on the `oven.agent` target, and nothing else logs what the
+agent did. A fact that is not on the stream never reaches the log, so
+looking for it afterwards means reading the events, not adding a log line
+and running the turn again.
+
+What happened is logged at `info`; what was said — the text a turn
+streams, what a tool writes — is logged at `trace`, so the default filter
+keeps the shape of a run and `RUST_LOG=oven.agent=trace` keeps every word
+of it.
+
+Tracing keeps one other job: the engine's own anomalies, the ones the
+protocol has no vocabulary for — a provider that answers with nothing, a
+tool call whose arguments are not JSON, an MCP server that will not
+connect. Those are logged where they happen.
 
 ## App events
 

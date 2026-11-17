@@ -20,7 +20,7 @@ pub use completions::CompletionsProvider;
 pub use error::{ProviderError, Result};
 pub use model::{ModelCapabilities, ModelInfo, Pricing};
 pub use responses::ResponsesProvider;
-pub use retry::RetryingProvider;
+pub use retry::{CallReport, RetryPolicy, RetryingProvider};
 pub use router::{Client, Router, RouterError, RouterHandle};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use validate::{ValidationError, estimate_input_tokens, validate_request};
@@ -98,17 +98,14 @@ pub trait Provider: Send + Sync {
 /// .unwrap();
 /// # }
 /// ```
-pub async fn complete_streaming<P, F>(
-    provider: &P,
-    req: &Request,
-    options: &CallOptions,
+/// Collects a stream into a response, calling `on_event` for every event.
+pub async fn collect_stream<F>(
+    mut stream: BoxStream<'static, Result<StreamEvent>>,
     mut on_event: F,
 ) -> Result<Response>
 where
-    P: Provider + ?Sized,
     F: FnMut(&StreamEvent),
 {
-    let mut stream = provider.stream(req, options).await?;
     let mut collector = StreamCollector::new();
     while let Some(event) = stream.next().await {
         let event = event?;
@@ -116,6 +113,20 @@ where
         collector.push(&event);
     }
     Ok(collector.finish()?)
+}
+
+pub async fn complete_streaming<P, F>(
+    provider: &P,
+    req: &Request,
+    options: &CallOptions,
+    on_event: F,
+) -> Result<Response>
+where
+    P: Provider + ?Sized,
+    F: FnMut(&StreamEvent),
+{
+    let stream = provider.stream(req, options).await?;
+    collect_stream(stream, on_event).await
 }
 
 macro_rules! impl_boxed_provider {

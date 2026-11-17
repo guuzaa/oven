@@ -517,8 +517,10 @@ fn tool_end(call_id: u64, ok: bool, output: &str) -> AppEvent {
 fn finished(call_id: u64, result: ToolResult, detail: Option<&str>) -> AppEvent {
     agent(AgentEvent::Tool(ToolEvent::Finished {
         call_id: ToolCallId(call_id),
+        name: "file_read".into(),
         result,
         detail: detail.map(str::to_string),
+        duration_ms: 1,
     }))
 }
 
@@ -898,6 +900,7 @@ fn two_edits_without_thinking(between: &[AppEvent]) -> Transcript {
     t.on_event(&agent(AgentEvent::Turn(TurnEvent::StepFinished {
         index: 1,
         stop: StepStop::ToolUse,
+        provider_ms: 10,
     })));
     t.on_event(&agent(AgentEvent::Turn(TurnEvent::StepStarted {
         index: 2,

@@ -6,8 +6,12 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oven_proto::{AgentEvent, AgentId, AppEvent, AppEventKind, EventSink, TurnId};
+use oven_proto::{
+    AgentEvent, AgentEventEnvelope, AgentId, AppEvent, AppEventKind, EventSink, TurnId,
+};
 use tokio::sync::mpsc;
+
+use crate::platform::trace;
 
 /// The channels the bus fans out to.
 ///
@@ -75,8 +79,19 @@ impl EventBus {
 
     /// Emits an agent event the runtime raises itself, rather than one it
     /// forwards from the agent's own event channel.
+    ///
+    /// Every agent event passes here: it is stamped with the moment it
+    /// happened and projected onto the log before it reaches the
+    /// subscribers.
     pub(crate) fn emit_agent(&self, agent_id: AgentId, turn_id: TurnId, event: AgentEvent) {
-        self.emit(AppEvent::agent_with(agent_id, turn_id, event).kind);
+        let envelope = AgentEventEnvelope {
+            agent_id,
+            turn_id,
+            at: oven_host::now_ms(),
+            event,
+        };
+        trace::project(&envelope);
+        self.emit(AppEvent::agent(envelope).kind);
     }
 
     pub(crate) fn emit_error(&self, message: impl Into<String>) {

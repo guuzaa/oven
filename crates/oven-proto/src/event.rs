@@ -1,7 +1,9 @@
 //! What happened while a turn ran.
 //!
 //! Every event names the agent and the turn it belongs to, so a frontend
-//! can route it to the conversation it belongs to and ignore the rest.
+//! can route it to the conversation it belongs to and ignore the rest, and
+//! carries the moment it happened, so a trace reads as a timeline and not
+//! only as an order.
 
 use oven_llm::Usage;
 use serde::{Deserialize, Serialize};
@@ -12,6 +14,8 @@ use crate::{AgentError, AgentId, Question, TodoList, ToolCallId, ToolView, TurnI
 pub struct AgentEventEnvelope {
     pub agent_id: AgentId,
     pub turn_id: TurnId,
+    /// Unix milliseconds when the event was emitted.
+    pub at: u64,
     pub event: AgentEvent,
 }
 
@@ -43,6 +47,21 @@ pub enum TurnEvent {
     StepFinished {
         index: usize,
         stop: StepStop,
+        /// How long the provider took to answer this step, retries
+        /// included. The step's own wall time is the gap between this
+        /// event's timestamp and the one that started it.
+        provider_ms: u64,
+    },
+    /// The provider had to be asked again: the call was retried, and it
+    /// waited before each retry. A summary of the call rather than a moment
+    /// in it — the wait happened before the answer arrived.
+    ProviderRetried {
+        /// How many times the call was retried.
+        attempts: u32,
+        /// How long the call waited between attempts, in milliseconds.
+        waited_ms: u64,
+        /// The status the last failed attempt reported, when it had one.
+        status: Option<u16>,
     },
     /// A chat typed while the turn was running, appended after the tool
     /// results that are about to be sent.
@@ -129,9 +148,14 @@ pub enum ToolEvent {
     },
     Finished {
         call_id: ToolCallId,
+        /// The tool the call ran, so the event stands on its own.
+        name: String,
         result: ToolResult,
         /// The body to show under the call's row once it has landed
         detail: Option<String>,
+        /// How long the call ran. Zero when it never ran: a call the gate
+        /// refused, or one the user declined.
+        duration_ms: u64,
     },
 }
 
@@ -222,6 +246,7 @@ mod tests {
         let event = AgentEvent::Turn(TurnEvent::StepFinished {
             index: 2,
             stop: StepStop::ToolUse,
+            provider_ms: 120,
         });
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), event);
