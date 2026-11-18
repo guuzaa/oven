@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.9.0] - 2026-11-18
+
+### Changed
+- **Breaking:** `RetryingProvider` is gone — the retry belongs to the router alone, and a provider
+  that wraps a provider could retry twice. `Router::with_retry_policy` takes the policy
+  (`RetryPolicy::new().with_timeout(..).with_retries(..).with_base_backoff(..)`), and the router
+  applies it to the calls it dispatches. Transport errors, rate limits, and HTTP 408/429/5xx are
+  retried; a timeout is reported as HTTP 408. Streaming retries the connection start, not events
+  already in flight. `list_models` is not retried.
+- `Client::complete_with_report` and `Client::open_stream_with_report` answer with the call and
+  the report of what the call cost: every wait it made, with the moment the wait ended and the
+  status the attempt that failed reported. A caller that wants to know where the time went asks
+  for the report alongside the answer.
+- `complete_streaming(provider, request, options, on_event)` still drives a streamed call and
+  returns the assembled `Response`. `collect_stream(stream, on_event)` is the same drive over a
+  stream the caller opened itself, for a caller that needs the report of the call that opened it.
+
 ## [0.8.0] - 2026-11-03
 
 ### Changed

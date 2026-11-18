@@ -127,22 +127,30 @@ let response = client.complete(&request, &options).await?;
 let mut stream = client.stream(&request, &options).await?;
 ```
 
-`Router` only answers which provider owns a model (`provider`, `qualify`). It does not call
-providers and it does not retry. `Client` is that table as a `Provider`.
+`Router` only answers which provider owns a model (`provider`, `qualify`). It also carries the
+retry policy, and `Client` is that table as a `Provider` that applies it.
 
 `register` takes `impl Provider + 'static`, so a concrete client does not need to be boxed first.
 `ProviderBuilder::build` still returns `Box<dyn Provider>`, and that box registers as-is.
 
-Retry and timeout are off until you wrap a provider with `RetryingProvider`. When on, transport
-errors, rate limits, and HTTP 408/429/5xx are retried. Streaming retries the connection start,
-not events already in flight. `list_models` is not retried. The backoff and the timeout wait on
-the Tokio timer.
+Retry and timeout are off until the router is given a policy. When on, transport errors, rate
+limits, and HTTP 408/429/5xx are retried. Streaming retries the connection start, not events
+already in flight. `list_models` is not retried. The backoff and the timeout wait on the Tokio
+timer.
 
 ```rust
-let deepseek = oven_llm::RetryingProvider::new(deepseek)
-    .with_timeout(std::time::Duration::from_secs(60))
-    .with_retries(2);
+let mut router = oven_llm::Router::new();
+router.with_retry_policy(
+    oven_llm::RetryPolicy::new()
+        .with_timeout(std::time::Duration::from_secs(60))
+        .with_retries(2),
+);
 ```
+
+`Client::complete_with_report` and `Client::open_stream_with_report` answer with the call and the
+report of what the call cost: every wait it made, with the moment the wait ended and the status
+the attempt that failed reported. A caller that wants to know where the time went asks for the
+report alongside the answer.
 
 `RouterHandle` shares one `Client` snapshot: `load` clones an `Arc<Client>` that stays stable
 across `.await`, and `replace` swaps the whole table. In-flight loads keep the previous providers.

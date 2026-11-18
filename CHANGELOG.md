@@ -23,7 +23,7 @@
 - `oven-agent`: `Agent::step` takes the number of the step it is, so the events it reports name the step they belong to
 - `oven-tui`: a trace no longer needs a session — every run writes one, a one-shot query included, and the first line names the session only when the run belonged to one
 - `oven-tui`: the trace listing says what it holds — a header, the short ids the app uses elsewhere, columns that fit their content, and an age that reads `1 hour ago` and not `1 hours ago`
-- `oven-llm`: `RetryingProvider` is gone — the retry belongs to the router alone, and a provider that wraps a provider could retry twice
+- `oven-llm`: `RetryingProvider` is gone — the retry belongs to the router alone, and a provider that wraps a provider could retry twice. The crate is released as `0.9.0`, and its own changelog says so
 - `oven-llm`: `StopReason` reads as the word it is written as — `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`
 - **Breaking:** `oven-proto`: `AgentEventEnvelope` carries `elapsed_ms` — the monotonic distance from the start of the run, next to the wall clock `at`. A clock correction no longer moves the ground under a timeline
 - **Breaking:** `oven-proto`: `ToolEvent::Finished` carries the tool that ran and how long it took, and `TurnEvent::StepFinished` carries how long the provider took
