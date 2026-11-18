@@ -28,6 +28,7 @@
 - **Breaking:** `oven-proto`: `AgentEventEnvelope` carries `elapsed_ms` — the monotonic distance from the start of the run, next to the wall clock `at`. A clock correction no longer moves the ground under a timeline
 - **Breaking:** `oven-proto`: `ToolEvent::Finished` carries the tool that ran and how long it took, and `TurnEvent::StepFinished` carries how long the provider took
 - **Breaking:** `oven-proto`: `AppEvent::agent_with` is gone — `AppEvent::agent` takes the envelope, and the envelope carries the moment the event happened
+- `oven-app`: a reply that cannot end the turn is a warning again — the fact is on the event stream and the projection says so at the level it deserves, not at the level of a thing that happened
 - `oven-tui`: a provider retry is a line of its own only when the wait was long — a wait under a second is the provider catching its breath, and the transcript did not need a line for it
 - `oven-agent`: a retried call says where it waited — one event per wait, carrying the moment the wait ended, so the timeline shows where the time went rather than only how long the call waited
 - `oven-tui`: an approval says what it is and where it comes from — the transcript notice and the popup both read `approval required` now, the call names itself in the future tense (`run cargo test --workspace`, not `Ran cargo test --workspace`), and the notice wears a marker and a colour of its own, so the one line that waits for the user does not read like another system note

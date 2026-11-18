@@ -926,7 +926,7 @@ fn project_turn(envelope: &AgentEventEnvelope, event: &TurnEvent) {
             usage,
             provider_ms,
         } => event!(
-            info,
+            warn,
             envelope,
             index,
             error = %error.message,
