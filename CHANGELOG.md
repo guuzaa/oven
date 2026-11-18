@@ -28,6 +28,8 @@
 - **Breaking:** `oven-proto`: `AgentEventEnvelope` carries `elapsed_ms` — the monotonic distance from the start of the run, next to the wall clock `at`. A clock correction no longer moves the ground under a timeline
 - **Breaking:** `oven-proto`: `ToolEvent::Finished` carries the tool that ran and how long it took, and `TurnEvent::StepFinished` carries how long the provider took
 - **Breaking:** `oven-proto`: `AppEvent::agent_with` is gone — `AppEvent::agent` takes the envelope, and the envelope carries the moment the event happened
+- **Breaking:** `oven-proto`: `EventSink::emit_at` has no default — a sink that does not say what it does with the moment of an event says so itself, rather than dropping it in silence
+- `oven-host`: the clock of a run is the clock of that run — the base was pinned once for the whole process, so two runs of one process counted from the start of the first one. Pinning again starts the next run's clock from zero
 - `oven-app`: a reply that cannot end the turn is a warning again — the fact is on the event stream and the projection says so at the level it deserves, not at the level of a thing that happened
 - `oven-tui`: a provider retry is a line of its own only when the wait was long — a wait under a second is the provider catching its breath, and the transcript did not need a line for it
 - `oven-agent`: a retried call says where it waited — one event per wait, carrying the moment the wait ended, so the timeline shows where the time went rather than only how long the call waited

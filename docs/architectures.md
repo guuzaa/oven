@@ -348,6 +348,7 @@ pub struct AgentEventEnvelope {
     pub agent_id: AgentId,
     pub turn_id: TurnId,
     pub at: u64,
+    pub elapsed_ms: u64,
     pub event: AgentEvent,
 }
 

@@ -10,14 +10,14 @@ pub trait EventSink {
 
     /// Emits an event that happened at a known moment.
     ///
-    /// The moment is in the monotonic milliseconds the process counts from
-    /// its start — the same clock the bus timestamps with. An event that
+    /// The moment is in the monotonic milliseconds the run counts from its
+    /// start — the same clock the bus timestamps with. An event that
     /// happened inside a call, and is only reported once the call is over,
     /// keeps the moment it happened at.
-    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent) {
-        let _ = elapsed_ms;
-        self.emit(event);
-    }
+    ///
+    /// A sink that does not care about the moment says so by ignoring it,
+    /// rather than by leaving the default to drop it silently.
+    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent);
 }
 
 #[derive(Debug, Default)]
@@ -25,6 +25,8 @@ pub struct NullSink;
 
 impl EventSink for NullSink {
     fn emit(&mut self, _event: AgentEvent) {}
+
+    fn emit_at(&mut self, _elapsed_ms: u64, _event: AgentEvent) {}
 }
 
 #[derive(Debug, Default)]
@@ -34,6 +36,10 @@ pub struct VecEventSink {
 
 impl EventSink for VecEventSink {
     fn emit(&mut self, event: AgentEvent) {
+        self.events.push(event);
+    }
+
+    fn emit_at(&mut self, _elapsed_ms: u64, event: AgentEvent) {
         self.events.push(event);
     }
 }

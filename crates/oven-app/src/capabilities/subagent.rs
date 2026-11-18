@@ -580,7 +580,20 @@ impl CountingSink {
 
 impl EventSink for CountingSink {
     fn emit(&mut self, event: AgentEvent) {
-        match &event {
+        self.count(&event);
+        self.inner.emit(event);
+    }
+
+    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent) {
+        self.count(&event);
+        self.inner.emit_at(elapsed_ms, event);
+    }
+}
+
+impl CountingSink {
+    /// Counts what the event says about the subagent's work.
+    fn count(&mut self, event: &AgentEvent) {
+        match event {
             // Started is also emitted for a refusal, which never ran. The
             // count is invocations: a success or a failure from the tool.
             AgentEvent::Tool(ToolEvent::Finished { result, .. }) if result.executed() => {
@@ -594,7 +607,6 @@ impl EventSink for CountingSink {
             }
             _ => {}
         }
-        self.inner.emit(event);
     }
 }
 
