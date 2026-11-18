@@ -63,6 +63,20 @@ pub(crate) struct EventBus {
     subscribers: Subscribers,
     /// What the trace of a run keeps, and how many traces stay.
     settings: TraceSettings,
+    /// The writer of the trace of this run, and the task that runs it.
+    trace: Arc<Mutex<Option<TraceTask>>>,
+}
+
+/// The trace of the run, and the task that writes it.
+///
+/// The task is kept so the run can wait for it: a trace that is still
+/// being written when the app leaves is a trace whose tail is missing.
+struct TraceTask {
+    /// The writer's own end of the fan-out. Dropping it closes the
+    /// channel, which is how the writer learns that the run is over.
+    sender: mpsc::UnboundedSender<Arc<AppEvent>>,
+    /// The task that writes the trace.
+    join: tokio::task::JoinHandle<()>,
 }
 
 impl EventBus {
@@ -70,6 +84,7 @@ impl EventBus {
         Self {
             subscribers: Arc::new(Mutex::new(Vec::new())),
             settings: TraceSettings::default(),
+            trace: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -102,8 +117,36 @@ impl EventBus {
         self.subscribers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(sender);
-        tokio::spawn(writer.run());
+            .push(sender.clone());
+        let join = tokio::spawn(writer.run());
+        *self.trace.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(TraceTask { sender, join });
+    }
+
+    /// Ends the trace of the run and waits for what it holds to reach the
+    /// disk.
+    ///
+    /// The writer's end of the fan-out is taken out first: with it gone the
+    /// writer sees that the run is over, flushes what it holds and stops.
+    /// Waiting for that is what keeps the tail of a run from being lost
+    /// when the app leaves right after it.
+    pub(crate) async fn finish_trace(&self) {
+        let task = self
+            .trace
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(task) = task else {
+            return;
+        };
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|sender| !sender.same_channel(&task.sender));
+        drop(task.sender);
+        if let Err(error) = task.join.await {
+            tracing::warn!(error = %error, "the trace writer did not finish");
+        }
     }
 
     pub(crate) fn emit(&self, kind: AppEventKind) {

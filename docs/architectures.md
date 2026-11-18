@@ -498,8 +498,10 @@ they belong to.
 
 A run without a session still writes a trace, and the first line says it
 had none. The file is written by a task of its own, and the events are
-buffered: they reach the disk a turn at a time, so the tail of a run can be
-missing if the app leaves right after it; everything the writer reached is on
+buffered: they reach the disk a turn at a time. The writer is waited for
+when the app leaves, so a run that ends the ordinary way leaves a whole
+trace; the tail of a run can still be missing if the app is killed; everything
+the writer reached is on
 disk. A write that fails does not end the trace: the event is lost, the rest
 of the run is still written, and the loss is reported when the run ends.
 

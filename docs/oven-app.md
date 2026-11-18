@@ -330,7 +330,9 @@ The events travel the bus the frontend watches, so the trace holds what the
 frontend saw, in the order it saw it. A run without a session writes a trace
 as well, and its first line says it had no session. The file is written by a
 task of its own, and the events are buffered: they reach the disk a turn at a
-time, so the tail of a run can be missing if the app leaves right after it. A
+time. The writer is waited for when the app leaves, so a run that ends the
+ordinary way leaves a whole trace; the tail of a run can still be missing if
+the app is killed. A
 write that fails does not end the trace: the event is lost, the rest of the run
 is still written, and the loss is reported when the run ends.
 

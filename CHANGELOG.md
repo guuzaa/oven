@@ -36,6 +36,7 @@
 - `oven-tui`: an approval notice lands above the call it asks about — in Ask mode the call only starts once the user answers, but it joined the activity that was already open, so the notice ended up under the row that showed the call. The approval now closes the activity it interrupts, and the call lands in a row of its own below the notice
 - `oven-tui`: the loop limit notice lands above the work it asks about — the turn asks before it takes another step, but the step joined the activity that was already open, so the notice ended up under the row that showed the call. The notice now closes the activity it interrupts, and the step lands in a row of its own below the notice
 - `oven-app`: a trace file cannot be read outside the trace directory — the id is checked the way a session id is checked, so an id that names a path is refused
+- `oven-app`: the trace of a run is whole when the app leaves — the writer of the trace was a task of its own that nobody waited for, so the tail of a run was lost when the app shut down right after it. The app waits for the writer now, so a run that ends the ordinary way leaves a whole trace
 - `oven-app`: a reply that cannot end the turn says what the provider sent — what it stopped for, how many blocks it sent and what it used. The facts were in a log line under a target that the documented filter turned off, so they were nowhere to be found when a model answered with nothing
 - `oven-tui`: the mode table of `oven-tui.md` renders again — two rows were joined into one
 

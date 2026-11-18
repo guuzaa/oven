@@ -6316,3 +6316,28 @@ async fn a_workspace_keeps_as_many_traces_as_the_config_says() {
         "the config says how many traces stay"
     );
 }
+
+/// The trace of a run is whole when the app has left.
+///
+/// The writer of the trace is waited for at the end of the run, so the
+/// tail of the run is on the disk and not in a task that was dropped with
+/// the runtime.
+#[tokio::test]
+async fn the_trace_of_a_run_is_whole_when_the_app_leaves() {
+    let tmp = tempdir::TempDir::new("app-runtime-trace-whole").unwrap();
+    let app = AppBuilder::new(tmp.path());
+    let mock = MockProvider::new(vec![text_response("hello")]);
+    let app = spawn_app(&app, Box::new(mock)).await;
+
+    assert_eq!(app.prompt("hi").await.unwrap(), "hello");
+    app.shutdown().await;
+
+    let traces = tmp.path().join(".oven").join("trace");
+    let names = trace_files(&traces);
+    assert_eq!(names.len(), 1, "the run left one trace behind");
+    let written = std::fs::read_to_string(traces.join(&names[0])).unwrap();
+    assert!(
+        written.contains("\"kind\":\"completed\""),
+        "the trace holds the whole run: {written}"
+    );
+}
