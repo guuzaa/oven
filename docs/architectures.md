@@ -493,8 +493,9 @@ the session file is the conversation and has to stay resumable; the trace
 is the process, and it is read, not replayed. It travels the same bus the
 frontend watches, so it holds what the frontend saw, in the order it saw
 it. It holds the whole conversation, so the trace directory carries a
-`.gitignore` that keeps the traces out of the commits of the workspace
-they belong to.
+`.gitignore` that ignores the whole directory: the traces stay out of the
+commits of the workspace they belong to, and the workspace is not reported
+as changed because a run wrote a trace into it.
 
 A run without a session still writes a trace, and the first line says it
 had none. The file is written by a task of its own, and the events are

@@ -64,7 +64,10 @@ const CUT_MARK: &str = "\n...[truncated]";
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
 /// What the trace directory tells git, so a trace never lands in a commit
 /// with the workspace it belongs to.
-const GITIGNORE: &str = "*\n!.gitignore\n";
+///
+/// The rule ignores the directory itself, so git does not report the
+/// workspace as changed because a run wrote a trace into it.
+const GITIGNORE: &str = "*\n";
 
 #[derive(Debug, Error)]
 pub enum TraceError {
@@ -446,8 +449,9 @@ pub async fn remove_trace(root: &Path, id: &str) -> Result<(), TraceError> {
 
 /// Removes the traces that are not worth keeping, and says how many went.
 ///
-/// `keep` keeps the newest traces and drops the rest. `older_than` drops
-/// the traces that were last written longer ago than that.
+/// `keep` keeps the newest traces and drops the rest; zero keeps none of
+/// them. `older_than` drops the traces that were last written longer ago
+/// than that.
 pub async fn prune_traces(
     root: &Path,
     keep: Option<usize>,
@@ -1534,6 +1538,21 @@ mod tests {
                 duration_ms: 42,
             },
         ))))
+    }
+
+    #[tokio::test]
+    async fn the_trace_directory_ignores_itself() {
+        let dir = tempdir::TempDir::new("oven-trace-gitignore").unwrap();
+        let path = write_trace(dir.path()).await;
+
+        let ignore = path.parent().unwrap().join(".gitignore");
+        let written = std::fs::read_to_string(&ignore).unwrap();
+        assert_eq!(written, "*\n", "{written}");
+        assert!(
+            !written.contains("!.gitignore"),
+            "the rule ignores the directory itself, so git does not report the workspace \
+             as changed: {written}"
+        );
     }
 
     #[tokio::test]

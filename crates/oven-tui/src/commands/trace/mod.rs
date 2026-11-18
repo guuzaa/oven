@@ -108,6 +108,13 @@ async fn execute(args: &Args, root: &Path) -> Result<String, AppError> {
                     "say what to prune: --keep or --older-than".into(),
                 ));
             }
+            if prune.keep == Some(0) {
+                return Err(AppError::Runtime(
+                    "say how many to keep: 0 would remove every trace, and 0 elsewhere means \
+                     keep them all — use --older-than to age them out"
+                        .into(),
+                ));
+            }
             let older_than = prune
                 .older_than
                 .map(|days| Duration::from_secs(days.saturating_mul(SECONDS_PER_DAY)));

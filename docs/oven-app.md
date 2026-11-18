@@ -343,8 +343,10 @@ refused. `read_trace` reads the file line by line and keeps the last events
 only when it is asked for the tail of a long trace; the tail still carries the
 moment the run started at, so the steps still say where they sit in the run.
 
-The trace directory carries a `.gitignore` that keeps the traces out of
-the commits of the workspace they belong to. `oven trace rm` and `oven trace
+The trace directory carries a `.gitignore` that ignores the whole directory,
+so the traces stay out of the commits of the workspace they belong to and the
+workspace is not reported as changed because a run wrote a trace into it.
+`oven trace rm` and `oven trace
 prune` remove the traces that are not wanted any more, and a workspace keeps
 the newest traces on its own — `trace_keep` in the config says how many, and
 `0` keeps them all.

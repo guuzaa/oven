@@ -39,6 +39,8 @@
 - `oven-app`: a trace file cannot be read outside the trace directory — the id is checked the way a session id is checked, so an id that names a path is refused
 - `oven-app`: the trace of a run is whole when the app leaves — the writer of the trace was a task of its own that nobody waited for, so the tail of a run was lost when the app shut down right after it. The app waits for the writer now, so a run that ends the ordinary way leaves a whole trace
 - `oven-tui`: `oven trace show --text` reads the words of a turn as they were said — the text arrives in pieces, and every piece became a line of its own, so an answer of a few hundred tokens was a few hundred lines of fragments. The pieces that follow each other are one line now
+- `oven-tui`: the workspace is not reported as changed because a run wrote a trace into it — the trace directory ignored everything but itself, so git saw the workspace as carrying an untracked `.oven/`. The directory ignores itself now
+- `oven-tui`: `oven trace prune --keep 0` is refused — it would remove every trace, and `0` means "keep them all" everywhere else
 - `oven-app`: a reply that cannot end the turn says what the provider sent — what it stopped for, how many blocks it sent and what it used. The facts were in a log line under a target that the documented filter turned off, so they were nowhere to be found when a model answered with nothing
 - `oven-tui`: the mode table of `oven-tui.md` renders again — two rows were joined into one
 

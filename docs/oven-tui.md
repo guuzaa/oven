@@ -98,8 +98,11 @@ c8e2f1a09b6d  3e4f5678  1.1 KB  2 hours ago
 
 `oven trace rm <id>` removes one trace, and `oven trace prune --keep N` or
 `oven trace prune --older-than DAYS` removes the ones that are not worth
-keeping. The trace directory also carries a `.gitignore`, so the traces stay
-out of the commits of the workspace they belong to.
+keeping. `--keep 0` is refused: it would remove every trace, and `0` means
+"keep them all" everywhere else. The trace directory also carries a
+`.gitignore` that ignores the whole directory, so the traces stay out of the
+commits of the workspace they belong to and the workspace is not reported as
+changed because a run wrote a trace into it.
 
 A session that is resumed writes a run of its own, so the runs of a session
 are the traces that name it. `oven trace ls --session <id>` lists only those,
