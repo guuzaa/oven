@@ -129,6 +129,42 @@ pub enum Note {
     },
 }
 
+/// Which kind of words a note holds.
+#[derive(Debug, Clone, Copy)]
+enum Words {
+    Said,
+    Thinking,
+    Output,
+}
+
+impl Words {
+    /// The note that holds these words.
+    fn note(self, text: &str) -> Note {
+        match self {
+            Words::Said => Note::Said {
+                text: text.to_owned(),
+            },
+            Words::Thinking => Note::Thinking {
+                text: text.to_owned(),
+            },
+            Words::Output => Note::Output {
+                text: text.to_owned(),
+            },
+        }
+    }
+
+    /// The words the note holds, when it holds that kind of words.
+    fn held_by(self, note: &mut Note) -> Option<&mut String> {
+        match (self, note) {
+            (Words::Said, Note::Said { text }) | (Words::Thinking, Note::Thinking { text }) => {
+                Some(text)
+            }
+            (Words::Output, Note::Output { text }) => Some(text),
+            _ => None,
+        }
+    }
+}
+
 /// The run as a forest, one root per agent. The events are put back in the
 /// order they happened first: an event the agent reports late can carry an
 /// earlier moment.
@@ -250,6 +286,35 @@ impl Builder {
     fn note_inside(&mut self, key: TurnKey, note: Note) {
         let parent = self.inside(key);
         self.push(Some(parent), Kind::Note(note));
+    }
+
+    /// Puts what was said under the turn it was said in.
+    ///
+    /// The words of a turn arrive in pieces, and a reader wants the
+    /// sentence rather than the pieces: two deltas that follow each other
+    /// are one line, not two.
+    fn say(&mut self, key: TurnKey, text: &str, words: Words) {
+        let parent = self.inside(key);
+        self.say_under(parent, text, words);
+    }
+
+    /// Puts what was said under `parent`, into the note that is already
+    /// there when it holds the same kind of words.
+    fn say_under(&mut self, parent: usize, text: &str, words: Words) {
+        let last = self
+            .slots
+            .get(parent)
+            .and_then(|slot| slot.as_ref())
+            .and_then(|slot| slot.children.last())
+            .copied();
+        if let Some(node) = last
+            && let Kind::Note(note) = &mut self.slot(node).kind
+            && let Some(held) = words.held_by(note)
+        {
+            held.push_str(text);
+            return;
+        }
+        self.push(Some(parent), Kind::Note(words.note(text)));
     }
 
     fn add(&mut self, event: &AgentEventEnvelope, at_ms: u64) {
@@ -408,10 +473,10 @@ impl Builder {
     fn stream_event(&mut self, key: TurnKey, stream: &StreamEvent) {
         match stream {
             StreamEvent::TextDelta { text } if self.with_text => {
-                self.note_inside(key, Note::Said { text: text.clone() });
+                self.say(key, text, Words::Said);
             }
             StreamEvent::ThinkingDelta { text } if self.with_text => {
-                self.note_inside(key, Note::Thinking { text: text.clone() });
+                self.say(key, text, Words::Thinking);
             }
             StreamEvent::ThinkingDone { duration_ms } => {
                 self.note_inside(
@@ -462,10 +527,7 @@ impl Builder {
                     .get(&(key.0, call_id.0))
                     .copied()
                     .unwrap_or_else(|| self.inside(key));
-                self.push(
-                    Some(parent),
-                    Kind::Note(Note::Output { text: text.clone() }),
-                );
+                self.say_under(parent, text, Words::Output);
             }
             ToolEvent::OutputDelta { .. } => {}
             ToolEvent::Finished {
@@ -857,5 +919,113 @@ mod tests {
 
         assert_eq!(forest.len(), 2);
         assert_eq!(forest[0].children[0].children.len(), 2);
+    }
+
+    /// The words of a turn, as they arrived.
+    fn said(text: &str) -> AgentEvent {
+        AgentEvent::Stream(StreamEvent::TextDelta {
+            text: text.to_owned(),
+        })
+    }
+
+    #[test]
+    fn what_was_said_is_one_line_and_not_one_line_per_piece() {
+        let forest = build(
+            &trace(vec![
+                at(
+                    1,
+                    1,
+                    0,
+                    AgentEvent::Turn(TurnEvent::StepStarted { index: 1 }),
+                ),
+                at(1, 1, 5, said("It has a ")),
+                at(1, 1, 10, said("main function.")),
+            ]),
+            true,
+        );
+
+        let step = &forest[0].children[0].children[0];
+        assert_eq!(step.children.len(), 1, "the pieces are one line");
+        let Kind::Note(Note::Said { text }) = &step.children[0].kind else {
+            panic!("what was said");
+        };
+        assert_eq!(text, "It has a main function.");
+    }
+
+    #[test]
+    fn what_was_said_keeps_its_own_line_when_something_else_came_between() {
+        let forest = build(
+            &trace(vec![
+                at(
+                    1,
+                    1,
+                    0,
+                    AgentEvent::Turn(TurnEvent::StepStarted { index: 1 }),
+                ),
+                at(1, 1, 5, said("It has a ")),
+                at(1, 1, 10, said("main function.")),
+                at(
+                    1,
+                    1,
+                    15,
+                    AgentEvent::Usage {
+                        usage: Default::default(),
+                    },
+                ),
+                at(1, 1, 20, said("And more.")),
+            ]),
+            true,
+        );
+
+        let step = &forest[0].children[0].children[0];
+        let said_lines = step
+            .children
+            .iter()
+            .filter(|child| matches!(child.kind, Kind::Note(Note::Said { .. })))
+            .count();
+        assert_eq!(said_lines, 2, "the words around the usage are two lines");
+    }
+
+    #[test]
+    fn the_output_of_a_call_is_one_line_and_not_one_line_per_piece() {
+        let forest = build(
+            &trace(vec![
+                at(
+                    1,
+                    1,
+                    0,
+                    AgentEvent::Turn(TurnEvent::StepStarted { index: 1 }),
+                ),
+                at(1, 1, 5, started(1)),
+                at(
+                    1,
+                    1,
+                    9,
+                    AgentEvent::Tool(ToolEvent::OutputDelta {
+                        call_id: ToolCallId(1),
+                        stream: ToolOutputStream::Stdout,
+                        text: "a".into(),
+                    }),
+                ),
+                at(
+                    1,
+                    1,
+                    10,
+                    AgentEvent::Tool(ToolEvent::OutputDelta {
+                        call_id: ToolCallId(1),
+                        stream: ToolOutputStream::Stdout,
+                        text: "b".into(),
+                    }),
+                ),
+            ]),
+            true,
+        );
+
+        let call = &forest[0].children[0].children[0].children[0];
+        assert_eq!(call.children.len(), 1, "the pieces are one line");
+        let Kind::Note(Note::Output { text }) = &call.children[0].kind else {
+            panic!("the output");
+        };
+        assert_eq!(text, "ab");
     }
 }

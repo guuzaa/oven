@@ -147,7 +147,7 @@ run c8e2f1a09b6d · session 3e4f5678 · started 2 hours ago
 agent 1
 └── turn 1
     ├── step 1 · +0ms
-    │   └── ✗ the model returned no answer · stop end_turn · 1 blocks · 653 tokens · provider 412ms
+    │   └── ✗ the model returned no answer · stop end_turn · 1 block · 653 tokens · provider 412ms
     └── ✗ turn failed after 412ms · the model returned no answer
 ```
 

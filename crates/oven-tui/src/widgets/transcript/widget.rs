@@ -45,6 +45,9 @@ pub(super) use super::wrap::MAX_STICKY_PROMPT_ROWS;
 const NO_OUTPUT: &str = "(no output)";
 pub(super) const LOOP_LIMIT_REACHED: &str = "agent loop limit reached";
 pub(super) const PROVIDER_RETRIED: &str = "provider retried";
+/// How long a provider had to wait before it was asked again, for the wait
+/// to be worth a line of its own in the transcript.
+const RETRY_NOTICE_MIN_WAIT_MS: u64 = 1000;
 /// The reason a cancelled turn gives.
 const CANCELLED_REASON: &str = "cancelled";
 
@@ -1515,11 +1518,16 @@ impl Transcript {
                 AgentEvent::Turn(TurnEvent::ProviderRetried {
                     retry, waited_ms, ..
                 }) => {
-                    self.flush_streaming();
-                    self.push_row(
-                        LineKind::System,
-                        &format!("{PROVIDER_RETRIED} (retry {retry}, waited {waited_ms}ms)"),
-                    );
+                    // A wait that was short is the provider catching its
+                    // breath; a wait that was long is what the user was
+                    // waiting for, and says so.
+                    if *waited_ms >= RETRY_NOTICE_MIN_WAIT_MS {
+                        self.flush_streaming();
+                        self.push_row(
+                            LineKind::System,
+                            &format!("{PROVIDER_RETRIED} (retry {retry}, waited {waited_ms}ms)"),
+                        );
+                    }
                 }
                 AgentEvent::Turn(TurnEvent::LoopLimitReached { max_iters, .. }) => {
                     self.stop_live_thinking();

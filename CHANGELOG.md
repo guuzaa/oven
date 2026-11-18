@@ -28,6 +28,7 @@
 - **Breaking:** `oven-proto`: `AgentEventEnvelope` carries `elapsed_ms` — the monotonic distance from the start of the run, next to the wall clock `at`. A clock correction no longer moves the ground under a timeline
 - **Breaking:** `oven-proto`: `ToolEvent::Finished` carries the tool that ran and how long it took, and `TurnEvent::StepFinished` carries how long the provider took
 - **Breaking:** `oven-proto`: `AppEvent::agent_with` is gone — `AppEvent::agent` takes the envelope, and the envelope carries the moment the event happened
+- `oven-tui`: a provider retry is a line of its own only when the wait was long — a wait under a second is the provider catching its breath, and the transcript did not need a line for it
 - `oven-agent`: a retried call says where it waited — one event per wait, carrying the moment the wait ended, so the timeline shows where the time went rather than only how long the call waited
 - `oven-tui`: an approval says what it is and where it comes from — the transcript notice and the popup both read `approval required` now, the call names itself in the future tense (`run cargo test --workspace`, not `Ran cargo test --workspace`), and the notice wears a marker and a colour of its own, so the one line that waits for the user does not read like another system note
 - `oven-agent`: a tool can say how its call reads before it runs — `Tool::request_view` gives the wording a call is asked with, and the approval a user answers carries that wording instead of the one the call leaves behind
@@ -37,6 +38,7 @@
 - `oven-tui`: the loop limit notice lands above the work it asks about — the turn asks before it takes another step, but the step joined the activity that was already open, so the notice ended up under the row that showed the call. The notice now closes the activity it interrupts, and the step lands in a row of its own below the notice
 - `oven-app`: a trace file cannot be read outside the trace directory — the id is checked the way a session id is checked, so an id that names a path is refused
 - `oven-app`: the trace of a run is whole when the app leaves — the writer of the trace was a task of its own that nobody waited for, so the tail of a run was lost when the app shut down right after it. The app waits for the writer now, so a run that ends the ordinary way leaves a whole trace
+- `oven-tui`: `oven trace show --text` reads the words of a turn as they were said — the text arrives in pieces, and every piece became a line of its own, so an answer of a few hundred tokens was a few hundred lines of fragments. The pieces that follow each other are one line now
 - `oven-app`: a reply that cannot end the turn says what the provider sent — what it stopped for, how many blocks it sent and what it used. The facts were in a log line under a target that the documented filter turned off, so they were nowhere to be found when a model answered with nothing
 - `oven-tui`: the mode table of `oven-tui.md` renders again — two rows were joined into one
 
