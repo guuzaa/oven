@@ -140,6 +140,10 @@ compact_threshold = 0.8
 # Provider round trips one turn may take before the loop asks to continue.
 max_iters = 200
 
+# How many traces of a workspace are kept: the newest ones, the older ones go.
+# 0 keeps them all.
+trace_keep = 2
+
 [subagents]
 enabled = true
 max_concurrent = 4
@@ -174,6 +178,8 @@ reasoning_effort = "low"
 - `max_iters` — provider round trips one turn may take before the loop asks
   whether to continue; `[subagents]` tunes delegation (`enabled`,
   `max_concurrent`, and the subagents' own `max_iters`).
+- `trace_keep` — how many traces a workspace keeps; the newest ones stay and
+  the older ones go, and `0` keeps them all.
 - `active` — the canonical vendor slug in use; aliases are accepted on read
   (`grok` → `xai`, `kimi` → `moonshot`, `glm` → `zhipu`). A known vendor needs
   only `api_key`: its endpoint, wire protocol and model catalog come from

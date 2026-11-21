@@ -628,6 +628,7 @@ pub(crate) fn spawn_runtime(
     user_config_path: Option<PathBuf>,
 ) -> App {
     let (inbox_tx, inbox_rx) = inbox::channel();
+    oven_host::pin_base();
     let subscribers = agents.events.subscribers();
     let slash = Arc::new(SlashRegistry::with_builtin());
     let provider = config
@@ -641,6 +642,10 @@ pub(crate) fn spawn_runtime(
         .map(SessionStore::current_id)
         .or_else(|| session.as_ref().map(|open| open.id().to_string()));
     let span = current_or_session_span(span_id.as_deref());
+    // The trace of the run: the agent's events, one per line, in a file of
+    // their own beside the workspace. Every run writes one, so a run that
+    // went wrong can be read back after it happened.
+    agents.events.start_trace(&root, span_id.as_deref());
     let (session_store, session_state) = if let Some(store) = attached {
         let has_content = agents.main.history().len() != 0;
         store.mark_content(has_content);

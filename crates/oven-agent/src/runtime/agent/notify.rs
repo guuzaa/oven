@@ -3,8 +3,7 @@ use std::time::{Duration, Instant};
 use oven_host::{as_ms, now_ms};
 
 use oven_proto::EventSink;
-use oven_proto::ToolCallId;
-use oven_proto::{AgentEvent, StreamEvent, ToolResult};
+use oven_proto::{AgentEvent, StreamEvent};
 
 /// Cap on a tool's output as it enters the conversation, keeping a single
 /// huge `file_read`/`bash` result from being carried (and re-encoded on
@@ -61,31 +60,10 @@ pub(super) fn thinking_span(elapsed: Duration) -> (u64, u64) {
     (now_ms().saturating_sub(duration_ms), duration_ms)
 }
 
-pub(super) fn log_tool_started(name: &str, call_id: ToolCallId) {
-    tracing::info!(name, call_id = call_id.0, "tool started");
-}
-
-pub(super) fn log_tool_finished(
-    name: &str,
-    call_id: ToolCallId,
-    result: &ToolResult,
-    started: Instant,
-) {
-    let duration_ms = as_ms(started.elapsed());
-    let (ok, error) = match result {
-        ToolResult::Success { .. } => (true, None),
-        ToolResult::Failed { error, .. } => (false, Some(error.as_str())),
-        ToolResult::Rejected { reason } => (false, Some(reason.as_str())),
-        ToolResult::Cancelled => (false, Some("cancelled")),
-    };
-    tracing::info!(
-        name,
-        call_id = call_id.0,
-        ok,
-        error,
-        duration_ms,
-        "tool finished"
-    );
+/// How long a call ran, in milliseconds. A call that ran is never reported
+/// as zero, so a zero duration means the call never ran at all.
+pub(super) fn call_duration(started: Instant) -> u64 {
+    as_ms(started.elapsed()).max(1)
 }
 
 /// Keeps the head and the tail of an oversized output, dropping only the

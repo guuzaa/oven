@@ -46,9 +46,10 @@ pub use oven_proto::{
     CallOutcome, Command, CommandResult, CompactionEvent, HistoryChangeReason, Input,
     LoopLimitDecision, ModelChoice, NodeInfo, NodeStatus, ProviderView, Question, QuestionOption,
     SessionState, ShellEvent, StepStop, StreamEvent, SubagentEvent, TodoItem, TodoList, TodoStatus,
-    ToolCallId, ToolEvent, ToolResult, ToolView, TurnEvent, TurnId, UserRequestId, UserResponse,
+    ToolCallId, ToolEvent, ToolOutputStream, ToolResult, ToolView, TurnEvent, TurnId,
+    UserRequestId, UserResponse,
 };
 pub use platform::shell::{LocalShell, ShellInput, display_shell_line};
-pub use platform::{dirs, log};
+pub use platform::{dirs, log, trace};
 
 pub mod memory;

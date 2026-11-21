@@ -517,8 +517,10 @@ fn tool_end(call_id: u64, ok: bool, output: &str) -> AppEvent {
 fn finished(call_id: u64, result: ToolResult, detail: Option<&str>) -> AppEvent {
     agent(AgentEvent::Tool(ToolEvent::Finished {
         call_id: ToolCallId(call_id),
+        name: "file_read".into(),
         result,
         detail: detail.map(str::to_string),
+        duration_ms: 1,
     }))
 }
 
@@ -898,6 +900,7 @@ fn two_edits_without_thinking(between: &[AppEvent]) -> Transcript {
     t.on_event(&agent(AgentEvent::Turn(TurnEvent::StepFinished {
         index: 1,
         stop: StepStop::ToolUse,
+        provider_ms: 10,
     })));
     t.on_event(&agent(AgentEvent::Turn(TurnEvent::StepStarted {
         index: 2,
@@ -5139,5 +5142,37 @@ fn the_whole_command_shows_once_the_turn_is_over() {
     assert!(
         rows.iter().any(|row| row.contains(&"x".repeat(40))),
         "the command shows in full: {rows:?}"
+    );
+}
+
+#[test]
+fn a_wait_the_user_felt_is_a_line_of_its_own() {
+    let mut t = Transcript::new();
+    t.on_event(&agent(AgentEvent::Turn(TurnEvent::ProviderRetried {
+        retry: 1,
+        waited_ms: 30_000,
+        status: Some(429),
+    })));
+
+    let rows = row_texts(&t);
+    assert!(
+        rows.iter().any(|row| row.contains("provider retried")),
+        "the wait is said out loud: {rows:?}"
+    );
+}
+
+#[test]
+fn a_wait_the_user_did_not_felt_is_not_a_line() {
+    let mut t = Transcript::new();
+    t.on_event(&agent(AgentEvent::Turn(TurnEvent::ProviderRetried {
+        retry: 1,
+        waited_ms: 200,
+        status: Some(429),
+    })));
+
+    let rows = row_texts(&t);
+    assert!(
+        !rows.iter().any(|row| row.contains("provider retried")),
+        "a wait that was short is not worth a line: {rows:?}"
     );
 }

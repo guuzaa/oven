@@ -338,6 +338,9 @@ impl App {
         if let Some(join) = join {
             let _ = join.await;
         }
+        // The runtime has stopped, so nothing else will be published: the
+        // trace of the run is whole once its writer has finished.
+        self.shared.events.finish_trace().await;
         self.inbox.unsent()
     }
 }

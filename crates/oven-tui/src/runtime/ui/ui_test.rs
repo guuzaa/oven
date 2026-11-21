@@ -9,7 +9,8 @@ use crate::widgets::slash_command_popup::SlashCommandPopup;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use oven_app::ProviderView;
 use oven_app::{
-    AgentEvent, AppEventKind, NodeStatus, ToolCallId, ToolEvent, ToolResult, TurnEvent, TurnId,
+    AgentEvent, AgentEventEnvelope, AppEventKind, NodeStatus, ToolCallId, ToolEvent, ToolResult,
+    TurnEvent, TurnId,
 };
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -208,8 +209,10 @@ async fn an_open_prompt_closes_when_its_request_resolves() {
     ui.apply_event(&crate::core::component::app_event(AgentEvent::Tool(
         ToolEvent::Finished {
             call_id: ToolCallId(1),
+            name: "file_read".into(),
             result: ToolResult::Cancelled,
             detail: None,
+            duration_ms: 0,
         },
     )));
     ui.apply_event(&crate::core::component::app_event(AgentEvent::Turn(
@@ -318,13 +321,15 @@ async fn a_subagents_task_opens_its_transcript() {
     let alpha = running("alpha");
     ui.views.mirror(std::slice::from_ref(&alpha));
 
-    ui.apply_event(&AppEvent::agent_with(
-        alpha.id,
-        TurnId(1),
-        AgentEvent::Turn(TurnEvent::Prompt {
+    ui.apply_event(&AppEvent::agent(AgentEventEnvelope {
+        agent_id: alpha.id,
+        turn_id: TurnId(1),
+        at: 0,
+        elapsed_ms: 0,
+        event: AgentEvent::Turn(TurnEvent::Prompt {
             text: "read note.txt and report what it says".to_string(),
         }),
-    ));
+    }));
     ui.views.focus(alpha.id);
 
     let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
@@ -752,13 +757,15 @@ async fn an_appended_prompt_leaves_the_queue_and_joins_the_transcript() {
     ui.state.busy = true;
     ui.queue.push(parked(TEST_ANSWER));
 
-    ui.apply_event(&AppEvent::agent_with(
-        ui.views.main_id(),
-        TurnId(1),
-        AgentEvent::Turn(TurnEvent::UserAppended {
+    ui.apply_event(&AppEvent::agent(AgentEventEnvelope {
+        agent_id: ui.views.main_id(),
+        turn_id: TurnId(1),
+        at: 0,
+        elapsed_ms: 0,
+        event: AgentEvent::Turn(TurnEvent::UserAppended {
             text: TEST_ANSWER.to_string(),
         }),
-    ));
+    }));
 
     assert!(ui.queue.is_empty(), "the queue row goes away");
     assert_eq!(ui.transcript.rewind_text().as_deref(), Some(TEST_ANSWER));

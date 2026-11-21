@@ -12,7 +12,7 @@ use futures::stream::FuturesUnordered;
 use oven_llm::{Message, Response, StopReason, Usage};
 
 use super::Agent;
-use super::notify::{MAX_TOOL_OUTPUT_BYTES, log_tool_finished, log_tool_started, truncate};
+use super::notify::{MAX_TOOL_OUTPUT_BYTES, call_duration, truncate};
 use crate::core::subagent::notice_message;
 use crate::core::tool::{Tool, suggest};
 use crate::core::turn::{PendingInput, Step, StepCall, TurnContext, TurnOutput};
@@ -21,7 +21,7 @@ use oven_proto::EventSink;
 use oven_proto::TodoList;
 use oven_proto::ToolCallId;
 use oven_proto::ToolView;
-use oven_proto::{AgentError, MAX_ITERS_EXCEEDED};
+use oven_proto::{AGENT_TARGET, AgentError, MAX_ITERS_EXCEEDED};
 use oven_proto::{AgentEvent, CallOutcome, ToolEvent, ToolResult, TurnEvent};
 use oven_proto::{AgentMode, ToolAccess};
 use oven_proto::{ApprovalDecision, LoopLimitDecision};
@@ -61,20 +61,25 @@ impl Agent {
     /// prompt promises the model when it asks it to batch independent calls,
     /// and it is the difference between three subagents working in parallel
     /// and three subagents working one after another.
+    ///
+    /// `index` is the step's number in its turn: the caller counts the
+    /// steps, and the events it reads back name the step they belong to.
     pub async fn step(
         &mut self,
         sink: &mut impl EventSink,
         ctx: &TurnContext,
+        index: usize,
     ) -> Result<Step, AgentError> {
-        let (response, thinking) = self.complete_response(sink).await?;
+        let (response, thinking, provider_ms) = self.complete_response(sink).await?;
         if let Some(error) = reply_problem(&response) {
-            tracing::warn!(
-                stop_reason = ?response.stop_reason,
-                blocks = response.content.len(),
-                output_tokens = response.usage.map(|usage| usage.output_tokens),
-                error = %error.message,
-                "the reply cannot end the turn"
-            );
+            sink.emit(AgentEvent::Turn(TurnEvent::StepRejected {
+                index,
+                error: error.clone(),
+                stop_reason: response.stop_reason,
+                blocks: response.content.len(),
+                usage: response.usage,
+                provider_ms,
+            }));
             return Err(error);
         }
         self.acknowledge_request_notes();
@@ -100,6 +105,7 @@ impl Agent {
                 text,
                 calls: Vec::new(),
                 usage,
+                provider_ms,
             });
         }
 
@@ -109,7 +115,12 @@ impl Agent {
         let (calls, wrote_todo) = self.commit_calls(&planned, records, sink);
         self.append_pending(ctx, sink);
         self.note_todo_round(wrote_todo);
-        Ok(Step { text, calls, usage })
+        Ok(Step {
+            text,
+            calls,
+            usage,
+            provider_ms,
+        })
     }
 
     /// Counts plan-mode tool rounds that left the checklist alone. A write
@@ -279,11 +290,12 @@ impl Agent {
                 for _ in 0..policy.max_iters {
                     index += 1;
                     sink.emit(AgentEvent::Turn(TurnEvent::StepStarted { index }));
-                    let step = self.step(sink, ctx).await?;
+                    let step = self.step(sink, ctx, index).await?;
                     self.history.note_committed();
                     sink.emit(AgentEvent::Turn(TurnEvent::StepFinished {
                         index,
                         stop: step.stop(),
+                        provider_ms: step.provider_ms,
                     }));
                     if step.is_final() {
                         let usage = self.last_turn_usage();
@@ -320,25 +332,13 @@ impl Agent {
             self.history.drop_uncommitted();
         }
 
-        let duration_ms = self.history.elapsed_ms();
-        match &result {
-            Ok(output) => {
-                tracing::info!(
-                    duration_ms,
-                    input_tokens = output.usage.input_tokens,
-                    output_tokens = output.usage.output_tokens,
-                    cache_read_tokens = output.usage.cache_read_tokens,
-                    "turn completed"
-                );
-            }
-            Err(e) if e.is_cancelled() => {
-                tracing::info!(duration_ms, "turn cancelled");
+        if let Err(error) = &result {
+            let duration_ms = self.history.elapsed_ms();
+            if error.is_cancelled() {
                 sink.emit(AgentEvent::Turn(TurnEvent::Cancelled { duration_ms }));
-            }
-            Err(e) => {
-                tracing::warn!(duration_ms, error = %e.message, "turn failed");
+            } else {
                 sink.emit(AgentEvent::Turn(TurnEvent::Failed {
-                    error: e.clone(),
+                    error: error.clone(),
                     duration_ms,
                 }));
             }
@@ -351,7 +351,7 @@ impl Agent {
         if !ctx.has_user() {
             return Err(AgentError::max_iters_exceeded());
         }
-        tracing::warn!(max_iters, "{MAX_ITERS_EXCEEDED}");
+        tracing::warn!(target: AGENT_TARGET, max_iters, "{MAX_ITERS_EXCEEDED}");
         match ctx.request_loop_continue(max_iters).await {
             Some(decision) => Ok(decision),
             None => Err(AgentError::cancelled()),
@@ -433,7 +433,7 @@ async fn gate_calls(planned: &[PlannedCall], ctx: &TurnContext) -> Result<Vec<Ga
     let mut gates = Vec::with_capacity(planned.len());
     for call in planned {
         if let Some(error) = call.argument_error.clone() {
-            tracing::warn!(tool = %call.name, %error, "tool arguments were not valid JSON");
+            tracing::warn!(target: AGENT_TARGET, tool = %call.name, %error, "tool arguments were not valid JSON");
             gates.push(Gate::Refused(ToolResult::Failed {
                 output: Some(truncate(&format!("error: {error}"), MAX_TOOL_OUTPUT_BYTES)),
                 error,
@@ -510,15 +510,15 @@ async fn run_calls(
             name: call.name.clone(),
             view: call.view.clone(),
         }));
-        log_tool_started(&call.name, call.call_id);
         match gate {
             Gate::Refused(result) => {
-                log_tool_finished(&call.name, call.call_id, &result, Instant::now());
                 pending[index] = Some(CallRecord::of(&result));
                 sink.emit(AgentEvent::Tool(ToolEvent::Finished {
                     call_id: call.call_id,
+                    name: call.name.clone(),
                     result,
                     detail: None,
+                    duration_ms: 0,
                 }));
             }
             Gate::Run(tool) => {
@@ -557,12 +557,13 @@ async fn run_calls(
                 None,
             ),
         };
-        log_tool_finished(&call.name, call.call_id, &result, started);
         pending[index] = Some(CallRecord::of(&result));
         sink.emit(AgentEvent::Tool(ToolEvent::Finished {
             call_id: call.call_id,
+            name: call.name.clone(),
             result,
             detail,
+            duration_ms: call_duration(started),
         }));
     }
     pending
@@ -575,7 +576,7 @@ async fn run_calls(
             // keeps the promise of one record per call even if that breaks.
             None => {
                 let call = &planned[index];
-                tracing::error!(tool = %call.name, "a running tool call left no record");
+                tracing::error!(target: AGENT_TARGET, tool = %call.name, "a running tool call left no record");
                 CallRecord::of(&ToolResult::Failed {
                     error: format!("tool '{}' was never run", call.name),
                     output: Some(format!("tool '{}' was never run", call.name)),

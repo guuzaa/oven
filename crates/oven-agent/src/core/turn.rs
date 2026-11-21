@@ -236,6 +236,8 @@ pub struct Step {
     pub text: String,
     pub calls: Vec<StepCall>,
     pub usage: Option<Usage>,
+    /// How long the provider took to answer this step.
+    pub provider_ms: u64,
 }
 
 impl Step {

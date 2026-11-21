@@ -33,7 +33,7 @@ pub use app_event::{
 pub use command::{Command, CommandResult};
 pub use error::{AgentError, MAX_ITERS_EXCEEDED};
 pub use event::{
-    AgentEvent, AgentEventEnvelope, CallOutcome, StepStop, StreamEvent, ToolEvent,
+    AGENT_TARGET, AgentEvent, AgentEventEnvelope, CallOutcome, StepStop, StreamEvent, ToolEvent,
     ToolOutputStream, ToolResult, TurnEvent,
 };
 pub use id::{AgentId, ToolCallId, TurnId, UserRequestId};

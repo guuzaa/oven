@@ -32,6 +32,7 @@ use crate::core::session::{
     Session, SessionStore, canonical_root, session_format_version, session_span, working_dir_notice,
 };
 use crate::platform::dirs;
+use crate::platform::trace::{TraceMode, TraceSettings};
 use crate::runtime::pending::TurnInbox;
 use crate::runtime::{AppAgents, hydrate_session, spawn_runtime};
 use oven_proto::AppId;
@@ -104,6 +105,9 @@ pub struct AppBuilder {
     instructions: Vec<InstructionDoc>,
     memory: Option<Arc<MemoryStore>>,
     mcp_connector: Arc<dyn McpConnector>,
+    /// What the trace beside the workspace keeps: the agent's events, one
+    /// per line, in a file of their own.
+    trace_mode: TraceMode,
 }
 
 impl AppBuilder {
@@ -118,6 +122,7 @@ impl AppBuilder {
             instructions: Vec::new(),
             memory: None,
             mcp_connector: Arc::new(DefaultMcpConnector),
+            trace_mode: TraceMode::Skeleton,
         }
     }
 
@@ -127,6 +132,17 @@ impl AppBuilder {
 
     pub fn config(&self) -> &AppConfig {
         &self.config
+    }
+
+    /// What the trace beside the workspace keeps.
+    ///
+    /// Every run but a quiet one writes a trace of its own, so a session
+    /// that is resumed leaves a second trace rather than a longer one. The
+    /// trace keeps the shape of the run; `TraceMode::Full` keeps every
+    /// word of it, and `TraceMode::Quiet` writes no trace at all.
+    pub fn with_trace_mode(mut self, mode: TraceMode) -> Self {
+        self.trace_mode = mode;
+        self
     }
 
     pub fn skills(&self) -> &SkillRegistry {
@@ -296,7 +312,10 @@ impl AppBuilder {
             child_system = append_memory(child_system, store);
         }
         let main_system = format!("{}\n\n{child_system}", TOP_LEVEL_PROMPT.trim());
-        let events = EventBus::new();
+        let events = EventBus::new().with_trace(TraceSettings {
+            mode: self.trace_mode,
+            keep: self.config.trace_keep,
+        });
         let (wake, wake_rx) = mpsc::unbounded_channel();
         // `wake` goes to the supervisor, which keeps the channel open; the
         // runtime only ever listens on it.

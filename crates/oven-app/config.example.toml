@@ -21,6 +21,10 @@ compact_threshold = 0.8
 # going. Bounds what a single request can spend.
 max_iters = 200
 
+# How many traces of a workspace are kept: the newest ones, the older ones go.
+# 0 keeps them all.
+trace_keep = 2
+
 # Tools to mount. Empty means the built-in default set
 # (file_read, file_write, bash).
 # tools = ["file_read", "file_write", "bash"]

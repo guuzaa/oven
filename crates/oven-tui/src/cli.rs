@@ -2,11 +2,21 @@ use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use oven_app::trace::TraceMode;
 use oven_app::{App, AppBuilder, AppError, dirs, log, session};
 
 use crate::commands::{self, Command};
 use crate::runtime::ui::Ui;
+
+/// What `--trace` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TraceFlag {
+    /// Every word of the run, the text as it streamed.
+    Full,
+    /// No trace at all.
+    Quiet,
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "oven", about = "A toy coding agent for joy only.")]
@@ -33,6 +43,12 @@ pub struct Cli {
     #[arg(long)]
     amnesia: bool,
 
+    /// What the trace of the run keeps: `full` writes every word of it,
+    /// `quiet` writes no trace at all. Without the flag the trace keeps the
+    /// shape of the run.
+    #[arg(long, value_name = "MODE")]
+    trace: Option<TraceFlag>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -58,13 +74,22 @@ impl Cli {
         }
     }
 
+    /// What the trace of the run keeps.
+    fn trace_mode(&self) -> TraceMode {
+        match self.trace {
+            Some(TraceFlag::Full) => TraceMode::Full,
+            Some(TraceFlag::Quiet) => TraceMode::Quiet,
+            None => TraceMode::Skeleton,
+        }
+    }
+
     async fn builder(&self) -> AppBuilder {
         let mut builder = App::builder(&self.dir);
         if let Err(e) = builder.load_config().await {
             eprintln!("warning: loading config: {e}");
         }
         self.load_memory(&mut builder).await;
-        builder
+        builder.with_trace_mode(self.trace_mode())
     }
 
     async fn load_memory(&self, builder: &mut AppBuilder) {
@@ -77,7 +102,10 @@ impl Cli {
         let mut builder = App::builder(&self.dir);
         builder.load_config().await?;
         self.load_memory(&mut builder).await;
-        builder.query(prompt).await
+        builder
+            .with_trace_mode(self.trace_mode())
+            .query(prompt)
+            .await
     }
 
     async fn headless(&self, prompt: &str) -> ExitCode {
@@ -122,17 +150,17 @@ impl Cli {
         } else {
             match self.query.as_deref() {
                 Some(prompt) => {
-                    tracing::info!(root = %self.dir.display(), headless = true, amnesia = self.amnesia, "oven starting");
+                    tracing::info!(root = %self.dir.display(), headless = true, amnesia = self.amnesia, trace = ?self.trace_mode(), "oven starting");
                     self.headless(prompt.trim()).await
                 }
                 None if io::stdin().is_terminal() && io::stdout().is_terminal() => {
                     let session = self.resolve_session_id().await;
-                    tracing::info!(root = %self.dir.display(), headless = false, amnesia = self.amnesia, "oven starting");
+                    tracing::info!(root = %self.dir.display(), headless = false, amnesia = self.amnesia, trace = ?self.trace_mode(), "oven starting");
                     self.interactive(session.as_deref()).await
                 }
                 None => {
                     eprintln!(
-                        "usage: oven [-C DIR] [--session ID] [--continue] [--amnesia] [-Q|--query QUERY]"
+                        "usage: oven [-C DIR] [--session ID] [--continue] [--amnesia] [--trace MODE] [-Q|--query QUERY]"
                     );
                     ExitCode::from(2)
                 }
@@ -140,5 +168,43 @@ impl Cli {
         };
         log::shutdown();
         code
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn the_trace_keeps_the_shape_of_the_run_by_default() {
+        let plain = Cli::try_parse_from(["oven"]).unwrap();
+        assert_eq!(plain.trace_mode(), TraceMode::Skeleton);
+    }
+
+    #[test]
+    fn the_trace_flag_asks_for_every_word_or_for_nothing() {
+        let full = Cli::try_parse_from(["oven", "--trace", "full"]).unwrap();
+        assert_eq!(full.trace_mode(), TraceMode::Full);
+
+        let quiet = Cli::try_parse_from(["oven", "--trace", "quiet"]).unwrap();
+        assert_eq!(quiet.trace_mode(), TraceMode::Quiet);
+    }
+
+    #[test]
+    fn a_trace_mode_it_does_not_know_is_refused() {
+        let err = Cli::try_parse_from(["oven", "--trace", "loud"]).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("full"), "{message}");
+        assert!(message.contains("quiet"), "{message}");
+    }
+
+    #[test]
+    fn a_query_keeps_its_trace_too() {
+        let err = Cli::try_parse_from(["oven", "--trace", "full", "-Q", "hi"]).unwrap();
+
+        assert_eq!(err.trace_mode(), TraceMode::Full);
     }
 }

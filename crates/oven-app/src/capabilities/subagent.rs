@@ -18,7 +18,8 @@ use oven_agent::{
 use oven_host::{as_ms, now_ms};
 use oven_llm::{ModelId, Usage};
 use oven_proto::{
-    AgentError, AgentEvent, AgentId, EventSink, NodeInfo, NodeStatus, ToolEvent, TurnEvent, TurnId,
+    AGENT_TARGET, AgentError, AgentEvent, AgentId, EventSink, NodeInfo, NodeStatus, ToolEvent,
+    TurnEvent, TurnId,
 };
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
@@ -394,7 +395,7 @@ impl SubagentSpawner for Subagents {
         let Some(name) = detached else {
             return false;
         };
-        tracing::info!(subagent = %name, "subagent moved to the background");
+        tracing::info!(target: AGENT_TARGET, subagent = %name, "subagent moved to the background");
         self.notify();
         true
     }
@@ -543,6 +544,7 @@ async fn run_subagent(owner: Arc<Subagents>, mut child: Child, done: oneshot::Se
         .find(|entry| entry.info.id == child.id)
         .map_or((0, 0), |entry| (entry.info.tool_calls, entry.info.steps));
     tracing::info!(
+        target: AGENT_TARGET,
         subagent = %child.name,
         status = status.label(),
         duration_ms,
@@ -578,7 +580,20 @@ impl CountingSink {
 
 impl EventSink for CountingSink {
     fn emit(&mut self, event: AgentEvent) {
-        match &event {
+        self.count(&event);
+        self.inner.emit(event);
+    }
+
+    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent) {
+        self.count(&event);
+        self.inner.emit_at(elapsed_ms, event);
+    }
+}
+
+impl CountingSink {
+    /// Counts what the event says about the subagent's work.
+    fn count(&mut self, event: &AgentEvent) {
+        match event {
             // Started is also emitted for a refusal, which never ran. The
             // count is invocations: a success or a failure from the tool.
             AgentEvent::Tool(ToolEvent::Finished { result, .. }) if result.executed() => {
@@ -592,7 +607,6 @@ impl EventSink for CountingSink {
             }
             _ => {}
         }
-        self.inner.emit(event);
     }
 }
 
@@ -798,11 +812,14 @@ mod tests {
                 view: ToolView::named("write"),
             })
         };
-        let finished = |call_id, result| {
+        let finished = |call_id: ToolCallId, result: ToolResult| {
+            let duration_ms = if result.executed() { 1 } else { 0 };
             AgentEvent::Tool(ToolEvent::Finished {
                 call_id,
+                name: "write".into(),
                 result,
                 detail: None,
+                duration_ms,
             })
         };
 

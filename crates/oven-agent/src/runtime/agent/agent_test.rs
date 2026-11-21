@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt, iter};
 use oven_llm::{
     CallOptions, Delta, ModelId, ModelInfo, ProviderError, ProviderName, Result as LlmResult,
-    StopReason, StreamEvent as LlmStreamEvent,
+    RetryPolicy, StopReason, StreamEvent as LlmStreamEvent,
 };
 use oven_proto::ToolCallId;
 use oven_proto::TurnId;
@@ -26,6 +26,7 @@ use oven_proto::{ApprovalDecision, LoopLimitDecision, MAX_ITERS_EXCEEDED, StepSt
 use oven_proto::{StreamEvent, ToolEvent, ToolResult, TurnEvent};
 use serde_json::json;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -731,7 +732,7 @@ async fn event_sequence_for_tool_calling_turn() {
     let steps: Vec<(usize, StepStop)> = events
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::Turn(TurnEvent::StepFinished { index, stop }) => Some((*index, *stop)),
+            AgentEvent::Turn(TurnEvent::StepFinished { index, stop, .. }) => Some((*index, *stop)),
             _ => None,
         })
         .collect();
@@ -2397,7 +2398,7 @@ async fn compact_reshows_todo_list_on_the_next_request_only() {
     assert!(content_has(last, TODO_LIST_HEADING));
 
     let ctx = turn_ctx(&agent);
-    agent.step(&mut NullSink, &ctx).await.unwrap();
+    agent.step(&mut NullSink, &ctx, 1).await.unwrap();
     assert!(!has_todo_list(&agent.build_request()));
 }
 
@@ -2807,5 +2808,191 @@ async fn a_reply_cut_off_by_the_token_limit_fails_the_turn() {
         ),
         "the turn must say it failed: {:?}",
         sink.events
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_reply_says_what_the_provider_sent() {
+    let mut response = empty_response();
+    response.content = vec![ContentBlock::thinking("the model thinks")];
+    response.usage = Some(Usage {
+        input_tokens: 1200,
+        output_tokens: 653,
+        cache_read_tokens: 0,
+        reasoning_tokens: 653,
+    });
+    let mut agent = Agent::new(
+        router_with(Box::new(MockProvider::new(vec![response]))),
+        Vec::new(),
+    );
+    let mut sink = VecEventSink::default();
+
+    run_plain(&mut agent, "hi", &mut sink).await.unwrap_err();
+
+    let rejected = sink
+        .events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::Turn(TurnEvent::StepRejected {
+                index,
+                error,
+                stop_reason,
+                blocks,
+                usage,
+                ..
+            }) => Some((*index, error.clone(), *stop_reason, *blocks, *usage)),
+            _ => None,
+        })
+        .expect("the turn says the reply was rejected");
+    assert_eq!(rejected.0, 1, "the rejection names its step");
+    assert_eq!(rejected.1.message, REPLY_EMPTY);
+    assert_eq!(rejected.2, Some(StopReason::EndTurn));
+    assert_eq!(rejected.3, 1, "the provider sent one block");
+    assert_eq!(rejected.4.map(|usage| usage.output_tokens), Some(653));
+}
+
+/// Fails the first call with a rate limit, then answers.
+struct FlakyOnce {
+    calls: AtomicU32,
+    answer: Response,
+    /// How long the answering attempt takes.
+    delay: Duration,
+}
+
+#[async_trait]
+impl Provider for FlakyOnce {
+    async fn complete(&self, _req: &Request, _options: &CallOptions) -> LlmResult<Response> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(ProviderError::Api {
+                status: 429,
+                body: "slow down".into(),
+            });
+        }
+        tokio::time::sleep(self.delay).await;
+        Ok(self.answer.clone())
+    }
+
+    async fn stream(
+        &self,
+        _req: &Request,
+        _options: &CallOptions,
+    ) -> LlmResult<BoxStream<'static, LlmResult<LlmStreamEvent>>> {
+        Err(ProviderError::Api {
+            status: 500,
+            body: "stream disabled in mock".into(),
+        })
+    }
+
+    fn resolve_model(&self, id: &ModelId) -> Option<&ModelInfo> {
+        ModelInfo::non_streaming(&self.provider_name(), id)
+    }
+
+    fn provider_name(&self) -> ProviderName {
+        ProviderName::Custom("flaky".into())
+    }
+}
+
+/// The retries a turn reported, in the order it reported them.
+fn reported_retries(sink: &VecEventSink) -> Vec<(u32, u64, Option<u16>)> {
+    sink.events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::Turn(TurnEvent::ProviderRetried {
+                retry,
+                waited_ms,
+                status,
+            }) => Some((*retry, *waited_ms, *status)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A sink that keeps the moment every event was stamped with.
+#[derive(Default)]
+struct TimedSink {
+    stamped: Vec<(u64, AgentEvent)>,
+}
+
+impl EventSink for TimedSink {
+    fn emit(&mut self, event: AgentEvent) {
+        self.stamped.push((oven_host::monotonic_ms(), event));
+    }
+
+    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent) {
+        self.stamped.push((elapsed_ms, event));
+    }
+}
+
+fn router_retrying(provider: Box<dyn Provider>) -> Router {
+    let mut router = Router::new();
+    router.register(provider);
+    router.with_retry_policy(
+        RetryPolicy::new()
+            .with_retries(1)
+            .with_base_backoff(Duration::from_millis(2)),
+    );
+    router
+}
+
+#[tokio::test]
+async fn a_retried_call_is_reported() {
+    let mut agent = Agent::new(
+        router_retrying(Box::new(FlakyOnce {
+            calls: AtomicU32::new(0),
+            answer: text_response("done"),
+            delay: Duration::ZERO,
+        })),
+        Vec::new(),
+    );
+    let mut sink = VecEventSink::default();
+
+    run_plain(&mut agent, "go", &mut sink).await.unwrap();
+
+    assert_eq!(
+        reported_retries(&sink),
+        vec![(1, 2, Some(429))],
+        "the turn says what the retry cost"
+    );
+}
+
+#[tokio::test]
+async fn a_call_that_was_not_retried_is_not_reported() {
+    let mut agent = Agent::new(
+        router_retrying(Box::new(MockProvider::new(vec![text_response("done")]))),
+        Vec::new(),
+    );
+    let mut sink = VecEventSink::default();
+
+    run_plain(&mut agent, "go", &mut sink).await.unwrap();
+
+    assert!(
+        reported_retries(&sink).is_empty(),
+        "nothing was retried, so nothing is reported"
+    );
+}
+
+#[tokio::test]
+async fn a_retry_is_stamped_where_the_wait_happened() {
+    let mut agent = Agent::new(
+        router_retrying(Box::new(FlakyOnce {
+            calls: AtomicU32::new(0),
+            answer: text_response("done"),
+            delay: Duration::from_millis(50),
+        })),
+        Vec::new(),
+    );
+    let mut sink = TimedSink::default();
+
+    run_plain(&mut agent, "go", &mut sink).await.unwrap();
+
+    let (moment, _) = sink
+        .stamped
+        .iter()
+        .find(|(_, event)| matches!(event, AgentEvent::Turn(TurnEvent::ProviderRetried { .. })))
+        .expect("the turn reports the retry");
+    let last = sink.stamped.last().expect("the turn reported something").0;
+    assert!(
+        last - moment >= 40,
+        "the retry is stamped where the wait was, not where the call ended: {moment} vs {last}"
     );
 }

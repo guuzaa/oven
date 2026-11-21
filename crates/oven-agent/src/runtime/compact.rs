@@ -11,6 +11,7 @@ use oven_llm::{
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime::agent::Agent;
+use oven_proto::AGENT_TARGET;
 use oven_proto::AgentError;
 
 pub const NOTHING_TO_COMPACT: &str = "nothing to compact";
@@ -81,6 +82,7 @@ impl Agent {
             after_tokens: usage.output_tokens,
         };
         tracing::info!(
+            target: AGENT_TARGET,
             before_tokens = stats.before_tokens,
             after_tokens = stats.after_tokens,
             "history compacted"

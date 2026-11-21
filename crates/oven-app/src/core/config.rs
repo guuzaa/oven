@@ -18,6 +18,8 @@ use thiserror::Error;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
+use crate::platform::trace::DEFAULT_KEEP;
+
 pub mod mcp;
 
 pub use mcp::McpServerConfig;
@@ -589,6 +591,9 @@ pub struct AppConfig {
     /// Provider round trips one turn may take before the loop asks whether to
     /// keep going. Bounds what a single user request can spend.
     pub max_iters: usize,
+    /// How many traces a workspace keeps: the newest ones, the older ones
+    /// go. Zero keeps them all.
+    pub trace_keep: usize,
     /// Tools to mount, by name (`file_read`, `file_write`, `bash`). Empty
     /// means the built-in default set.
     pub tools: Vec<String>,
@@ -626,6 +631,8 @@ struct RawAppConfig {
     compact_threshold: f64,
     #[serde(default = "default_max_iters")]
     max_iters: usize,
+    #[serde(default = "default_trace_keep")]
+    trace_keep: usize,
     #[serde(default)]
     tools: Vec<String>,
     #[serde(default)]
@@ -667,6 +674,7 @@ impl Serialize for AppConfig {
         map.serialize_entry("base_backoff_ms", &self.base_backoff_ms)?;
         map.serialize_entry("compact_threshold", &self.compact_threshold)?;
         map.serialize_entry("max_iters", &self.max_iters)?;
+        map.serialize_entry("trace_keep", &self.trace_keep)?;
         if !self.tools.is_empty() {
             map.serialize_entry("tools", &self.tools)?;
         }
@@ -752,6 +760,7 @@ impl<'de> Deserialize<'de> for AppConfig {
             base_backoff_ms: raw.base_backoff_ms,
             compact_threshold: raw.compact_threshold,
             max_iters: raw.max_iters,
+            trace_keep: raw.trace_keep,
             tools: raw.tools,
             subagents: raw.subagents,
             mcps: raw.mcps,
@@ -810,6 +819,9 @@ fn default_compact_threshold() -> f64 {
 }
 fn default_max_iters() -> usize {
     DEFAULT_MAX_ITERS
+}
+fn default_trace_keep() -> usize {
+    DEFAULT_KEEP
 }
 
 /// Take the incoming value when it is not the default one: a config file
@@ -873,6 +885,11 @@ impl AppConfig {
             default_compact_threshold(),
         );
         take_non_default(&mut self.max_iters, overlay.max_iters, default_max_iters());
+        take_non_default(
+            &mut self.trace_keep,
+            overlay.trace_keep,
+            default_trace_keep(),
+        );
         self.subagents.merge_fields(&overlay.subagents);
         // The tools already mounted, so the ones the overlay adds are looked
         // up once instead of once per name.
@@ -1073,6 +1090,7 @@ impl AppConfig {
             base_backoff_ms: default_base_backoff_ms(),
             compact_threshold: default_compact_threshold(),
             max_iters: default_max_iters(),
+            trace_keep: default_trace_keep(),
             tools: Vec::new(),
             subagents: SubagentConfig::default(),
             mcps: BTreeMap::new(),
@@ -1517,6 +1535,18 @@ supports_vision = true
             base.subagents.max_iters,
             SubagentConfig::default().max_iters
         );
+    }
+
+    #[test]
+    fn trace_keep_defaults_and_merges() {
+        let cfg: AppConfig = toml::from_str("[provider]\nname = \"deepseek\"\n").unwrap();
+        assert_eq!(cfg.trace_keep, DEFAULT_KEEP);
+
+        let mut base = AppConfig::default();
+        let overlay: AppConfig =
+            toml::from_str("trace_keep = 5\n[provider]\nname = \"deepseek\"\n").unwrap();
+        base.merge(overlay);
+        assert_eq!(base.trace_keep, 5);
     }
 
     #[test]

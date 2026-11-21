@@ -46,13 +46,13 @@ documented in [`oven-proto.md`](./oven-proto.md).
 
 | Crate | Owns |
 | --- | --- |
-| `oven-llm` | `Message`, `Usage`, provider I/O |
+| `oven-llm` | `Message`, `Usage`, provider I/O, the retry policy and the report of what a call cost |
 | `oven-proto` | the protocol vocabulary: `Command`, `AppEvent`, `AppState`, `AgentEvent`, and the nouns they carry — a leaf crate on `oven-llm` and serde alone |
-| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, the history buffer and its projection rules, the `SubagentSpawner` protocol, provider retry decoration |
+| `oven-agent` | `Agent`, `RouterHandle`, `TurnContext`, `RunPolicy`, turn execution, tool protocol, `Selection` (the mode and model the next step runs with), the `RequestSink` a turn asks the user on, the history buffer and its projection rules, the `SubagentSpawner` protocol |
 | `oven-host` | Workspace filesystem access, path confinement, process execution, command-output decoding, directory walking, size-based log rotation, line diffs |
 | `oven-mem` | Durable memory: `Memory`, limits, id validation, file format, `MemoryStore`, catalog rendering |
-| `oven-app` | `App`, `AppBuilder`, the app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install |
-| `oven-tui` | render events and state; send commands; `oven mem` |
+| `oven-app` | `App`, `AppBuilder`, the app runtime actor, session persistence, local-shell orchestration, subagent supervision, memory tools, `/memory`, tracing subscriber install, the tracing projection of the agent event stream |
+| `oven-tui` | render events and state; send commands; `oven mem`, `oven trace` |
 
 `oven-proto` is the protocol layer: the vocabulary a frontend and the app
 runtime share. It is a leaf — `oven-llm` for messages and tokens, serde for
@@ -78,13 +78,13 @@ core           nouns and their pure rules: identity, events, history and its
 | `runtime` | `runtime/agent/mod.rs` | the `Agent` handle: tools, history, router, the mode and model the next step runs with |
 | | `runtime/agent/request.rs` | one provider request and its reply: streamed when the provider streams, one shot otherwise |
 | | `runtime/agent/step.rs` | one round trip and the tools it asked for: gating, approvals, calls in flight, result order |
-| | `runtime/agent/notify.rs` | the thinking window, per-call logging, the tool-output cap |
+| | `runtime/agent/notify.rs` | the thinking window, the duration of a call, the tool-output cap |
 | | `runtime/compact.rs` | compaction: replace the history with an LLM-written summary |
 | `core` | `core/history/` | the message buffer, and the rules that project it into records |
 | | `core/turn.rs` | `TurnContext`, `RunPolicy`, `Step`, `TurnOutput` |
 | | `core/interaction.rs` | the user-request protocol: one request out, one reply back |
 | | `core/tool.rs` | the `Tool` protocol: what a call is, what it may do, what it leaves behind |
-| | `core/subagent.rs`, `core/retry.rs` | the spawner protocol; `RetryingProvider` |
+| | `core/subagent.rs` | the spawner protocol |
 
 A noun a lower layer needs lives in the lower layer: `ToolCaps` is core
 vocabulary that a tool declares, so it sits in `core` rather than beside the
@@ -347,6 +347,8 @@ Emitted during one LLM turn. History and model stay on the committed `Message` /
 pub struct AgentEventEnvelope {
     pub agent_id: AgentId,
     pub turn_id: TurnId,
+    pub at: u64,
+    pub elapsed_ms: u64,
     pub event: AgentEvent,
 }
 
@@ -359,14 +361,23 @@ pub enum AgentEvent {
 }
 ```
 
-Events are not numbered and not timestamped: arrival order on the subscriber
-channel is the order things happened in, and a `ToolCallId` is the key a
-frontend pairs `Started` / `OutputDelta` / `Finished` with.
+Events are not numbered: arrival order on the subscriber channel is the
+order things happened in, and a `ToolCallId` is the key a frontend pairs
+`Started` / `OutputDelta` / `Finished` with. Each envelope carries the
+moment it happened twice: `at` is the wall-clock time in Unix milliseconds,
+and `elapsed_ms` is the monotonic distance from the start of the run.
+The wall clock says when the event happened against the rest of the world;
+the monotonic one says how far into the run it happened, and it keeps
+saying so when a clock correction moves the wall clock underneath the run.
+A trace reads as a timeline and not only as an order: `oven trace show` draws
+it as a tree of agents, turns and steps, and every step says when it started.
 
 ```text
 TurnEvent     Started | Completed { usage, duration_ms }
               Prompt { text }
-              StepStarted { index } | StepFinished { index, stop }
+              StepStarted { index } | StepFinished { index, stop, provider_ms }
+              StepRejected { index, error, stop_reason, blocks, usage, provider_ms }
+              ProviderRetried { retry, waited_ms, status }
               Cancelled { duration_ms } | Failed { error, duration_ms }
               LoopLimitReached { request_id, max_iters }
 StreamEvent   TextDelta { text } | ThinkingDelta { text }
@@ -375,11 +386,19 @@ ToolEvent     ApprovalRequested { request_id, call_id, name, view }
               QuestionAsked { request_id, question }
               Started { call_id, name, view }
               OutputDelta { call_id, stream, text }
-              Finished { call_id, result }
+              Finished { call_id, name, result, detail, duration_ms }
 ```
 
+`Finished` names the tool it ran and how long it ran, so the event stands
+on its own: a reader pairs it with `Started` by `call_id` to follow one
+call, and reads it alone to see what happened. `duration_ms` is zero when
+the call never ran — a call the gate refused, or one the user declined.
+
 `StepStarted` / `StepFinished` bound one provider round trip, `index` counting
-from 1. The calls inside one step run at the same time — `Started` is reported
+from 1. `provider_ms` is how long the provider took to answer that step,
+retries included; the step's own wall time is the gap between the two
+events' timestamps, and the tools inside it carry their own durations. The
+calls inside one step run at the same time — `Started` is reported
 for all of them, then `Finished` as each lands — so a response that asks for
 three subagents gets three working at once. Approvals are still asked one at a
 time, tools that declare `ToolCaps::exclusive` (the ones that rewrite a file
@@ -388,6 +407,23 @@ own — they wait for the calls that share the step, and those wait for them —
 and the tool results enter the history in the order the model asked for
 them, which is the order a provider expects them back in. They are what lets a driver — or a strip on screen — report loop
 progress and a stop reason without reading the agent.
+
+`ProviderRetried` says what one wait cost: which retry it was, how long
+the call waited, and the status the attempt that failed reported. There is
+one event per wait, and it lands where the wait happened rather than where
+the call ended, so the gap it explains is the gap on the timeline. The
+retry itself belongs to the router: the policy is the router's, and the
+report is what the call hands back — every wait, with the moment it ended
+— so the agent learns what the retries cost without the provider knowing
+which turn it is serving.
+
+`StepRejected` says the provider answered, but the reply cannot end the
+turn: it carries no answer, or it was cut off. It names the step it
+belongs to, the reason, what the provider stopped for, how many content
+blocks it sent, what it used, and how long it took — so a reader can tell
+a model that stopped on its own from one that was cut off, and a reader of
+a trace or of the log can see the facts without the raw reply. The turn
+fails after it, and the failure says what the step rejected.
 
 `ThinkingDone` closes the thinking window the agent timed: it fires the moment
 the reasoning phase ends, ahead of the answer text or the tool call that ended
@@ -409,6 +445,94 @@ id.
 Tool input is not on `ToolEvent::Started`. The UI uses `ToolView`. `view.diff` paints `+/-` lines as a file diff. Full arguments live on the committed `Message`.
 
 Final assistant text is the concatenation of `TextDelta`s (or `TurnOutput` / history), not a duplicated `Done { text }`.
+
+## The log is a view of the events
+
+The agent says what it did on the event stream. The log is a projection of
+that stream: `oven-app`'s `platform::trace` turns every agent event into a
+tracing record on the `oven.agent` target, and nothing else logs what the
+agent did. A fact that is not on the stream never reaches the log, so
+looking for it afterwards means reading the events, not adding a log line
+and running the turn again.
+
+What happened is logged at `info`; what was said — the text a turn
+streams, what a tool writes — is logged at `trace`, so the default filter
+keeps the shape of a run and `RUST_LOG=oven.agent=trace` keeps every word
+of it.
+
+Everything about a run is logged under that one target: the agent's own
+facts, the turn the runtime opens, the shell it runs, the subagents it
+starts. `oven.agent` is the target of the protocol crate
+(`oven_proto::AGENT_TARGET`), so the layer that knows a fact and the layer
+that reads it agree on where the fact lives, and one filter keeps the whole
+run.
+
+The engine's own anomalies — the ones the protocol has no vocabulary for,
+such as a tool call whose arguments are not JSON, or an MCP server that
+will not connect — are logged where they happen, under the target of the
+crate that saw them.
+
+## The trace file
+
+The log is a view; the trace file is the record. Every agent event is
+written to `<workspace>/.oven/trace/<run-id>.jsonl`, one event per line,
+in the order the events happened. Every run writes a file of its own, so a
+session that is resumed writes a second file rather than appending to the
+first, and a file stands for exactly one run:
+
+```json
+{"kind":"run","id":"a3f9c2b1d4e7","session_id":"0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678","started_at":1712345678901}
+{"agent_id":1,"turn_id":1,"at":1712345678901,"elapsed_ms":120,"event":{"kind":"turn","data":{"kind":"started"}}}
+{"agent_id":1,"turn_id":1,"at":1712345678940,"elapsed_ms":160,"event":{"kind":"tool","data":{"kind":"started","call_id":7,"name":"file_read","view":{"summary":"Read src/lib.rs","collapse":true}}}}
+```
+
+The first line names the run: which session it belonged to and when it
+started. The lines after it are the events.
+
+The file sits beside the workspace rather than in the session file, because
+the session file is the conversation and has to stay resumable; the trace
+is the process, and it is read, not replayed. It travels the same bus the
+frontend watches, so it holds what the frontend saw, in the order it saw
+it. It holds the whole conversation, so the trace directory carries a
+`.gitignore` that ignores the whole directory: the traces stay out of the
+commits of the workspace they belong to, and the workspace is not reported
+as changed because a run wrote a trace into it.
+
+A run without a session still writes a trace, and the first line says it
+had none. The file is written by a task of its own, and the events are
+buffered: they reach the disk a turn at a time. The writer is waited for
+when the app leaves, so a run that ends the ordinary way leaves a whole
+trace; the tail of a run can still be missing if the app is killed; everything
+the writer reached is on
+disk. A write that fails does not end the trace: the event is lost, the rest
+of the run is still written, and the loss is reported when the run ends.
+
+Reading a trace skips the lines it cannot parse — a run that was killed
+mid-write leaves half a line behind — and counts them, so the events that
+were written whole are still readable. Only a trace that holds nothing but
+damage is refused.
+
+Every run but a quiet one writes a trace: the bus carries what the trace
+keeps, `TraceMode::Skeleton` by default, `TraceMode::Full` when `oven --trace
+full` asks for every word, and `TraceMode::Quiet` when `oven --trace quiet`
+asks for none. The skeleton leaves out the text as it streamed and cuts every
+body it keeps, so the space a run takes is bounded. A workspace keeps the
+newest traces — `trace_keep` in the config says how many — so the space they
+take is bounded too.
+
+A session that is resumed writes a run of its own, so the runs of a session
+are the traces that name it. The first line of a trace says the session it
+belonged to, and that is the way back from a run to the conversation it was
+part of. `oven trace ls --session <id>` lists the runs of one session and
+`oven trace show --session <id>` reads them all, oldest first. The session may
+be named by its whole id, by a prefix of it, or by the short form the listing
+shows.
+
+Reading it needs nothing but `jq`:
+
+```sh
+jq -r 'select(.event.kind == "turn") | [.at, .event.data.kind] | @tsv' .oven/trace/<id>.jsonl
+```
 
 ## App events
 

@@ -1,5 +1,5 @@
-//! `Router`：哪家 provider 拥有哪个模型。调用走 [`Client`]，重试走
-//! [`crate::RetryingProvider`]。
+//! `Router`：哪家 provider 拥有哪个模型。调用走 [`Client`]，重试由 router
+//! 自己的策略决定。
 //!
 //! 派发顺序：
 //! 1. slug 的 vendor 段匹配已注册 provider（再按 `:variant` / 目录默认协议选实现）；
@@ -19,6 +19,7 @@ use thiserror::Error;
 use crate::domain::{CallOptions, ModelId, Request, Response, StreamEvent};
 use crate::provider::catalog;
 use crate::provider::model::ModelInfo;
+use crate::provider::retry::{CallReport, RetryPolicy, with_retry, with_timeout};
 use crate::provider::{Provider, ProviderError, ProviderKind, ProviderName};
 
 /// `Router` 派发失败。调用失败是 [`ProviderError`]，由 [`Client`] 返回。
@@ -46,6 +47,8 @@ impl From<RouterError> for ProviderError {
 pub struct Router {
     /// 按注册顺序保存的 provider。
     providers: Vec<Box<dyn Provider>>,
+    /// 走这个 router 的调用怎么重试。
+    retry: RetryPolicy,
 }
 
 impl Router {
@@ -65,6 +68,17 @@ impl Router {
     pub fn register(&mut self, provider: impl Provider + 'static) -> &mut Self {
         self.providers.push(Box::new(provider));
         self
+    }
+
+    /// 设置走这个 router 的调用如何重试。
+    pub fn with_retry_policy(&mut self, policy: RetryPolicy) -> &mut Self {
+        self.retry = policy;
+        self
+    }
+
+    /// 走这个 router 的调用如何重试。
+    pub fn retry_policy(&self) -> &RetryPolicy {
+        &self.retry
     }
 
     /// 按 vendor slug 和协议登记：已有同键则替换，否则追加。
@@ -233,6 +247,49 @@ impl From<Router> for Client {
     }
 }
 
+impl Client {
+    /// 调用 `options.model` 所属的 provider，按 router 的重试策略重试，
+    /// 返回调用结果与这次调用的开销报告。
+    pub async fn complete_with_report(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> (Result<Response, ProviderError>, CallReport) {
+        let provider = match self.router.provider(&options.model) {
+            Ok(provider) => provider,
+            Err(error) => return (Err(error.into()), CallReport::default()),
+        };
+        let policy = self.router.retry_policy();
+        with_retry(policy, || async {
+            match policy.timeout() {
+                Some(limit) => with_timeout(limit, provider.complete(req, options)).await,
+                None => provider.complete(req, options).await,
+            }
+        })
+        .await
+    }
+
+    /// 打开 `options.model` 所属的 provider 的流，按 router 的重试策略重试，
+    /// 返回流与这次调用的开销报告。
+    ///
+    /// 只有建立连接这一段会被重试：流走到一半才失败的，重来一次会把已经
+    /// 送出去的答案再送一遍。
+    pub async fn open_stream_with_report(
+        &self,
+        req: &Request,
+        options: &CallOptions,
+    ) -> (
+        Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError>,
+        CallReport,
+    ) {
+        let provider = match self.router.provider(&options.model) {
+            Ok(provider) => provider,
+            Err(error) => return (Err(error.into()), CallReport::default()),
+        };
+        with_retry(self.router.retry_policy(), || provider.stream(req, options)).await
+    }
+}
+
 impl Deref for Client {
     type Target = Router;
 
@@ -248,8 +305,7 @@ impl Provider for Client {
         req: &Request,
         options: &CallOptions,
     ) -> Result<Response, ProviderError> {
-        let provider = self.router.provider(&options.model)?;
-        provider.complete(req, options).await
+        self.complete_with_report(req, options).await.0
     }
 
     async fn stream(
@@ -257,8 +313,7 @@ impl Provider for Client {
         req: &Request,
         options: &CallOptions,
     ) -> Result<BoxStream<'static, Result<StreamEvent, ProviderError>>, ProviderError> {
-        let provider = self.router.provider(&options.model)?;
-        provider.stream(req, options).await
+        self.open_stream_with_report(req, options).await.0
     }
 
     fn known_models(&self) -> Vec<ModelInfo> {

@@ -1,17 +1,40 @@
 //! What happened while a turn ran.
 //!
 //! Every event names the agent and the turn it belongs to, so a frontend
-//! can route it to the conversation it belongs to and ignore the rest.
+//! can route it to the conversation it belongs to and ignore the rest, and
+//! carries the moment it happened, so a trace reads as a timeline and not
+//! only as an order.
 
-use oven_llm::Usage;
+use oven_llm::{StopReason, Usage};
 use serde::{Deserialize, Serialize};
 
 use crate::{AgentError, AgentId, Question, TodoList, ToolCallId, ToolView, TurnId, UserRequestId};
+
+/// The target every fact about a run is logged under.
+///
+/// The agent writes the facts it has, the app writes them again as a
+/// projection of the event stream, and both land under this target: one
+/// filter then keeps the whole run, and nothing about it is lost between
+/// the layer that knows and the layer that reads.
+pub const AGENT_TARGET: &str = "oven.agent";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentEventEnvelope {
     pub agent_id: AgentId,
     pub turn_id: TurnId,
+    /// Unix milliseconds when the event was emitted.
+    pub at: u64,
+    /// Milliseconds since the run started, on a monotonic clock.
+    ///
+    /// `at` says when the event happened in wall time, which is what orders
+    /// it against the rest of the world. This says how far into the run it
+    /// happened, and it keeps saying so when the wall clock is corrected
+    /// under the run's feet.
+    ///
+    /// A line written before the clock landed reads as zero: a moment the
+    /// trace cannot place, kept rather than dropped.
+    #[serde(default)]
+    pub elapsed_ms: u64,
     pub event: AgentEvent,
 }
 
@@ -43,6 +66,44 @@ pub enum TurnEvent {
     StepFinished {
         index: usize,
         stop: StepStop,
+        /// How long the provider took to answer this step, retries
+        /// included. The step's own wall time is the gap between this
+        /// event's timestamp and the one that started it.
+        provider_ms: u64,
+    },
+    /// The provider answered, but the reply cannot end the turn: it
+    /// carries no answer, or it was cut off.
+    ///
+    /// It says what the provider sent, so a reader can tell a model that
+    /// stopped on its own from one that was cut off, and a reader of a
+    /// trace can see the facts without the log.
+    StepRejected {
+        /// Which step of the turn it was.
+        index: usize,
+        /// Why the reply could not end the turn.
+        error: AgentError,
+        /// What the provider said it stopped for.
+        stop_reason: Option<StopReason>,
+        /// How many content blocks the reply carried.
+        blocks: usize,
+        /// What the provider said it used.
+        usage: Option<Usage>,
+        /// How long the provider took to answer.
+        provider_ms: u64,
+    },
+    /// The provider had to be asked again: the call waited, and then asked
+    /// once more. One event per wait, so the timeline shows where the wait
+    /// was rather than only how long it was.
+    ProviderRetried {
+        /// Which retry this was: 1 is the first time the call was asked
+        /// again. A line written before the field was renamed calls it
+        /// `attempts`, and reads all the same.
+        #[serde(alias = "attempts")]
+        retry: u32,
+        /// How long the call waited before asking again, in milliseconds.
+        waited_ms: u64,
+        /// The status the attempt that failed reported, when it had one.
+        status: Option<u16>,
     },
     /// A chat typed while the turn was running, appended after the tool
     /// results that are about to be sent.
@@ -129,9 +190,14 @@ pub enum ToolEvent {
     },
     Finished {
         call_id: ToolCallId,
+        /// The tool the call ran, so the event stands on its own.
+        name: String,
         result: ToolResult,
         /// The body to show under the call's row once it has landed
         detail: Option<String>,
+        /// How long the call ran. Zero when it never ran: a call the gate
+        /// refused, or one the user declined.
+        duration_ms: u64,
     },
 }
 
@@ -222,6 +288,26 @@ mod tests {
         let event = AgentEvent::Turn(TurnEvent::StepFinished {
             index: 2,
             stop: StepStop::ToolUse,
+            provider_ms: 120,
+        });
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), event);
+    }
+
+    #[test]
+    fn a_rejected_reply_survives_the_wire() {
+        let event = AgentEvent::Turn(TurnEvent::StepRejected {
+            index: 1,
+            error: AgentError::from("the model returned no answer"),
+            stop_reason: Some(StopReason::EndTurn),
+            blocks: 1,
+            usage: Some(Usage {
+                input_tokens: 1200,
+                output_tokens: 653,
+                cache_read_tokens: 0,
+                reasoning_tokens: 653,
+            }),
+            provider_ms: 410,
         });
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), event);

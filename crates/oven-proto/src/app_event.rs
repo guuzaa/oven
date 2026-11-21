@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentEvent, AgentEventEnvelope, AgentId, HistoryChangeReason, TurnId, UserRequestId};
+use crate::{AgentEventEnvelope, AgentId, HistoryChangeReason, UserRequestId};
 
 /// The app a frontend is talking to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -125,14 +125,6 @@ impl AppEvent {
 
     pub fn agent(event: AgentEventEnvelope) -> Self {
         Self::new(AppEventKind::Agent(event))
-    }
-
-    pub fn agent_with(agent_id: AgentId, turn_id: TurnId, event: AgentEvent) -> Self {
-        Self::new(AppEventKind::Agent(AgentEventEnvelope {
-            agent_id,
-            turn_id,
-            event,
-        }))
     }
 }
 

@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::core::config::ConfigError;
 use crate::core::session::SessionError;
+use crate::platform::trace::TraceError;
 use oven_llm::ProviderError;
 use oven_proto::AgentError;
 
@@ -11,6 +12,8 @@ pub enum AppError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Session(#[from] SessionError),
+    #[error(transparent)]
+    Trace(#[from] TraceError),
     #[error(transparent)]
     Agent(#[from] AgentError),
     #[error("app channel closed")]

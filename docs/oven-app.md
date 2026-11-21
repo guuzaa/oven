@@ -62,7 +62,7 @@ on `Shared`, so it never queues behind the turn it wants to affect.
 | `src/core/provider.rs` | routers, clients and the credential-free listings. |
 | `src/core/complete.rs` | the one prefix rule every completion list shares. |
 | `src/memory.rs` | the memory operations `/memory` and `oven mem` share. |
-| `src/platform/` | paths, the tracing subscriber, the local shell envelope. |
+| `src/platform/` | paths, the tracing subscriber, the trace of a run, the local shell envelope. |
 
 `App` has three constructors:
 
@@ -311,6 +311,62 @@ a session that was opened but never persisted stays invisible to `/continue`.
 root to the session id most recently used there, so `--continue` answers one
 question with one read.
 
+## The trace of a run
+
+`platform/trace.rs` writes the run down twice. The tracing projection turns every
+agent event into a log line on the `oven.agent` target, and the trace file
+records the same events in full, one JSONL line per event, at
+`<workspace>/.oven/trace/<run-id>.jsonl`. The log is the readable view; the
+file is the record, and it is what a question about a finished run is answered
+from.
+
+The unit of a trace file is the run, not the session: every run writes a file
+of its own, so a session that is resumed writes a second file rather than
+appending to the first, and a file stands for exactly one run. The first line
+of the file names the run — its id, the session it belonged to and when it
+started — and the lines after it are the events.
+
+The events travel the bus the frontend watches, so the trace holds what the
+frontend saw, in the order it saw it. A run without a session writes a trace
+as well, and its first line says it had no session. The file is written by a
+task of its own, and the events are buffered: they reach the disk a turn at a
+time. The writer is waited for when the app leaves, so a run that ends the
+ordinary way leaves a whole trace; the tail of a run can still be missing if
+the app is killed. A
+write that fails does not end the trace: the event is lost, the rest of the run
+is still written, and the loss is reported when the run ends.
+
+Reading a trace skips the lines it cannot parse — a run that was killed
+mid-write leaves half a line behind — and counts them, so the events that were
+written whole are still readable. Only a trace that holds nothing but damage is
+refused. `read_trace` reads the file line by line and keeps the last events
+only when it is asked for the tail of a long trace; the tail still carries the
+moment the run started at, so the steps still say where they sit in the run.
+
+The trace directory carries a `.gitignore` that ignores the whole directory,
+so the traces stay out of the commits of the workspace they belong to and the
+workspace is not reported as changed because a run wrote a trace into it.
+`oven trace rm` and `oven trace
+prune` remove the traces that are not wanted any more, and a workspace keeps
+the newest traces on its own — `trace_keep` in the config says how many, and
+`0` keeps them all.
+
+Writing it is not opt-in: every run but a quiet one writes a trace of its
+own. The bus carries what the trace keeps (`EventBus::with_trace`), and
+`AppBuilder::with_trace_mode` says it — `TraceMode::Skeleton` by default,
+`TraceMode::Full` for `oven --trace full` in the CLI, and `TraceMode::Quiet`
+for `oven --trace quiet`, which writes no trace at all. The skeleton keeps
+every event but the text as it streamed, and cuts every body it keeps, so the
+space a run takes is bounded. The full trace keeps every word.
+
+The failures of a run are in the log as well: the projection writes every
+agent event under the `oven.agent` target, and the default filter keeps what
+happened at `info`. A reply the provider sent that cannot end the turn — it
+carries no answer, or it was cut off — is reported as it happens, with what
+the provider stopped for, how many blocks it sent and what it used, so the
+question "why did the model answer with nothing" is answered by the log of
+the run that failed, with or without a trace file.
+
 ## Slash commands
 
 `commands/` defines one trait and eight built-ins; the registry is extensible:
@@ -372,9 +428,10 @@ and the setup wizard.
 
 ## Providers and config
 
-`provider.rs` turns config into a `Router`. Every provider with a usable key is
-registered wrapped in `RetryingProvider` (timeout, retries, exponential backoff
-from config). If nothing registers, `open` fails with
+`provider.rs` turns config into a `Router`. The router carries the retry
+policy (timeout, retries, exponential backoff from config), and every
+provider with a usable key is registered as it is. If nothing registers,
+`open` fails with
 `no API key for any provider; set provider.api_key or run /setup`, but the
 interactive path deliberately returns an *empty* router instead, so the startup
 can show the setup wizard rather than an error.

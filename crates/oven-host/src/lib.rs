@@ -13,5 +13,5 @@ pub use diff::{changed_lines, numbered};
 pub use filesystem::{PathError, resolve_within, write, write_atomic};
 pub use frontmatter::split_frontmatter;
 pub use rotate::{LOG_DROPPED_LINES, LOG_FLUSH_FAILED, LOG_MAX_BYTES, LOG_MAX_FILES, RotatingFile};
-pub use time::{as_ms, now_ms};
+pub use time::{as_ms, monotonic_ms, now_ms, pin_base};
 pub use walk::{WalkEntry, WalkError, walk_all, walk_all_stream, walk_dir, walk_dir_stream};

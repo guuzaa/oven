@@ -4,10 +4,15 @@
 //! the fan-out: one bus, many subscribers, and the sink a turn publishes
 //! through.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use oven_proto::{AgentEvent, AgentId, AppEvent, AppEventKind, EventSink, TurnId};
+use oven_proto::{
+    AgentEvent, AgentEventEnvelope, AgentId, AppEvent, AppEventKind, EventSink, TurnId,
+};
 use tokio::sync::mpsc;
+
+use crate::platform::trace::{self, TraceSettings, TraceWriter};
 
 /// The channels the bus fans out to.
 ///
@@ -41,6 +46,11 @@ impl EventSink for BusSink {
     fn emit(&mut self, event: AgentEvent) {
         self.bus.emit_agent(self.agent_id, self.turn_id, event);
     }
+
+    fn emit_at(&mut self, elapsed_ms: u64, event: AgentEvent) {
+        self.bus
+            .emit_agent_at(self.agent_id, self.turn_id, elapsed_ms, event);
+    }
 }
 
 /// Every event a frontend can see, fanning out to each subscriber.
@@ -51,17 +61,92 @@ impl EventSink for BusSink {
 #[derive(Clone)]
 pub(crate) struct EventBus {
     subscribers: Subscribers,
+    /// What the trace of a run keeps, and how many traces stay.
+    settings: TraceSettings,
+    /// The writer of the trace of this run, and the task that runs it.
+    trace: Arc<Mutex<Option<TraceTask>>>,
+}
+
+/// The trace of the run, and the task that writes it.
+///
+/// The task is kept so the run can wait for it: a trace that is still
+/// being written when the app leaves is a trace whose tail is missing.
+struct TraceTask {
+    /// The writer's own end of the fan-out. Dropping it closes the
+    /// channel, which is how the writer learns that the run is over.
+    sender: mpsc::UnboundedSender<Arc<AppEvent>>,
+    /// The task that writes the trace.
+    join: tokio::task::JoinHandle<()>,
 }
 
 impl EventBus {
     pub(crate) fn new() -> Self {
         Self {
             subscribers: Arc::new(Mutex::new(Vec::new())),
+            settings: TraceSettings::default(),
+            trace: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// What the trace of a run keeps, and how many traces stay.
+    ///
+    /// A quiet run writes no trace at all; the others keep the shape of
+    /// the run or every word of it.
+    pub(crate) fn with_trace(mut self, settings: TraceSettings) -> Self {
+        self.settings = settings;
+        self
     }
 
     pub(crate) fn subscribers(&self) -> Subscribers {
         self.subscribers.clone()
+    }
+
+    /// Records the agent's events into a trace of their own, one per line.
+    ///
+    /// The trace travels the same bus the frontend watches, so the file
+    /// holds what the frontend saw, in the order it saw it. A run that was
+    /// asked to be quiet has no writer, so it leaves no file behind.
+    pub(crate) fn start_trace(&self, root: &Path, session_id: Option<&str>) {
+        let run = trace::start(session_id);
+        let path = trace::trace_path(root, run.id());
+        let (sender, events) = mpsc::unbounded_channel();
+        let Some(writer) = TraceWriter::new(root.to_path_buf(), run, events, self.settings) else {
+            return;
+        };
+        tracing::info!(path = %path.display(), "the run writes its trace");
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(sender.clone());
+        let join = tokio::spawn(writer.run());
+        *self.trace.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(TraceTask { sender, join });
+    }
+
+    /// Ends the trace of the run and waits for what it holds to reach the
+    /// disk.
+    ///
+    /// The writer's end of the fan-out is taken out first: with it gone the
+    /// writer sees that the run is over, flushes what it holds and stops.
+    /// Waiting for that is what keeps the tail of a run from being lost
+    /// when the app leaves right after it.
+    pub(crate) async fn finish_trace(&self) {
+        let task = self
+            .trace
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(task) = task else {
+            return;
+        };
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|sender| !sender.same_channel(&task.sender));
+        drop(task.sender);
+        if let Err(error) = task.join.await {
+            tracing::warn!(error = %error, "the trace writer did not finish");
+        }
     }
 
     pub(crate) fn emit(&self, kind: AppEventKind) {
@@ -75,8 +160,35 @@ impl EventBus {
 
     /// Emits an agent event the runtime raises itself, rather than one it
     /// forwards from the agent's own event channel.
+    ///
+    /// Every agent event passes here: it is stamped with the moment it
+    /// happened and projected onto the log before it reaches the
+    /// subscribers.
     pub(crate) fn emit_agent(&self, agent_id: AgentId, turn_id: TurnId, event: AgentEvent) {
-        self.emit(AppEvent::agent_with(agent_id, turn_id, event).kind);
+        self.emit_agent_at(agent_id, turn_id, oven_host::monotonic_ms(), event);
+    }
+
+    /// Emits an agent event that happened at a known moment.
+    ///
+    /// An event the agent only reports once the call it belongs to is over
+    /// keeps the moment it happened at, so the timeline it lands on says
+    /// where the time went.
+    pub(crate) fn emit_agent_at(
+        &self,
+        agent_id: AgentId,
+        turn_id: TurnId,
+        elapsed_ms: u64,
+        event: AgentEvent,
+    ) {
+        let envelope = AgentEventEnvelope {
+            agent_id,
+            turn_id,
+            at: wall_clock_at(elapsed_ms),
+            elapsed_ms,
+            event,
+        };
+        trace::project(&envelope);
+        self.emit(AppEvent::agent(envelope).kind);
     }
 
     pub(crate) fn emit_error(&self, message: impl Into<String>) {
@@ -84,4 +196,9 @@ impl EventBus {
         tracing::warn!(error = %message, "app error");
         self.emit(AppEventKind::Error { message });
     }
+}
+
+/// The wall-clock time of a moment on the monotonic clock.
+fn wall_clock_at(elapsed_ms: u64) -> u64 {
+    oven_host::now_ms().saturating_sub(oven_host::monotonic_ms().saturating_sub(elapsed_ms))
 }

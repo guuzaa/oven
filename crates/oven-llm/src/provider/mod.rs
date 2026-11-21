@@ -20,7 +20,7 @@ pub use completions::CompletionsProvider;
 pub use error::{ProviderError, Result};
 pub use model::{ModelCapabilities, ModelInfo, Pricing};
 pub use responses::ResponsesProvider;
-pub use retry::RetryingProvider;
+pub use retry::{CallReport, RetryPolicy, RetryWait};
 pub use router::{Client, Router, RouterError, RouterHandle};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub use validate::{ValidationError, estimate_input_tokens, validate_request};
@@ -80,6 +80,23 @@ pub trait Provider: Send + Sync {
     fn provider_name(&self) -> ProviderName;
 }
 
+/// Collects a stream into a response, calling `on_event` for every event.
+pub async fn collect_stream<F>(
+    mut stream: BoxStream<'static, Result<StreamEvent>>,
+    mut on_event: F,
+) -> Result<Response>
+where
+    F: FnMut(&StreamEvent),
+{
+    let mut collector = StreamCollector::new();
+    while let Some(event) = stream.next().await {
+        let event = event?;
+        on_event(&event);
+        collector.push(&event);
+    }
+    Ok(collector.finish()?)
+}
+
 /// 发送一次流式请求，逐个事件交给 `on_event`，并把整条流拼成一条完整的
 /// [`Response`]。
 ///
@@ -102,20 +119,14 @@ pub async fn complete_streaming<P, F>(
     provider: &P,
     req: &Request,
     options: &CallOptions,
-    mut on_event: F,
+    on_event: F,
 ) -> Result<Response>
 where
     P: Provider + ?Sized,
     F: FnMut(&StreamEvent),
 {
-    let mut stream = provider.stream(req, options).await?;
-    let mut collector = StreamCollector::new();
-    while let Some(event) = stream.next().await {
-        let event = event?;
-        on_event(&event);
-        collector.push(&event);
-    }
-    Ok(collector.finish()?)
+    let stream = provider.stream(req, options).await?;
+    collect_stream(stream, on_event).await
 }
 
 macro_rules! impl_boxed_provider {

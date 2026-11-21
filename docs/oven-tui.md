@@ -30,6 +30,7 @@ platform    the OS the screens draw on
 | `cli` | `cli.rs` | clap parsing and mode selection |
 | `commands` | `commands/prompt.rs` | the line prompts a subcommand asks, and the terminal's no-echo input |
 | | `commands/model/` | `oven model`: `ls`, `add`, `rm` |
+| | `commands/trace/` | `oven trace`: `ls`, `show`, `rm`, `prune` |
 | `runtime` | `runtime/ui/mod.rs` | the `Ui` handle: the event loop, the queue flush, quitting |
 | | `runtime/ui/event.rs` | app events onto the screen: routing, overlay prompts, a submitted prompt |
 | | `runtime/ui/keys.rs` | terminal input: paste bursts, mouse, the key router, the `Esc` decision |
@@ -59,8 +60,11 @@ happens; `core` performs none.
 `Cli` has these flags: `--cd/-C` (workspace root, global so it may follow a
 subcommand), `--session/-s` and `--continue/-c` (mutually exclusive session
 selection; an explicit id wins, otherwise the newest session for this root),
-`--query/-Q`, and `--amnesia` (skip loading durable memory for this run, in
-both interactive and headless modes; `oven mem` is unaffected).
+`--query/-Q`, `--amnesia` (skip loading durable memory for this run, in
+both interactive and headless modes; `oven mem` is unaffected), and `--trace
+MODE` (what the trace of the run keeps: `full` writes every word of it,
+`quiet` writes no trace at all; without the flag the trace keeps the shape of
+the run).
 
 `Cli::run` dispatches to one of four modes:
 
@@ -74,6 +78,90 @@ both interactive and headless modes; `oven mem` is unaffected).
 Warnings from config loading and session resolution go to stderr and never abort
 startup. On interactive exit the resolved session id is printed as
 ` oven -s {id}` so it can be copied back into a shell.
+
+### `oven trace`
+
+`oven trace ls` lists the runs of this workspace — the run id, the session it
+belonged to, how much the trace holds, and when it was last written.
+`oven trace show <id>` prints one run as a tree: the agent, the turns it took,
+the steps of each turn, and what happened inside them. Every step says when
+it started, counted from the first event of the run, and how long it took.
+The times read in the units a person reads — `930ms`, `1.83s`, `1m 05s`,
+`1h 01m` — so a run that lasted an hour does not read as `3600.00s`.
+The id may be shortened to a prefix that names one run and no other.
+
+```text
+run           session    size  age
+a3f9c2b1d4e7  3e4f5678  114 B  a second ago
+c8e2f1a09b6d  3e4f5678  1.1 KB  2 hours ago
+```
+
+`oven trace rm <id>` removes one trace, and `oven trace prune --keep N` or
+`oven trace prune --older-than DAYS` removes the ones that are not worth
+keeping. `--keep 0` is refused: it would remove every trace, and `0` means
+"keep them all" everywhere else. The trace directory also carries a
+`.gitignore` that ignores the whole directory, so the traces stay out of the
+commits of the workspace they belong to and the workspace is not reported as
+changed because a run wrote a trace into it.
+
+A session that is resumed writes a run of its own, so the runs of a session
+are the traces that name it. `oven trace ls --session <id>` lists only those,
+and `oven trace show --session <id>` prints them all, oldest first, one tree
+after the other. The session may be named by its whole id, by a prefix of it,
+or by the short form the listing shows.
+
+Every run but a quiet one writes a trace of its own, so a run that went wrong
+can be read back after it happened. The trace keeps the shape of the run: what
+happened, when, and how it ended. The text as it streamed is left out, because
+it is the bulk of a trace and the session file holds it already; `oven --trace
+full` writes the whole run, word by word, for the runs that have to be read
+that way, and `oven --trace quiet` writes no trace at all.
+
+A workspace keeps the newest traces and drops the older ones, so the
+space they take is bounded: `trace_keep` in the config says how many, and
+`0` keeps them all.
+
+Everything about a run is also logged under the `oven.agent` target, so the
+default filter keeps the failures and `RUST_LOG=oven.agent=trace` keeps
+every word of the run. The log is at `~/.oven/logs/oven.log`.
+
+```text
+run a3f9c2b1d4e7 · session 3e4f5678 · started 2 hours ago
+agent 1
+└── turn 1
+    ├── step 1 · +0ms · 1.01s · tool use · provider 930ms
+    │   └── ✓ file_read · Read .oven/config.toml · 71ms
+    ├── step 2 · +1.01s · 31.13s · final answer · provider 31.13s
+    │   ├── ↻ provider retry 1 · waited 30.00s · status 429
+    │   └── Σ usage · 4210 in, 88 out
+    └── ✓ turn completed in 32.14s · 4210 in, 88 out
+```
+
+The tree says what belongs to what: the work of a step sits under the step,
+the output of a call under the call, and the work of a turn under the turn.
+A subagent takes a tree of its own, so its steps read apart from the driver's.
+
+A reply the provider sent that cannot end the turn — it carries no answer,
+or it was cut off — sits under the step it rejected, and says what the
+provider sent:
+
+```text
+run c8e2f1a09b6d · session 3e4f5678 · started 2 hours ago
+agent 1
+└── turn 1
+    ├── step 1 · +0ms
+    │   └── ✗ the model returned no answer · stop end_turn · 1 block · 653 tokens · provider 412ms
+    └── ✗ turn failed after 412ms · the model returned no answer
+```
+
+What was said — the text of the turn and its reasoning — is left out unless
+`--text` asks for it; the trace file holds all of it either way.
+
+`--tail N` shows the last N events only, for a trace too long to read at
+once. The steps still say when they started, counted from the start of the
+run, so a tail says where it sits in it. A trace that holds a line the reader
+cannot parse — a run that was killed mid-write leaves one behind — still shows
+the events that were written whole, and says how many lines were left out.
 
 ### `oven model`
 
