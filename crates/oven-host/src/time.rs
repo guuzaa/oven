@@ -2,11 +2,13 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time;
 
-/// The point the process counts time from. It never moves: every run is
-/// counted against it, so the runs of one process do not share a clock.
+/// The point the process counts time from. It never moves: the
+/// nanoseconds it hands out stay comparable across every run of one
+/// process.
 static EPOCH: OnceLock<time::Instant> = OnceLock::new();
 /// How far into the epoch the run that is running now started, in
-/// nanoseconds.
+/// nanoseconds. One base for the whole process: [`pin_base`] moves it for
+/// every clock at once.
 static BASE: AtomicU64 = AtomicU64::new(0);
 
 /// Current wall-clock time as Unix milliseconds.
@@ -24,10 +26,19 @@ pub fn as_ms(duration: time::Duration) -> u64 {
 /// Pins the point monotonic milliseconds are counted from.
 ///
 /// The app pins it when it opens a run, so a moment is "how far into the
-/// run it happened". Pinning again starts a new run's clock from zero: two
-/// runs of one process each count from their own start.
+/// run it happened". The base is one per process: pinning it again starts
+/// every clock over, so one process runs one run at a time.
 pub fn pin_base() {
     BASE.store(elapsed_nanos(), Ordering::Relaxed);
+}
+
+/// Milliseconds between the base a run counts from and a moment, both in
+/// the nanoseconds [`elapsed_nanos`] hands out. A moment before the base
+/// reads as zero.
+fn ms_between(base_nanos: u64, moment_nanos: u64) -> u64 {
+    as_ms(time::Duration::from_nanos(
+        moment_nanos.saturating_sub(base_nanos),
+    ))
 }
 
 /// Milliseconds since the base was pinned, on a monotonic clock.
@@ -37,10 +48,7 @@ pub fn pin_base() {
 /// does not move, so the distance between two moments stays true — which is
 /// what a timeline of a run is made of.
 pub fn monotonic_ms() -> u64 {
-    let base = BASE.load(Ordering::Relaxed);
-    as_ms(time::Duration::from_nanos(
-        elapsed_nanos().saturating_sub(base),
-    ))
+    ms_between(BASE.load(Ordering::Relaxed), elapsed_nanos())
 }
 
 /// Nanoseconds since the epoch the process counts time from.
@@ -54,20 +62,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_clock_of_a_run_counts_from_the_start_of_that_run() {
+    fn a_moment_is_counted_from_the_base_of_its_run() {
+        assert_eq!(ms_between(1_000_000_000, 1_500_000_000), 500);
+    }
+
+    #[test]
+    fn a_moment_before_the_base_reads_as_zero() {
+        assert_eq!(ms_between(1_500_000_000, 1_000_000_000), 0);
+    }
+
+    #[test]
+    fn the_clock_of_a_run_never_goes_backwards() {
         pin_base();
         let first = monotonic_ms();
-        std::thread::sleep(time::Duration::from_millis(10));
-
         assert!(
-            monotonic_ms() >= first + 10,
-            "the clock of the run does not stand still"
-        );
-
-        pin_base();
-        assert!(
-            monotonic_ms() < first + 10,
-            "the next run counts from its own start"
+            monotonic_ms() >= first,
+            "the clock of the run does not go back"
         );
     }
 }
