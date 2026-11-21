@@ -82,6 +82,15 @@ impl Glyph {
             Glyph::Text(owned) => text.push_str(owned),
         }
     }
+
+    /// Extra columns the terminal advances for the glyph beyond the buffer.
+    fn drift(&self) -> usize {
+        match self {
+            Glyph::Char(ch) => drift_of(*ch),
+            Glyph::Fixed(text) => text.chars().map(drift_of).sum(),
+            Glyph::Text(text) => text.chars().map(drift_of).sum(),
+        }
+    }
 }
 
 /// A glyph for text that is not one character of the source.
@@ -1017,6 +1026,10 @@ struct TableMeta {
     style: Style,
     indent: Vec<Atom>,
     widths: Vec<usize>,
+    /// The most extra columns any row's glyphs advance on the terminal beyond
+    /// the buffer. The column budget reserves it, so a laid row never re-wraps
+    /// outside its columns.
+    drift: usize,
     gaps: Vec<Vec<Atom>>,
     /// Each cell is a list of lines. A `<br>` starts a new line.
     cells: Vec<Vec<Vec<Atom>>>,
@@ -1032,6 +1045,7 @@ fn render_table(lines: &[&str]) -> Vec<MdLine> {
     let raw: Vec<Vec<CellRange>> = lines.iter().map(|line| cell_ranges(line)).collect();
     let cols = raw.iter().map(Vec::len).max().unwrap_or(0).max(1);
     let mut widths = vec![MIN_COL_WIDTH; cols];
+    let mut drift = 0;
     let mut rows = Vec::with_capacity(lines.len());
     for (idx, (line, mut ranges)) in lines.iter().zip(raw).enumerate() {
         let style = row_style(idx);
@@ -1053,6 +1067,7 @@ fn render_table(lines: &[&str]) -> Vec<MdLine> {
                 let natural = cell.iter().flatten().map(|line| atom_width(line)).max();
                 *width = (*width).max(natural.unwrap_or(0));
             }
+            drift = drift.max(row_drift(cells.iter().flatten()));
         }
         rows.push((*line, ranges, cells));
     }
@@ -1076,7 +1091,7 @@ fn render_table(lines: &[&str]) -> Vec<MdLine> {
                     })
                 })
                 .collect();
-            compose_row(line, &widths, style, separator, cells, &ranges)
+            compose_row(line, &widths, drift, style, separator, cells, &ranges)
         })
         .collect()
 }
@@ -1091,9 +1106,18 @@ fn row_style(idx: usize) -> Style {
     }
 }
 
+/// The extra columns a row's glyphs advance on the terminal beyond the buffer.
+fn row_drift<'a>(cells: impl Iterator<Item = &'a Vec<Vec<Atom>>>) -> usize {
+    cells
+        .flat_map(|cell| cell.iter().flatten())
+        .map(|atom| atom.text.drift())
+        .sum()
+}
+
 fn compose_row(
     line: &str,
     widths: &[usize],
+    drift: usize,
     style: Style,
     separator: bool,
     cells: Vec<Vec<Vec<Atom>>>,
@@ -1148,6 +1172,7 @@ fn compose_row(
             style,
             indent,
             widths: widths.to_vec(),
+            drift,
             gaps,
             cells,
         }),
@@ -1162,12 +1187,17 @@ pub(super) fn layout_table(md: &MdLine, avail: usize) -> Option<Vec<MdLine>> {
     let gap_w: usize = table.gaps.iter().map(|gap| atom_width(gap)).sum();
     let natural: usize = table.widths.iter().sum();
     let stacked = table.cells.iter().any(|cell| cell.len() > 1);
-    if !stacked && indent_w + gap_w + natural <= avail {
+    if !stacked && indent_w + gap_w + natural + table.drift <= avail {
         return None;
     }
+    // `take_cols` budgets by terminal width, so the columns reserve the drift:
+    // a row that only fits the buffer would be re-wrapped outside its columns.
     let widths = fit_columns(
         &table.widths,
-        avail.saturating_sub(indent_w).saturating_sub(gap_w),
+        avail
+            .saturating_sub(indent_w)
+            .saturating_sub(gap_w)
+            .saturating_sub(table.drift),
     );
     let wrapped: Vec<Vec<Vec<Atom>>> = table
         .cells
@@ -1572,6 +1602,13 @@ fn width_of(ch: char) -> usize {
     }
 }
 
+/// Extra columns the terminal advances for `ch` beyond the buffer: ambiguous
+/// characters are one cell wide and two on a CJK terminal, and the wrap budget
+/// in `take_cols` counts the wider width.
+fn drift_of(ch: char) -> usize {
+    ch.width_cjk().unwrap_or(0).saturating_sub(width_of(ch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1768,6 +1805,35 @@ mod tests {
             ranges.extend(line.copy_window(0, 0, width, true).ranges_between(0, width));
         }
         assert_eq!(emit_ranges(&body.source, &ranges), body.source.as_ref());
+    }
+
+    #[test]
+    fn ambiguous_glyphs_stay_inside_the_wrap_budget() {
+        const TEXT: &str = "| k | v |\n| --- | --- |\n| a | foo—barbaz—qux—zug—zip |";
+        let lines = render_markdown(TEXT);
+        let body = lines
+            .iter()
+            .find(|line| line.source.contains("foo—"))
+            .expect("body row");
+        // `take_cols` re-wraps anything wider than `avail` counting ambiguous
+        // glyphs double, which would spill the row outside its columns.
+        for (avail, want) in [
+            (20, vec!["a  foo—barbaz—qu", "   x—zug—zip"]),
+            (25, vec!["a  foo—barbaz—qux—zug", "   —zip"]),
+        ] {
+            let laid = layout_table(body, avail).expect("column wrap");
+            let shown: Vec<String> = laid.iter().map(show).collect();
+            assert_eq!(shown, want, "at avail {avail}");
+            for line in &laid {
+                let terminal: usize = line
+                    .spans
+                    .iter()
+                    .flat_map(|span| span.content.chars())
+                    .map(|ch| width_of(ch) + drift_of(ch))
+                    .sum();
+                assert!(terminal <= avail, "row exceeds {avail} at {shown:?}");
+            }
+        }
     }
 
     #[test]
