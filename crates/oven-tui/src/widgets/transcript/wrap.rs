@@ -1342,6 +1342,8 @@ mod tests {
     fn invisible_glyphs_ride_through_a_wrap() {
         const ACUTE: &str = "0123456789e\u{301}xy";
         const FAMILY: &str = "👨‍👩‍👧‍👦 family";
+        const CLUSTER: &str = "👨‍👩‍👧‍👦";
+        const ZWJ: char = '\u{200d}';
         // Width 15 breaks between `e` and its combining acute; the acute must
         // stay with its base instead of vanishing.
         let shown = wrapped_markdown(ACUTE, 15);
@@ -1350,8 +1352,16 @@ mod tests {
         assert_eq!(shown[1].trim_start(), "xy", "{shown:?}");
         let shown = wrapped_markdown("\u{301}abc", 20);
         assert!(shown[0].ends_with("\u{301}abc"), "{shown:?}");
-        let joined = wrapped_markdown(FAMILY, 80).join("");
-        assert!(joined.contains(FAMILY), "{joined:?}");
+        // Width 8 splits the family emoji across rows: a joiner lands on each
+        // side of the break, and the rows still reassemble into the cluster.
+        let shown = wrapped_markdown(FAMILY, 8);
+        assert!(shown.len() > 1, "{shown:?}");
+        assert!(
+            shown[0].contains(ZWJ) && shown[1].contains(ZWJ),
+            "{shown:?}"
+        );
+        let trimmed: String = shown.iter().map(|row| row.trim_start()).collect();
+        assert!(trimmed.contains(CLUSTER), "{trimmed:?}");
     }
 
     #[test]
