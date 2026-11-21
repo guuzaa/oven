@@ -54,6 +54,9 @@ use crate::platform::id;
 /// How many characters a run id has: short enough to type, long enough to
 /// be a name of its own.
 const RUN_ID_LEN: usize = 12;
+/// Which shape of the trace file this build writes, and the newest one it
+/// reads.
+pub const TRACE_FORMAT_VERSION: u32 = 1;
 /// How many traces a workspace keeps: the newest ones, the older ones go.
 pub const DEFAULT_KEEP: usize = 2;
 /// How much of a body the trace of a run keeps.
@@ -84,6 +87,11 @@ pub enum TraceError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(
+        "trace: {path}: the file was written by a newer oven: format {version}, this build reads {}",
+        TRACE_FORMAT_VERSION
+    )]
+    NewerFormat { path: PathBuf, version: u32 },
     #[error("trace: '{id}' is not a plain name")]
     BadId { id: String },
     #[error("trace: no run named '{id}'")]
@@ -162,6 +170,12 @@ pub fn trace_path(root: &Path, id: &str) -> PathBuf {
 pub enum TraceRun {
     /// One run of the agent: the trace of one invocation.
     Run {
+        /// Which shape of the trace file this is. A header written before
+        /// the format named its version reads as 0 and is read as it
+        /// stands; one from a newer oven is refused with its version
+        /// rather than misread.
+        #[serde(default)]
+        version: u32,
         /// The id of the run: the name of its file.
         id: String,
         /// The session the run belonged to, when it belonged to one.
@@ -172,6 +186,13 @@ pub enum TraceRun {
 }
 
 impl TraceRun {
+    /// Which shape of the trace file this is.
+    pub fn version(&self) -> u32 {
+        match self {
+            TraceRun::Run { version, .. } => *version,
+        }
+    }
+
     /// The id of the run.
     pub fn id(&self) -> &str {
         match self {
@@ -197,6 +218,7 @@ impl TraceRun {
 /// Starts the trace of a run: what the run is called.
 pub fn start(session_id: Option<&str>) -> TraceRun {
     TraceRun::Run {
+        version: TRACE_FORMAT_VERSION,
         id: new_run_id(),
         session_id: session_id.map(str::to_owned),
         started_at: oven_host::now_ms(),
@@ -407,6 +429,12 @@ async fn read_file(path: &Path, tail: Option<usize>) -> Result<Trace, TraceError
                 events.push_back(envelope);
             }
             Err(error) => match serde_json::from_str::<TraceRun>(&line) {
+                Ok(run) if run.version() > TRACE_FORMAT_VERSION => {
+                    return Err(TraceError::NewerFormat {
+                        path: path.to_path_buf(),
+                        version: run.version(),
+                    });
+                }
                 Ok(run) => trace.run = Some(run),
                 Err(_) => {
                     trace.damaged += 1;
@@ -1387,6 +1415,123 @@ mod tests {
         );
     }
 
+    /// The trace as the first build that wrote traces wrote it: a header
+    /// without a version, envelopes without `elapsed_ms`, and `attempts`
+    /// where the field is now called `retry`.
+    const LEGACY_TRACE: &str = r#"{"kind":"run","id":"0193c2a1b4d5","session_id":"session-1","started_at":1000}
+{"agent_id":1,"turn_id":2,"at":1001,"event":{"kind":"turn","data":{"kind":"started"}}}
+{"agent_id":1,"turn_id":2,"at":1002,"event":{"kind":"turn","data":{"kind":"step_finished","index":1,"stop":"final_answer","provider_ms":5}}}
+{"agent_id":1,"turn_id":2,"at":1003,"event":{"kind":"turn","data":{"kind":"provider_retried","attempts":2,"waited_ms":300,"status":429}}}
+{"agent_id":1,"turn_id":2,"at":1004,"event":{"kind":"tool","data":{"kind":"finished","call_id":7,"name":"bash","result":{"kind":"success","output":"hi"},"detail":null,"duration_ms":42}}}
+"#;
+
+    #[tokio::test]
+    async fn a_trace_written_before_the_format_named_itself_still_reads() {
+        let dir = tempdir::TempDir::new("oven-trace-legacy").unwrap();
+        let path = trace_path(dir.path(), "legacy");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, LEGACY_TRACE).unwrap();
+
+        let trace = read_trace(dir.path(), "legacy", None).await.unwrap();
+        assert_eq!(trace.damaged, 0, "every line of the old shape reads");
+        assert_eq!(trace.events.len(), 4);
+        assert_eq!(
+            trace.run.as_ref().unwrap().version(),
+            0,
+            "the header names no version"
+        );
+        assert_eq!(
+            trace.events[0].elapsed_ms, 0,
+            "the moment the old trace did not carry reads as zero"
+        );
+        assert!(
+            matches!(
+                &trace.events[2].event,
+                AgentEvent::Turn(TurnEvent::ProviderRetried { retry: 2, .. })
+            ),
+            "the field the old trace called attempts reads as the retry number: {:?}",
+            trace.events[2].event
+        );
+    }
+
+    /// The lines of a trace, as this build writes them. The shape is
+    /// persisted: changing it moves the version, rather than breaking the
+    /// files that are already out there.
+    const PINNED_RUN: &str = r#"{"kind":"run","version":1,"id":"0193c2a1b4d5","session_id":"session-1","started_at":1000}"#;
+    const PINNED_FINISHED: &str = r#"{"agent_id":1,"turn_id":2,"at":3,"elapsed_ms":4,"event":{"kind":"tool","data":{"kind":"finished","call_id":7,"name":"bash","result":{"kind":"success","output":"hi"},"detail":null,"duration_ms":42}}}"#;
+    const PINNED_COMPLETED: &str = r#"{"agent_id":1,"turn_id":2,"at":5,"elapsed_ms":6,"event":{"kind":"turn","data":{"kind":"completed","usage":{"input_tokens":1,"output_tokens":2},"duration_ms":7}}}"#;
+
+    #[test]
+    fn the_lines_of_a_trace_keep_their_shape() {
+        let run = TraceRun::Run {
+            version: TRACE_FORMAT_VERSION,
+            id: "0193c2a1b4d5".to_owned(),
+            session_id: Some("session-1".to_owned()),
+            started_at: 1000,
+        };
+        assert_eq!(&serde_json::to_string(&run).unwrap(), PINNED_RUN);
+
+        let finished = AgentEventEnvelope {
+            agent_id: AgentId(1),
+            turn_id: TurnId(2),
+            at: 3,
+            elapsed_ms: 4,
+            event: AgentEvent::Tool(ToolEvent::Finished {
+                call_id: oven_proto::ToolCallId(7),
+                name: "bash".into(),
+                result: ToolResult::Success {
+                    output: "hi".to_owned(),
+                },
+                detail: None,
+                duration_ms: 42,
+            }),
+        };
+        assert_eq!(&serde_json::to_string(&finished).unwrap(), PINNED_FINISHED);
+
+        let completed = AgentEventEnvelope {
+            agent_id: AgentId(1),
+            turn_id: TurnId(2),
+            at: 5,
+            elapsed_ms: 6,
+            event: AgentEvent::Turn(TurnEvent::Completed {
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    ..Usage::default()
+                },
+                duration_ms: 7,
+            }),
+        };
+        assert_eq!(
+            &serde_json::to_string(&completed).unwrap(),
+            PINNED_COMPLETED
+        );
+    }
+
+    #[tokio::test]
+    async fn a_trace_of_a_newer_oven_is_refused_with_its_version() {
+        let dir = tempdir::TempDir::new("oven-trace-newer").unwrap();
+        let path = trace_path(dir.path(), "newer");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let header = TraceRun::Run {
+            version: TRACE_FORMAT_VERSION + 1,
+            id: "newer".to_owned(),
+            session_id: None,
+            started_at: 1000,
+        };
+        std::fs::write(&path, serde_json::to_string(&header).unwrap()).unwrap();
+
+        let error = read_trace(dir.path(), "newer", None).await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                TraceError::NewerFormat { version, .. }
+                    if version == TRACE_FORMAT_VERSION + 1
+            ),
+            "{error}"
+        );
+    }
+
     #[tokio::test]
     async fn a_trace_id_cannot_leave_the_trace_directory() {
         let dir = tempdir::TempDir::new("oven-trace-escape").unwrap();
@@ -1651,6 +1796,7 @@ mod tests {
     /// A run of a session, named and placed in time.
     fn run_of(id: &str, session: &str, started_at: u64) -> TraceRun {
         TraceRun::Run {
+            version: TRACE_FORMAT_VERSION,
             id: id.to_owned(),
             session_id: Some(session.to_owned()),
             started_at,

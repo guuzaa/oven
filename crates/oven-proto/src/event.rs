@@ -30,6 +30,10 @@ pub struct AgentEventEnvelope {
     /// it against the rest of the world. This says how far into the run it
     /// happened, and it keeps saying so when the wall clock is corrected
     /// under the run's feet.
+    ///
+    /// A line written before the clock landed reads as zero: a moment the
+    /// trace cannot place, kept rather than dropped.
+    #[serde(default)]
     pub elapsed_ms: u64,
     pub event: AgentEvent,
 }
@@ -92,7 +96,9 @@ pub enum TurnEvent {
     /// was rather than only how long it was.
     ProviderRetried {
         /// Which retry this was: 1 is the first time the call was asked
-        /// again.
+        /// again. A line written before the field was renamed calls it
+        /// `attempts`, and reads all the same.
+        #[serde(alias = "attempts")]
         retry: u32,
         /// How long the call waited before asking again, in milliseconds.
         waited_ms: u64,

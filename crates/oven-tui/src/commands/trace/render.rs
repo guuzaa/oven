@@ -79,6 +79,7 @@ fn damaged_note(damaged: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use oven_app::trace::TRACE_FORMAT_VERSION;
     use oven_app::{
         AgentEvent, AgentEventEnvelope, AgentId, StepStop, StreamEvent, ToolCallId, ToolEvent,
         ToolOutputStream, ToolView, TurnEvent, TurnId,
@@ -174,6 +175,7 @@ mod tests {
     /// A run of a session, as the trace file names it.
     fn run_of(id: &str) -> TraceRun {
         TraceRun::Run {
+            version: TRACE_FORMAT_VERSION,
             id: id.to_owned(),
             session_id: Some("0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678".to_owned()),
             started_at: unix_ms(SystemTime::now() - Duration::from_secs(60)),
@@ -221,6 +223,7 @@ mod tests {
     fn the_tree_says_when_the_run_started() {
         let mut trace = trace(vec![envelope(0, AgentEvent::Turn(TurnEvent::Started))]);
         trace.run = Some(TraceRun::Run {
+            version: TRACE_FORMAT_VERSION,
             id: "a3f9c2b1d4e7".to_owned(),
             session_id: Some("0193c2a1-b4d5-7e8f-9a0b-1c2d3e4f5678".to_owned()),
             started_at: unix_ms(SystemTime::now() - Duration::from_secs(60 * 60)),
