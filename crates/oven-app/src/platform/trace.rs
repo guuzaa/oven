@@ -507,13 +507,21 @@ pub async fn prune_traces(
 
 /// Keeps the newest traces of a workspace and removes the rest.
 ///
-/// The trace of the run that is still being written stays whatever its
-/// age: it is not over yet.
+/// The trace of the run being closed is one of the newest whatever its
+/// age: it is not over yet when the pruning starts, and it counts toward
+/// what a workspace keeps — the clocks of two files agreeing on a moment
+/// must not decide it is not.
 async fn prune_to_newest(root: &Path, keep: usize, current: &str) -> Result<usize, TraceError> {
     let traces = list_traces(root).await?;
+    let others_kept = keep.saturating_sub(1);
+    let mut kept = 0;
     let mut removed = 0;
-    for (index, trace) in traces.iter().enumerate() {
-        if index < keep || trace.id == current {
+    for trace in &traces {
+        if trace.id == current {
+            continue;
+        }
+        if kept < others_kept {
+            kept += 1;
             continue;
         }
         removed += remove_file(root, &trace.id).await;
@@ -1601,6 +1609,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_run_being_closed_counts_as_one_of_the_newest() {
+        let dir = tempdir::TempDir::new("oven-trace-prune-current").unwrap();
+        let other = write_run(dir.path(), run_of("run-a", "session-1", 100)).await;
+        let current = write_run(dir.path(), run_of("run-b", "session-1", 200)).await;
+        // The clocks of the files are not the clocks of the runs: they can
+        // agree on a moment, and a correction can leave a finished run's
+        // file reading as the newest.
+        set_modified(&other, SystemTime::now() + Duration::from_secs(3600));
+
+        let removed = prune_to_newest(dir.path(), 1, "run-b").await.unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!other.exists(), "the run that is over goes");
+        assert!(
+            current.exists(),
+            "the run being closed is one of the newest whatever its age"
+        );
+    }
+
+    #[tokio::test]
     async fn a_workspace_without_traces_lists_none() {
         let dir = tempdir::TempDir::new("oven-trace-none").unwrap();
         assert!(list_traces(dir.path()).await.unwrap().is_empty());
@@ -1769,6 +1797,12 @@ mod tests {
             output.len()
         );
         assert!(output.ends_with(CUT_MARK), "the cut says so");
+    }
+
+    /// The moment a file was last written, as the test wants it.
+    fn set_modified(path: &Path, when: SystemTime) {
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_modified(when).unwrap();
     }
 
     /// Writes the trace of a run that belonged to a session, and returns
