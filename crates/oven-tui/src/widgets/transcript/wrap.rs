@@ -1129,7 +1129,15 @@ fn spans_between(glyphs: &[Glyph], from: usize, to: usize) -> Vec<Span<'static>>
     };
     for glyph in glyphs {
         let next = col + glyph.width;
-        let inside = glyph.width > 0 && col < to && next > from;
+        // An invisible glyph rides along with its neighbours: the segment that
+        // covers its position takes it, and one exactly at a break stays with
+        // the visible glyph before it. Only position zero has no earlier
+        // segment to do the taking.
+        let inside = if glyph.width == 0 {
+            col <= to && (from == 0 || col > from)
+        } else {
+            col < to && next > from
+        };
         if inside {
             if open && style != glyph.style {
                 flush(&mut spans, &mut text, style);
@@ -1317,6 +1325,33 @@ mod tests {
             title: title.to_string(),
             detail: Collapsible::new(text),
         }
+    }
+
+    fn wrapped_markdown(text: &str, width: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut copies = Vec::new();
+        let mut buf = Buf {
+            lines: &mut lines,
+            copies: &mut copies,
+        };
+        wrap_markdown_into(&mut buf, &render_markdown(text), width);
+        lines.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn invisible_glyphs_ride_through_a_wrap() {
+        const ACUTE: &str = "0123456789e\u{301}xy";
+        const FAMILY: &str = "👨‍👩‍👧‍👦 family";
+        // Width 15 breaks between `e` and its combining acute; the acute must
+        // stay with its base instead of vanishing.
+        let shown = wrapped_markdown(ACUTE, 15);
+        assert_eq!(shown.len(), 2, "{shown:?}");
+        assert!(shown[0].ends_with("e\u{301}"), "{shown:?}");
+        assert_eq!(shown[1].trim_start(), "xy", "{shown:?}");
+        let shown = wrapped_markdown("\u{301}abc", 20);
+        assert!(shown[0].ends_with("\u{301}abc"), "{shown:?}");
+        let joined = wrapped_markdown(FAMILY, 80).join("");
+        assert!(joined.contains(FAMILY), "{joined:?}");
     }
 
     #[test]
