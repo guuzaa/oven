@@ -80,6 +80,23 @@ pub trait Provider: Send + Sync {
     fn provider_name(&self) -> ProviderName;
 }
 
+/// Collects a stream into a response, calling `on_event` for every event.
+pub async fn collect_stream<F>(
+    mut stream: BoxStream<'static, Result<StreamEvent>>,
+    mut on_event: F,
+) -> Result<Response>
+where
+    F: FnMut(&StreamEvent),
+{
+    let mut collector = StreamCollector::new();
+    while let Some(event) = stream.next().await {
+        let event = event?;
+        on_event(&event);
+        collector.push(&event);
+    }
+    Ok(collector.finish()?)
+}
+
 /// 发送一次流式请求，逐个事件交给 `on_event`，并把整条流拼成一条完整的
 /// [`Response`]。
 ///
@@ -98,23 +115,6 @@ pub trait Provider: Send + Sync {
 /// .unwrap();
 /// # }
 /// ```
-/// Collects a stream into a response, calling `on_event` for every event.
-pub async fn collect_stream<F>(
-    mut stream: BoxStream<'static, Result<StreamEvent>>,
-    mut on_event: F,
-) -> Result<Response>
-where
-    F: FnMut(&StreamEvent),
-{
-    let mut collector = StreamCollector::new();
-    while let Some(event) = stream.next().await {
-        let event = event?;
-        on_event(&event);
-        collector.push(&event);
-    }
-    Ok(collector.finish()?)
-}
-
 pub async fn complete_streaming<P, F>(
     provider: &P,
     req: &Request,
