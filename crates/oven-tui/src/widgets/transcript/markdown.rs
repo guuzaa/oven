@@ -913,13 +913,10 @@ fn display_atoms(
     atoms
 }
 
+/// Atoms for a line that has no pieces around it: the whole line is its own
+/// display, so source and display both start at byte zero.
 fn source_atoms(line: &str, style: Style) -> Vec<Atom> {
-    line.char_indices()
-        .filter_map(|(at, ch)| {
-            let atom = glyph_atom(ch, at, at + ch.len_utf8(), style);
-            (atom.width > 0).then_some(atom)
-        })
-        .collect()
+    display_atoms(line, 0, line.len(), 0, style)
 }
 
 fn glyph_atom(ch: char, start: usize, end: usize, style: Style) -> Atom {
@@ -1731,6 +1728,14 @@ mod tests {
         let shown = lines.iter().map(show).collect::<Vec<_>>().join("\n");
         assert!(shown.contains(FAMILY), "{shown}");
         assert!(shown.contains("❤️"), "{shown}");
+    }
+
+    #[test]
+    fn invisible_glyphs_stay_in_a_code_line() {
+        const TEXT: &str = "e\u{301}x";
+        let line = &render_markdown(&format!("```\n{TEXT}\n```"))[1];
+        assert_eq!(show(line), TEXT);
+        assert_eq!(source_covered(line), TEXT);
     }
 
     #[test]
